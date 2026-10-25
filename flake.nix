@@ -15,7 +15,7 @@
       let
         toolchain = fenix.packages.${system}.fromToolchainFile {
           file = ./rust-toolchain.toml;
-          sha256 = "sha256-zm3dyIY2T414ZRR3EhLOvptzG6gta4WZUcawzMUWtqI==";
+          sha256 = "sha256-zm3dyIY2T414ZRR3EhLOvptzG6gta4WZUcawzMUWtqI=";
         };
         pkgs = nixpkgs.legacyPackages.${system};
       in
@@ -26,6 +26,7 @@
           nativeBuildInputs = [
             toolchain
           ];
+          RUST_SRC_PATH = "${toolchain}/lib/rustlib/src/rust/library";
         };
       }
     );
