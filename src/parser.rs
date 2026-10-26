@@ -78,6 +78,8 @@ pub struct Fn {
     pub alias: bool,
     // partial fn。停止性を検査しない代わりに、型の計算で展開しない
     pub partial: bool,
+    // params の先頭の何個がジェネリック引数か
+    pub implicit: usize,
 }
 
 pub struct Parser<'s> {
@@ -89,6 +91,8 @@ pub struct Parser<'s> {
     pub depth: usize,
     // 宣言された型の名前。直後の < を型引数として読む
     pub types: Rc<HashSet<String>>,
+    // ジェネリック引数を持つ関数の名前。f<int>(x) の < を型引数として読む
+    pub generic_fns: Rc<HashSet<String>>,
 }
 
 use crate::error::Error;
@@ -136,11 +140,13 @@ pub fn parse(src: &str) -> R<Program> {
         g: Rc::default(),
         depth: 0,
         types: Rc::default(),
+        generic_fns: Rc::default(),
     };
     let mut g = Grammar::default();
     let mut fn_starts = Vec::new();
     let mut data_starts = Vec::new();
     let mut types: HashSet<String> = ["Vec", "Type"].map(String::from).into();
+    let mut generic_fns: HashSet<String> = HashSet::new();
     // 1周目は syntax と macro だけを読む（宣言より前の関数でもマクロを使えるようにする）
     loop {
         match p.peek() {
@@ -148,6 +154,17 @@ pub fn parse(src: &str) -> R<Program> {
             Tok::Punct("syntax") => p.syntax_decl(&mut g)?,
             Tok::Punct("macro") => p.macro_decl(&mut g)?,
             Tok::Punct("fn" | "partial") => {
+                let k = if p.peek() == &Tok::Punct("partial") {
+                    2
+                } else {
+                    1
+                };
+                if let (Some(Tok::Ident(n)), Some(Tok::Punct("<"))) = (
+                    p.toks.get(p.pos + k).map(|t| &t.tok),
+                    p.toks.get(p.pos + k + 1).map(|t| &t.tok),
+                ) {
+                    generic_fns.insert(n.clone());
+                }
                 fn_starts.push(p.pos);
                 p.skip_fn()?;
             }
@@ -162,6 +179,7 @@ pub fn parse(src: &str) -> R<Program> {
         }
     }
     p.types = Rc::new(types);
+    p.generic_fns = Rc::new(generic_fns);
     g.validate()?;
     p.g = Rc::new(g);
     p.check_macros()?;
@@ -276,8 +294,15 @@ impl Parser<'_> {
         let partial = self.eat("partial");
         self.expect("fn")?;
         let name = self.ident()?;
+        // ジェネリック引数は引数の先頭に置き、呼び出しで省けるようにする
+        let mut params = if self.eat("<") {
+            self.type_params()?
+        } else {
+            vec![]
+        };
+        let implicit = params.len();
         self.expect("(")?;
-        let params = self.params()?;
+        params.extend(self.params()?);
         let ret = if self.eat("->") {
             Some(self.ty()?)
         } else {
@@ -291,6 +316,7 @@ impl Parser<'_> {
             body: self.block()?,
             alias: false,
             partial,
+            implicit,
         })
     }
 
@@ -315,8 +341,13 @@ impl Parser<'_> {
         let mut params = Vec::new();
         loop {
             let n = self.ident()?;
-            self.expect(":")?;
-            params.push((n, self.binary(5)?));
+            // 型を省いた <A> は <A: Type>
+            let t = if self.eat(":") {
+                self.binary(5)?
+            } else {
+                Expr::Var("Type".into())
+            };
+            params.push((n, t));
             if !self.eat(",") {
                 self.expect(">")?;
                 return Ok(params);
@@ -347,6 +378,7 @@ impl Parser<'_> {
                 body,
                 alias: true,
                 partial: false,
+                implicit: 0,
             }));
         }
         self.eat("|");
@@ -570,6 +602,23 @@ impl Parser<'_> {
                     }
                 }
                 Expr::Array(items)
+            }
+            // f<型, ...>(引数) は型引数を明示した呼び出し。型引数を引数の先頭に並べる
+            Tok::Ident(name)
+                if self.generic_fns.contains(&name) && self.peek() == &Tok::Punct("<") =>
+            {
+                self.pos += 1;
+                let mut args = Vec::new();
+                loop {
+                    args.push(self.binary(5)?);
+                    if !self.eat(",") {
+                        self.expect(">")?;
+                        break;
+                    }
+                }
+                self.expect("(")?;
+                args.extend(self.args()?);
+                Expr::Call(name, args)
             }
             Tok::Ident(name) => {
                 if !self.at_newline() && self.eat("(") {

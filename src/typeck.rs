@@ -413,6 +413,14 @@ impl Norm<'_> {
         let Some(f) = self.fns.get(name).copied().filter(|f| !f.partial) else {
             return Ok(neu(Neu::Call(name.into(), args)));
         };
+        // 省かれたジェネリック引数は、値の計算には使わないので () で埋める
+        let args = if args.len() + f.implicit == f.params.len() {
+            let mut full = vec![V::Unit; f.implicit];
+            full.extend(args);
+            full
+        } else {
+            args
+        };
         if self.fuel == 0 || self.depth >= 64 {
             return Err(format!("型の計算が終わらない（{name} の展開）").into());
         }
@@ -1222,6 +1230,17 @@ impl Ck<'_> {
             }
             Expr::Block(b) => self.check_block(b, expected),
             Expr::Match(s, arms) => self.check_match(s, arms, Some(expected)).map(|_| ()),
+            Expr::Call(n, args)
+                if self.lookup(n).is_none()
+                    && self
+                        .norm
+                        .fns
+                        .get(n.as_str())
+                        .is_some_and(|f| f.implicit > 0) =>
+            {
+                let t = self.call_fn(n, args, Some(expected))?;
+                self.subsume(e, &t, expected)
+            }
             Expr::Lam(params, ret, body) if matches!(base(expected), V::Pi(_)) => {
                 let V::Pi(p) = base(expected) else {
                     unreachable!()
@@ -1429,32 +1448,10 @@ impl Ck<'_> {
                 prim(ret)
             }
             Expr::Call(name, args) => {
-                let f = *self
-                    .norm
-                    .fns
-                    .get(name.as_str())
-                    .ok_or(format!("未定義の関数 {name}"))?;
-                if f.params.len() != args.len() {
-                    return Err(format!("関数 {name} の引数は{}個", f.params.len()).into());
+                if !self.norm.fns.contains_key(name.as_str()) {
+                    return Err(format!("未定義の関数 {name}").into());
                 }
-                // 引数の型は前の引数の値に依存しうるので、値を順に積みながら計算する
-                let mut vals = Vec::new();
-                let mut fenv: Env = vec![HashMap::new()];
-                for ((pn, pt), a) in f.params.iter().zip(args) {
-                    let t = self.norm.eval_or_opaque(pt, &mut fenv)?;
-                    self.check(a, &t)
-                        .ctx(|e| format!("関数 {name} の引数 {pn}: {e}"))?;
-                    let v = self.eval_value(a)?;
-                    vals.push(v.clone());
-                    fenv[0].insert(pn.clone(), v);
-                }
-                if self.cur_fn.as_deref() == Some(name.as_str()) {
-                    self.check_decrease(&vals)?;
-                }
-                match &f.ret {
-                    Some(t) => self.norm.eval_or_opaque(t, &mut fenv)?,
-                    None => prim("unit"),
-                }
+                return self.call_fn(name, args, None);
             }
             Expr::Assign(name, x) => {
                 let en = self.lookup(name).ok_or(format!("未定義の変数 {name}"))?;
@@ -1576,6 +1573,85 @@ impl Ck<'_> {
         } else {
             Err("再帰呼び出しで小さくなる引数が無いので、停止することを示せない（match で取り出した部分か、0 以上で元より小さい int を渡す。検査しないなら partial fn にする）".into())
         }
+    }
+
+    // トップレベルの関数の呼び出し。ジェネリック引数を省いた時は、メタ変数にして引数と期待する型から求める
+    fn call_fn(&mut self, name: &str, args: &[Expr], expected: Option<&V>) -> R<V> {
+        let f = self.norm.fns[name];
+        let explicit = f.params.len() - f.implicit;
+        let infer = f.implicit > 0 && args.len() == explicit;
+        if !infer && args.len() != f.params.len() {
+            return Err(format!("関数 {name} の引数は{explicit}個").into());
+        }
+        // 引数の型は前の引数の値に依存しうるので、値を順に積みながら計算する
+        let mut fenv: Env = vec![HashMap::new()];
+        let mut metas = Vec::new();
+        let mut sol = HashMap::new();
+        let params = if infer {
+            for (p, _) in &f.params[..f.implicit] {
+                let id = self.norm.fresh();
+                metas.push((id, p.clone()));
+                fenv[0].insert(p.clone(), neu(Neu::Var(id, format!("?{p}"))));
+            }
+            &f.params[f.implicit..]
+        } else {
+            &f.params[..]
+        };
+        let ids: Vec<usize> = metas.iter().map(|m| m.0).collect();
+        // 期待する型が分かれば、先に戻り値の型と合わせる
+        if infer && let (Some(exp), Some(rt)) = (expected, &f.ret) {
+            let mut env1 = fenv.clone();
+            for (p, _) in params {
+                let v = self.norm.opaque();
+                env1[0].insert(p.clone(), v);
+            }
+            let rv = self.norm.eval_or_opaque(rt, &mut env1)?;
+            self.unify(&rv, &base(exp), &ids, &mut sol)?;
+        }
+        let mut vals = Vec::new();
+        for ((pn, pt), a) in params.iter().zip(args) {
+            let r = |e: &str| format!("関数 {name} の引数 {pn}: {e}");
+            let t = self.norm.eval_or_opaque(pt, &mut fenv)?;
+            let t = self.apply(&sol, &t)?;
+            if ids
+                .iter()
+                .any(|id| !sol.contains_key(id) && mentions(&t, *id))
+            {
+                let at = self.expr(a).ctx(r)?;
+                if !self.unify(&t, &at, &ids, &mut sol)? {
+                    return Err(r(&format!("{} が必要だが {}", show(&t), show(&at))).into());
+                }
+            } else {
+                self.check(a, &t).ctx(r)?;
+            }
+            let v = self.eval_value(a)?;
+            vals.push(v.clone());
+            fenv[0].insert(pn.clone(), v);
+        }
+        if infer {
+            let mut solved = Vec::new();
+            for (id, p) in &metas {
+                let Some(v) = sol.get(id) else {
+                    return Err(format!(
+                        "関数 {name} の型引数 {p} を推論できない。{name}<...>(...) で明示する"
+                    )
+                    .into());
+                };
+                let v = self.apply(&sol, v)?;
+                fenv[0].insert(p.clone(), v.clone());
+                solved.push(v);
+            }
+            solved.extend(vals);
+            vals = solved;
+        }
+        if self.cur_fn.as_deref() == Some(name) {
+            self.check_decrease(&vals)?;
+        }
+        let ret = match &f.ret {
+            Some(t) => self.norm.eval_or_opaque(t, &mut fenv)?,
+            None => prim("unit"),
+        };
+        self.apply(&sol, &ret)
     }
 
     // トップレベルの関数を値として使った時の型
@@ -1893,6 +1969,14 @@ impl Ck<'_> {
                 true
             }
             (V::VecT(x), V::VecT(y)) => self.unify(x, y, metas, sol)?,
+            (V::Pi(x), V::Pi(y)) if x.doms.len() == y.doms.len() => {
+                for (p, q) in x.doms.iter().zip(&y.doms).chain([(&x.cod, &y.cod)]) {
+                    if !self.unify(p, q, metas, sol)? {
+                        return Ok(false);
+                    }
+                }
+                true
+            }
             _ => same(&a, &b),
         })
     }
@@ -2348,6 +2432,21 @@ fn main() {
         ] {
             let e = check(&src.replace(from, to)).unwrap_err();
             assert!(e.contains(msg), "{to} => {e}");
+        }
+        // ジェネリック引数: 推論できなければ明示を求める。期待する型からも推論する
+        let g = "type Opt<A> = Non | Som(x: A)\nfn non<A>() -> Opt<A> { Non }\nfn id<A>(x: A) -> A { x }\n";
+        check(&format!(
+            "{g}fn main() {{ let x: Opt<int> = non()\n let y = non<int>()\n let z: int = id(3) }}"
+        ))
+        .unwrap();
+        for (body, msg) in [
+            ("let x = non()", "推論できない"),
+            ("let y: int = id<int>(\"s\")", "int が必要だが str"),
+            ("let z: str = id(3)", "str が必要だが int"),
+            ("let w = id<int, int>(3)", "引数は1個"),
+        ] {
+            let e = check(&format!("{g}fn main() {{ {body} }}")).unwrap_err();
+            assert!(e.contains(msg), "{body} => {e}");
         }
         // 正値性: 自分を関数型の引数に持つ型は矛盾を導ける
         let e = check("type Bad = | MkBad(f: (Bad) -> int)\nfn main() {}").unwrap_err();

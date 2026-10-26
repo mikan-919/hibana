@@ -1,6 +1,6 @@
 // 右辺が | で区切った構築子の並びなら新しい型
 type Nat = Zero | Succ(n: Nat)
-type Option<T: Type> = None | Some(x: T)
+type Option<T> = None | Some(x: T)
 // 添字付きの型族。Refl は a と a が等しいことの証明。構築子が1つなら先頭に | を書く
 type Eq<A: Type, a: A, b: A> = | Refl -> Eq<A, a, a>
 
@@ -17,6 +17,11 @@ fn cong(x: Nat, y: Nat, p: Eq<Nat, x, y>) -> Eq<Nat, Succ(x), Succ(y)> {
 }
 
 // 0 + n = n は計算するだけで示せる
+// 等しさは入れ替えられる。A は x と y の型から推論する
+fn sym<A>(x: A, y: A, p: Eq<A, x, y>) -> Eq<A, y, x> {
+    match p { Refl => Refl }
+}
+
 fn zero_add(n: Nat) -> Eq<Nat, add(Zero, n), n> { Refl }
 
 // n + 0 = n は n についての帰納法で示す
@@ -39,4 +44,5 @@ fn main() {
     print(get(o) + get(None))
     print(add(Succ(Zero), Succ(Succ(Zero))))
     print(add_zero(Succ(Zero)))
+    print(sym(add(Zero, Zero), Zero, zero_add(Zero)))
 }

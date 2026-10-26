@@ -1,10 +1,10 @@
-type List<A: Type> = Nil | Cons(x: A, xs: List<A>)
+type List<A> = Nil | Cons(x: A, xs: List<A>)
 
-// 関数を受け取る関数。f の型は (A) -> B
-fn map(A: Type, B: Type, f: (A) -> B, l: List<A>) -> List<B> {
+// 関数を受け取る関数。f の型は (A) -> B。A と B はジェネリック引数で、呼ぶ側では省ける
+fn map<A, B>(f: (A) -> B, l: List<A>) -> List<B> {
     match l {
         Nil => Nil
-        Cons(x, xs) => Cons(f(x), map(A, B, f, xs))
+        Cons(x, xs) => Cons(f(x), map(f, xs))
     }
 }
 
@@ -29,7 +29,8 @@ fn main() {
     print(twice(inc)(3))
     print(adder(10)(5))
     let l = Cons(1, Cons(2, Cons(3, Nil)))
-    print(sum(map(int, int, adder(100), l)))
+    print(sum(map(adder(100), l)))
+    print(sum(map<int, int>(inc, l)))
     print(call_dep(fn(b) { if b { 1 } else { "no" } }))
     let f: (int, int) -> int = add
     print(f(2, 3))

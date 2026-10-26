@@ -207,6 +207,15 @@ impl Interp<'_> {
 
     fn call(&mut self, name: &str, args: Vec<Value>) -> R<Value> {
         let f = self.fns[name];
+        // 型検査で推論したジェネリック引数は実行時には消えている
+        // ponytail: 型引数を値として使うと "?" になる。必要なら型検査の結果を構文木に書き戻す
+        let args = if args.len() + f.implicit == f.params.len() {
+            let mut full = vec![Value::Ty("?".into()); f.implicit];
+            full.extend(args);
+            full
+        } else {
+            args
+        };
         let mut env = vec![f.params.iter().map(|(n, _)| n.clone()).zip(args).collect()];
         match self.block(&f.body, &mut env) {
             Err(Flow::Return(v)) => Ok(v),

@@ -812,6 +812,7 @@ impl Parser<'_> {
             g: self.g.clone(),
             depth: self.depth + 1,
             types: self.types.clone(),
+            generic_fns: self.generic_fns.clone(),
         };
         let wrap = |e: &str| format!("マクロ {}: {e}", m.name);
         let b = p.block().ctx(wrap)?;
@@ -870,6 +871,7 @@ impl Parser<'_> {
             g: self.g.clone(),
             depth: self.depth + 1,
             types: self.types.clone(),
+            generic_fns: self.generic_fns.clone(),
         };
         if m.stmt {
             // 文の並びとして読み、ブロックにする
