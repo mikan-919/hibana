@@ -1,9 +1,10 @@
 // syntax / macro 宣言の解析、パターン照合、マクロ展開
-use crate::lexer::{Span, Tok, lex};
+use crate::lexer::{Span, Tok, Token, lex};
 use crate::parser::{Block, Expr, Parser, R, Stmt, Type};
 use std::collections::HashMap;
+use std::ops::Range;
 
-// パターン照合の結果。展開コードと検査用に全フィールドを保持する
+// パターン照合の結果。検査用に全フィールドを保持する
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum Node {
@@ -26,11 +27,19 @@ pub enum Node {
     },
     List(Vec<Node>),
     Null,
+    // 束縛した値と、それが占めるトークンの範囲（展開時にこのトークン列を差し込む）
+    At(Range<usize>, Box<Node>),
 }
 
 impl Node {
-    pub fn get(&self, k: &str) -> Option<&Node> {
+    pub fn strip(&self) -> &Node {
         match self {
+            Node::At(_, n) => n.strip(),
+            n => n,
+        }
+    }
+    pub fn get(&self, k: &str) -> Option<&Node> {
+        match self.strip() {
             Node::Record { fields, .. } => fields.iter().find(|(n, _)| n == k).map(|(_, v)| v),
             _ => None,
         }
@@ -123,7 +132,8 @@ struct Macro {
     fields: Vec<(String, bool)>,
     // -> Stmt なら文の位置、-> Expr なら式の位置で試す
     stmt: bool,
-    body: Option<Tmpl>,
+    // 展開コード。空なら照合結果を Expr::Macro として残す
+    body: Option<Vec<Q>>,
     first: Firsts,
 }
 
@@ -133,20 +143,19 @@ pub struct Grammar {
     macros: Vec<Macro>,
 }
 
-// 展開コード: return 構築子 { フィールド: 値, ... }
+// 展開コードの要素
 #[derive(Debug)]
-enum Tmpl {
-    Ctor(String, Vec<(String, Tmpl)>),
-    Var(String),
-    Null,
+enum Q {
+    Tok(Token),
+    // $a.b.c。rest は a の後ろの ". 名前" のトークン列
+    Var {
+        dollar: Token,
+        path: Vec<String>,
+        rest: Vec<Token>,
+    },
+    // $( ... ) 区切り? *
+    Rep(Vec<Q>, Option<Token>),
 }
-
-// (構築子, 必須フィールド, 省略可能フィールド)
-const CTORS: &[(&str, &[&str], &[&str])] = &[
-    ("If", &["cond", "then"], &["els"]),
-    ("Not", &["expr"], &[]),
-    ("While", &["cond", "body"], &[]),
-];
 
 // パターンが持つ束縛名と、それが繰り返し（配列）かを求める。同じ連接内の重複はエラー
 fn fields(p: &Pattern) -> R<Vec<(String, bool)>> {
@@ -231,77 +240,111 @@ fn lits(f: &[First]) -> Vec<String> {
         .collect()
 }
 
-fn check_tmpl(t: &Tmpl, fields: &[(String, bool)]) -> R<()> {
-    match t {
-        Tmpl::Null => Ok(()),
-        Tmpl::Var(v) if fields.iter().any(|f| &f.0 == v) => Ok(()),
-        Tmpl::Var(v) => Err(format!("未定義の束縛 {v}")),
-        Tmpl::Ctor(n, fs) => {
-            let (_, req, opt) = CTORS
-                .iter()
-                .find(|c| c.0 == n)
-                .ok_or(format!("不明な構築子 {n}"))?;
-            if let Some(r) = req.iter().find(|r| !fs.iter().any(|(f, _)| f == *r)) {
-                return Err(format!("{n} に {r} が無い"));
-            }
-            for (f, t) in fs {
-                if !req.contains(&f.as_str()) && !opt.contains(&f.as_str()) {
-                    return Err(format!("{n} に {f} というフィールドは無い"));
+fn parse_quote(ts: &[Token], fields: &[(String, bool)]) -> R<Vec<Q>> {
+    let at = |i: usize| ts.get(i).map(|t| &t.tok);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < ts.len() {
+        let t = &ts[i];
+        let line = t.span.start.line;
+        if t.tok != Tok::Punct("$") {
+            out.push(Q::Tok(t.clone()));
+            i += 1;
+            continue;
+        }
+        match at(i + 1) {
+            Some(Tok::Punct("(")) => {
+                let (mut j, mut depth) = (i + 1, 0);
+                loop {
+                    match at(j) {
+                        Some(Tok::Punct("(")) => depth += 1,
+                        Some(Tok::Punct(")")) => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        None => return Err(format!("{line}行: $( が閉じていない")),
+                        _ => {}
+                    }
+                    j += 1;
                 }
-                check_tmpl(t, fields)?;
+                let inner = parse_quote(&ts[i + 2..j], fields)?;
+                let mut k = j + 1;
+                let mut sep = None;
+                if at(k) != Some(&Tok::Punct("*")) {
+                    sep = ts.get(k).cloned();
+                    k += 1;
+                }
+                if at(k) != Some(&Tok::Punct("*")) {
+                    return Err(format!("{line}行: $( ) の後に * が必要"));
+                }
+                out.push(Q::Rep(inner, sep));
+                i = k + 1;
             }
-            Ok(())
+            Some(Tok::Ident(n)) => {
+                if !fields.iter().any(|f| &f.0 == n) {
+                    return Err(format!("{line}行: 未定義の束縛 {n}"));
+                }
+                let (mut path, mut rest) = (vec![n.clone()], Vec::new());
+                i += 2;
+                while let (Some(Tok::Punct(".")), Some(Tok::Ident(s))) = (at(i), at(i + 1)) {
+                    if ts[i].gap_before {
+                        break;
+                    }
+                    path.push(s.clone());
+                    rest.extend([ts[i].clone(), ts[i + 1].clone()]);
+                    i += 2;
+                }
+                out.push(Q::Var {
+                    dollar: t.clone(),
+                    path,
+                    rest,
+                });
+            }
+            _ => return Err(format!("{line}行: $ の後には束縛名か ( が必要")),
         }
     }
+    Ok(out)
 }
 
-fn to_expr(n: Node) -> R<Expr> {
-    Ok(match n {
-        Node::Expr(e) | Node::Stmt(Stmt::Expr(e)) => e,
-        Node::Ident(s, _) => Expr::Var(s),
-        Node::Int(i) => Expr::Int(i),
-        Node::Str(s) => Expr::Str(s),
-        Node::Block(b) => Expr::Block(b),
-        other => return Err(format!("式にできない値 {other:?}")),
-    })
-}
+// 展開中の束縛。キーは "rs" や "rs.annotations" のような経路
+type Env = Vec<(String, Node)>;
 
-fn to_block(n: Node) -> R<Block> {
-    match n {
-        Node::Block(b) => Ok(b),
-        n => Ok(Block {
-            stmts: vec![],
-            tail: Some(Box::new(to_expr(n)?)),
-        }),
-    }
-}
-
-fn eval_tmpl(t: &Tmpl, rec: &Node) -> R<Node> {
-    Ok(match t {
-        Tmpl::Null => Node::Null,
-        Tmpl::Var(v) => rec.get(v).cloned().unwrap_or(Node::Null),
-        Tmpl::Ctor(n, fs) => {
-            let get = |k: &str| match fs.iter().find(|(f, _)| f == k) {
-                Some((_, t)) => eval_tmpl(t, rec),
-                None => Ok(Node::Null),
-            };
-            Node::Expr(match n.as_str() {
-                "If" => {
-                    let els = match get("els")? {
-                        Node::Null => None,
-                        n => Some(Box::new(to_expr(n)?)),
-                    };
-                    Expr::If(
-                        Box::new(to_expr(get("cond")?)?),
-                        to_block(get("then")?)?,
-                        els,
-                    )
-                }
-                "Not" => Expr::Unary("!", Box::new(to_expr(get("expr")?)?)),
-                _ => Expr::While(Box::new(to_expr(get("cond")?)?), to_block(get("body")?)?),
-            })
+// path を env の最長一致から辿り、(値, 辿った段数) を返す。stop_at_list なら配列で止まる
+fn walk(env: &Env, path: &[String], stop_at_list: bool) -> (Node, usize) {
+    let mut best: Option<(&Node, usize)> = None;
+    for (k, v) in env {
+        let ks: Vec<&str> = k.split('.').collect();
+        let hit = ks.len() <= path.len() && ks.iter().zip(path).all(|(a, b)| a == b);
+        // 同じ長さなら後に積んだ（繰り返し中の）束縛を優先する
+        if hit && best.is_none_or(|b| ks.len() >= b.1) {
+            best = Some((v, ks.len()));
         }
-    })
+    }
+    let (node, mut n) = best.expect("先頭の束縛名は宣言時に検査済み");
+    let mut node = node.clone();
+    while n < path.len() {
+        if stop_at_list && matches!(node.strip(), Node::List(_)) {
+            break;
+        }
+        match node.get(&path[n]) {
+            Some(v) => node = v.clone(),
+            None => break,
+        }
+        n += 1;
+    }
+    (node, n)
+}
+
+fn q_paths<'a>(q: &'a [Q], out: &mut Vec<&'a [String]>) {
+    for x in q {
+        match x {
+            Q::Var { path, .. } => out.push(path),
+            Q::Rep(inner, _) => q_paths(inner, out),
+            Q::Tok(_) => {}
+        }
+    }
 }
 
 impl Grammar {
@@ -474,19 +517,23 @@ impl Parser<'_> {
             false
         };
         self.expect("{")?;
-        let body = if self.eat("}") {
+        let start = self.pos;
+        let mut depth = 1;
+        while depth > 0 {
+            match self.next() {
+                Tok::Punct("{") => depth += 1,
+                Tok::Punct("}") => depth -= 1,
+                Tok::Eof => return self.err("マクロ本体の \"}\" が足りない"),
+                _ => {}
+            }
+        }
+        let fields = fields(&pat).map_err(|e| format!("マクロ {name}: {e}"))?;
+        let raw = &self.toks[start..self.pos - 1];
+        let body = if raw.is_empty() {
             None
         } else {
-            self.expect("return")?;
-            let t = self.tmpl()?;
-            self.eat(";");
-            self.expect("}")?;
-            Some(t)
+            Some(parse_quote(raw, &fields).map_err(|e| format!("マクロ {name}: {e}"))?)
         };
-        let fields = fields(&pat).map_err(|e| format!("マクロ {name}: {e}"))?;
-        if let Some(t) = &body {
-            check_tmpl(t, &fields).map_err(|e| format!("マクロ {name}: {e}"))?;
-        }
         g.macros.push(Macro {
             name,
             pat,
@@ -496,27 +543,6 @@ impl Parser<'_> {
             first: (vec![], true),
         });
         Ok(())
-    }
-
-    fn tmpl(&mut self) -> R<Tmpl> {
-        let n = self.ident()?;
-        if n == "null" {
-            return Ok(Tmpl::Null);
-        }
-        if !self.eat("{") {
-            return Ok(Tmpl::Var(n));
-        }
-        let mut fs = Vec::new();
-        while !self.eat("}") {
-            let f = self.ident()?;
-            self.expect(":")?;
-            fs.push((f, self.tmpl()?));
-            if !self.eat(",") {
-                self.expect("}")?;
-                break;
-            }
-        }
-        Ok(Tmpl::Ctor(n, fs))
     }
 
     fn pattern(&mut self) -> R<Pattern> {
@@ -626,7 +652,7 @@ impl Parser<'_> {
                 let rec = record(Some(&m.name), self.span_from(start), &m.fields, b);
                 match &m.body {
                     None => Ok(Some(Expr::Macro(m.name.clone(), Box::new(rec)))),
-                    Some(t) => Ok(Some(to_expr(eval_tmpl(t, &rec)?)?)),
+                    Some(q) => self.expand(m, q, rec).map(Some),
                 }
             }
             _ => {
@@ -636,6 +662,155 @@ impl Parser<'_> {
                     self.line(),
                     names.join(", ")
                 ))
+            }
+        }
+    }
+
+    // ponytail: 衛生的でない。展開コード内の let は呼び出し側の変数と衝突しうる
+    fn expand(&self, m: &Macro, q: &[Q], rec: Node) -> R<Expr> {
+        if self.depth >= 64 {
+            return Err(format!("マクロ {} の展開が深すぎる", m.name));
+        }
+        let Node::Record { fields, .. } = rec else {
+            unreachable!()
+        };
+        let mut env = fields;
+        let mut toks = Vec::new();
+        self.splice(q, &mut env, &mut toks)
+            .map_err(|e| format!("マクロ {}: {e}", m.name))?;
+        let end = self.toks[self.pos].clone();
+        let eof = Token {
+            tok: Tok::Eof,
+            ..end.clone()
+        };
+        let mut p = Parser {
+            toks,
+            pos: 0,
+            src: self.src,
+            g: self.g.clone(),
+            depth: self.depth + 1,
+        };
+        let wrap = |e: String| format!("マクロ {} の展開結果: {e}", m.name);
+        if m.stmt {
+            // 文の並びとして読み、ブロックにする
+            p.toks.extend([
+                Token {
+                    tok: Tok::Punct("}"),
+                    nl_before: true,
+                    ..end
+                },
+                eof,
+            ]);
+            return p.block().map(Expr::Block).map_err(wrap);
+        }
+        p.toks.push(eof);
+        let e = p.expr().map_err(wrap)?;
+        if p.peek() != &Tok::Eof {
+            return p.err("1個の式でない").map_err(wrap);
+        }
+        Ok(e)
+    }
+
+    fn splice(&self, q: &[Q], env: &mut Env, out: &mut Vec<Token>) -> R<()> {
+        for x in q {
+            match x {
+                Q::Tok(t) => out.push(t.clone()),
+                Q::Var { dollar, path, rest } => {
+                    let (node, n) = walk(env, path, false);
+                    self.emit(&node, dollar, out).map_err(|e| {
+                        format!("{}行: ${}: {e}", dollar.span.start.line, path.join("."))
+                    })?;
+                    // 束縛の中に無い残りの経路は、式のフィールド参照として残す
+                    out.extend(rest[2 * (n - 1)..].iter().cloned());
+                }
+                Q::Rep(inner, sep) => {
+                    let mut paths = Vec::new();
+                    q_paths(inner, &mut paths);
+                    let mut lists: Vec<(String, Vec<Node>)> = Vec::new();
+                    for p in paths {
+                        let (node, n) = walk(env, p, true);
+                        let key = p[..n].join(".");
+                        if let Node::List(v) = node.strip()
+                            && !lists.iter().any(|l| l.0 == key)
+                        {
+                            lists.push((key, v.clone()));
+                        }
+                    }
+                    let Some(len) = lists.first().map(|l| l.1.len()) else {
+                        return Err("$( )* の中に配列の束縛が無い".into());
+                    };
+                    if lists.iter().any(|l| l.1.len() != len) {
+                        return Err("$( )* の中の配列の長さが揃っていない".into());
+                    }
+                    for k in 0..len {
+                        if k > 0
+                            && let Some(s) = sep
+                        {
+                            out.push(s.clone());
+                        }
+                        let base = env.len();
+                        env.extend(lists.iter().map(|(key, v)| (key.clone(), v[k].clone())));
+                        let r = self.splice(inner, env, out);
+                        env.truncate(base);
+                        r?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // 束縛のトークン列を差し込む。先頭の空白・改行の有無は $ の位置に合わせる
+    fn emit(&self, node: &Node, dollar: &Token, out: &mut Vec<Token>) -> R<()> {
+        let at_dollar = |t: &Token| Token {
+            gap_before: dollar.gap_before,
+            nl_before: dollar.nl_before,
+            ..t.clone()
+        };
+        let Node::At(range, inner) = node else {
+            return match node {
+                Node::Null => Ok(()),
+                _ => Err("配列は $( )* の中で使う".into()),
+            };
+        };
+        let toks = &self.toks[range.clone()];
+        match inner.strip() {
+            Node::List(_) => Err("配列は $( )* の中で使う".into()),
+            Node::Text(s, _) => {
+                out.push(Token {
+                    tok: Tok::Str(s.clone()),
+                    ..at_dollar(dollar)
+                });
+                Ok(())
+            }
+            n => {
+                let Some(first) = toks.first() else {
+                    return Ok(());
+                };
+                // 式は括弧で囲み、差し込み先の演算子と結合しないようにする
+                if matches!(n, Node::Expr(_)) {
+                    let close = Token {
+                        tok: Tok::Punct(")"),
+                        gap_before: false,
+                        nl_before: false,
+                        ..first.clone()
+                    };
+                    out.push(Token {
+                        tok: Tok::Punct("("),
+                        ..at_dollar(first)
+                    });
+                    out.push(Token {
+                        gap_before: false,
+                        nl_before: false,
+                        ..first.clone()
+                    });
+                    out.extend(toks[1..].iter().cloned());
+                    out.push(close);
+                } else {
+                    out.push(at_dollar(first));
+                    out.extend(toks[1..].iter().cloned());
+                }
+                Ok(())
             }
         }
     }
@@ -704,6 +879,7 @@ impl Parser<'_> {
                             fields: inner,
                         }
                     };
+                    let v = Node::At(start..self.pos, Box::new(v));
                     b.push((n.clone(), v.clone()));
                     v
                 }
@@ -728,6 +904,21 @@ impl Parser<'_> {
         }
     }
 
+    // 繰り返しの1回分を照合し、要素を範囲付きで積む
+    fn m_item(
+        &mut self,
+        a: &Atom,
+        items: &mut Vec<Node>,
+        lists: &mut Vec<(String, Vec<Node>)>,
+    ) -> M<()> {
+        let save = self.pos;
+        let mut ib = Vec::new();
+        let v = self.m_atom(a, &mut ib)?;
+        items.push(Node::At(save..self.pos, Box::new(v)));
+        Self::push_binds(lists, ib);
+        Ok(())
+    }
+
     fn m_term(&mut self, t: &Term, b: &mut Binds) -> M<Node> {
         let mut items = Vec::new();
         let mut lists = Vec::new();
@@ -750,14 +941,13 @@ impl Parser<'_> {
             }
             Op::Many | Op::Many1 => loop {
                 let save = self.pos;
-                let mut ib = Vec::new();
-                match self.m_atom(&t.atom, &mut ib) {
+                match self.m_item(&t.atom, &mut items, &mut lists) {
                     // 空一致は無限ループになるので止める
-                    Ok(_) if self.pos == save => break,
-                    Ok(v) => {
-                        items.push(v);
-                        Self::push_binds(&mut lists, ib);
+                    Ok(()) if self.pos == save => {
+                        items.pop();
+                        break;
                     }
+                    Ok(()) => {}
                     Err(Miss::Fail) => {
                         self.pos = save;
                         break;
@@ -767,33 +957,24 @@ impl Parser<'_> {
             },
             Op::Sep(sep) => {
                 let save = self.pos;
-                let mut ib = Vec::new();
-                match self.m_atom(&t.atom, &mut ib) {
-                    Ok(v) => {
-                        items.push(v);
-                        Self::push_binds(&mut lists, ib);
-                        loop {
-                            let save = self.pos;
-                            if let Err(e) = self.m_atom(sep, &mut Vec::new()) {
-                                if let Miss::Fatal(_) = e {
-                                    return Err(e);
-                                }
-                                self.pos = save;
-                                break;
+                match self.m_item(&t.atom, &mut items, &mut lists) {
+                    Ok(()) => loop {
+                        let save = self.pos;
+                        if let Err(e) = self.m_atom(sep, &mut Vec::new()) {
+                            if let Miss::Fatal(_) = e {
+                                return Err(e);
                             }
-                            let mut ib = Vec::new();
-                            match self.m_atom(&t.atom, &mut ib) {
-                                Ok(v) => {
-                                    items.push(v);
-                                    Self::push_binds(&mut lists, ib);
-                                }
-                                Err(Miss::Fail) => {
-                                    return Err(Miss::Fatal("区切りの後に要素が無い".into()));
-                                }
-                                Err(e) => return Err(e),
-                            }
+                            self.pos = save;
+                            break;
                         }
-                    }
+                        match self.m_item(&t.atom, &mut items, &mut lists) {
+                            Ok(()) => {}
+                            Err(Miss::Fail) => {
+                                return Err(Miss::Fatal("区切りの後に要素が無い".into()));
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    },
                     Err(Miss::Fail) => self.pos = save,
                     Err(e) => return Err(e),
                 }
@@ -903,18 +1084,20 @@ mod tests {
     }
 
     fn f<'a>(n: &'a Node, k: &str) -> &'a Node {
-        n.get(k).unwrap_or_else(|| panic!("{k} が無い: {n:?}"))
+        n.get(k)
+            .unwrap_or_else(|| panic!("{k} が無い: {n:?}"))
+            .strip()
     }
 
     fn list(n: &Node) -> &[Node] {
-        match n {
+        match n.strip() {
             Node::List(v) => v,
             _ => panic!("{n:?}"),
         }
     }
 
     fn ident(n: &Node) -> &str {
-        match n {
+        match n.strip() {
             Node::Ident(s, _) => s,
             _ => panic!("{n:?}"),
         }
@@ -1001,7 +1184,8 @@ fn main() {
             ("syntax A = \"a b\" ;", "1個のトークンでない"),
             ("syntax A = B ;", "未定義の規則"),
             ("macro m (e:Expr \"!\") {}", "左再帰"),
-            ("macro m (\"m\") { return Not { expr: x } }", "未定義の束縛"),
+            ("macro m (\"m\") { $x }", "未定義の束縛"),
+            ("macro m (\"m\" x:Int) { $( $x ) }", "* が必要"),
             (
                 "macro a (\"hey\") {} macro b (\"hey\") {} fn main() { let x = hey }",
                 "Ambiguous",
@@ -1009,6 +1193,10 @@ fn main() {
             (
                 "syntax L = (Expr % \",\") ; macro m (\"m\" L) {} fn main() { let x = m 1, }",
                 "区切り",
+            ),
+            (
+                "macro m (\"m\" x:Int*) { $x } fn main() { let y = m 1 2 }",
+                "$( )* の中",
             ),
         ] {
             let e = parse(src).unwrap_err();

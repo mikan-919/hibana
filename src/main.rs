@@ -36,19 +36,9 @@ mod tests {
     }
 
     #[test]
-    fn unless_macro() {
-        let src = r#"
-fn do_work() { print(1) }
-macro unless ("unless" cond:Expr body:Block) -> Stmt {
-    return If { cond: Not { expr: cond }, then: body, els: null };
-}
-fn main() {
-    let is_ready = false
-    unless is_ready { do_work(); }
-    unless true { print(2) }
-}
-"#;
-        assert_eq!(out(src).unwrap(), "1\n");
+    fn macros_example() {
+        let src = include_str!("../examples/macros.hb");
+        assert_eq!(out(src).unwrap(), "1\n3\n3\n3\n11\n-3\n10\n20\n");
     }
 
     #[test]

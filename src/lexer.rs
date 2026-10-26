@@ -40,6 +40,8 @@ pub struct Token {
     pub span: Span,
     // 直前のトークンとの間に空白・改行・コメントがあるか（"~" の判定に使う）
     pub gap_before: bool,
+    // 直前のトークンとの間に改行があるか（文の区切りに使う）
+    pub nl_before: bool,
 }
 
 const KEYWORDS: &[&str] = &[
@@ -48,7 +50,7 @@ const KEYWORDS: &[&str] = &[
 // 最長一致のため、2文字の記号を先に置く
 const PUNCTS: &[&str] = &[
     "->", "==", "!=", "<=", ">=", "&&", "||", "</", "(", ")", "{", "}", ",", ";", ":", ".", "=",
-    "<", ">", "+", "-", "*", "/", "%", "!", "@", "~", "|", "?",
+    "<", ">", "+", "-", "*", "/", "%", "!", "@", "$", "~", "|", "?",
 ];
 
 struct Lx<'a> {
@@ -171,13 +173,16 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
     let mut out: Vec<Token> = Vec::new();
     loop {
         // ファイル先頭のトークンは gap_before = false
+        let line0 = lx.line;
         let gap = lx.skip()? && !out.is_empty();
+        let nl = lx.line > line0;
         let start = lx.pos();
         let Some(c) = lx.peek() else {
             out.push(Token {
                 tok: Tok::Eof,
                 span: Span { start, end: start },
                 gap_before: gap,
+                nl_before: nl,
             });
             return Ok(out);
         };
@@ -224,6 +229,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 end: lx.pos(),
             },
             gap_before: gap,
+            nl_before: nl,
         });
     }
 }

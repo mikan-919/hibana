@@ -64,6 +64,8 @@ pub struct Parser<'s> {
     pub pos: usize,
     pub src: &'s str,
     pub g: Rc<Grammar>,
+    // マクロ展開の入れ子の深さ
+    pub depth: usize,
 }
 
 pub type R<T> = Result<T, String>;
@@ -74,6 +76,7 @@ pub fn parse(src: &str) -> R<Vec<Fn>> {
         pos: 0,
         src,
         g: Rc::default(),
+        depth: 0,
     };
     let mut g = Grammar::default();
     let mut fn_starts = Vec::new();
@@ -139,7 +142,7 @@ impl Parser<'_> {
     }
     // 次のトークンが前のトークンと別の行にあるか
     fn at_newline(&self) -> bool {
-        self.pos > 0 && self.toks[self.pos].span.start.line > self.toks[self.pos - 1].span.end.line
+        self.toks[self.pos].nl_before
     }
     // 文の区切り: ";"、改行、"}" の直前のいずれか
     fn end_stmt(&mut self) -> R<()> {
