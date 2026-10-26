@@ -120,6 +120,10 @@ const BUILTINS: &[&str] = &[
     "resume",
     "all",
     "push",
+    "Ref",
+    "new_ref",
+    "read",
+    "write",
     "Async",
 ];
 
@@ -145,6 +149,18 @@ fn syn_of(kind: &str) -> V {
         prim("syn")
     } else {
         V::Syn(kind.into())
+    }
+}
+
+// 書き換えられる参照の型 Ref<T>
+fn ref_t(a: V) -> V {
+    V::DataT(Rc::new(("Ref".into(), vec![a])))
+}
+
+fn ref_of(t: &V) -> Option<V> {
+    match base(t) {
+        V::DataT(d) if d.0 == "Ref" && d.1.len() == 1 => Some(d.1[0].clone()),
+        _ => None,
     }
 }
 
@@ -480,6 +496,7 @@ impl Norm<'_> {
         match (name, args.as_slice()) {
             ("len", [v]) => return Ok(Self::len(v.clone())),
             ("Vec", [a]) => return Ok(V::VecT(Rc::new(a.clone()))),
+            ("Ref", [a]) => return Ok(ref_t(a.clone())),
             ("Type", [V::Int(n)]) if *n >= 0 => return Ok(V::Univ(*n as u32)),
             _ if self.ctors.contains_key(name) => return Ok(V::Data(Rc::new((name.into(), args)))),
             _ if self.datas.contains_key(name) => {
@@ -1208,7 +1225,10 @@ impl Ck<'_> {
     // 構造体の値なら、フィールドの型の細分化の条件を v.f についての事実として加える
     fn struct_facts(&mut self, ty: &V, val: &V) -> R<()> {
         let V::DataT(d) = base(ty) else { return Ok(()) };
-        let data = self.norm.datas[d.0.as_str()];
+        // Ref と Async は宣言の無い組み込みの型
+        let Some(data) = self.norm.datas.get(d.0.as_str()).copied() else {
+            return Ok(());
+        };
         let [c] = data.ctors.as_slice() else {
             return Ok(());
         };
@@ -1498,6 +1518,15 @@ impl Ck<'_> {
             {
                 let t = self.call_fn(n, args, Some(expected))?;
                 self.subsume(e, &t, expected)
+            }
+            // 期待する型から、new_ref([]) の要素の型が分かる
+            Expr::Call(n, args)
+                if n == "new_ref"
+                    && self.lookup(n).is_none()
+                    && args.len() == 1
+                    && ref_of(expected).is_some() =>
+            {
+                self.check(&args[0], &ref_of(expected).unwrap())
             }
             Expr::Lam(params, ret, effs, body) if matches!(base(expected), V::Pi(_)) => {
                 let V::Pi(p) = base(expected) else {
@@ -1797,6 +1826,36 @@ impl Ck<'_> {
             Expr::Lam(params, ret, effs, body) => return self.lam_infer(params, ret, effs, body),
             Expr::Pi(binders, ret, effs) => return self.pi_type(binders, ret, effs),
             Expr::Match(s, arms) => return self.check_match(s, arms, None),
+            // 書き換えられる参照。new_ref(x) で作り、read(r) で読み、write(r, x) で書く
+            Expr::Call(name, args) if name == "Ref" => {
+                let [a] = args.as_slice() else {
+                    return Err("Ref の引数は1個".into());
+                };
+                let k = self.type_level(a).ctx(|e| format!("Ref の引数: {e}"))?;
+                V::Univ(k)
+            }
+            Expr::Call(name, args) if name == "new_ref" && self.lookup(name).is_none() => {
+                let [a] = args.as_slice() else {
+                    return Err("new_ref の引数は1個".into());
+                };
+                ref_t(base(&self.expr(a)?))
+            }
+            Expr::Call(name, args) if name == "read" && self.lookup(name).is_none() => {
+                let [r] = args.as_slice() else {
+                    return Err("read の引数は1個".into());
+                };
+                let t = self.expr(r)?;
+                ref_of(&t).ok_or(format!("read は Ref に使う（実際は {}）", show(&t)))?
+            }
+            Expr::Call(name, args) if name == "write" && self.lookup(name).is_none() => {
+                let [r, x] = args.as_slice() else {
+                    return Err("write の引数は2個".into());
+                };
+                let t = self.expr(r)?;
+                let a = ref_of(&t).ok_or(format!("write は Ref に使う（実際は {}）", show(&t)))?;
+                self.check(x, &a)?;
+                prim("unit")
+            }
             Expr::Call(name, args) if name == "len" || name == "Vec" => {
                 if args.len() != 1 {
                     return Err(format!("{name} の引数は1個").into());
@@ -1967,10 +2026,11 @@ impl Ck<'_> {
     // 添字付きの型族（構築子が戻り値の型を指定する型）か。こうした型の値は証明になりうる
     fn is_proof_type(&self, t: &V) -> bool {
         match base(t) {
-            V::DataT(d) => self.norm.datas[d.0.as_str()]
-                .ctors
-                .iter()
-                .any(|c| c.ret.is_some()),
+            V::DataT(d) => self
+                .norm
+                .datas
+                .get(d.0.as_str())
+                .is_some_and(|data| data.ctors.iter().any(|c| c.ret.is_some())),
             _ => false,
         }
     }
@@ -2823,7 +2883,9 @@ impl Ck<'_> {
         let V::DataT(dt) = &st else {
             return Err(format!("match は data 型の値に使う（実際は {}）", show(&st)).into());
         };
-        let d = self.norm.datas[dt.0.as_str()];
+        let Some(d) = self.norm.datas.get(dt.0.as_str()).copied() else {
+            return Err(format!("match は data 型の値に使う（実際は {}）", show(&st)).into());
+        };
         let sv = self.eval_value(s)?;
         let svar = match &sv {
             V::Neu(n) => match &**n {
@@ -2918,7 +2980,9 @@ impl Ck<'_> {
 
     // 構造体の値 x のフィールド f の型。フィールドの型は前のフィールドの値に依存しうる
     fn struct_field(&mut self, d: &(String, Vec<V>), x: &Expr, f: &str) -> R<V> {
-        let data = self.norm.datas[d.0.as_str()];
+        let Some(data) = self.norm.datas.get(d.0.as_str()).copied() else {
+            return Err(format!("型 {} は構造体でないのでフィールドは無い", d.0).into());
+        };
         let [c] = data.ctors.as_slice() else {
             return Err(format!("型 {} は構造体でないのでフィールドは無い", d.0).into());
         };

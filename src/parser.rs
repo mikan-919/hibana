@@ -342,7 +342,7 @@ pub fn parse(src: &str) -> R<Program> {
     let mut data_starts = Vec::new();
     let mut extern_starts = Vec::new();
     let mut effect_starts = Vec::new();
-    let mut types: HashSet<String> = ["Vec", "Type"].map(String::from).into();
+    let mut types: HashSet<String> = ["Vec", "Ref", "Type"].map(String::from).into();
     let mut generic_fns: HashSet<String> = HashSet::new();
     // 組み込みと利用者のファイルの名前・モジュール名・パターンのリテラル。マクロの衛生性で名前を付け替えない
     let mut globals: HashSet<String> = [
@@ -367,6 +367,10 @@ pub fn parse(src: &str) -> R<Program> {
         "resume",
         "all",
         "push",
+        "Ref",
+        "new_ref",
+        "read",
+        "write",
         "Async",
         "Vec",
         "Type",

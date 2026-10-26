@@ -299,6 +299,8 @@ mod tests {
             get("/users/bob"),
             get("/users/zed"),
             get("/"),
+            send("POST /users HTTP/1.1\r\nHost: x\r\nContent-Length: 16\r\nConnection: close\r\n\r\n{\"name\":\"carol\"}".into()),
+            send("POST /users HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".into()),
             get("/users"),
             send("POST /echo?from=me HTTP/1.1\r\nHost: x\r\nX-Agent: t\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi".into()),
         ];
@@ -311,11 +313,17 @@ mod tests {
         );
         assert!(rs[1].starts_with("HTTP/1.1 404"), "{}", rs[1]);
         assert!(rs[2].contains("content-type: text/html"), "{}", rs[2]);
-        assert!(rs[3].contains(r#"{"users":["alice","bob"]}"#), "{}", rs[3]);
+        assert!(rs[3].starts_with("HTTP/1.1 201"), "{}", rs[3]);
+        assert!(rs[4].starts_with("HTTP/1.1 400"), "{}", rs[4]);
         assert!(
-            rs[4].contains(r#"{"from":"me","agent":"t","body":"hi"}"#),
+            rs[5].contains(r#"{"users":["alice","bob","carol"]}"#),
             "{}",
-            rs[4]
+            rs[5]
+        );
+        assert!(
+            rs[6].contains(r#"{"from":"me","agent":"t","body":"hi"}"#),
+            "{}",
+            rs[6]
         );
         // Workers では export default { fetch } を呼ぶ
         let js = tmp.join("worker.mjs");

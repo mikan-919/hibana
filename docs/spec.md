@@ -200,6 +200,7 @@ fn main() ! Async { print(twice_later(5)) }
 |---|---|
 | `int` `bool` `str` `unit` | 64ビット整数・真偽値・文字列・値の無いこと |
 | `Vec<T>` | 配列。書き換えられないので、`Vec<int[x -> x > 0]>` は `Vec<int>` として使える |
+| `Ref<T>` | 書き換えられる参照。`new_ref(x)` で作り、`read(r)` で読み、`write(r, x)` で書く。無名関数や handle の腕が写し取っても同じ値を指す（`mut` 変数は写し取った時の値になる） |
 | `(x: A, B) -> C` | 関数型。後の引数や戻り値の型は、前の引数の値に依存してよい。依存しなければ名前を省く |
 | `T[x -> 条件]` | 細分化型。条件を満たす `T` の値だけを許す |
 | `Type`、`Type<n>` | 型の型。`Type` は `Type<0>` で、`Type<n> : Type<n + 1>`。下の階層の型は上の階層の型としても使える |
@@ -316,6 +317,7 @@ macro pow ("pow" "(" x:Expr "," n:Int ")") {
 | `split(s, sep)` | `(str, str) -> Vec<str>` |
 | `starts_with(s, p)` | `(str, str) -> bool` |
 | `slice(s, i, j)` | `(str, int, int) -> str`。範囲外は実行時エラー |
+| `new_ref(x)` `read(r)` `write(r, x)` | `T -> Ref<T>`、`Ref<T> -> T`、`(Ref<T>, T) -> unit` |
 | `push(v, x)` | `(Vec<T>, T) -> Vec<T>`。`v` の後ろに `x` を足した新しい `Vec`（`v` は変わらない） |
 | `all(fs)` | `(Vec<() -> T ! Async>) -> Vec<T> ! Async`（3.5 節） |
 | `resume(x)` | `handle` の腕の中で、続きを再開する（3.5 節） |
@@ -333,9 +335,10 @@ macro pow ("pow" "(" x:Expr "," n:Int ")") {
 | `Map<V>`、`empty()` `get(m, k)` `set(m, k, v)` `keys(m)` | 文字列のキーから値への表。`set` は新しい `Map` を返す。線形探索 |
 | `Json` = `JNull` \| `JBool` \| `JInt` \| `JStr` \| `JArr(Vec<Json>)` \| `JObj(Vec<Field>)`、`Field { key, value }` | JSON の値 |
 | `stringify(j)` `quote_str(s)` | JSON の文字列にする |
+| `parse_json(s)`、`field(j, key)` `str_or(o, d)` `int_or(o, d)` | JSON を読む（`Option<Json>`、読めなければ `None`）。フィールドと値を取り出す |
 
 - `empty()` の型引数は引数から決まらないので、`let e: Map<int> = empty()` のように期待する型を書きます。
-- JSON を読む（文字列から `Json` にする）関数はまだありません。
+- JSON の数は整数だけを読み、`\uXXXX` のエスケープは読めません。
 
 ### web
 
@@ -366,7 +369,7 @@ fn main() {
 }
 ```
 
-サーバーの例は `examples/server.hb` です。データの置き場を `Need<Db>` の効果で受け取り、`main` の `handle` で本物の置き場を渡しています（テストでは置き場を差し替えられる）。
+サーバーの例は `examples/server.hb` です。データの置き場（`Ref` を持つ構造体）を `Need<Db>` の効果で受け取り、`main` の `handle` で本物の置き場を渡しています（テストでは置き場を差し替えられる）。
 
 ```
 let api = routes ! Need<Db> {

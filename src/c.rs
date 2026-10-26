@@ -13,9 +13,9 @@ const PRELUDE: &str = r#"#include <stdint.h>
 #include <string.h>
 #include <stdbool.h>
 #include <setjmp.h>
-enum { T_UNIT, T_INT, T_BOOL, T_STR, T_ARR, T_DATA, T_FN, T_TY };
+enum { T_UNIT, T_INT, T_BOOL, T_STR, T_ARR, T_DATA, T_FN, T_TY, T_REF };
 typedef struct V V;
-struct V { int tag; union { int64_t i; bool b; struct Str* s; struct Arr* a; struct Data* d; struct Fn* f; const char* ty; }; };
+struct V { int tag; union { int64_t i; bool b; struct Str* s; struct Arr* a; struct Data* d; struct Fn* f; const char* ty; V* r; }; };
 typedef struct Str { int64_t len; char s[]; } Str;
 typedef struct Arr { int64_t n; V items[]; } Arr;
 typedef struct Data { int ctor; int n; V f[]; } Data;
@@ -69,6 +69,7 @@ static bool eq(V a, V b) {
     case T_STR: return a.s->len == b.s->len && memcmp(a.s->s, b.s->s, a.s->len) == 0;
     case T_TY: return strcmp(a.ty, b.ty) == 0;
     case T_FN: return a.f == b.f;
+    case T_REF: return a.r == b.r;
     case T_ARR:
       if (a.a->n != b.a->n) return false;
       for (int64_t k = 0; k < a.a->n; k++) if (!eq(a.a->items[k], b.a->items[k])) return false;
@@ -94,6 +95,7 @@ static void show(Buf* b, V v) {
     case T_BOOL: puts_(b, v.b ? "true" : "false"); break;
     case T_TY: puts_(b, v.ty); break;
     case T_FN: puts_(b, "<fn>"); break;
+    case T_REF: puts_(b, "<ref>"); break;
     case T_STR:
       puts_(b, "\"");
       for (int64_t k = 0; k < v.s->len; k++) {
@@ -185,6 +187,8 @@ static V h_op(const char* op, V* args) {
   }
   die("操作を処理する handle が無い"); return U;
 }
+static V mk_ref(V x) { V v = { .tag = T_REF }; v.r = alloc(sizeof(V)); *v.r = x; return v; }
+static V h_write(V r, V x) { *r.r = x; return U; }
 static V h_vpush(V v, V x) {
   V* items = alloc((v.a->n + 1) * sizeof(V));
   if (v.a->n) memcpy(items, v.a->items, v.a->n * sizeof(V));
@@ -483,6 +487,9 @@ impl Gen<'_> {
                 let v = match name.as_str() {
                     "all" => format!("h_all({})", vs[0]),
                     "push" => format!("h_vpush({}, {})", vs[0], vs[1]),
+                    "new_ref" => format!("mk_ref({})", vs[0]),
+                    "read" => format!("(*{}.r)", vs[0]),
+                    "write" => format!("h_write({}, {})", vs[0], vs[1]),
                     "resume" => format!("mk_res({})", vs.first().map_or("U", |v| v)),
                     n if self.fns.get(n).is_some_and(|f| f.op.is_some()) => {
                         let f = self.fns[n];

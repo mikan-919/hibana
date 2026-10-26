@@ -15,10 +15,14 @@ function $mul(a, b) { return $chk(a * b); }
 function $div(a, b) { if (b === 0n) throw new Error("0 で除算した"); return $chk(a / b); }
 function $rem(a, b) { if (b === 0n) throw new Error("0 で除算した"); return a % b; }
 function $neg(a) { return $chk(-a); }
+let $w;
+// 書き換えられる参照
+class $Ref { constructor(v) { this.v = v; } }
 function $d(c, f) { return { $c: c, $f: f }; }
 function $field(x, f) { return x.$f[$fields[x.$c].indexOf(f)]; }
 function $eq(a, b) {
   if (a === b) return true;
+  if (a instanceof $Ref) return false;
   if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((x, i) => $eq(x, b[i]));
   if (a && b && typeof a === "object" && typeof b === "object") return a.$c === b.$c && $eq(a.$f, b.$f);
   return false;
@@ -28,6 +32,7 @@ function $show(v) {
   if (typeof v === "string") return JSON.stringify(v);
   if (v === undefined) return "()";
   if (typeof v === "function") return "<fn>";
+  if (v instanceof $Ref) return "<ref>";
   if (Array.isArray(v)) return "[" + v.map($show).join(", ") + "]";
   if (v.$c.endsWith("{}")) return v.$c.slice(0, -2) + " { " + $fields[v.$c].map((f, i) => f + ": " + $show(v.$f[i])).join(", ") + " }";
   return v.$f.length === 0 ? v.$c : v.$c + "(" + v.$f.map($show).join(", ") + ")";
@@ -487,6 +492,9 @@ impl Gen<'_> {
                         let k = vs.len() - (f.params.len() - f.implicit);
                         format!("$op({}, [{}])", lit(n), vs[k..].join(", "))
                     }
+                    "new_ref" => format!("new $Ref({})", vs[0]),
+                    "read" => format!("{}.v", vs[0]),
+                    "write" => format!("($w = {}, $w.v = {}, undefined)", vs[0], vs[1]),
                     "push" => format!("[...{}, {}]", vs[0], vs[1]),
                     "all" => wait(true, format!("$all({})", vs[0])),
                     "print" => format!("$print({})", vs[0]),

@@ -20,6 +20,8 @@ pub enum Value {
     // data の値 (構築子, フィールド)
     Data(Rc<(String, Vec<Value>)>),
     Fn(Rc<Callable>),
+    // 書き換えられる参照。写し取った関数どうしでも同じものを指す
+    Ref(Rc<std::cell::RefCell<Value>>),
 }
 
 // 関数の値
@@ -116,6 +118,7 @@ fn show(v: &Value) -> String {
         Value::Unit => "()".into(),
         Value::Syn(s) => format!("{:?}", s.node.strip()),
         Value::Fn(_) => "<fn>".into(),
+        Value::Ref(_) => "<ref>".into(),
         Value::Data(d) if d.1.is_empty() => d.0.clone(),
         Value::Data(d) => format!(
             "{}({})",
@@ -500,6 +503,20 @@ impl Interp<'_> {
                         out.push(self.apply(f, vec![])?);
                     }
                     Value::Arr(Rc::new(out))
+                } else if name == "new_ref" && !self.fns.contains_key(name.as_str()) {
+                    Value::Ref(Rc::new(std::cell::RefCell::new(vs.pop().unwrap())))
+                } else if name == "read" && !self.fns.contains_key(name.as_str()) {
+                    let Value::Ref(r) = &vs[0] else {
+                        unreachable!("型検査済み")
+                    };
+                    r.borrow().clone()
+                } else if name == "write" && !self.fns.contains_key(name.as_str()) {
+                    let x = vs.pop().unwrap();
+                    let Value::Ref(r) = &vs[0] else {
+                        unreachable!("型検査済み")
+                    };
+                    *r.borrow_mut() = x;
+                    Value::Unit
                 } else if name == "push" && !self.fns.contains_key(name.as_str()) {
                     let x = vs.pop().unwrap();
                     let Value::Arr(xs) = vs.pop().unwrap() else {
@@ -531,7 +548,9 @@ impl Interp<'_> {
                         Value::Unit => "()".into(),
                         Value::Str(s) => s.to_string(),
                         Value::Ty(t) => t.to_string(),
-                        Value::Arr(_) | Value::Data(_) | Value::Fn(_) => self.show(&vs[0]),
+                        Value::Arr(_) | Value::Data(_) | Value::Fn(_) | Value::Ref(_) => {
+                            self.show(&vs[0])
+                        }
                         Value::Syn(s) => format!("{:?}", s.node.strip()),
                     };
                     writeln!(self.out, "{s}").map_err(|e| Flow::Error(e.to_string()))?;
