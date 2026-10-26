@@ -406,7 +406,7 @@ fn emit(v: &Value, dollar: &Token, out: &mut Vec<Token>) -> R<()> {
         Value::Bool(b) => Tok::Punct(if *b { "true" } else { "false" }),
         Value::Str(s) => Tok::Str(s.to_string()),
         Value::Ty(t) => Tok::Ident(t.to_string()),
-        Value::Arr(_) => return Err("配列は差し込めない".into()),
+        Value::Arr(_) | Value::Data(_) => return Err("配列と data の値は差し込めない".into()),
         Value::Unit => return Err("() は差し込めない".into()),
         Value::Syn(s) => return emit_syn(s, dollar, out),
     };
@@ -1143,7 +1143,7 @@ mod tests {
 
     // main の最初の let に書いたマクロの照合結果を取り出す
     fn macro_node(src: &str) -> Node {
-        let fns = parse(src).unwrap();
+        let fns = parse(src).unwrap().fns;
         let main = fns.iter().find(|f| f.name == "main").unwrap();
         match &main.body.stmts[0] {
             Stmt::Let { init, .. } if matches!(init.peel(), Expr::Macro(..)) => {

@@ -1,7 +1,8 @@
 use crate::error::Error;
 use crate::meta::{self, Node, Syn};
-use crate::parser::{Block, Expr, Fn, Stmt};
+use crate::parser::{Block, Expr, Fn, Program, Stmt};
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::io::Write;
 use std::rc::Rc;
 
@@ -16,6 +17,8 @@ pub enum Value {
     // 型。実行時には名前だけを持つ
     Ty(Rc<str>),
     Arr(Rc<Vec<Value>>),
+    // data の値 (構築子, フィールド)
+    Data(Rc<(String, Vec<Value>)>),
 }
 
 // 通常の値以外で評価を抜ける理由
@@ -29,13 +32,20 @@ type R<T> = Result<T, Flow>;
 // ponytail: 構文木を直接評価する方式。速度が必要ならバイトコードVMに置き換える
 struct Interp<'a> {
     fns: HashMap<&'a str, &'a Fn>,
+    ctors: HashSet<&'a str>,
     out: &'a mut dyn Write,
 }
 
 // 型検査を通ったプログラムを前提とする
-pub fn run(fns: &[Fn], out: &mut dyn Write) -> Result<Value, String> {
+pub fn run(prog: &Program, out: &mut dyn Write) -> Result<Value, String> {
     let mut it = Interp {
-        fns: fns.iter().map(|f| (f.name.as_str(), f)).collect(),
+        fns: prog.fns.iter().map(|f| (f.name.as_str(), f)).collect(),
+        ctors: prog
+            .datas
+            .iter()
+            .flat_map(|d| &d.ctors)
+            .map(|c| c.name.as_str())
+            .collect(),
         out,
     };
     match it.call("main", vec![]) {
@@ -49,6 +59,7 @@ pub fn run_macro(b: &Block, vars: Vec<(String, Value)>) -> Result<Value, String>
     let mut err = std::io::stderr();
     let mut it = Interp {
         fns: HashMap::new(),
+        ctors: HashSet::new(),
         out: &mut err,
     };
     match it.block(b, &mut vec![vars.into_iter().collect()]) {
@@ -66,6 +77,12 @@ fn show(v: &Value) -> String {
         Value::Ty(t) => t.to_string(),
         Value::Unit => "()".into(),
         Value::Syn(s) => format!("{:?}", s.node.strip()),
+        Value::Data(d) if d.1.is_empty() => d.0.clone(),
+        Value::Data(d) => format!(
+            "{}({})",
+            d.0,
+            d.1.iter().map(show).collect::<Vec<_>>().join(", ")
+        ),
     }
 }
 
@@ -237,6 +254,9 @@ impl Interp<'_> {
             }
             Expr::Var(n) => match env.iter().rev().find_map(|s| s.get(n)) {
                 Some(v) => v.clone(),
+                None if self.ctors.contains(n.as_str()) => {
+                    Value::Data(Rc::new((n.clone(), vec![])))
+                }
                 // 型検査を通っているので、残りは int などの型名
                 None => Value::Ty(n.as_str().into()),
             },
@@ -277,7 +297,15 @@ impl Interp<'_> {
                 for a in args {
                     vs.push(self.expr(a, env)?);
                 }
-                if let Some(v) = self.syn_fn(name, &mut vs)? {
+                if self.ctors.contains(name.as_str()) {
+                    Value::Data(Rc::new((name.clone(), vs)))
+                } else if !self.fns.contains_key(name.as_str())
+                    && name != "print"
+                    && name.starts_with(|c: char| c.is_ascii_uppercase())
+                {
+                    // 型を作る呼び出し（Option(int) など）。実行時には名前だけを持つ
+                    Value::Ty(name.as_str().into())
+                } else if let Some(v) = self.syn_fn(name, &mut vs)? {
                     v
                 } else if name == "print" {
                     let s = match &vs[0] {
@@ -286,7 +314,7 @@ impl Interp<'_> {
                         Value::Unit => "()".into(),
                         Value::Str(s) => s.to_string(),
                         Value::Ty(t) => t.to_string(),
-                        Value::Arr(_) => show(&vs[0]),
+                        Value::Arr(_) | Value::Data(_) => show(&vs[0]),
                         Value::Syn(s) => format!("{:?}", s.node.strip()),
                     };
                     writeln!(self.out, "{s}").map_err(|e| Flow::Error(e.to_string()))?;
@@ -294,6 +322,23 @@ impl Interp<'_> {
                 } else {
                     self.call(name, vs)?
                 }
+            }
+            Expr::Match(s, arms) => {
+                let Value::Data(d) = self.expr(s, env)? else {
+                    unreachable!("型検査済み")
+                };
+                let arm = arms
+                    .iter()
+                    .find(|a| a.ctor == d.0 || a.ctor == "_")
+                    .expect("網羅性は型検査済み");
+                let mut scope = HashMap::new();
+                if arm.ctor != "_" {
+                    scope.extend(arm.binds.iter().cloned().zip(d.1.iter().cloned()));
+                }
+                env.push(scope);
+                let r = self.expr(&arm.body, env);
+                env.pop();
+                r?
             }
             Expr::Assign(name, x) => {
                 let v = self.expr(x, env)?;

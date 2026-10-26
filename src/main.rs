@@ -9,9 +9,9 @@ mod typeck;
 use std::io::Write;
 
 fn run(src: &str, out: &mut dyn Write) -> error::R<eval::Value> {
-    let fns = parser::parse(src)?;
-    typeck::check(&fns)?;
-    Ok(eval::run(&fns, out)?)
+    let prog = parser::parse(src)?;
+    typeck::check(&prog)?;
+    Ok(eval::run(&prog, out)?)
 }
 
 // ソースの該当箇所に下線を引いて表示するためのエラー

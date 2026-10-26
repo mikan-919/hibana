@@ -28,6 +28,7 @@ pub enum Expr {
     Index(Box<Expr>, Box<Expr>),
     // 細分化型 型[変数 -> 条件]
     Refine(Box<Expr>, String, Box<Expr>),
+    Match(Box<Expr>, Vec<Arm>),
     // ソース上の位置。エラー表示に使う
     At(Span, Box<Expr>),
 }
@@ -80,7 +81,36 @@ pub struct Parser<'s> {
 use crate::error::Error;
 pub use crate::error::R;
 
-pub fn parse(src: &str) -> R<Vec<Fn>> {
+// data 宣言。構築子の ret は添字付きの型族の戻り値の型（無ければ Name(params)）
+#[derive(Debug)]
+pub struct Data {
+    pub name: String,
+    pub params: Vec<(String, Expr)>,
+    pub ctors: Vec<Ctor>,
+}
+
+#[derive(Debug)]
+pub struct Ctor {
+    pub name: String,
+    pub fields: Vec<(String, Expr)>,
+    pub ret: Option<Expr>,
+}
+
+// match の腕。ctor が "_" なら残りすべて
+#[derive(Debug, Clone)]
+pub struct Arm {
+    pub ctor: String,
+    pub binds: Vec<String>,
+    pub body: Expr,
+}
+
+#[derive(Debug, Default)]
+pub struct Program {
+    pub fns: Vec<Fn>,
+    pub datas: Vec<Data>,
+}
+
+pub fn parse(src: &str) -> R<Program> {
     let mut p = Parser {
         toks: lex(src)?,
         pos: 0,
@@ -90,6 +120,7 @@ pub fn parse(src: &str) -> R<Vec<Fn>> {
     };
     let mut g = Grammar::default();
     let mut fn_starts = Vec::new();
+    let mut data_starts = Vec::new();
     // 1周目は syntax と macro だけを読む（宣言より前の関数でもマクロを使えるようにする）
     loop {
         match p.peek() {
@@ -100,19 +131,26 @@ pub fn parse(src: &str) -> R<Vec<Fn>> {
                 fn_starts.push(p.pos);
                 p.skip_fn()?;
             }
-            _ => return p.err("fn・syntax・macro のいずれかが必要"),
+            Tok::Punct("data") => {
+                data_starts.push(p.pos);
+                p.skip_fn()?;
+            }
+            _ => return p.err("fn・data・syntax・macro のいずれかが必要"),
         }
     }
     g.validate()?;
     p.g = Rc::new(g);
     p.check_macros()?;
-    fn_starts
-        .into_iter()
-        .map(|s| {
-            p.pos = s;
-            p.func()
-        })
-        .collect()
+    let mut prog = Program::default();
+    for s in data_starts {
+        p.pos = s;
+        prog.datas.push(p.data()?);
+    }
+    for s in fn_starts {
+        p.pos = s;
+        prog.fns.push(p.func()?);
+    }
+    Ok(prog)
 }
 
 // 優先順位（大きいほど強く結合する）
@@ -211,16 +249,7 @@ impl Parser<'_> {
         self.expect("fn")?;
         let name = self.ident()?;
         self.expect("(")?;
-        let mut params = Vec::new();
-        while !self.eat(")") {
-            let n = self.ident()?;
-            self.expect(":")?;
-            params.push((n, self.ty()?));
-            if !self.eat(",") {
-                self.expect(")")?;
-                break;
-            }
-        }
+        let params = self.params()?;
         let ret = if self.eat("->") {
             Some(self.ty()?)
         } else {
@@ -232,6 +261,53 @@ impl Parser<'_> {
             params,
             ret,
             body: self.block()?,
+        })
+    }
+
+    // (名前: 型, ...)。"(" は読み終えた状態で呼ぶ
+    fn params(&mut self) -> R<Vec<(String, Expr)>> {
+        let mut params = Vec::new();
+        while !self.eat(")") {
+            let n = self.ident()?;
+            self.expect(":")?;
+            params.push((n, self.ty()?));
+            if !self.eat(",") {
+                self.expect(")")?;
+                break;
+            }
+        }
+        Ok(params)
+    }
+
+    fn data(&mut self) -> R<Data> {
+        self.expect("data")?;
+        let name = self.ident()?;
+        let params = if self.eat("(") {
+            self.params()?
+        } else {
+            vec![]
+        };
+        self.expect("{")?;
+        let mut ctors = Vec::new();
+        while !self.eat("}") {
+            let name = self.ident()?;
+            let fields = if self.eat("(") {
+                self.params()?
+            } else {
+                vec![]
+            };
+            let ret = if self.eat("->") {
+                Some(self.ty()?)
+            } else {
+                None
+            };
+            ctors.push(Ctor { name, fields, ret });
+            self.eat(",");
+        }
+        Ok(Data {
+            name,
+            params,
+            ctors,
         })
     }
 
@@ -410,6 +486,29 @@ impl Parser<'_> {
                 let cond = self.expr()?;
                 self.expect("{")?;
                 Expr::While(Box::new(cond), self.block()?)
+            }
+            Tok::Punct("match") => {
+                let s = self.expr()?;
+                self.expect("{")?;
+                let mut arms = Vec::new();
+                while !self.eat("}") {
+                    let ctor = self.ident()?;
+                    let mut binds = Vec::new();
+                    if self.eat("(") {
+                        while !self.eat(")") {
+                            binds.push(self.ident()?);
+                            if !self.eat(",") {
+                                self.expect(")")?;
+                                break;
+                            }
+                        }
+                    }
+                    self.expect("=>")?;
+                    let body = self.expr()?;
+                    arms.push(Arm { ctor, binds, body });
+                    self.eat(",");
+                }
+                Expr::Match(Box::new(s), arms)
             }
             Tok::Punct("quote") => {
                 self.expect("{")?;
