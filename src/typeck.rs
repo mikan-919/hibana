@@ -128,7 +128,12 @@ fn show(v: &V) -> String {
         V::Unit => "()".into(),
         V::Arr(v) => format!("[{}]", v.iter().map(show).collect::<Vec<_>>().join(", ")),
         V::Univ(0) => "Type".into(),
-        V::Univ(n) => format!("Type({n})"),
+        V::Univ(n) => format!("Type<{n}>"),
+        V::DataT(d) if !d.1.is_empty() => format!(
+            "{}<{}>",
+            d.0,
+            d.1.iter().map(show).collect::<Vec<_>>().join(", ")
+        ),
         V::Data(d) | V::DataT(d) if d.1.is_empty() => d.0.clone(),
         V::Data(d) | V::DataT(d) => format!(
             "{}({})",
@@ -149,6 +154,13 @@ fn show(v: &V) -> String {
             Neu::Var(_, name) => name.clone(),
             Neu::Un(op, x) => format!("{op}{}", show(x)),
             Neu::Bin(op, a, b) => format!("({} {op} {})", show(a), show(b)),
+            // 型の別名は大文字で始まる名前とみなして <> で表す
+            Neu::Call(f, args) if f.starts_with(|c: char| c.is_ascii_uppercase()) => {
+                format!(
+                    "{f}<{}>",
+                    args.iter().map(show).collect::<Vec<_>>().join(", ")
+                )
+            }
             Neu::Call(f, args) => format!(
                 "{f}({})",
                 args.iter().map(show).collect::<Vec<_>>().join(", ")
@@ -898,6 +910,9 @@ pub fn check(prog: &Program) -> R<()> {
             Some(t) => ck.eval_type(t).ctx(|e| r(&format!("戻り値: {e}")))?,
             None => prim("unit"),
         };
+        if !f.alias && matches!(base(&ck.ret), V::Univ(_)) {
+            return Err(r("関数は型を返せない。型を計算するなら type で定義する").into());
+        }
         if f.partial && ck.is_proof_type(&ck.ret) {
             return Err(r("partial fn は証明の型（添字付きの型族）を返せない。止まらない関数で偽の証明が作れてしまうため").into());
         }
@@ -1608,6 +1623,9 @@ impl Ck<'_> {
 
     // 関数の本体を、戻り値の型 rt で検査する
     fn fn_body(&mut self, body: &Block, rt: Option<V>) -> R<V> {
+        if let Some(V::Univ(_)) = rt.as_ref().map(base) {
+            return Err("関数は型を返せない。型を計算するなら type で定義する".into());
+        }
         let saved = self.ret.clone();
         let r = match rt {
             Some(rt) => {
@@ -1625,6 +1643,9 @@ impl Ck<'_> {
             }
         };
         self.ret = saved;
+        if let Ok(V::Univ(_)) = r.as_ref().map(base) {
+            return Err("関数は型を返せない。型を計算するなら type で定義する".into());
+        }
         r
     }
 
@@ -2201,13 +2222,13 @@ mod tests {
     fn dependent() {
         // 引数の値で戻り値の型が決まる
         let src = r#"
-fn T(b: bool) -> Type { if b { int } else { str } }
-fn f(b: bool) -> T(b) { if b { 1 } else { "one" } }
+type T<b: bool> = if b { int } else { str }
+fn f(b: bool) -> T<b> { if b { 1 } else { "one" } }
 fn id(A: Type, x: A) -> A { x }
 fn main() {
     let x: int = f(true)
     let s: str = f(false)
-    let y: T(1 < 2) = id(int, 3)
+    let y: T<(1 < 2)> = id(int, 3)
     print(x + y)
 }
 "#;
@@ -2215,8 +2236,8 @@ fn main() {
         for (bad, msg) in [
             ("let x: int = f(true)", "let x: int = f(false)"),
             (
-                "let y: T(1 < 2) = id(int, 3)",
-                "let y: T(1 < 2) = id(int, true)",
+                "let y: T<(1 < 2)> = id(int, 3)",
+                "let y: T<(1 < 2)> = id(int, true)",
             ),
             ("let s: str = f(false)", "let s: str = f(1 == 1)"),
         ] {
@@ -2229,22 +2250,26 @@ fn main() {
 
     #[test]
     fn type_level_loop_is_bounded() {
-        let e = check("fn loop(n: int) -> Type { loop(n + 1) } fn main() { let x: loop(0) = 1 }")
-            .unwrap_err();
+        let e =
+            check("type Loop<n: int> = Loop<n + 1>\nfn main() { let x: Loop<0> = 1 }").unwrap_err();
         assert!(e.contains("停止することを示せない"), "{e}");
-        // partial fn は型の計算で展開しない
-        let e = check(
-            "partial fn loop(n: int) -> Type { loop(n + 1) } fn main() { let x: loop(0) = 1 }",
-        )
-        .unwrap_err();
-        assert!(e.contains("loop(0) が必要だが int"), "{e}");
+        // 関数は型を返せない
+        let e = check("fn f() -> Type { int } fn main() {}").unwrap_err();
+        assert!(e.contains("関数は型を返せない"), "{e}");
+        let e = check("fn main() { let f = fn() { int } }").unwrap_err();
+        assert!(e.contains("関数は型を返せない"), "{e}");
+        // 型には <> で引数を渡す
+        let e =
+            check("type Box<A: Type> = | MkBox(x: A)\nfn main() { let b: Box(int) = MkBox(1) }")
+                .unwrap_err();
+        assert!(e.contains("<> で引数を渡す"), "{e}");
     }
 
     #[test]
     fn inductive() {
         let src = include_str!("../examples/inductive.hb");
         check(src).unwrap();
-        let extra = "type TBox = | MkT(t: Type)\nfn id(A: Type, x: A) -> A { x }\nfn two() -> Eq(int, 1 + 1, 2) { Refl }\n";
+        let extra = "type TBox = | MkT(t: Type)\nfn id(A: Type, x: A) -> A { x }\nfn two() -> Eq<int, 1 + 1, 2> { Refl }\n";
         check(&format!("{src}{extra}")).unwrap();
         for (from, to, msg) in [
             ("Succ(k) => Succ(add(k, n))", "Succ(k) => n", "が必要だが"),
@@ -2256,29 +2281,29 @@ fn main() {
             ),
             ("let o = Some(3)", "let o = None", "推論できない"),
             (
-                "fn zero_add(n: Nat) -> Eq(Nat, add(Zero, n), n)",
-                "fn zero_add(n: Nat) -> Eq(Nat, add(n, Zero), n)",
+                "fn zero_add(n: Nat) -> Eq<Nat, add(Zero, n), n>",
+                "fn zero_add(n: Nat) -> Eq<Nat, add(n, Zero), n>",
                 "が必要だが",
             ),
         ] {
             let e = check(&src.replace(from, to)).unwrap_err();
             assert!(e.contains(msg), "{to} => {e}");
         }
-        // Type を含む data は Type(1) なので、Type を求める所には渡せない
+        // Type を含む data は Type<1> なので、Type を求める所には渡せない
         let e = check(&format!(
             "{src}{extra}fn f() -> int {{ let b = id(TBox, MkT(int))\n 0 }}"
         ))
         .unwrap_err();
-        assert!(e.contains("Type が必要だが Type(1)"), "{e}");
-        let e = check(&format!("{src}{extra}fn bad() -> Eq(int, 1, 2) {{ Refl }}")).unwrap_err();
+        assert!(e.contains("Type が必要だが Type<1>"), "{e}");
+        let e = check(&format!("{src}{extra}fn bad() -> Eq<int, 1, 2> {{ Refl }}")).unwrap_err();
         assert!(e.contains("が必要だが"), "{e}");
         // 停止性: 止まらない関数で偽の証明を作れない
         for (bad, msg) in [
             (
-                "fn bad() -> Eq(int, 1, 2) { bad() }",
+                "fn bad() -> Eq<int, 1, 2> { bad() }",
                 "停止することを示せない",
             ),
-            ("partial fn bad() -> Eq(int, 1, 2) { bad() }", "証明の型"),
+            ("partial fn bad() -> Eq<int, 1, 2> { bad() }", "証明の型"),
             ("fn bad(n: Nat) -> Nat { bad(n) }", "停止することを示せない"),
             (
                 "fn bad(n: int) -> int { bad(n - 1) }",
@@ -2339,12 +2364,12 @@ fn main() {
     #[test]
     fn refinement() {
         let src = r#"
-fn Pos() -> Type { int[x -> x > 0] }
-fn NumVec(T: Type) -> Type { Vec<T> }
+type Pos = int[x -> x > 0]
+type NumVec<T: Type> = Vec<T>
 fn get(v: Vec<int>, i: int[i -> i >= 0]) -> int {
     if i < len(v) { v[i] } else { 0 }
 }
-fn sum(v: NumVec<Pos()>) -> int {
+fn sum(v: NumVec<Pos>) -> int {
     let mut s = 0
     let mut i: int[x -> x >= 0] = 0
     while i < len(v) {
@@ -2353,16 +2378,16 @@ fn sum(v: NumVec<Pos()>) -> int {
     }
     s
 }
-fn add(x: Pos(), y: Pos()) -> int[r -> r > 1] { x + y }
+fn add(x: Pos, y: Pos) -> int[r -> r > 1] { x + y }
 fn main() {
-    let p: Pos() = 3
+    let p: Pos = 3
     let v: NumVec<int[x -> x > 0]> = [1, 2, p]
     print(sum(v) + get(v, 1) + v[2])
 }
 "#;
         check(src).unwrap();
         for (from, to, msg) in [
-            ("let p: Pos() = 3", "let p: Pos() = 0", "証明できない"),
+            ("let p: Pos = 3", "let p: Pos = 0", "証明できない"),
             (
                 "-> int[r -> r > 1] { x + y }",
                 "-> int[r -> r > 2] { x + y }",

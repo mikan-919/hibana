@@ -1,5 +1,6 @@
 use crate::lexer::{Span, Tok, Token, lex};
 use crate::meta::{Grammar, Node, Q};
+use std::collections::HashSet;
 use std::rc::Rc;
 
 #[derive(Debug, Clone)]
@@ -86,6 +87,8 @@ pub struct Parser<'s> {
     pub g: Rc<Grammar>,
     // マクロ展開の入れ子の深さ
     pub depth: usize,
+    // 宣言された型の名前。直後の < を型引数として読む
+    pub types: Rc<HashSet<String>>,
 }
 
 use crate::error::Error;
@@ -132,10 +135,12 @@ pub fn parse(src: &str) -> R<Program> {
         src,
         g: Rc::default(),
         depth: 0,
+        types: Rc::default(),
     };
     let mut g = Grammar::default();
     let mut fn_starts = Vec::new();
     let mut data_starts = Vec::new();
+    let mut types: HashSet<String> = ["Vec", "Type"].map(String::from).into();
     // 1周目は syntax と macro だけを読む（宣言より前の関数でもマクロを使えるようにする）
     loop {
         match p.peek() {
@@ -147,12 +152,16 @@ pub fn parse(src: &str) -> R<Program> {
                 p.skip_fn()?;
             }
             Tok::Punct("type") => {
+                if let Some(Tok::Ident(n)) = p.toks.get(p.pos + 1).map(|t| &t.tok) {
+                    types.insert(n.clone());
+                }
                 data_starts.push(p.pos);
                 p.skip_decl();
             }
             _ => return p.err("fn・type・syntax・macro のいずれかが必要"),
         }
     }
+    p.types = Rc::new(types);
     g.validate()?;
     p.g = Rc::new(g);
     p.check_macros()?;
@@ -301,11 +310,25 @@ impl Parser<'_> {
     }
 
     // type Name(引数) = | 構築子 | ... は新しい型、type Name(引数) = 式 は別名
+    // <名前: 型, ...>。"<" は読み終えた状態で呼ぶ。閉じの > を比較と読まないよう、加減乗除より弱い演算子は読まない
+    fn type_params(&mut self) -> R<Vec<(String, Expr)>> {
+        let mut params = Vec::new();
+        loop {
+            let n = self.ident()?;
+            self.expect(":")?;
+            params.push((n, self.binary(5)?));
+            if !self.eat(",") {
+                self.expect(">")?;
+                return Ok(params);
+            }
+        }
+    }
+
     fn type_decl(&mut self) -> R<TypeDecl> {
         self.expect("type")?;
         let name = self.ident()?;
-        let params = if self.eat("(") {
-            self.params()?
+        let params = if self.eat("<") {
+            self.type_params()?
         } else {
             vec![]
         };
@@ -515,12 +538,16 @@ impl Parser<'_> {
             Tok::Str(s) => Expr::Str(s),
             Tok::Punct("true") => Expr::Bool(true),
             Tok::Punct("false") => Expr::Bool(false),
-            // 大文字で始まる名前に空白なしで続く < は型引数。比較の < と区別する
+            // 型の名前に続く < は型引数。比較の < と区別する
             Tok::Ident(name)
-                if name.starts_with(|c: char| c.is_ascii_uppercase())
-                    && self.peek() == &Tok::Punct("<")
-                    && !self.toks[self.pos].gap_before =>
+                if self.types.contains(&name)
+                    && !self.at_newline()
+                    && self.peek() == &Tok::Punct("(") =>
             {
+                self.pos -= 1;
+                return self.err_at(format!("型 {name} には <> で引数を渡す"));
+            }
+            Tok::Ident(name) if self.types.contains(&name) && self.peek() == &Tok::Punct("<") => {
                 self.pos += 1;
                 let mut args = Vec::new();
                 loop {

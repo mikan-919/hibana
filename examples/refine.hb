@@ -1,5 +1,5 @@
 // 右辺が型の式なら別名。<> で型引数を渡せる
-type NumVec(T: Type) = Vec<T>
+type NumVec<T: Type> = Vec<T>
 
 // 細分化型: 条件を満たす値だけを許す型。条件はコンパイル時に証明する
 type Pos = int[x -> x > 0]

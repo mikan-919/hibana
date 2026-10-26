@@ -1,14 +1,14 @@
-type List(A: Type) = Nil | Cons(x: A, xs: List(A))
+type List<A: Type> = Nil | Cons(x: A, xs: List<A>)
 
 // 関数を受け取る関数。f の型は (A) -> B
-fn map(A: Type, B: Type, f: (A) -> B, l: List(A)) -> List(B) {
+fn map(A: Type, B: Type, f: (A) -> B, l: List<A>) -> List<B> {
     match l {
         Nil => Nil
         Cons(x, xs) => Cons(f(x), map(A, B, f, xs))
     }
 }
 
-fn sum(l: List(int)) -> int {
+fn sum(l: List<int>) -> int {
     match l {
         Nil => 0
         Cons(x, xs) => x + sum(xs)
@@ -21,8 +21,8 @@ fn twice(f: (int) -> int) -> (int) -> int { fn(x) { f(f(x)) } }
 fn add(a: int, b: int) -> int { a + b }
 
 // 依存関数型: 引数 b の値で戻り値の型が決まる関数を受け取る
-type T(b: bool) = if b { int } else { str }
-fn call_dep(f: (b: bool) -> T(b)) -> int { f(true) }
+type T<b: bool> = if b { int } else { str }
+fn call_dep(f: (b: bool) -> T<b>) -> int { f(true) }
 
 fn main() {
     let inc = fn(x: int) -> int { x + 1 }
