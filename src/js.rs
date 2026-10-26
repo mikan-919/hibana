@@ -32,6 +32,31 @@ function $show(v) {
   if (v.$c.endsWith("{}")) return v.$c.slice(0, -2) + " { " + $fields[v.$c].map((f, i) => f + ": " + $show(v.$f[i])).join(", ") + " }";
   return v.$f.length === 0 ? v.$c : v.$c + "(" + v.$f.map($show).join(", ") + ")";
 }
+// web ライブラリの serve と worker。app は JS の関数（$to で変換済み）で、{ method, path, body } を受け取る
+globalThis.hibana_serve = async (port, app) => {
+  const http = await import("node:http");
+  const server = http.createServer(async (req, res) => {
+    try {
+      let body = "";
+      for await (const c of req) body += c;
+      const r = await app({ method: req.method, path: new URL(req.url, "http://localhost").pathname, body });
+      res.writeHead(r.status, { "content-type": r.content_type });
+      res.end(r.body);
+    } catch (e) {
+      console.error("実行時エラー: " + e.message);
+      res.writeHead(500, { "content-type": "text/plain" });
+      res.end("Internal Server Error");
+    }
+  });
+  await new Promise((ok) => server.listen(port, ok));
+  console.log("http://localhost:" + server.address().port);
+};
+let $worker;
+globalThis.hibana_worker = (app) => { $worker = app; };
+const $fetch = async (req) => {
+  const r = await $worker({ method: req.method, path: new URL(req.url).pathname, body: await req.text() });
+  return new Response(r.body, { status: r.status, headers: { "content-type": r.content_type } });
+};
 // 処理中の handle。内側ほど後ろ。腕の中の操作は、その handle より外で処理する
 // 並べ替えずに作り直す（並行に動く処理と共有するため）。await の後は $k で、待つ前の並びに戻す
 let $h = [];
@@ -74,7 +99,7 @@ function $slice(s, i, j) {
 function $to(d, v) {
   if (d === "int") return Number(v);
   if (d.vec) return v.map((x) => $to(d.vec, x));
-  if (d.fn && d.async) return (...a) => v(...a.map((x, i) => $from(d.fn[i], x))).then((r) => $to(d.ret, r));
+  if (d.fn && d.async) return (...a) => Promise.resolve(v(...a.map((x, i) => $from(d.fn[i], x)))).then((r) => $to(d.ret, r));
   if (d.fn) return (...a) => $to(d.ret, v(...a.map((x, i) => $from(d.fn[i], x))));
   if (d.st) return Object.fromEntries(d.f.map(([n, fd], i) => [n, $to(fd, v.$f[i])]));
   return v;
@@ -138,7 +163,11 @@ pub fn emit(prog: &Program, info: &crate::typeck::Info) -> String {
     }
     // import は ES モジュールの先頭に置く
     let mut out = imports + &out;
-    out += "(async () => { try { await f_main(); } catch (e) { console.error(\"実行時エラー: \" + e.message); process.exitCode = 1; } })();\n";
+    // web を使うプログラムは Cloudflare Workers の ES モジュールとしても使える
+    if g.fns.contains_key("web.worker") {
+        out += "export default { fetch: $fetch };\n";
+    }
+    out += "(async () => { try { await f_main(); } catch (e) { console.error(\"実行時エラー: \" + e.message); if (globalThis.process) process.exitCode = 1; } })();\n";
     out
 }
 
@@ -561,7 +590,7 @@ impl Gen<'_> {
                 self.push(format!("return {v};"));
                 "undefined".into()
             }
-            Expr::Lam(params, _, body) => {
+            Expr::Lam(params, _, _, body) => {
                 // 作った時の可変な変数の値を写し取る（インタプリタと同じ意味にする）
                 let muts: Vec<String> = self
                     .scopes
@@ -585,7 +614,7 @@ impl Gen<'_> {
                             stmts: vec![],
                             tail: Some(Box::new(a.body.clone())),
                         };
-                        let f = self.expr(&Expr::Lam(params, None, body));
+                        let f = self.expr(&Expr::Lam(params, None, vec![], body));
                         format!("{}: {f}", lit(&a.ctor))
                     })
                     .collect();

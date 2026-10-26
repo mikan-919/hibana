@@ -166,7 +166,7 @@ impl Resolver<'_> {
                     self.with(&binds, |r| r.expr(&mut a.body));
                 }
             }
-            Expr::Lam(params, ret, body) => {
+            Expr::Lam(params, ret, effs, body) => {
                 self.locals.push(Vec::new());
                 for (n, t) in params.iter_mut() {
                     if let Some(t) = t {
@@ -177,6 +177,7 @@ impl Resolver<'_> {
                 if let Some(t) = ret {
                     self.expr(t);
                 }
+                self.exprs(effs);
                 self.block(body);
                 self.locals.pop();
             }

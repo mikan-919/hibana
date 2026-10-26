@@ -602,7 +602,7 @@ impl Norm<'_> {
                 }
                 self.app(f, vs).map_err(Halt::Err)?
             }
-            Expr::Lam(params, _, body) => V::Lam(Rc::new(Clo {
+            Expr::Lam(params, _, _, body) => V::Lam(Rc::new(Clo {
                 params: params.iter().map(|p| p.0.clone()).collect(),
                 body: body.clone(),
                 env: env
@@ -880,7 +880,7 @@ fn walk(e: &Expr, f: &mut dyn FnMut(&Expr)) {
             walk(s, f);
             arms.iter().for_each(|a| walk(&a.body, f));
         }
-        Expr::Lam(_, _, b) => block(b, f),
+        Expr::Lam(_, _, _, b) => block(b, f),
         Expr::For(_, a, b, body) => {
             walk(a, f);
             if let Some(b) = b {
@@ -1498,10 +1498,23 @@ impl Ck<'_> {
                 let t = self.call_fn(n, args, Some(expected))?;
                 self.subsume(e, &t, expected)
             }
-            Expr::Lam(params, ret, body) if matches!(base(expected), V::Pi(_)) => {
+            Expr::Lam(params, ret, effs, body) if matches!(base(expected), V::Pi(_)) => {
                 let V::Pi(p) = base(expected) else {
                     unreachable!()
                 };
+                // 書いた効果は、期待する関数型の効果に含まれていなければならない
+                for e in effs {
+                    let mut env = self.val_env();
+                    let v = self.effect_inst(e, &mut env)?;
+                    if !p.effs.contains(&v) {
+                        return Err(format!(
+                            "{} が必要だが、効果 {} を起こす無名関数",
+                            show(expected),
+                            show(&v)
+                        )
+                        .into());
+                    }
+                }
                 self.lam_check(params, ret, body, &p)
             }
             Expr::Call(n, args) if self.norm.ctors.contains_key(n.as_str()) => {
@@ -1676,12 +1689,12 @@ impl Ck<'_> {
                     Expr::Array(items)
                         if !items.is_empty()
                             && items.iter().all(
-                                |i| matches!(i.peel(), Expr::Lam(ps, _, _) if ps.is_empty()),
+                                |i| matches!(i.peel(), Expr::Lam(ps, _, _, _) if ps.is_empty()),
                             ) =>
                     {
                         let mut t: Option<V> = None;
                         for it in items {
-                            let Expr::Lam(_, ret, body) = it.peel() else {
+                            let Expr::Lam(_, ret, _, body) = it.peel() else {
                                 unreachable!()
                             };
                             let rt = match ret {
@@ -1768,7 +1781,7 @@ impl Ck<'_> {
                 let t = self.expr(f)?;
                 return self.apply_type(&t, args, e);
             }
-            Expr::Lam(params, ret, body) => return self.lam_infer(params, ret, body),
+            Expr::Lam(params, ret, effs, body) => return self.lam_infer(params, ret, effs, body),
             Expr::Pi(binders, ret, effs) => return self.pi_type(binders, ret, effs),
             Expr::Match(s, arms) => return self.check_match(s, arms, None),
             Expr::Call(name, args) if name == "len" || name == "Vec" => {
@@ -2308,12 +2321,13 @@ impl Ck<'_> {
         &mut self,
         params: &[(String, Option<Expr>)],
         ret: &Option<Box<Expr>>,
+        effs: &[Expr],
         body: &Block,
     ) -> R<V> {
         let level = self.norm.pi_depth;
         self.norm.pi_depth += 1;
         self.push();
-        let r = self.lam_infer_inner(level, params, ret, body);
+        let r = self.lam_infer_inner(level, params, ret, effs, body);
         self.pop();
         self.norm.pi_depth -= 1;
         r
@@ -2324,6 +2338,7 @@ impl Ck<'_> {
         level: usize,
         params: &[(String, Option<Expr>)],
         ret: &Option<Box<Expr>>,
+        effs: &[Expr],
         body: &Block,
     ) -> R<V> {
         let mut doms = Vec::new();
@@ -2345,8 +2360,21 @@ impl Ck<'_> {
             Some(t) => Some(self.eval_type(t)?),
             None => None,
         };
-        // ponytail: 期待する型の無い無名関数は効果を起こせない。効果も推論するなら本体で起きた効果を集める
-        let cod = self.fn_body(body, rt, vec![])?;
+        // 期待する型の無い無名関数は、書いた効果だけを起こせる
+        // ponytail: 効果は推論しない。推論するなら本体で起きた効果を集める
+        let mut es = Vec::new();
+        let mut avail = Vec::new();
+        for e in effs {
+            let mut env = self.val_env();
+            let v = self.effect_inst(e, &mut env)?;
+            let V::DataT(d) = &v else { unreachable!() };
+            if d.0 == "Async" {
+                self.awaits.insert(body as *const Block as usize);
+            }
+            avail.push((d.0.clone(), Some(v.clone())));
+            es.push(v);
+        }
+        let cod = self.fn_body(body, rt, avail)?;
         // 引数の変数を、関数型の引数の番号に置き換える
         let mut out = Vec::new();
         for (i, d) in doms.iter().enumerate() {
@@ -2368,10 +2396,21 @@ impl Ck<'_> {
                 &neu(Neu::Var(binder(level, j), params[j].0.clone())),
             )?;
         }
+        let mut effs = Vec::new();
+        for mut e in es {
+            for (j, id) in ids.iter().enumerate() {
+                e = self.norm.subst(
+                    &e,
+                    *id,
+                    &neu(Neu::Var(binder(level, j), params[j].0.clone())),
+                )?;
+            }
+            effs.push(e);
+        }
         Ok(V::Pi(Rc::new(PiV {
             doms: out,
             cod,
-            effs: vec![],
+            effs,
             level,
         })))
     }

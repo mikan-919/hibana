@@ -3,13 +3,16 @@
 //   let app = routes {
 //       GET "/user/{id}" { ok("user " + id) }
 //   }
-//   let res = app(Request { method: "GET", path: "/user/42" })
+//   let res = app(Request { method: "GET", path: "/user/42", body: "" })
+//
+// routes ! Async, Need<Db> { ... } のように、ルートの本体で起こす効果を書ける。
+// serve(port, app) は Node.js の HTTP サーバー、worker(app) は Cloudflare Workers の fetch として app を動かす（JS ターゲットだけ）
 //
 // JSX（<div class={c}>Hello {name}</div>）は HTML の文字列になる
 
 // ---- リクエストと応答 ----
 
-type Request = { method: str, path: str }
+type Request = { method: str, path: str, body: str }
 type Response = { status: int, content_type: str, body: str }
 
 fn ok(body: str) -> Response {
@@ -70,10 +73,11 @@ macro jsx (el:JsxElement) -> Expr {
 syntax Annotation = "@" ~ name:Ident "(" args:ExprList? ")" "->" alias:Ident
 syntax ExprList = items:(Expr % ",")
 syntax Route = annotations:Annotation* method:Ident path:String body:Block
+syntax RouteEffects = "!" items:(Expr % ",")
 
 // ルートの並びを (Request) -> Response の関数にする。どれにも合わなければ not_found()
 // パスの {名前} はその名前の変数になり、注釈 @f(引数) -> x は let x = f(引数) になる
-macro routes ("routes" "{" rs:Route* "}") -> Expr {
+macro routes ("routes" effs:RouteEffects? "{" rs:Route* "}") -> Expr {
     let mut acc = quote { not_found() }
     let mut i = len(rs)
     while i > 0 {
@@ -100,5 +104,27 @@ macro routes ("routes" "{" rs:Route* "}") -> Expr {
         }
         acc = quote { if $cond { $binds ${r.body} } else { $acc } }
     }
-    quote { fn(req: Request) -> Response { let parts = split(req.path, "/"); $acc } }
+    if is_null(effs) {
+        quote { fn(req: Request) -> Response { let parts = split(req.path, "/"); $acc } }
+    } else {
+        quote { fn(req: Request) -> Response ! $( $effs.items ),* { let parts = split(req.path, "/"); $acc } }
+    }
+}
+
+// ---- サーバー ----
+
+// 中身は JS の出力の先頭にある（globalThis.hibana_serve と hibana_worker）
+extern {
+    fn hibana_serve(port: int, app: (Request) -> Response ! Async) ! Async
+    fn hibana_worker(app: (Request) -> Response ! Async)
+}
+
+// Node.js の HTTP サーバーとして app を動かす。port が 0 なら空いている番号を使い、URL を表示する
+fn serve(port: int, app: (Request) -> Response ! Async) ! Async {
+    hibana_serve(port, app)
+}
+
+// Cloudflare Workers の fetch として app を動かす（出力の export default { fetch } から呼ぶ）
+fn worker(app: (Request) -> Response ! Async) {
+    hibana_worker(app)
 }

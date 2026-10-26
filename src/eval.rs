@@ -532,7 +532,7 @@ impl Interp<'_> {
                     self.call(name, vs)?
                 }
             }
-            Expr::Lam(params, _, body) => Value::Fn(Rc::new(Callable::Lam {
+            Expr::Lam(params, _, _, body) => Value::Fn(Rc::new(Callable::Lam {
                 params: params.iter().map(|p| p.0.clone()).collect(),
                 body: body.clone(),
                 env: env

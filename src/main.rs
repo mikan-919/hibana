@@ -29,7 +29,12 @@ fn to_js(src: &str) -> error::R<String> {
 fn to_c(src: &str) -> error::R<String> {
     let prog = parser::parse(&parser::with_uses(src)?)?;
     typeck::check(&prog)?;
-    if let Some(f) = prog.fns.iter().find(|f| f.js.is_some()) {
+    // JavaScript のモジュールの関数は使えない（大域の関数 extern { } は、呼ぶと実行時エラー）
+    if let Some(f) = prog
+        .fns
+        .iter()
+        .find(|f| f.js.as_ref().is_some_and(|m| !m.is_empty()))
+    {
         return Err(format!(
             "extern の関数 {} は JS ターゲット（hibana js）でだけ使える",
             f.name
@@ -129,8 +134,12 @@ mod tests {
         names.sort();
         for p in names {
             let src = std::fs::read_to_string(&p).unwrap();
-            // extern を使う例はインタプリタでは動かないので、js_extern で確かめる
-            if src.contains(".ts\"") || src.contains(".js\"") || src.contains("\nextern") {
+            // extern を使う例はインタプリタでは動かないので、js_extern で確かめる。サーバーは web_server で確かめる
+            if src.contains(".ts\"")
+                || src.contains(".js\"")
+                || src.contains("\nextern")
+                || src.contains("web.serve(")
+            {
                 continue;
             }
             let want = out(&src).unwrap();
@@ -164,8 +173,12 @@ mod tests {
         names.sort();
         for p in names {
             let src = std::fs::read_to_string(&p).unwrap();
-            // extern を使う例はインタプリタでは動かないので、js_extern で確かめる
-            if src.contains(".ts\"") || src.contains(".js\"") || src.contains("\nextern") {
+            // extern を使う例はインタプリタでは動かないので、js_extern で確かめる。サーバーは web_server で確かめる
+            if src.contains(".ts\"")
+                || src.contains(".js\"")
+                || src.contains("\nextern")
+                || src.contains("web.serve(")
+            {
                 continue;
             }
             let want = out(&src).unwrap();
@@ -246,6 +259,70 @@ mod tests {
         assert_eq!(out(src).unwrap(), "1\n81\n11\n-3\na\n10\nb\n20\n");
     }
 
+    // examples/server.hb を Node.js の HTTP サーバーと Cloudflare Workers の fetch として動かす
+    #[test]
+    fn web_server() {
+        use std::io::{BufRead, Read};
+        let src = include_str!("../examples/server.hb");
+        let tmp = std::env::temp_dir().join(format!("hibana-server-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        // port 0 で空いている番号を使い、表示された URL に要求を送る
+        let js = tmp.join("server.mjs");
+        std::fs::write(
+            &js,
+            super::to_js(&src.replace("web.serve(8080, app)", "web.serve(0, app)")).unwrap(),
+        )
+        .unwrap();
+        let mut child = std::process::Command::new("node")
+            .arg(&js)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut lines = std::io::BufReader::new(child.stdout.take().unwrap()).lines();
+        assert_eq!(lines.next().unwrap().unwrap(), "found alice");
+        let url = lines.next().unwrap().unwrap();
+        let addr = url.trim_start_matches("http://");
+        let get = |path: &str| {
+            let mut s = std::net::TcpStream::connect(addr).unwrap();
+            std::io::Write::write_all(
+                &mut s,
+                format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").as_bytes(),
+            )
+            .unwrap();
+            let mut r = String::new();
+            s.read_to_string(&mut r).unwrap();
+            r
+        };
+        // 確かめる前にサーバーを止める（失敗しても node が残らないように）
+        let rs = [get("/users/bob"), get("/users/zed"), get("/")];
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(
+            rs[0].starts_with("HTTP/1.1 200") && rs[0].contains("found bob"),
+            "{}",
+            rs[0]
+        );
+        assert!(rs[1].starts_with("HTTP/1.1 404"), "{}", rs[1]);
+        assert!(rs[2].contains("content-type: text/html"), "{}", rs[2]);
+        // Workers では export default { fetch } を呼ぶ
+        let js = tmp.join("worker.mjs");
+        std::fs::write(
+            &js,
+            super::to_js(&src.replace("web.serve(8080, app)", "web.worker(app)")).unwrap(),
+        )
+        .unwrap();
+        let r = std::process::Command::new("node")
+            .args(["--input-type=module", "-e", "const m = await import(process.argv[1]); const r = await m.default.fetch(new Request('https://example.com/users/alice')); console.log(r.status, await r.text());"])
+            .arg(&js)
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(r.stdout).unwrap(),
+            "found alice\n200 found alice\n"
+        );
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
     #[test]
     fn web_macros() {
         let src = include_str!("../examples/web.hb");
@@ -268,7 +345,7 @@ mod tests {
         let e = out("use web\nfn main() { print(ok(\"a\").body) }").unwrap_err();
         assert!(e.contains("未定義の関数 ok"), "{e}");
         // use web.* はすべて、use web.{..} は挙げた名前だけ修飾なしで使える
-        let all = "fn main() { let r = Request { method: \"GET\", path: \"/\" }\n print(ok(r.path).status) }";
+        let all = "fn main() { let r = Request { method: \"GET\", path: \"/\", body: \"\" }\n print(ok(r.path).status) }";
         assert_eq!(out(&format!("use web.*\n{all}")).unwrap(), "200\n");
         assert_eq!(
             out(&format!("use web.{{ok, Request}}\n{all}")).unwrap(),

@@ -30,8 +30,13 @@ pub enum Expr {
     // 細分化型 型[変数 -> 条件]
     Refine(Box<Expr>, String, Box<Expr>),
     Match(Box<Expr>, Vec<Arm>),
-    // 無名関数 fn(引数) -> 戻り値の型 { 本体 }。引数の型は期待する型から分かれば省ける
-    Lam(Vec<(String, Option<Expr>)>, Option<Box<Expr>>, Block),
+    // 無名関数 fn(引数) -> 戻り値の型 ! 効果 { 本体 }。引数の型は期待する型から分かれば省ける
+    Lam(
+        Vec<(String, Option<Expr>)>,
+        Option<Box<Expr>>,
+        Vec<Expr>,
+        Block,
+    ),
     // 関数型 (x: A, ...) -> B ! 効果。名前の無い引数は "_"
     Pi(Vec<(String, Expr)>, Box<Expr>, Vec<Expr>),
     // 式の値の関数を呼ぶ
@@ -1294,8 +1299,9 @@ impl Parser<'_> {
                 } else {
                     None
                 };
+                let effs = self.effects()?;
                 self.expect("{")?;
-                Expr::Lam(params, ret, self.block()?)
+                Expr::Lam(params, ret, effs, self.block()?)
             }
             Tok::Punct("{") => Expr::Block(self.block()?),
             Tok::Punct("if") => self.if_rest()?,

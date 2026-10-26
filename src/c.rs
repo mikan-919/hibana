@@ -327,6 +327,20 @@ impl Gen<'_> {
 
     fn func(&mut self, f: &Fn) -> String {
         let name = ident("f_", &f.name);
+        if f.js.is_some() {
+            let ps: Vec<String> = f.params.iter().map(|_| "V".to_string()).collect();
+            self.protos
+                .push(format!("static V {name}({});\n", ps.join(", ")));
+            let ps: Vec<String> = (0..f.params.len()).map(|i| format!("V a{i}")).collect();
+            return format!(
+                "static V {name}({}) {{ die({}); return U; }}\n",
+                ps.join(", "),
+                lit(&format!(
+                    "extern の関数 {} は JS ターゲット（hibana js）でだけ使える",
+                    f.name
+                ))
+            );
+        }
         let ps: Vec<String> = f.params.iter().map(|_| "V".to_string()).collect();
         self.protos.push(format!(
             "static V {name}({});\nstatic V {}(V* env, V* a);\n",
@@ -572,7 +586,7 @@ impl Gen<'_> {
                 self.push(format!("return {v};"));
                 "U".into()
             }
-            Expr::Lam(params, _, body) => self.lambda(params, body),
+            Expr::Lam(params, _, _, body) => self.lambda(params, body),
             Expr::Handle(body, arms) => {
                 // 腕は無名関数にする。resume しなかった腕の値は longjmp で受け取る
                 let fs: Vec<String> = arms

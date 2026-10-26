@@ -325,10 +325,12 @@ macro pow ("pow" "(" x:Expr "," n:Int ")") {
 
 | 名前 | 内容 |
 |---|---|
-| `Request` | `{ method: str, path: str }` |
+| `Request` | `{ method: str, path: str, body: str }` |
 | `Response` | `{ status: int, content_type: str, body: str }` |
 | `ok(body)` `html(body)` `not_found()` | 応答を作る（200 の text/plain・200 の text/html・404） |
-| `routes { メソッド "パス" { 本体 } ... }` | `(Request) -> Response` の関数を作る。パスの `{名前}` はその名前の変数になる。どれにも合わなければ `not_found()` |
+| `routes { メソッド "パス" { 本体 } ... }` | `(Request) -> Response` の関数を作る。パスの `{名前}` はその名前の変数になる。どれにも合わなければ `not_found()`。`routes ! Async, Need<Db> { ... }` と書くと、ルートの本体でその効果を起こせる（`(Request) -> Response ! Async, Need<Db>` の関数になる） |
+| `serve(port, app)` | Node.js の HTTP サーバーとして `app: (Request) -> Response ! Async` を動かす（`Async`）。`port` が 0 なら空いている番号を使う。起動すると URL を表示する |
+| `worker(app)` | Cloudflare Workers の `fetch` として `app` を動かす。`use web` したプログラムの JS の出力は `export default { fetch }` を持つ ES モジュールになる |
 | `@f(引数) -> x` | `routes` のルートの前に書く注釈。本体の前で `let x = f(引数)` する |
 | JSX | `<div class={c}>Hello {name}</div>` を HTML の文字列にする。閉じタグが合わなければコンパイルエラー |
 
@@ -340,10 +342,22 @@ fn main() {
         GET "/" { web.html(<h1>Welcome</h1>) }
         GET "/user/{id}" { web.ok("user " + id) }
     }
-    let res = app(web.Request { method: "GET", path: "/user/42" })
+    let res = app(web.Request { method: "GET", path: "/user/42", body: "" })
     print(res.body)    // user 42
 }
 ```
+
+サーバーの例は `examples/server.hb` です。データの置き場を `Need<Db>` の効果で受け取り、`main` の `handle` で本物の置き場を渡しています（テストでは置き場を差し替えられる）。
+
+```
+let api = routes ! Need<Db> {
+    GET "/users/{name}" { if exists(name) { web.ok("found " + name) } else { web.not_found() } }
+}
+let app = fn(req: web.Request) -> web.Response { handle api(req) { need() => resume(db) } }
+web.serve(8080, app)    // hibana js examples/server.hb > server.mjs && node server.mjs
+```
+
+`serve` と `worker` は JS ターゲットでだけ動きます（インタプリタと C では、呼ぶと実行時エラー）。
 
 `routes` の展開は、ルートの本体から見えない変数（`req` `parts`）を衛生性で隠しています。パスの区切りの位置 `parts[k]` は、条件の `len(parts) == N &&` から範囲を証明しています。
 
