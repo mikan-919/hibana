@@ -1,5 +1,5 @@
 // web ライブラリ（lib/web.hb）を使う例
-import web
+use web
 
 fn durable_objects(name: str) -> str { "stub(" + name + ")" }
 

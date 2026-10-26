@@ -1,4 +1,4 @@
-// Web アプリのためのライブラリ。import web で使う
+// Web アプリのためのライブラリ。use web で使う
 //
 //   let app = routes {
 //       GET "/user/{id}" { ok("user " + id) }

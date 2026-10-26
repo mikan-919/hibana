@@ -140,12 +140,12 @@ pub struct Program {
     pub datas: Vec<Data>,
 }
 
-// 組み込みのライブラリ。実行ファイルに埋め込むので、どこからでも import できる
+// 組み込みのライブラリ。実行ファイルに埋め込むので、どこからでも use できる
 const LIBS: &[(&str, &str)] = &[("web", include_str!("../lib/web.hb"))];
 
-// import web（組み込みのライブラリ）と import "path.hb"（ファイル）を、ソースの後ろに足す。同じものは1回だけ読む
-// ponytail: 名前空間が無いので、読み込んだ名前はすべて同じ場所に並ぶ。衝突するなら import web as w のような修飾を入れる
-pub fn with_imports(src: &str) -> R<String> {
+// use web（組み込みのライブラリ）と use "path.hb"（ファイル）を、ソースの後ろに足す。同じものは1回だけ読む
+// ponytail: 名前空間が無いので、読み込んだ名前はすべて同じ場所に並ぶ。衝突するなら use web as w のような修飾を入れる
+pub fn with_uses(src: &str) -> R<String> {
     let mut out = src.to_string();
     let mut done: Vec<String> = Vec::new();
     let mut todo = vec![src.to_string()];
@@ -153,10 +153,10 @@ pub fn with_imports(src: &str) -> R<String> {
         let toks = lex(&s)?;
         for w in toks.windows(2) {
             let name = match (&w[0].tok, &w[1].tok) {
-                (Tok::Punct("import"), Tok::Ident(n) | Tok::Str(n)) => n.clone(),
-                (Tok::Punct("import"), _) => {
+                (Tok::Punct("use"), Tok::Ident(n) | Tok::Str(n)) => n.clone(),
+                (Tok::Punct("use"), _) => {
                     return Err(
-                        Error::from("import の後にはライブラリ名かファイル名が必要").at(w[1].span)
+                        Error::from("use の後にはライブラリ名かファイル名が必要").at(w[1].span)
                     );
                 }
                 _ => continue,
@@ -223,8 +223,8 @@ pub fn parse(src: &str) -> R<Program> {
     loop {
         match p.peek() {
             Tok::Eof => break,
-            // 読み込みは with_imports で済んでいる
-            Tok::Punct("import") => p.pos += 2,
+            // 読み込みは with_uses で済んでいる（use 名前 を読み飛ばす）
+            Tok::Punct("use") => p.pos += 2,
             Tok::Punct("syntax") => p.syntax_decl(&mut g)?,
             Tok::Punct("macro") => p.macro_decl(&mut g)?,
             Tok::Punct("fn" | "partial") => {
@@ -259,7 +259,7 @@ pub fn parse(src: &str) -> R<Program> {
                     }
                 }
             }
-            _ => return p.err("fn・type・syntax・macro・import のいずれかが必要"),
+            _ => return p.err("fn・type・syntax・macro・use のいずれかが必要"),
         }
     }
     p.types = Rc::new(types.clone());
@@ -543,8 +543,7 @@ impl Parser<'_> {
                 Tok::Punct("(" | "[" | "{") => depth += 1,
                 Tok::Punct(")" | "]" | "}") => depth -= 1,
                 Tok::Punct("|") if depth == 0 => return true,
-                Tok::Punct("fn" | "partial" | "type" | "syntax" | "macro" | "import")
-                | Tok::Eof
+                Tok::Punct("fn" | "partial" | "type" | "syntax" | "macro" | "use") | Tok::Eof
                     if depth == 0 =>
                 {
                     return false;
@@ -564,7 +563,7 @@ impl Parser<'_> {
                 Tok::Eof => return,
                 Tok::Punct("(" | "[" | "{") => depth += 1,
                 Tok::Punct(")" | "]" | "}") => depth -= 1,
-                Tok::Punct("fn" | "partial" | "type" | "syntax" | "macro" | "import")
+                Tok::Punct("fn" | "partial" | "type" | "syntax" | "macro" | "use")
                     if depth == 0 =>
                 {
                     return;

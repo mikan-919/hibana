@@ -11,21 +11,21 @@ mod typeck;
 use std::io::Write;
 
 fn run(src: &str, out: &mut dyn Write) -> error::R<eval::Value> {
-    let prog = parser::parse(&parser::with_imports(src)?)?;
+    let prog = parser::parse(&parser::with_uses(src)?)?;
     typeck::check(&prog)?;
     Ok(eval::run(&prog, out)?)
 }
 
 // JavaScript に変換する
 fn to_js(src: &str) -> error::R<String> {
-    let prog = parser::parse(&parser::with_imports(src)?)?;
+    let prog = parser::parse(&parser::with_uses(src)?)?;
     typeck::check(&prog)?;
     Ok(js::emit(&prog))
 }
 
 // C に変換する
 fn to_c(src: &str) -> error::R<String> {
-    let prog = parser::parse(&parser::with_imports(src)?)?;
+    let prog = parser::parse(&parser::with_uses(src)?)?;
     typeck::check(&prog)?;
     Ok(c::emit(&prog))
 }
@@ -84,7 +84,7 @@ fn main() {
         let report = Report {
             msg: e.msg,
             // 読み込んだライブラリの中のエラーも指せるよう、ライブラリを足したソースを渡す
-            src: miette::NamedSource::new(&path, parser::with_imports(&src).unwrap_or(src.clone())),
+            src: miette::NamedSource::new(&path, parser::with_uses(&src).unwrap_or(src.clone())),
             span: e.span.map(Into::into),
         };
         eprintln!("{:?}", miette::Report::new(report));
@@ -176,7 +176,7 @@ mod tests {
         // ルートの本体からは、マクロが導入した parts は見えない（衛生性）
         let e = out(&src.replace("ok(\"user \" + id)", "ok(\"user \" + parts[0])")).unwrap_err();
         assert!(e.contains("未定義の変数 parts"), "{e}");
-        let e = out("import nothing\nfn main() {}").unwrap_err();
+        let e = out("use nothing\nfn main() {}").unwrap_err();
         assert!(e.contains("ライブラリ nothing が無い"), "{e}");
     }
 

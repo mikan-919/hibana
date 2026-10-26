@@ -9,7 +9,7 @@ hibana は、依存型（型の中に値を書ける型）と、構文を拡張�
 - 識別子は英字か `_` で始まり、英数字と `_` が続きます。
 - 整数（`42`、`0xFF`）と文字列（`"a\n"`）を書けます。浮動小数（`3.14`）と文字（`'a'`）は字句解析だけ対応していて、式には書けません（マクロのパターンの `Float` `Char` で使えます）。文字列のエスケープは `\n \t \r \0 \\ \" \'` です。
 - コメントは `// 行末まで` と `/* ... */` です。
-- キーワード: `fn partial let mut if else while for in return match type syntax macro quote import true false`
+- キーワード: `fn partial let mut if else while for in return match type syntax macro quote use true false`
 - 各トークンは、直前に空白があるか（`gap_before`）と改行があるか（`nl_before`）を持ちます。前者はマクロのパターンの `~`（空白なしで続く）に、後者は文の区切りに使います。
 
 ## 2. 文の区切り
@@ -18,7 +18,7 @@ hibana は、依存型（型の中に値を書ける型）と、構文を拡張�
 
 ## 3. 宣言
 
-ファイルの最上位には `import`・`fn`・`partial fn`・`type`・`syntax`・`macro` を並べます。宣言の順序は自由で、後で宣言した型や関数・マクロも使えます。`main` という引数の無い関数が入口です。
+ファイルの最上位には `use`・`fn`・`partial fn`・`type`・`syntax`・`macro` を並べます。宣言の順序は自由で、後で宣言した型や関数・マクロも使えます。`main` という引数の無い関数が入口です。
 
 ### 3.1 関数
 
@@ -64,8 +64,8 @@ type T<b: bool> = if b { int } else { str }
 ### 3.3 読み込み
 
 ```
-import web          // 組み込みのライブラリ（lib/ 以下。実行ファイルに埋め込まれている）
-import "util.hb"    // ファイル（今のディレクトリからの経路）
+use web          // 組み込みのライブラリ（lib/ 以下。実行ファイルに埋め込まれている）
+use "util.hb"    // ファイル（今のディレクトリからの経路）
 ```
 
 読み込んだファイルの宣言は、読み込んだ側の宣言と同じ場所に並びます（名前空間はまだ無い）。同じものは1回だけ読みます。
@@ -217,7 +217,7 @@ macro pow ("pow" "(" x:Expr "," n:Int ")") {
 
 ### web
 
-`import web` で、Web アプリのための型・関数・マクロを使えます（`lib/web.hb`、例は `examples/web.hb`）。
+`use web` で、Web アプリのための型・関数・マクロを使えます（`lib/web.hb`、例は `examples/web.hb`）。
 
 | 名前 | 内容 |
 |---|---|
@@ -229,7 +229,7 @@ macro pow ("pow" "(" x:Expr "," n:Int ")") {
 | JSX | `<div class={c}>Hello {name}</div>` を HTML の文字列にする。閉じタグが合わなければコンパイルエラー |
 
 ```
-import web
+use web
 
 fn main() {
     let app = routes {
@@ -272,7 +272,7 @@ fn main() {
 
 ## 12. 既知の制約
 
-- `import` に名前空間が無いので、ライブラリと同じ名前を定義すると衝突します。
+- `use` に名前空間が無いので、ライブラリと同じ名前を定義すると衝突します。
 - ネイティブのバックエンドはメモリを解放しません。長く動くプログラムには GC（Boehm GC など）を入れる必要があります。
 - JavaScript とネイティブの実行時エラーには、ソース上の位置が出ません。
 - 型エラー以外の実行時エラー（0 除算・オーバーフロー・`slice` の範囲外）には位置が出ません。
