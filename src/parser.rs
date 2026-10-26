@@ -184,22 +184,93 @@ pub fn qual(m: &str, n: &str) -> String {
     }
 }
 
-// use の対象のモジュール名と本文。組み込みのライブラリか、ファイル（モジュール名は拡張子を除いた名前）
-fn load(name: &str, span: crate::lexer::Span) -> R<(String, String)> {
-    if let Some((_, t)) = LIBS.iter().find(|l| l.0 == name) {
-        return Ok((name.to_string(), t.to_string()));
+// use に書いた名前から、モジュール名を作る。ファイルは拡張子を除いた名前（./js/util.ts は util）、
+// node:path は path、@scope/pkg は pkg。名前に使えない文字は _ にする
+pub fn module_name(spec: &str) -> String {
+    let last = spec.rsplit(['/', ':']).next().unwrap_or(spec);
+    let stem = last.split('.').next().unwrap_or(last);
+    stem.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+// use に書いたファイルの経路の起点（use を書いた .hb のディレクトリ）
+thread_local! {
+    static BASE: std::cell::RefCell<std::path::PathBuf> = std::cell::RefCell::new(".".into());
+}
+
+pub fn set_base_dir(p: &std::path::Path) {
+    BASE.with(|b| *b.borrow_mut() = p.to_path_buf());
+}
+
+fn base_dir() -> std::path::PathBuf {
+    BASE.with(|b| b.borrow().clone())
+}
+
+// JavaScript のパッケージ（npm・node:）の型宣言 .d.ts を node_modules から探す
+fn find_dts(spec: &str) -> Option<String> {
+    let nm = base_dir().join("node_modules");
+    let mut cands = Vec::new();
+    if let Some(m) = spec.strip_prefix("node:") {
+        cands.push(nm.join("@types/node").join(format!("{m}.d.ts")));
+    } else {
+        let pkg = nm.join(spec);
+        if let Ok(j) = std::fs::read_to_string(pkg.join("package.json")) {
+            // package.json の "types" か "typings"
+            for key in ["\"types\"", "\"typings\""] {
+                if let Some(rest) = j.split(key).nth(1)
+                    && let Some(v) = rest.split('"').nth(1)
+                {
+                    cands.push(pkg.join(v));
+                }
+            }
+        }
+        cands.push(pkg.join("index.d.ts"));
+        cands.push(nm.join("@types").join(spec).join("index.d.ts"));
     }
+    cands
+        .into_iter()
+        .find_map(|p| std::fs::read_to_string(p).ok())
+}
+
+// use の対象のモジュール名と本文。組み込みのライブラリ、.hb のファイル、JavaScript / TypeScript のモジュール
+fn load(name: &str, is_str: bool, span: crate::lexer::Span) -> R<(String, String)> {
+    // use web のように名前で書いたら組み込みのライブラリ、文字列で書いたらファイルかパッケージ
+    if !is_str {
+        return match LIBS.iter().find(|l| l.0 == name) {
+            Some((_, t)) => Ok((name.to_string(), t.to_string())),
+            None => Err(Error::from(format!("ライブラリ {name} が無い")).at(span)),
+        };
+    }
+    let read = |p: &str| {
+        std::fs::read_to_string(base_dir().join(p))
+            .map_err(|e| Error::from(format!("{p}: {e}")).at(span))
+    };
     if name.ends_with(".hb") {
-        let text = std::fs::read_to_string(name)
-            .map_err(|e| Error::from(format!("{name}: {e}")).at(span))?;
-        let stem = std::path::Path::new(name)
-            .file_stem()
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
-        return Ok((stem, text));
+        return Ok((module_name(name), read(name)?));
     }
-    Err(Error::from(format!("ライブラリ {name} が無い")).at(span))
+    // JavaScript / TypeScript は型宣言から extern の宣言を作る（JS ターゲットでだけ使える）
+    let dts = if name.ends_with(".ts") {
+        read(name)?
+    } else if let Some(base) = name.strip_suffix(".js").or(name.strip_suffix(".mjs")) {
+        read(&format!("{base}.d.ts"))
+            .map_err(|_| Error::from(format!("{name} の型宣言 {base}.d.ts が無い")).at(span))?
+    } else if name.starts_with("node:") || !name.contains('/') || name.starts_with('@') {
+        find_dts(name).ok_or_else(|| {
+            Error::from(format!("{name} の型宣言（.d.ts）が node_modules に無い（node: の組み込みには @types/node が要る）"))
+                .at(span)
+        })?
+    } else {
+        return Err(Error::from(format!("ライブラリ {name} が無い")).at(span));
+    };
+    let text = crate::ts::module_text(&dts, name).map_err(|e| e.at(span))?;
+    Ok((module_name(name), text))
 }
 
 // use したモジュールの本文を、`module 名前` を前に付けてソースの後ろに足す。同じものは1回だけ読む
@@ -210,8 +281,10 @@ pub fn with_uses(src: &str) -> R<String> {
     while let Some(s) = todo.pop() {
         let toks = lex(&s)?;
         for w in toks.windows(2) {
-            let name = match (&w[0].tok, &w[1].tok) {
-                (Tok::Punct("use"), Tok::Ident(n) | Tok::Str(n)) => n.clone(),
+            let (name, is_str) = match (&w[0].tok, &w[1].tok) {
+                (Tok::Punct("use"), Tok::Ident(n) | Tok::Str(n)) => {
+                    (n.clone(), matches!(w[1].tok, Tok::Str(_)))
+                }
                 (Tok::Punct("use"), _) => {
                     return Err(
                         Error::from("use の後にはライブラリ名かファイル名が必要").at(w[1].span)
@@ -222,7 +295,7 @@ pub fn with_uses(src: &str) -> R<String> {
             if done.contains(&name) {
                 continue;
             }
-            let (module, text) = load(&name, w[1].span)?;
+            let (module, text) = load(&name, is_str, w[1].span)?;
             done.push(name);
             out += &format!("\nmodule {module}\n");
             out += &text;
@@ -551,11 +624,7 @@ impl Parser<'_> {
         self.expect("use")?;
         let module = match self.next() {
             Tok::Ident(n) => n,
-            Tok::Str(f) => std::path::Path::new(&f)
-                .file_stem()
-                .unwrap()
-                .to_string_lossy()
-                .to_string(),
+            Tok::Str(f) => module_name(&f),
             _ => return self.err("use の後にはライブラリ名かファイル名が必要"),
         };
         let names = if self.toks[self.pos].tok == Tok::Punct(".") && !self.at_newline() {

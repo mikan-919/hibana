@@ -7,6 +7,7 @@ mod meta;
 mod parser;
 mod resolve;
 mod smt;
+mod ts;
 mod typeck;
 
 use std::io::Write;
@@ -82,6 +83,12 @@ fn main() {
         eprintln!("{path}: {e}");
         std::process::exit(2);
     });
+    // use に書いたファイルは、このファイルのディレクトリから探す
+    parser::set_base_dir(
+        std::path::Path::new(&path)
+            .parent()
+            .unwrap_or(std::path::Path::new(".")),
+    );
     let r = match cmd {
         "js" => to_js(&src).map(|s| print!("{s}")),
         "c" => to_c(&src).map(|s| print!("{s}")),
@@ -123,7 +130,7 @@ mod tests {
         for p in names {
             let src = std::fs::read_to_string(&p).unwrap();
             // extern を使う例はインタプリタでは動かないので、js_extern で確かめる
-            if src.contains("\nextern") {
+            if src.contains(".ts\"") || src.contains(".js\"") || src.contains("\nextern") {
                 continue;
             }
             let want = out(&src).unwrap();
@@ -158,7 +165,7 @@ mod tests {
         for p in names {
             let src = std::fs::read_to_string(&p).unwrap();
             // extern を使う例はインタプリタでは動かないので、js_extern で確かめる
-            if src.contains("\nextern") {
+            if src.contains(".ts\"") || src.contains(".js\"") || src.contains("\nextern") {
                 continue;
             }
             let want = out(&src).unwrap();
@@ -175,10 +182,11 @@ mod tests {
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 
-    // extern で JavaScript と TypeScript のモジュールを使う例を、Node.js で実行する
+    // use で JavaScript と TypeScript のモジュールを使う例を、Node.js で実行する
     #[test]
     fn js_extern() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+        crate::parser::set_base_dir(&dir);
         let src = std::fs::read_to_string(dir.join("js_interop.hb")).unwrap();
         // 出力した JS からの相対経路（./js/util.ts）で読み込めるよう、examples の中に書き出す
         let js = dir.join(format!("js_interop_{}.mjs", std::process::id()));
@@ -190,12 +198,46 @@ mod tests {
         std::fs::remove_file(&js).unwrap();
         assert_eq!(
             String::from_utf8(r.stdout).unwrap(),
-            "hibana.hb\n50\nHIBANA!\n18\n3\n43\n"
+            "50\nHIBANA!\n18\n3\n3\nHello, world\n6\n"
         );
         let e = out(&src).unwrap_err();
         assert!(e.contains("JS ターゲット"), "{e}");
         let e = super::to_c(&src).unwrap_err();
         assert!(e.contains("JS ターゲット"), "{e}");
+        // 型宣言が無いモジュールは型が分からないので使えない
+        let e = out("use \"./nope.js\"\nfn main() {}").unwrap_err();
+        assert!(e.contains("型宣言 ./nope.d.ts が無い"), "{e}");
+        let e = out("use \"node:path\"\nfn main() {}").unwrap_err();
+        assert!(e.contains("@types/node"), "{e}");
+        // npm のパッケージは node_modules の package.json の types から型宣言を読む
+        let tmp = std::env::temp_dir().join(format!("hibana-npm-{}", std::process::id()));
+        let pkg = tmp.join("node_modules/fake-pkg");
+        std::fs::create_dir_all(pkg.join("dist")).unwrap();
+        std::fs::write(pkg.join("package.json"), r#"{ "name": "fake-pkg", "type": "module", "main": "dist/index.js", "types": "dist/index.d.ts" }"#).unwrap();
+        std::fs::write(
+            pkg.join("dist/index.js"),
+            "export function twice(n) { return n * 2; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            pkg.join("dist/index.d.ts"),
+            "export declare function twice(n: number): number;\n",
+        )
+        .unwrap();
+        crate::parser::set_base_dir(&tmp);
+        let js = super::to_js("use \"fake-pkg\"\nfn main() { print(fake_pkg.twice(21)) }").unwrap();
+        std::fs::write(tmp.join("main.mjs"), js).unwrap();
+        let r = std::process::Command::new("node")
+            .arg(tmp.join("main.mjs"))
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(&tmp).unwrap();
+        assert_eq!(
+            String::from_utf8(r.stdout).unwrap(),
+            "42\n",
+            "{}",
+            String::from_utf8_lossy(&r.stderr)
+        );
     }
 
     #[test]

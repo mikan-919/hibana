@@ -76,36 +76,39 @@ use "util.hb"        // ファイル（今のディレクトリからの経路�
 - `syntax` と `macro` は、`use` したモジュールのものもすべて有効です（パターンのリテラルで呼び出すため）。マクロの展開結果がライブラリの関数や型を使っていても、衛生性によって定義した側のモジュールの名前（`web.not_found` など）を指すので、利用者が修飾なしで取り込んでいなくても動きます。
 - 同じモジュールは1回だけ読みます。
 
-### 3.4 JavaScript / TypeScript のモジュール（extern）
+### 3.4 JavaScript / TypeScript のモジュール
 
 JS ターゲット（`hibana js`）でだけ使えます。インタプリタで呼ぶと実行時エラー、`hibana c` / `hibana build` ではエラーになります。
 
 ```
-extern "node:path" {            // npm のパッケージ・node: の組み込み・.js / .ts のファイル
-    fn basename(p: str) -> str
-}
-extern "./js/util.ts" {
-    fn applyTwice(f: (int) -> int, x: int) -> int
-}
-extern {                        // モジュールを省くとグローバル（globalThis）の関数
-    fn parseInt(s: str) -> int
+use "./js/util.ts"        // TypeScript のファイル。export した関数・interface・type の型を読む
+use "./js/greet.js"       // JavaScript のファイル。隣の greet.d.ts の型を読む
+use "some-package"        // npm のパッケージ。node_modules の package.json の types、index.d.ts、@types/... を探す
+use "node:path"           // Node.js の組み込み。node_modules/@types/node が要る
+
+fn main() {
+    print(util.add(2, 3))
+    let p = util.point(1, 2)       // interface Point は構造体 util.Point になる
+    print(p.x + p.y)
 }
 ```
 
-- 関数の名前は、モジュールが書き出している名前と同じにします。型は hibana 側で書き、境界で宣言した型に従って値を変換します。
+- `use` に名前で書く（`use web`）と組み込みのライブラリ、文字列で書くとファイルかパッケージです。ファイルの経路は、`use` を書いた .hb のファイルのディレクトリからの経路です。
+- モジュール名は、ファイル名から拡張子を除いた名前です（`./js/util.ts` は `util`、`node:path` は `path`、名前に使えない文字は `_`）。hibana のモジュールと同じく、`use "./js/util.ts".*` で修飾なしにもできます。
+- 型は TypeScript の型宣言から読み、境界でその型に従って値を変換します。型宣言の無い JavaScript は使えません。
 
-| hibana の型 | JavaScript の値 |
-|---|---|
-| `int` | number（整数でなければ実行時エラー） |
-| `Vec<T>` | 配列（要素ごとに変換） |
-| 構造体 | 同じフィールド名を持つオブジェクト |
-| 関数型 | 関数（引数と戻り値を変換するよう包む） |
-| `js` | JavaScript の値をそのまま持ち回る型 |
-| それ以外 | そのまま渡す |
+| TypeScript の型 | hibana の型 | 境界での変換 |
+|---|---|---|
+| `number` | `int` | number と BigInt（整数でなければ実行時エラー） |
+| `string` `boolean` `void` | `str` `bool` `unit` | そのまま |
+| `T[]` `Array<T>` | `Vec<T>` | 要素ごと |
+| `(x: A) => B` | `(A) -> B` | 引数と戻り値を変換するよう包む |
+| `interface P { ... }`、`type P = { ... }`、オブジェクト型 | 構造体 | 同じフィールド名のオブジェクト |
+| 共用体・ジェネリクス・`any` などそれ以外 | `js` | JavaScript の値をそのまま持ち回る |
 
-- `.ts` のファイルは、Node.js の型の除去（TypeScript の型注釈を取り除いて実行する機能、Node.js 23.6 以降）でそのまま読み込めます。
-- 相対経路は、出力した JavaScript のファイルからの経路です。
-- extern の関数は中身が分からないので、停止性を検査せず（`partial fn` と同じ扱い）、型の計算でも展開しません。
+- ジェネリクスや可変長引数を持つ関数、メソッドは読めないので無視します。
+- 内部では、型宣言から `extern "経路" { fn 名前(引数) -> 型 }` の宣言を作って使います。型宣言の無いモジュールには、この `extern` を直接書くこともできます。
+- JavaScript の関数は中身が分からないので、停止性を検査せず（`partial fn` と同じ扱い）、型の計算でも展開しません。
 
 ## 4. 式
 
@@ -310,7 +313,7 @@ fn main() {
 ## 12. 既知の制約
 
 - `syntax` の規則名とマクロ名には名前空間がありません。別のモジュールで同じ名前の規則を定義すると衝突します。
-- extern の `int` は number に変換するので、2^53 を超える整数は正しく渡せません。Promise を返す（非同期の）関数は、まだ扱えません。
+- JavaScript との境界では `int` を number に変換するので、2^53 を超える整数は正しく渡せません。Promise を返す（非同期の）関数は、まだ扱えません。
 - ネイティブのバックエンドはメモリを解放しません。長く動くプログラムには GC（Boehm GC など）を入れる必要があります。
 - JavaScript とネイティブの実行時エラーには、ソース上の位置が出ません。
 - 型エラー以外の実行時エラー（0 除算・オーバーフロー・`slice` の範囲外）には位置が出ません。
