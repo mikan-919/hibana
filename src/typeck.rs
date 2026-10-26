@@ -94,7 +94,8 @@ pub(crate) enum Neu {
 }
 
 // js は JavaScript の値をそのまま持ち回る型（extern で使う）。never は戻らない効果の操作（fail など）の戻り値の型
-const PRIMS: &[&str] = &["int", "bool", "str", "syn", "unit", "js", "never"];
+// Effect は効果の並びの型（<E: Effect> の効果の変数に使う）
+const PRIMS: &[&str] = &["int", "bool", "str", "syn", "unit", "js", "never", "Effect"];
 
 // マクロ本体の中でだけ使える組み込み関数 (名前, 引数, 戻り値)
 const SYN_FNS: &[(&str, &[&str], &str)] = &[
@@ -196,7 +197,7 @@ fn show(v: &V) -> String {
         V::Prim(p) => p.to_string(),
         V::VecT(a) => format!("Vec<{}>", show(a)),
         V::Refine(r) => format!("{}[_ -> {}]", show(&r.0), show(&r.1)),
-        V::Pi(p) if p.effs.is_empty() => format!(
+        V::Pi(p) if flat(&p.effs).is_empty() => format!(
             "({}) -> {}",
             p.doms.iter().map(show).collect::<Vec<_>>().join(", "),
             show(&p.cod)
@@ -205,7 +206,11 @@ fn show(v: &V) -> String {
             "({}) -> {} ! {}",
             p.doms.iter().map(show).collect::<Vec<_>>().join(", "),
             show(&p.cod),
-            p.effs.iter().map(show).collect::<Vec<_>>().join(", ")
+            flat(&p.effs)
+                .iter()
+                .map(show)
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
         V::Lam(_) => "<fn>".into(),
         V::Syn(k) => format!("syn<{k}>"),
@@ -275,6 +280,28 @@ fn le_form(v: &V) -> Option<(V, V, i64)> {
     };
     let ((ta, ca), (tb, cb)) = (lin(a), lin(b));
     Some((ta, tb, k.saturating_add(cb).saturating_sub(ca)))
+}
+
+// 効果の名前。効果の変数（<E: Effect>）は変数ごとに別の名前
+fn eff_key(v: &V) -> String {
+    match v {
+        V::DataT(d) => d.0.clone(),
+        V::Neu(n) => match &**n {
+            Neu::Var(id, name) => format!("{name}#{id}"),
+            _ => show(v),
+        },
+        _ => show(v),
+    }
+}
+
+// 効果の並び。効果の変数に入れた並び（Arr）は開く
+fn flat(effs: &[V]) -> Vec<V> {
+    effs.iter()
+        .flat_map(|e| match e {
+            V::Arr(xs) => flat(xs),
+            e => vec![e.clone()],
+        })
+        .collect()
 }
 
 // 項 from を to に置き換え、計算できる所を計算し直す
@@ -862,7 +889,8 @@ fn same(a: &V, b: &V) -> bool {
         (V::Univ(i), V::Univ(j)) => j <= i,
         // 起こす効果の少ない関数は、多い関数として使える
         (V::Pi(x), V::Pi(y)) => {
-            x.doms == y.doms && x.cod == y.cod && y.effs.iter().all(|e| x.effs.contains(e))
+            let xe = flat(&x.effs);
+            x.doms == y.doms && x.cod == y.cod && flat(&y.effs).iter().all(|e| xe.contains(e))
         }
         (a, b) => a == b,
     }
@@ -1158,15 +1186,16 @@ pub fn check(prog: &Program) -> R<Info> {
         ck.avail = Vec::new();
         for e in &f.effects {
             let mut env = ck.val_env();
-            let v = ck.effect_inst(e, &mut env).ctx(r)?;
-            let V::DataT(d) = &v else { unreachable!() };
-            if f.name == "main" && d.0 != "Async" {
-                return Err(r(
-                    "main 関数が起こせる効果は Async だけ（ほかの効果は handle で処理する）",
-                )
-                .into());
+            for v in ck.effect_inst(e, &mut env).ctx(r)? {
+                let k = eff_key(&v);
+                if f.name == "main" && k != "Async" {
+                    return Err(r(
+                        "main 関数が起こせる効果は Async だけ（ほかの効果は handle で処理する）",
+                    )
+                    .into());
+                }
+                ck.avail.push((k, Some(v)));
             }
-            ck.avail.push((d.0.clone(), Some(v)));
         }
         ck.ret = match &f.ret {
             Some(t) => ck.eval_type(t).ctx(|e| r(&format!("戻り値: {e}")))?,
@@ -1586,14 +1615,15 @@ impl Ck<'_> {
                 // 書いた効果は、期待する関数型の効果に含まれていなければならない
                 for e in effs {
                     let mut env = self.val_env();
-                    let v = self.effect_inst(e, &mut env)?;
-                    if !p.effs.contains(&v) {
-                        return Err(format!(
-                            "{} が必要だが、効果 {} を起こす無名関数",
-                            show(expected),
-                            show(&v)
-                        )
-                        .into());
+                    for v in self.effect_inst(e, &mut env)? {
+                        if !flat(&p.effs).contains(&v) {
+                            return Err(format!(
+                                "{} が必要だが、効果 {} を起こす無名関数",
+                                show(expected),
+                                show(&v)
+                            )
+                            .into());
+                        }
                     }
                 }
                 self.lam_check(params, ret, body, &p)
@@ -2196,13 +2226,26 @@ impl Ck<'_> {
         if infer {
             let mut solved = Vec::new();
             for (id, p) in &metas {
-                let Some(v) = sol.get(id) else {
-                    return Err(format!(
-                        "関数 {name} の型引数 {p} を推論できない。{name}<...>(...) で明示する"
-                    )
-                    .into());
+                let is_eff = f
+                    .params
+                    .iter()
+                    .any(|(n, t)| n == p && matches!(t.peel(), Expr::Var(k) if k == "Effect"));
+                let v = match sol.get(id) {
+                    Some(v) => v.clone(),
+                    // 効果の変数が決まらなければ、効果は無い
+                    None if is_eff => V::Arr(Rc::new(vec![])),
+                    None => {
+                        return Err(format!(
+                            "関数 {name} の型引数 {p} を推論できない。{name}<...>(...) で明示する"
+                        )
+                        .into());
+                    }
                 };
-                let v = self.apply(&sol, v)?;
+                let v = self.apply(&sol, &v)?;
+                // ponytail: 効果の変数の中の Async は、多相な関数の中で待つ呼び出しにできない。単相化すれば入れられる
+                if is_eff && flat(&[v.clone()]).iter().any(|e| eff_key(e) == "Async") {
+                    return Err(format!("関数 {name} の効果の変数 {p} に Async は入れられない（JavaScript で待てないため）").into());
+                }
                 fenv[0].insert(p.clone(), v.clone());
                 solved.push(v);
             }
@@ -2220,8 +2263,9 @@ impl Ck<'_> {
             self.use_effect(V::DataT(Rc::new((eff.clone(), args))))?;
         }
         for e in &f.effects {
-            let v = self.effect_inst(e, &mut fenv)?;
-            self.use_effect(v)?;
+            for v in self.effect_inst(e, &mut fenv)? {
+                self.use_effect(v)?;
+            }
         }
         let ret = match &f.ret {
             Some(t) => self.norm.eval_or_opaque(t, &mut fenv)?,
@@ -2231,27 +2275,34 @@ impl Ck<'_> {
     }
 
     // 効果の型の式を評価する。Async は組み込みの効果
-    fn effect_inst(&mut self, e: &Expr, env: &mut Env) -> R<V> {
+    // 効果の変数に入った並びは開くので、複数の効果になりうる
+    fn effect_inst(&mut self, e: &Expr, env: &mut Env) -> R<Vec<V>> {
         if let Expr::Var(n) = e.peel()
             && n == "Async"
         {
-            return Ok(V::DataT(Rc::new(("Async".into(), vec![]))));
+            return Ok(vec![V::DataT(Rc::new(("Async".into(), vec![])))]);
         }
         let v = self.norm.eval_or_opaque(e, env)?;
-        match &v {
-            V::DataT(d) if self.effect_names.contains(&d.0) => Ok(v),
-            _ => Err(format!("{} は効果でない", show(&v)).into()),
+        let mut out = Vec::new();
+        for v in flat(&[v]) {
+            match &v {
+                V::DataT(d) if self.effect_names.contains(&d.0) => out.push(v),
+                // 効果の変数（<E: Effect>）
+                V::Neu(n) if matches!(&**n, Neu::Var(..)) => out.push(v),
+                _ => return Err(format!("{} は効果でない", show(&v)).into()),
+            }
         }
+        Ok(out)
     }
 
     // 効果 inst を起こしてよいか確かめる。handle の本体の効果の型がまだ決まっていなければ、ここで決める
     fn use_effect(&mut self, inst: V) -> R<()> {
-        let V::DataT(d) = &inst else { unreachable!() };
+        let key = eff_key(&inst);
         // ponytail: 腕は同期的に呼ぶので、腕の中では待てない。待つなら腕を async にして $op も待つ
-        if d.0 == "Async" && self.in_arm > 0 {
+        if key == "Async" && self.in_arm > 0 {
             return Err("handle の腕の中では Async の効果を起こせない".into());
         }
-        let Some(slot) = self.avail.iter_mut().rev().find(|(n, _)| *n == d.0) else {
+        let Some(slot) = self.avail.iter_mut().rev().find(|(n, _)| *n == key) else {
             let s = show(&inst);
             return Err(format!(
                 "効果 {s} を起こすには、関数の型に ! {s} を書くか、handle で処理する"
@@ -2398,10 +2449,12 @@ impl Ck<'_> {
             for (j, v) in vals.iter().enumerate() {
                 eff = self.norm.subst(&eff, binder(p.level, j), v)?;
             }
-            if matches!(&eff, V::DataT(d) if d.0 == "Async") {
-                self.awaits.insert(e as *const Expr as usize);
+            for eff in flat(&[eff]) {
+                if eff_key(&eff) == "Async" {
+                    self.awaits.insert(e as *const Expr as usize);
+                }
+                self.use_effect(eff)?;
             }
-            self.use_effect(eff)?;
         }
         Ok(c)
     }
@@ -2490,13 +2543,13 @@ impl Ck<'_> {
         let mut avail = Vec::new();
         for e in effs {
             let mut env = self.val_env();
-            let v = self.effect_inst(e, &mut env)?;
-            let V::DataT(d) = &v else { unreachable!() };
-            if d.0 == "Async" {
-                self.awaits.insert(body as *const Block as usize);
+            for v in self.effect_inst(e, &mut env)? {
+                if eff_key(&v) == "Async" {
+                    self.awaits.insert(body as *const Block as usize);
+                }
+                avail.push((eff_key(&v), Some(v.clone())));
+                es.push(v);
             }
-            avail.push((d.0.clone(), Some(v.clone())));
-            es.push(v);
         }
         let cod = self.fn_body(body, rt, avail)?;
         // 引数の変数を、関数型の引数の番号に置き換える
@@ -2582,11 +2635,11 @@ impl Ck<'_> {
                 for (j, v) in vals.iter().enumerate() {
                     e = self.norm.subst(&e, binder(p.level, j), v)?;
                 }
-                if let V::DataT(d) = &e {
-                    if d.0 == "Async" {
+                for e in flat(&[e]) {
+                    if eff_key(&e) == "Async" {
                         self.awaits.insert(body as *const Block as usize);
                     }
-                    avail.push((d.0.clone(), Some(e.clone())));
+                    avail.push((eff_key(&e), Some(e)));
                 }
             }
             self.fn_body(body, Some(cod), avail).map(|_| ())
@@ -2734,6 +2787,24 @@ impl Ck<'_> {
                     if !self.unify(p, q, metas, sol)? {
                         return Ok(false);
                     }
+                }
+                // 効果の変数が1つなら、相手の効果のうち残りをその値にする
+                let (xe, ye) = (flat(&x.effs), flat(&y.effs));
+                let vars: Vec<usize> = xe
+                    .iter()
+                    .filter_map(|e| match e {
+                        V::Neu(n) => match &**n {
+                            Neu::Var(id, _) if metas.contains(id) && !sol.contains_key(id) => {
+                                Some(*id)
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    })
+                    .collect();
+                if let [id] = vars.as_slice() {
+                    let rest: Vec<V> = ye.into_iter().filter(|e| !xe.contains(e)).collect();
+                    sol.insert(*id, V::Arr(Rc::new(rest)));
                 }
                 true
             }

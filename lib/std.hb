@@ -12,6 +12,30 @@ fn unwrap_or<A>(o: Option<A>, d: A) -> A {
     }
 }
 
+// ---- Vec の高階関数 ----
+
+// f が起こす効果を E として、そのまま起こす（効果の多相）
+// ponytail: 無名関数を渡す時は引数の型を書く（fn(x: int) -> int { ... }）。期待する型から推論するなら、引数ごとに推論し直す
+fn map<A, B, E: Effect>(xs: Vec<A>, f: (A) -> B ! E) -> Vec<B> ! E {
+    let mut out: Vec<B> = []
+    for x in xs { out = push(out, f(x)) }
+    out
+}
+
+fn filter<A, E: Effect>(xs: Vec<A>, f: (A) -> bool ! E) -> Vec<A> ! E {
+    let mut out: Vec<A> = []
+    for x in xs {
+        if f(x) { out = push(out, x) }
+    }
+    out
+}
+
+fn fold<A, B, E: Effect>(xs: Vec<A>, init: B, f: (B, A) -> B ! E) -> B ! E {
+    let mut acc = init
+    for x in xs { acc = f(acc, x) }
+    acc
+}
+
 // ---- Map（文字列のキーから値へ） ----
 
 // ponytail: 線形探索。大きくなるならハッシュ表にする

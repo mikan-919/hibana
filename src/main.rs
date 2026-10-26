@@ -459,6 +459,19 @@ fn main() {
                 "(int) -> int が必要だが (int) -> int ! Log",
             ),
             ("fn g() -> never { g() }\nfn main() {}", "効果の操作だけ"),
+            // 効果の多相: E は渡した関数の効果になり、呼ぶ側で処理する必要がある
+            (
+                "fn ap<E: Effect>(f: () -> unit ! E) ! E { f() }\nfn n() ! Log { log(\"a\") }\nfn main() { ap(n) }",
+                "! Log を書くか",
+            ),
+            (
+                "fn ap<E: Effect>(f: () -> unit ! E) ! E { log(\"a\") }\nfn main() {}",
+                "! Log を書くか",
+            ),
+            (
+                "fn ap<E: Effect>(f: () -> unit ! E) ! E { f() }\nfn main() ! Async { ap(fn() ! Async { }) }",
+                "Async は入れられない",
+            ),
             (
                 "fn f() -> int { handle { return 1 } { ask() => resume(2) } }\nfn main() {}",
                 "return を使えない",
