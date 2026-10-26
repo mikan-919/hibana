@@ -28,3 +28,9 @@ export async function later(x: number): Promise<number> {
   await new Promise((r) => setTimeout(r, 10));
   return x * 2;
 }
+
+export async function mapLater(xs: number[], f: (x: number) => Promise<number>): Promise<number[]> {
+  const out = [];
+  for (const x of xs) out.push(await f(x));
+  return out;
+}

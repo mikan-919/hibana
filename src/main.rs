@@ -21,8 +21,8 @@ fn run(src: &str, out: &mut dyn Write) -> error::R<eval::Value> {
 // JavaScript に変換する
 fn to_js(src: &str) -> error::R<String> {
     let prog = parser::parse(&parser::with_uses(src)?)?;
-    typeck::check(&prog)?;
-    Ok(js::emit(&prog))
+    let info = typeck::check(&prog)?;
+    Ok(js::emit(&prog, &info))
 }
 
 // C に変換する
@@ -198,7 +198,7 @@ mod tests {
         std::fs::remove_file(&js).unwrap();
         assert_eq!(
             String::from_utf8(r.stdout).unwrap(),
-            "50\nHIBANA!\n18\n3\n3\nHello, world\n6\n20\n"
+            "50\nHIBANA!\n18\n3\n3\nHello, world\n6\n20\n[3, 5]\n"
         );
         let e = out(&src).unwrap_err();
         assert!(e.contains("JS ターゲット"), "{e}");
@@ -315,7 +315,7 @@ fn main() {
         let src = include_str!("../examples/effects.hb");
         assert_eq!(
             out(src).unwrap(),
-            "[log] find 1\nuser1\n[log] find 0\nnot found: 0\n[log] find 2\nuser2\n3\n"
+            "each a\neach b\n[log] find 1\nuser1\n[log] find 0\nnot found: 0\n[log] find 2\nuser2\n3\n"
         );
         let p = "effect Log { fn log(msg: str) }\neffect Ask { fn ask() -> int }\neffect Fail { fn fail(m: str) -> never }\n";
         for (src, msg) in [
@@ -349,8 +349,12 @@ fn main() {
                 "! Log を書くか",
             ),
             (
-                "fn f() ! Log { let g = f }\nfn main() {}",
+                "fn f() ! Log { let g = log }\nfn main() {}",
                 "値として使えない",
+            ),
+            (
+                "fn twice(f: (int) -> int, x: int) -> int { f(f(x)) }\nfn n(x: int) -> int ! Log { x }\nfn main() { handle twice(n, 1) { log(m) => resume() } }",
+                "(int) -> int が必要だが (int) -> int ! Log",
             ),
             ("fn g() -> never { g() }\nfn main() {}", "効果の操作だけ"),
             (

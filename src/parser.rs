@@ -32,8 +32,8 @@ pub enum Expr {
     Match(Box<Expr>, Vec<Arm>),
     // 無名関数 fn(引数) -> 戻り値の型 { 本体 }。引数の型は期待する型から分かれば省ける
     Lam(Vec<(String, Option<Expr>)>, Option<Box<Expr>>, Block),
-    // 関数型 (x: A, ...) -> B。名前の無い引数は "_"
-    Pi(Vec<(String, Expr)>, Box<Expr>),
+    // 関数型 (x: A, ...) -> B ! 効果。名前の無い引数は "_"
+    Pi(Vec<(String, Expr)>, Box<Expr>, Vec<Expr>),
     // 式の値の関数を呼ぶ
     Apply(Box<Expr>, Vec<Expr>),
     // handle 式 { 操作(引数) => 式 ... }。腕の ctor は操作の名前、binds は引数
@@ -743,13 +743,19 @@ impl Parser<'_> {
         })
     }
 
-    // ! 効果, ... 。効果は型の式
+    // ! 効果, ... 。効果は型の式。引数の並びの中の関数型では、, の後が 名前: なら次の引数
+    // ponytail: 名前の無い引数の並び (int, (int) -> int ! Log, str) では str も効果と読むので、関数型を括弧で囲む
     fn effects(&mut self) -> R<Vec<Expr>> {
         let mut es = Vec::new();
         if self.eat("!") {
             loop {
                 es.push(self.ret_ty()?);
-                if !self.eat(",") {
+                let next_param = matches!(
+                    self.toks.get(self.pos + 1).map(|t| &t.tok),
+                    Some(Tok::Ident(_))
+                ) && self.toks.get(self.pos + 2).map(|t| &t.tok)
+                    == Some(&Tok::Punct(":"));
+                if next_param || !self.eat(",") {
                     break;
                 }
             }
@@ -1254,7 +1260,8 @@ impl Parser<'_> {
                         .into_iter()
                         .map(|(n, t)| (n.unwrap_or("_".into()), t))
                         .collect();
-                    Expr::Pi(binders, Box::new(self.ty()?))
+                    let ret = Box::new(self.ty()?);
+                    Expr::Pi(binders, ret, self.effects()?)
                 } else if let [(None, _)] = entries.as_slice() {
                     entries.pop().unwrap().1
                 } else {

@@ -18,4 +18,6 @@ fn main() ! Async {
     print(greet.hello("world"))
     print(greet.size(greet.Size { w: 3, h: 4 }).w)
     print(twice_later(5))
+    // Async の関数型の値も渡せる。JavaScript からは Promise を返す関数に見える
+    print(util.mapLater([1, 2], fn(x) { util.later(x) + 1 }))
 }

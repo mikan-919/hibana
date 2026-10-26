@@ -35,7 +35,18 @@ fn describe(id: str) -> str ! Need<Db>, Log {
     }
 }
 
+// 関数型にも効果を書ける。効果の無い関数は、効果を持つ関数型の値として渡せる
+fn each(xs: Vec<str>, f: (str) -> unit ! Log) ! Log {
+    for x in xs { f(x) }
+}
+
 fn main() {
+    handle each(["a", "b"], fn(x) { log("each " + x) }) {
+        log(msg) => {
+            print(msg)
+            resume()
+        }
+    }
     let mut i = 0
     for id in ["1", "0", "2"] {
         let s = handle describe(id) {

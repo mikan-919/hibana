@@ -62,6 +62,7 @@ function $slice(s, i, j) {
 function $to(d, v) {
   if (d === "int") return Number(v);
   if (d.vec) return v.map((x) => $to(d.vec, x));
+  if (d.fn && d.async) return (...a) => v(...a.map((x, i) => $from(d.fn[i], x))).then((r) => $to(d.ret, r));
   if (d.fn) return (...a) => $to(d.ret, v(...a.map((x, i) => $from(d.fn[i], x))));
   if (d.st) return Object.fromEntries(d.f.map(([n, fd], i) => [n, $to(fd, v.$f[i])]));
   return v;
@@ -74,14 +75,16 @@ function $from(d, v) {
   }
   if (d === "unit") return undefined;
   if (d.vec) return Array.from(v, (x) => $from(d.vec, x));
+  if (d.fn && d.async) return async (...a) => $from(d.ret, await v(...a.map((x, i) => $to(d.fn[i], x))));
   if (d.fn) return (...a) => $from(d.ret, v(...a.map((x, i) => $to(d.fn[i], x))));
   if (d.st) return $d(d.st, d.f.map(([n, fd]) => $from(fd, v[n])));
   return v;
 }
 "#;
 
-pub fn emit(prog: &Program) -> String {
+pub fn emit(prog: &Program, info: &crate::typeck::Info) -> String {
     let mut g = Gen {
+        awaits: &info.awaits,
         fns: prog.fns.iter().map(|f| (f.name.as_str(), f)).collect(),
         ctors: prog
             .datas
@@ -138,12 +141,13 @@ fn desc(prog: &Program, t: &Expr, depth: usize) -> String {
         Expr::Call(n, args) if n == "Vec" && args.len() == 1 => {
             format!("{{ vec: {} }}", desc(prog, &args[0], depth + 1))
         }
-        Expr::Pi(bs, r) => {
+        Expr::Pi(bs, r, effs) => {
             let ps: Vec<String> = bs.iter().map(|(_, t)| desc(prog, t, depth + 1)).collect();
             format!(
-                "{{ fn: [{}], ret: {} }}",
+                "{{ fn: [{}], ret: {}, async: {} }}",
                 ps.join(", "),
-                desc(prog, r, depth + 1)
+                desc(prog, r, depth + 1),
+                has_async(effs)
             )
         }
         Expr::Var(n) | Expr::Call(n, _) => {
@@ -180,8 +184,11 @@ fn desc(prog: &Program, t: &Expr, depth: usize) -> String {
 
 // Async の効果を起こす関数は、JavaScript の async 関数にする
 fn is_async(f: &Fn) -> bool {
-    f.effects
-        .iter()
+    has_async(&f.effects)
+}
+
+fn has_async(effs: &[Expr]) -> bool {
+    effs.iter()
         .any(|e| matches!(e.peel(), Expr::Var(n) if n == "Async"))
 }
 
@@ -217,12 +224,22 @@ struct Gen<'a> {
     next: usize,
     // async 関数にする関数。呼び出しを await する
     async_fns: std::collections::HashSet<&'a str>,
+    // 型検査が記録した、待つ呼び出しと async にする無名関数の本体（アドレス）
+    awaits: &'a std::collections::HashSet<usize>,
 }
 
 impl Gen<'_> {
     fn tmp(&mut self) -> String {
         self.next += 1;
         format!("t{}", self.next)
+    }
+
+    fn await_(&self, e: &Expr) -> &'static str {
+        if self.awaits.contains(&(e as *const Expr as usize)) {
+            "await "
+        } else {
+            ""
+        }
     }
 
     fn push(&mut self, s: String) {
@@ -404,7 +421,8 @@ impl Gen<'_> {
             Expr::Call(name, args) => {
                 if let Some((js, _)) = self.lookup(name).cloned() {
                     let vs = self.args(args);
-                    return self.let_(format!("{js}({})", vs.join(", ")));
+                    let w = self.await_(e);
+                    return self.let_(format!("{w}{js}({})", vs.join(", ")));
                 }
                 let mut vs = self.args(args);
                 let v = match name.as_str() {
@@ -448,7 +466,8 @@ impl Gen<'_> {
             Expr::Apply(f, args) => {
                 let f = self.expr(f);
                 let vs = self.args(args);
-                self.let_(format!("{f}({})", vs.join(", ")))
+                let w = self.await_(e);
+                self.let_(format!("{w}{f}({})", vs.join(", ")))
             }
             Expr::Field(x, f) => {
                 let a = self.expr(x);
@@ -535,7 +554,8 @@ impl Gen<'_> {
                     .map(|(js, _)| js.clone())
                     .collect();
                 let params: Vec<String> = params.iter().map(|p| p.0.clone()).collect();
-                let f = self.function(&params, body, false);
+                let a = self.awaits.contains(&(body as *const Block as usize));
+                let f = self.function(&params, body, a);
                 self.let_(format!("(({0}) => {f})({0})", muts.join(", ")))
             }
             Expr::Handle(body, arms) => {

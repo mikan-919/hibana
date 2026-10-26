@@ -44,13 +44,15 @@ pub(crate) enum V {
 pub(crate) struct PiV {
     doms: Vec<V>,
     cod: V,
+    // 呼ぶと起きる効果
+    effs: Vec<V>,
     level: usize,
 }
 
 // 深さ level は比べない。依存しない関数型は、どの深さで書いても同じ型になる
 impl PartialEq for PiV {
     fn eq(&self, o: &Self) -> bool {
-        self.doms == o.doms && self.cod == o.cod
+        self.doms == o.doms && self.cod == o.cod && self.effs == o.effs
     }
 }
 
@@ -176,10 +178,16 @@ fn show(v: &V) -> String {
         V::Prim(p) => p.to_string(),
         V::VecT(a) => format!("Vec<{}>", show(a)),
         V::Refine(r) => format!("{}[_ -> {}]", show(&r.0), show(&r.1)),
-        V::Pi(p) => format!(
+        V::Pi(p) if p.effs.is_empty() => format!(
             "({}) -> {}",
             p.doms.iter().map(show).collect::<Vec<_>>().join(", "),
             show(&p.cod)
+        ),
+        V::Pi(p) => format!(
+            "({}) -> {} ! {}",
+            p.doms.iter().map(show).collect::<Vec<_>>().join(", "),
+            show(&p.cod),
+            p.effs.iter().map(show).collect::<Vec<_>>().join(", ")
         ),
         V::Lam(_) => "<fn>".into(),
         V::Syn(k) => format!("syn<{k}>"),
@@ -253,7 +261,7 @@ fn mentions(v: &V, id: usize) -> bool {
         V::Arr(xs) => xs.iter().any(|x| mentions(x, id)),
         V::VecT(a) => mentions(a, id),
         V::Refine(r) => mentions(&r.0, id) || mentions(&r.1, id),
-        V::Pi(p) => p.doms.iter().any(|x| mentions(x, id)) || mentions(&p.cod, id),
+        V::Pi(p) => p.doms.iter().chain(&p.effs).any(|x| mentions(x, id)) || mentions(&p.cod, id),
         V::Lam(c) => c.env.values().any(|x| mentions(x, id)),
         V::Neu(n) => match &**n {
             Neu::Var(i, _) => *i == id,
@@ -427,7 +435,13 @@ impl Norm<'_> {
     }
 
     // 関数型の式を評価する。引数は Var(binder(深さ, i)) にする
-    fn eval_pi(&mut self, binders: &[(String, Expr)], ret: &Expr, env: &mut Env) -> H<V> {
+    fn eval_pi(
+        &mut self,
+        binders: &[(String, Expr)],
+        ret: &Expr,
+        effs: &[Expr],
+        env: &mut Env,
+    ) -> H<V> {
         let level = self.pi_depth;
         self.pi_depth += 1;
         env.push(HashMap::new());
@@ -440,7 +454,19 @@ impl Norm<'_> {
                     .insert(n.clone(), neu(Neu::Var(binder(level, i), n.clone())));
             }
             let cod = self.eval(ret, env)?;
-            Ok(V::Pi(Rc::new(PiV { doms, cod, level })))
+            let mut es = Vec::new();
+            for e in effs {
+                es.push(match e.peel() {
+                    Expr::Var(n) if n == "Async" => V::DataT(Rc::new(("Async".into(), vec![]))),
+                    e => self.eval(e, env)?,
+                });
+            }
+            Ok(V::Pi(Rc::new(PiV {
+                doms,
+                cod,
+                effs: es,
+                level,
+            })))
         })();
         env.pop();
         self.pi_depth -= 1;
@@ -583,7 +609,7 @@ impl Norm<'_> {
                     .flat_map(|s| s.iter().map(|(k, v)| (k.clone(), v.clone())))
                     .collect(),
             })),
-            Expr::Pi(binders, ret) => self.eval_pi(binders, ret, env)?,
+            Expr::Pi(binders, ret, effs) => self.eval_pi(binders, ret, effs, env)?,
             Expr::Array(items) => {
                 let mut vs = Vec::new();
                 for a in items {
@@ -681,6 +707,11 @@ impl Norm<'_> {
                     .map(|x| self.subst(x, id, by))
                     .collect::<R<_>>()?,
                 cod: self.subst(&p.cod, id, by)?,
+                effs: p
+                    .effs
+                    .iter()
+                    .map(|x| self.subst(x, id, by))
+                    .collect::<R<_>>()?,
                 level: p.level,
             })),
             V::Lam(c) if c.env.values().any(|x| mentions(x, id)) => {
@@ -768,6 +799,8 @@ struct Ck<'a> {
     resume: Vec<V>,
     // 検査中の handle の腕の入れ子の深さ
     in_arm: usize,
+    // JavaScript で待つ呼び出しの式と、async にする無名関数の本体（アドレス）
+    awaits: std::collections::HashSet<usize>,
     // 効果の名前（Async と effect 宣言）
     effect_names: std::collections::HashSet<String>,
 }
@@ -785,6 +818,10 @@ fn same(a: &V, b: &V) -> bool {
         (V::Prim("syn"), V::Syn(_)) | (V::Syn(_), V::Prim("syn")) => true,
         // 下の階層の型は上の階層の型としても使える
         (V::Univ(i), V::Univ(j)) => j <= i,
+        // 起こす効果の少ない関数は、多い関数として使える
+        (V::Pi(x), V::Pi(y)) => {
+            x.doms == y.doms && x.cod == y.cod && y.effs.iter().all(|e| x.effs.contains(e))
+        }
         (a, b) => a == b,
     }
 }
@@ -850,7 +887,7 @@ fn walk(e: &Expr, f: &mut dyn FnMut(&Expr)) {
             }
             block(body, f);
         }
-        Expr::Pi(bs, r) => {
+        Expr::Pi(bs, r, _) => {
             bs.iter().for_each(|(_, t)| walk(t, f));
             walk(r, f);
         }
@@ -979,7 +1016,13 @@ fn callees(f: &Fn) -> Vec<String> {
     out
 }
 
-pub fn check(prog: &Program) -> R<()> {
+// 型検査の結果のうち、出力に使うもの
+pub struct Info {
+    // JavaScript で待つ呼び出しの式と、async にする無名関数の本体（アドレス）
+    pub awaits: std::collections::HashSet<usize>,
+}
+
+pub fn check(prog: &Program) -> R<Info> {
     let fns = &prog.fns;
     let mut ck = Ck {
         norm: Norm::new(),
@@ -996,6 +1039,7 @@ pub fn check(prog: &Program) -> R<()> {
         avail: Vec::new(),
         resume: Vec::new(),
         in_arm: 0,
+        awaits: Default::default(),
         effect_names: std::iter::once("Async".to_string())
             .chain(prog.fns.iter().filter_map(|f| f.op.clone()))
             .chain(
@@ -1119,7 +1163,7 @@ pub fn check(prog: &Program) -> R<()> {
                 .ctx(|e| r(&format!("戻り値: {e}")))?;
         }
     }
-    Ok(())
+    Ok(Info { awaits: ck.awaits })
 }
 
 // マクロ本体を、束縛名を syn 型の変数として検査する。値は syn 型でなければならない
@@ -1139,6 +1183,7 @@ pub fn check_macro(b: &Block, params: &Kinds, rules: &HashMap<String, Kinds>) ->
         avail: Vec::new(),
         resume: Vec::new(),
         in_arm: 0,
+        awaits: Default::default(),
         effect_names: Default::default(),
     };
     for (p, k) in params {
@@ -1637,7 +1682,7 @@ impl Ck<'_> {
             }
             Expr::Call(name, args) if self.lookup(name).is_some() => {
                 let t = self.lookup(name).unwrap().ty.clone();
-                return self.apply_type(&t, args);
+                return self.apply_type(&t, args, e);
             }
             Expr::Call(name, args) if name == "print" => {
                 if args.len() != 1 {
@@ -1661,10 +1706,10 @@ impl Ck<'_> {
             }
             Expr::Apply(f, args) => {
                 let t = self.expr(f)?;
-                return self.apply_type(&t, args);
+                return self.apply_type(&t, args, e);
             }
             Expr::Lam(params, ret, body) => return self.lam_infer(params, ret, body),
-            Expr::Pi(binders, ret) => return self.pi_type(binders, ret),
+            Expr::Pi(binders, ret, effs) => return self.pi_type(binders, ret, effs),
             Expr::Match(s, arms) => return self.check_match(s, arms, None),
             Expr::Call(name, args) if name == "len" || name == "Vec" => {
                 if args.len() != 1 {
@@ -2105,9 +2150,9 @@ impl Ck<'_> {
 
     // トップレベルの関数を値として使った時の型
     fn fn_type(&mut self, f: &Fn) -> R<V> {
-        if f.op.is_some() || !f.effects.is_empty() {
+        if f.op.is_some() {
             return Err(format!(
-                "効果を起こす関数 {} は値として使えない（関数型にはまだ効果を書けないため）",
+                "効果の操作 {} は値として使えない（呼び出しだけができる）",
                 f.name
             )
             .into());
@@ -2121,7 +2166,7 @@ impl Ck<'_> {
         }
         let ret = f.ret.clone().unwrap_or(Expr::Var("unit".into()));
         let mut env: Env = vec![HashMap::new()];
-        match self.norm.eval_pi(&f.params, &ret, &mut env) {
+        match self.norm.eval_pi(&f.params, &ret, &f.effects, &mut env) {
             Ok(v) => Ok(v),
             Err(Halt::Stuck) => Ok(self.norm.opaque()),
             Err(Halt::Err(e)) => Err(e),
@@ -2129,7 +2174,8 @@ impl Ck<'_> {
     }
 
     // 関数型 t の値を args で呼んだ時の型。引数の型は前の引数の値に依存しうる
-    fn apply_type(&mut self, t: &V, args: &[Expr]) -> R<V> {
+    // e は呼び出しの式。Async の効果を持つ関数なら、JavaScript で待つ呼び出しとして記録する
+    fn apply_type(&mut self, t: &V, args: &[Expr], e: &Expr) -> R<V> {
         let V::Pi(p) = base(t) else {
             return Err(format!("関数でない値（{}）を呼んでいる", show(t)).into());
         };
@@ -2150,18 +2196,28 @@ impl Ck<'_> {
         for (j, v) in vals.iter().enumerate() {
             c = self.norm.subst(&c, binder(p.level, j), v)?;
         }
+        for eff in &p.effs {
+            let mut eff = eff.clone();
+            for (j, v) in vals.iter().enumerate() {
+                eff = self.norm.subst(&eff, binder(p.level, j), v)?;
+            }
+            if matches!(&eff, V::DataT(d) if d.0 == "Async") {
+                self.awaits.insert(e as *const Expr as usize);
+            }
+            self.use_effect(eff)?;
+        }
         Ok(c)
     }
 
     // 関数の本体を、戻り値の型 rt で検査する
-    fn fn_body(&mut self, body: &Block, rt: Option<V>) -> R<V> {
+    // avail は本体で起こしてよい効果
+    fn fn_body(&mut self, body: &Block, rt: Option<V>, avail: Vec<(String, Option<V>)>) -> R<V> {
         if let Some(V::Univ(_)) = rt.as_ref().map(base) {
             return Err("関数は型を返せない。型を計算するなら type で定義する".into());
         }
         let saved = self.ret.clone();
-        // ponytail: 関数型に効果を書けないので、無名関数の中では効果を起こせない
         let saved_eff = (
-            std::mem::take(&mut self.avail),
+            std::mem::replace(&mut self.avail, avail),
             std::mem::take(&mut self.resume),
         );
         let r = match rt {
@@ -2229,7 +2285,8 @@ impl Ck<'_> {
             Some(t) => Some(self.eval_type(t)?),
             None => None,
         };
-        let cod = self.fn_body(body, rt)?;
+        // ponytail: 期待する型の無い無名関数は効果を起こせない。効果も推論するなら本体で起きた効果を集める
+        let cod = self.fn_body(body, rt, vec![])?;
         // 引数の変数を、関数型の引数の番号に置き換える
         let mut out = Vec::new();
         for (i, d) in doms.iter().enumerate() {
@@ -2254,6 +2311,7 @@ impl Ck<'_> {
         Ok(V::Pi(Rc::new(PiV {
             doms: out,
             cod,
+            effs: vec![],
             level,
         })))
     }
@@ -2295,7 +2353,20 @@ impl Ck<'_> {
                 let rt = self.eval_type(rt)?;
                 want(&cod, &rt, "戻り値")?;
             }
-            self.fn_body(body, Some(cod)).map(|_| ())
+            let mut avail = Vec::new();
+            for e in &p.effs {
+                let mut e = e.clone();
+                for (j, v) in vals.iter().enumerate() {
+                    e = self.norm.subst(&e, binder(p.level, j), v)?;
+                }
+                if let V::DataT(d) = &e {
+                    if d.0 == "Async" {
+                        self.awaits.insert(body as *const Block as usize);
+                    }
+                    avail.push((d.0.clone(), Some(e.clone())));
+                }
+            }
+            self.fn_body(body, Some(cod), avail).map(|_| ())
         })();
         self.pop();
         self.norm.pi_depth -= 1;
@@ -2303,7 +2374,7 @@ impl Ck<'_> {
     }
 
     // 関数型 (x: A, ...) -> B の型。引数と戻り値の型の階層の最大
-    fn pi_type(&mut self, binders: &[(String, Expr)], ret: &Expr) -> R<V> {
+    fn pi_type(&mut self, binders: &[(String, Expr)], ret: &Expr, effs: &[Expr]) -> R<V> {
         self.push();
         let r = (|| {
             let mut level = 0;
@@ -2312,6 +2383,10 @@ impl Ck<'_> {
                 let ty = self.eval_value(t)?;
                 let id = self.norm.fresh();
                 self.bind(n, ty, neu(Neu::Var(id, n.clone())), false)?;
+            }
+            for e in effs {
+                let mut env = self.val_env();
+                self.effect_inst(e, &mut env)?;
             }
             Ok(V::Univ(level.max(self.type_level(ret)?)))
         })();
@@ -2838,7 +2913,7 @@ mod tests {
     use crate::parser::parse;
 
     fn check(src: &str) -> crate::error::R<()> {
-        super::check(&parse(src)?)
+        super::check(&parse(src)?).map(|_| ())
     }
 
     #[test]

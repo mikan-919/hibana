@@ -16,6 +16,8 @@ enum Ty {
     Fn(Vec<Ty>, Box<Ty>),
     Obj(Vec<(String, Ty)>),
     Named(String),
+    // Promise<T>。関数の戻り値なら T を返す Async の効果の関数にする
+    Promise(Box<Ty>),
 }
 
 fn lex(src: &str) -> Vec<String> {
@@ -201,6 +203,12 @@ impl P {
                     "string" => Ty::Str,
                     "boolean" => Ty::Bool,
                     "void" | "undefined" => Ty::Unit,
+                    "Promise" if self.peek() == "<" => {
+                        self.i += 1;
+                        let t = self.ty()?;
+                        self.eat(">");
+                        Ty::Promise(Box::new(t))
+                    }
                     "Array" | "ReadonlyArray" if self.peek() == "<" => {
                         self.i += 1;
                         let t = self.ty()?;
@@ -263,8 +271,12 @@ impl P {
             Ty::Vec(e) => format!("Vec<{}>", self.hib(e)),
             Ty::Fn(ps, r) => {
                 let ps: Vec<String> = ps.iter().map(|p| self.hib(p)).collect();
-                format!("({}) -> {}", ps.join(", "), self.hib(r))
+                match &**r {
+                    Ty::Promise(r) => format!("(({}) -> {} ! Async)", ps.join(", "), self.hib(r)),
+                    r => format!("({}) -> {}", ps.join(", "), self.hib(r)),
+                }
             }
+            Ty::Promise(_) => "js".into(),
             Ty::Obj(fs) => {
                 self.anon += 1;
                 let name = format!("Object{}", self.anon);
@@ -293,20 +305,15 @@ impl P {
             return;
         }
         let ps = self.params();
-        // Promise<T> を返す関数は、T を返す Async の効果の関数にする
-        let mut is_async = false;
         let ret = if self.eat(":") {
-            if self.peek() == "Promise" && self.at(1) == "<" {
-                self.i += 2;
-                is_async = true;
-                let t = self.ty();
-                self.eat(">");
-                t
-            } else {
-                self.ty()
-            }
+            self.ty()
         } else {
             Some(Ty::Js)
+        };
+        // Promise<T> を返す関数は、T を返す Async の効果の関数にする
+        let (ret, is_async) = match ret {
+            Some(Ty::Promise(t)) => (Some(*t), true),
+            r => (r, false),
         };
         if self.peek() == "{" {
             self.skip_group();

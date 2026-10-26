@@ -180,13 +180,14 @@ impl Resolver<'_> {
                 self.block(body);
                 self.locals.pop();
             }
-            Expr::Pi(binders, ret) => {
+            Expr::Pi(binders, ret, effs) => {
                 self.locals.push(Vec::new());
                 for (n, t) in binders.iter_mut() {
                     self.expr(t);
                     self.locals.last_mut().unwrap().push(n.clone());
                 }
                 self.expr(ret);
+                self.exprs(effs);
                 self.locals.pop();
             }
             Expr::Int(_)
