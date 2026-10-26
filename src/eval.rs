@@ -46,6 +46,8 @@ impl PartialEq for Callable {
 enum Flow {
     Return(Value),
     Error(String),
+    // handle の腕が resume しなかった。(handle の番号, handle の値)
+    Abort(usize, Value),
 }
 
 type R<T> = Result<T, Flow>;
@@ -56,6 +58,9 @@ struct Interp<'a> {
     // 構築子の名前からフィールド名の並び
     ctors: HashMap<&'a str, Vec<&'a str>>,
     out: &'a mut dyn Write,
+    // 処理中の handle (番号, 操作の名前から腕の関数)。内側ほど後ろ
+    handlers: Vec<(usize, HashMap<String, Value>)>,
+    next_h: usize,
 }
 
 // 型検査を通ったプログラムを前提とする
@@ -74,10 +79,13 @@ pub fn run(prog: &Program, out: &mut dyn Write) -> Result<Value, String> {
             })
             .collect(),
         out,
+        handlers: Vec::new(),
+        next_h: 0,
     };
     match it.call("main", vec![]) {
         Ok(v) | Err(Flow::Return(v)) => Ok(v),
         Err(Flow::Error(e)) => Err(e),
+        Err(Flow::Abort(..)) => unreachable!("handle の外には出ない"),
     }
 }
 
@@ -88,10 +96,13 @@ pub fn run_macro(b: &Block, vars: Vec<(String, Value)>) -> Result<Value, String>
         fns: HashMap::new(),
         ctors: HashMap::new(),
         out: &mut err,
+        handlers: Vec::new(),
+        next_h: 0,
     };
     match it.block(b, &mut vec![vars.into_iter().collect()]) {
         Ok(v) | Err(Flow::Return(v)) => Ok(v),
         Err(Flow::Error(e)) => Err(e),
+        Err(Flow::Abort(..)) => unreachable!("handle の外には出ない"),
     }
 }
 
@@ -292,6 +303,10 @@ impl Interp<'_> {
 
     fn call(&mut self, name: &str, args: Vec<Value>) -> R<Value> {
         let f = self.fns[name];
+        if f.op.is_some() {
+            let k = args.len() - (f.params.len() - f.implicit);
+            return self.perform(name, args[k..].to_vec());
+        }
         if f.js.is_some() {
             return error(format!(
                 "extern の関数 {name} は JS ターゲット（hibana js）でだけ使える"
@@ -310,6 +325,21 @@ impl Interp<'_> {
         match self.block(&f.body, &mut env) {
             Err(Flow::Return(v)) => Ok(v),
             r => r,
+        }
+    }
+
+    // 操作を、それを処理する一番内側の handle の腕で実行する。腕の中の操作は、その handle より外で処理する
+    fn perform(&mut self, op: &str, args: Vec<Value>) -> R<Value> {
+        let Some(i) = self.handlers.iter().rposition(|h| h.1.contains_key(op)) else {
+            return error(format!("操作 {op} を処理する handle が無い"));
+        };
+        let (id, f) = (self.handlers[i].0, self.handlers[i].1[op].clone());
+        let saved = self.handlers.split_off(i);
+        let r = self.apply(&f, args);
+        self.handlers.extend(saved);
+        match r? {
+            Value::Data(d) if d.0 == "$resume" => Ok(d.1[0].clone()),
+            v => Err(Flow::Abort(id, v)),
         }
     }
 
@@ -390,6 +420,7 @@ impl Interp<'_> {
                     r.map_err(|f| match f {
                         Flow::Error(e) => Error::from(e),
                         Flow::Return(_) => "${ } の中で return した".into(),
+                        Flow::Abort(..) => unreachable!("マクロ本体に handle は無い"),
                     })
                 };
                 meta::splice(q, &mut flat, &mut out, &mut ev).map_err(|e| Flow::Error(e.msg))?;
@@ -459,6 +490,12 @@ impl Interp<'_> {
                 }
                 if let Some(f) = env.iter().rev().find_map(|s| s.get(name)).cloned() {
                     self.apply(&f, vs)?
+                } else if name == "resume" {
+                    // 腕の値として返し、perform が操作の戻り値にする
+                    Value::Data(Rc::new((
+                        "$resume".into(),
+                        vec![vs.pop().unwrap_or(Value::Unit)],
+                    )))
                 } else if self.ctors.contains_key(name.as_str()) {
                     Value::Data(Rc::new((name.clone(), vs)))
                 } else if !self.fns.contains_key(name.as_str())
@@ -494,6 +531,37 @@ impl Interp<'_> {
                     .collect(),
             })),
             Expr::Pi(..) => Value::Ty("fn".into()),
+            Expr::Handle(body, arms) => {
+                self.next_h += 1;
+                let id = self.next_h;
+                let captured: HashMap<String, Value> = env
+                    .iter()
+                    .flat_map(|s| s.iter().map(|(k, v)| (k.clone(), v.clone())))
+                    .collect();
+                let arms = arms
+                    .iter()
+                    .map(|a| {
+                        let body = Block {
+                            stmts: vec![],
+                            tail: Some(Box::new(a.body.clone())),
+                        };
+                        let f = Callable::Lam {
+                            params: a.binds.clone(),
+                            body,
+                            env: captured.clone(),
+                        };
+                        (a.ctor.clone(), Value::Fn(Rc::new(f)))
+                    })
+                    .collect();
+                let n = self.handlers.len();
+                self.handlers.push((id, arms));
+                let r = self.expr(body, env);
+                self.handlers.truncate(n);
+                match r {
+                    Err(Flow::Abort(h, v)) if h == id => v,
+                    r => r?,
+                }
+            }
             Expr::Apply(f, args) => {
                 let f = self.expr(f, env)?;
                 let mut vs = Vec::new();

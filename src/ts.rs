@@ -1,7 +1,8 @@
 // TypeScript の型宣言（.ts と .d.ts）から、hibana のモジュールの本文を作る。
 // export した関数・interface・type を読み、関数は extern の宣言に、interface とオブジェクト型は構造体にする。
 // 本体は読み飛ばす。読めない宣言（ジェネリクス・可変長引数など）は無視する
-// ponytail: TypeScript の型の一部だけを読む。共用体・ジェネリクス・Promise などは js 型か無視になる
+// Promise<T> を返す関数は、T を返す Async の効果の関数にする
+// ponytail: TypeScript の型の一部だけを読む。共用体・ジェネリクスなどは js 型か無視になる
 use crate::error::R;
 
 // TypeScript の型を hibana の型にしたもの
@@ -292,8 +293,18 @@ impl P {
             return;
         }
         let ps = self.params();
+        // Promise<T> を返す関数は、T を返す Async の効果の関数にする
+        let mut is_async = false;
         let ret = if self.eat(":") {
-            self.ty()
+            if self.peek() == "Promise" && self.at(1) == "<" {
+                self.i += 2;
+                is_async = true;
+                let t = self.ty();
+                self.eat(">");
+                t
+            } else {
+                self.ty()
+            }
         } else {
             Some(Ty::Js)
         };
@@ -310,8 +321,9 @@ impl P {
             .map(|(i, p)| format!("a{i}: {}", self.hib(p)))
             .collect();
         let ret = self.hib(&ret);
+        let eff = if is_async { " ! Async" } else { "" };
         self.fns
-            .push(format!("    fn {name}({}) -> {ret}\n", ps.join(", ")));
+            .push(format!("    fn {name}({}) -> {ret}{eff}\n", ps.join(", ")));
     }
 }
 
@@ -345,6 +357,7 @@ pub fn module_text(src: &str, path: &str) -> R<String> {
         p.eat("declare");
         match p.next().as_str() {
             "function" => p.function(),
+            "async" if p.eat("function") => p.function(),
             "interface" => {
                 let name = p.next();
                 while !matches!(p.peek(), "{" | "") {

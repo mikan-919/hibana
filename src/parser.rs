@@ -36,6 +36,8 @@ pub enum Expr {
     Pi(Vec<(String, Expr)>, Box<Expr>),
     // 式の値の関数を呼ぶ
     Apply(Box<Expr>, Vec<Expr>),
+    // handle 式 { 操作(引数) => 式 ... }。腕の ctor は操作の名前、binds は引数
+    Handle(Box<Expr>, Vec<Arm>),
     // for x in 式 { } と for x in a..b { }
     For(String, Box<Expr>, Option<Box<Expr>>, Block),
     // ソース上の位置。エラー表示に使う
@@ -86,6 +88,10 @@ pub struct Fn {
     pub implicit: usize,
     // extern で宣言した JavaScript の関数。Some(モジュール)、グローバルの関数は Some("")
     pub js: Option<String>,
+    // ! の後ろに書いた効果（Fail<E> などの型の式）
+    pub effects: Vec<Expr>,
+    // effect 宣言の操作なら、その効果の名前
+    pub op: Option<String>,
 }
 
 pub struct Parser<'s> {
@@ -327,6 +333,7 @@ pub fn parse(src: &str) -> R<Program> {
     let mut fn_starts = Vec::new();
     let mut data_starts = Vec::new();
     let mut extern_starts = Vec::new();
+    let mut effect_starts = Vec::new();
     let mut types: HashSet<String> = ["Vec", "Type"].map(String::from).into();
     let mut generic_fns: HashSet<String> = HashSet::new();
     // 組み込みと利用者のファイルの名前・モジュール名・パターンのリテラル。マクロの衛生性で名前を付け替えない
@@ -349,6 +356,8 @@ pub fn parse(src: &str) -> R<Program> {
         "split",
         "starts_with",
         "slice",
+        "resume",
+        "Async",
         "Vec",
         "Type",
     ]
@@ -401,6 +410,21 @@ pub fn parse(src: &str) -> R<Program> {
                     }
                 }
             }
+            Tok::Punct("effect") => {
+                if let Some(Tok::Ident(n)) = p.toks.get(p.pos + 1).map(|t| t.tok.clone()) {
+                    types.insert(qual(&cur, &n));
+                    declare(&cur, &n, &mut globals);
+                }
+                effect_starts.push(p.pos);
+                let start = p.pos;
+                p.skip_fn()?;
+                for w in p.toks[start..p.pos].windows(2) {
+                    if let (Tok::Punct("fn"), Tok::Ident(n)) = (&w[0].tok, &w[1].tok) {
+                        let n = n.clone();
+                        declare(&cur, &n, &mut globals);
+                    }
+                }
+            }
             Tok::Punct("fn" | "partial") => {
                 let k = if p.peek() == &Tok::Punct("partial") {
                     2
@@ -432,7 +456,7 @@ pub fn parse(src: &str) -> R<Program> {
                     }
                 }
             }
-            _ => return p.err("fn・type・extern・syntax・macro・use のいずれかが必要"),
+            _ => return p.err("fn・type・effect・extern・syntax・macro・use のいずれかが必要"),
         }
     }
     p.types = Rc::new(types.clone());
@@ -449,6 +473,12 @@ pub fn parse(src: &str) -> R<Program> {
     p.g = Rc::new(g);
     p.check_macros()?;
     let mut prog = Program::default();
+    for s in effect_starts {
+        p.pos = s;
+        let (d, ops) = p.effect_decl()?;
+        prog.datas.push(d);
+        prog.fns.extend(ops);
+    }
     for s in data_starts {
         p.pos = s;
         match p.type_decl()? {
@@ -696,6 +726,7 @@ impl Parser<'_> {
         } else {
             None
         };
+        let effects = self.effects()?;
         self.expect("{")?;
         Ok(Fn {
             name,
@@ -707,7 +738,74 @@ impl Parser<'_> {
             partial,
             implicit,
             js: None,
+            effects,
+            op: None,
         })
+    }
+
+    // ! 効果, ... 。効果は型の式
+    fn effects(&mut self) -> R<Vec<Expr>> {
+        let mut es = Vec::new();
+        if self.eat("!") {
+            loop {
+                es.push(self.ret_ty()?);
+                if !self.eat(",") {
+                    break;
+                }
+            }
+        }
+        Ok(es)
+    }
+
+    // effect Name<引数> { fn 操作(引数) -> 型 ... }。効果は構築子の無い型にする。
+    // 操作は本体の無い関数で、効果の引数をジェネリック引数として先頭に持つ
+    fn effect_decl(&mut self) -> R<(Data, Vec<Fn>)> {
+        self.expect("effect")?;
+        let module = self.cur_module();
+        let name = qual(&module, &self.ident()?);
+        let params = if self.eat("<") {
+            self.type_params()?
+        } else {
+            vec![]
+        };
+        self.expect("{")?;
+        let mut ops = Vec::new();
+        while !self.eat("}") {
+            self.expect("fn")?;
+            let op = qual(&module, &self.ident()?);
+            self.expect("(")?;
+            let mut ps = params.clone();
+            ps.extend(self.params()?);
+            let ret = if self.eat("->") {
+                Some(self.ret_ty()?)
+            } else {
+                None
+            };
+            ops.push(Fn {
+                name: op,
+                params: ps,
+                ret,
+                body: Block {
+                    stmts: vec![],
+                    tail: None,
+                },
+                alias: false,
+                module: module.clone(),
+                partial: true,
+                implicit: params.len(),
+                js: None,
+                effects: vec![],
+                op: Some(name.clone()),
+            });
+            self.eat(",");
+        }
+        let d = Data {
+            name,
+            module,
+            params,
+            ctors: vec![],
+        };
+        Ok((d, ops))
     }
 
     // extern "モジュール" { fn 名前(引数) -> 型 ... }。本体の無い関数として並べる（JS ターゲットでだけ使える）
@@ -729,10 +827,11 @@ impl Parser<'_> {
             self.expect("(")?;
             let params = self.params()?;
             let ret = if self.eat("->") {
-                Some(self.ty()?)
+                Some(self.ret_ty()?)
             } else {
                 None
             };
+            let effects = self.effects()?;
             let body = Block {
                 stmts: vec![],
                 tail: None,
@@ -748,6 +847,8 @@ impl Parser<'_> {
                 partial: true,
                 implicit: 0,
                 js: Some(js.clone()),
+                effects,
+                op: None,
             });
             self.eat(",");
         }
@@ -837,6 +938,8 @@ impl Parser<'_> {
                 partial: false,
                 js: None,
                 implicit: 0,
+                effects: vec![],
+                op: None,
             }));
         }
         self.eat("|");
@@ -879,7 +982,8 @@ impl Parser<'_> {
                 Tok::Punct(")" | "]" | "}") => depth -= 1,
                 Tok::Punct("|") if depth == 0 => return true,
                 Tok::Punct(
-                    "fn" | "partial" | "type" | "syntax" | "macro" | "use" | "module" | "extern",
+                    "fn" | "partial" | "type" | "syntax" | "macro" | "use" | "module" | "extern"
+                    | "effect",
                 )
                 | Tok::Eof
                     if depth == 0 =>
@@ -902,7 +1006,8 @@ impl Parser<'_> {
                 Tok::Punct("(" | "[" | "{") => depth += 1,
                 Tok::Punct(")" | "]" | "}") => depth -= 1,
                 Tok::Punct(
-                    "fn" | "partial" | "type" | "syntax" | "macro" | "use" | "module" | "extern",
+                    "fn" | "partial" | "type" | "syntax" | "macro" | "use" | "module" | "extern"
+                    | "effect",
                 ) if depth == 0 => {
                     return;
                 }
@@ -1221,6 +1326,28 @@ impl Parser<'_> {
                     self.eat(",");
                 }
                 Expr::Match(Box::new(s), arms)
+            }
+            Tok::Punct("handle") => {
+                let body = self.expr()?;
+                self.expect("{")?;
+                let mut arms = Vec::new();
+                while !self.eat("}") {
+                    let ctor = self.ident()?;
+                    self.expect("(")?;
+                    let mut binds = Vec::new();
+                    while !self.eat(")") {
+                        binds.push(self.ident()?);
+                        if !self.eat(",") {
+                            self.expect(")")?;
+                            break;
+                        }
+                    }
+                    self.expect("=>")?;
+                    let body = self.expr()?;
+                    arms.push(Arm { ctor, binds, body });
+                    self.eat(",");
+                }
+                Expr::Handle(Box::new(body), arms)
             }
             Tok::Punct("quote") => {
                 self.expect("{")?;

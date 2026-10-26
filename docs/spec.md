@@ -9,7 +9,7 @@ hibana は、依存型（型の中に値を書ける型）と、構文を拡張�
 - 識別子は英字か `_` で始まり、英数字と `_` が続きます。
 - 整数（`42`、`0xFF`）と文字列（`"a\n"`）を書けます。浮動小数（`3.14`）と文字（`'a'`）は字句解析だけ対応していて、式には書けません（マクロのパターンの `Float` `Char` で使えます）。文字列のエスケープは `\n \t \r \0 \\ \" \'` です。
 - コメントは `// 行末まで` と `/* ... */` です。
-- キーワード: `fn partial let mut if else while for in return match type syntax macro quote use true false`
+- キーワード: `fn partial let mut if else while for in return match type syntax macro quote use module extern effect handle true false`
 - 各トークンは、直前に空白があるか（`gap_before`）と改行があるか（`nl_before`）を持ちます。前者はマクロのパターンの `~`（空白なしで続く）に、後者は文の区切りに使います。
 
 ## 2. 文の区切り
@@ -18,7 +18,7 @@ hibana は、依存型（型の中に値を書ける型）と、構文を拡張�
 
 ## 3. 宣言
 
-ファイルの最上位には `use`・`fn`・`partial fn`・`type`・`syntax`・`macro` を並べます。宣言の順序は自由で、後で宣言した型や関数・マクロも使えます。`main` という引数の無い関数が入口です。
+ファイルの最上位には `use`・`fn`・`partial fn`・`type`・`effect`・`syntax`・`macro` を並べます。宣言の順序は自由で、後で宣言した型や関数・マクロも使えます。`main` という引数の無い関数が入口です。
 
 ### 3.1 関数
 
@@ -104,11 +104,68 @@ fn main() {
 | `T[]` `Array<T>` | `Vec<T>` | 要素ごと |
 | `(x: A) => B` | `(A) -> B` | 引数と戻り値を変換するよう包む |
 | `interface P { ... }`、`type P = { ... }`、オブジェクト型 | 構造体 | 同じフィールド名のオブジェクト |
+| `Promise<T>`（戻り値） | `T` と `! Async`（3.5 節） | 呼び出しを `await` する |
 | 共用体・ジェネリクス・`any` などそれ以外 | `js` | JavaScript の値をそのまま持ち回る |
 
 - ジェネリクスや可変長引数を持つ関数、メソッドは読めないので無視します。
 - 内部では、型宣言から `extern "経路" { fn 名前(引数) -> 型 }` の宣言を作って使います。型宣言の無いモジュールには、この `extern` を直接書くこともできます。
 - JavaScript の関数は中身が分からないので、停止性を検査せず（`partial fn` と同じ扱い）、型の計算でも展開しません。
+
+### 3.5 効果
+
+非同期・失敗・依存の注入などは、代数的エフェクト（効果の「操作」を呼ぶと、外側の `handle` の腕がそれを処理し、必要なら呼んだ所から続きを再開する仕組み）で書きます。Promise や `await` は書きません。例は `examples/effects.hb` です。
+
+```
+effect Fail<E> { fn fail(e: E) -> never }
+effect Need<T> { fn need() -> T }
+
+fn find(id: str) -> User ! Fail<NotFound>, Need<Db> {
+    let db = need()
+    if id == "0" { fail(NotFound { id: id }) } else { User { name: db.prefix + id } }
+}
+
+fn main() {
+    let name = handle find("42").name {
+        fail(e) => "not found: " + e.id       // resume しない腕は handle 全体の値になる
+        need() => resume(Db { prefix: "u" })  // resume で、操作の戻り値を渡して続きを再開する
+    }
+}
+```
+
+- `effect Name<引数> { fn 操作(引数) -> 型 ... }` で効果を宣言します。効果は構築子の無い型で、操作は効果の引数をジェネリック引数に持つ関数です。戻らない操作の戻り値の型は `never` と書きます（`never` を戻り値の型にできるのは操作だけです）。
+- 関数が起こす効果は、戻り値の型の後ろに `! 効果, ...` と書きます。書いていない効果を起こすと型エラーです。効果を起こす関数を呼ぶ関数も、その効果を書くか `handle` で処理する必要があります。
+- `handle 式 { 操作(引数) => 式 ... }` は、式の中で起きた腕の操作を処理します。処理した効果は、`handle` の外の型から消えます。効果の型引数（`Fail<E>` の `E`）は、本体で起こした効果の型から決まります。
+- 腕の中の操作は、その `handle` より外側で処理します（深いハンドラー）。
+- `resume(値)`（unit なら `resume()`）は続きを1回だけ再開します。腕の最後（腕の値になる位置）にだけ書けます。戻り値の型が `never` の操作は再開できません。
+- `main` が起こせる効果は `Async` だけです。
+
+`Async` は組み込みの効果で、待つ処理を表します。TypeScript の `Promise<T>` を返す関数は、`T` を返して `Async` の効果を起こす関数として読みます（3.4 節）。
+
+```
+use "./js/util.ts"        // export async function later(x: number): Promise<number>
+
+fn twice_later(x: int) -> int ! Async {
+    util.later(x) + util.later(x)       // await は書かない
+}
+
+fn main() ! Async { print(twice_later(5)) }
+```
+
+実装:
+
+| 実行方式 | 操作の呼び出し | resume しない腕 | Async |
+|---|---|---|---|
+| インタプリタ | 処理中の handle の並びから、一番内側の腕を呼ぶ | 抜け出す理由（`Flow::Abort`）として handle まで戻す | 意味を持たない |
+| JavaScript | `$op` が同じように腕を呼ぶ | 例外（`$Abort`）で handle の `try` まで戻す | `Async` を持つ関数を `async function` にし、呼び出しを `await` する |
+| C | `h_op` が同じように腕を呼ぶ | `setjmp` / `longjmp` で戻す（handle を含む関数の局所変数は `volatile`） | 意味を持たない |
+
+制限:
+
+- `resume` は腕の最後でだけ使えます。続きの後に処理を書く（`resume` の結果を使う）には、継続を実装する必要があります。
+- 関数型にはまだ効果を書けないので、無名関数の中では効果を起こせず、効果を起こす関数は値として使えません。
+- `handle` の中では `return` を使えません。
+- 腕の中では `Async` を起こせません（腕は同期的に呼びます）。
+- 並行に待つ（`Promise.all` にあたる）方法はまだありません。並行の処理が無いので、処理中の handle の並びは1つの大域変数で足ります。
 
 ## 4. 式
 
@@ -313,7 +370,7 @@ fn main() {
 ## 12. 既知の制約
 
 - `syntax` の規則名とマクロ名には名前空間がありません。別のモジュールで同じ名前の規則を定義すると衝突します。
-- JavaScript との境界では `int` を number に変換するので、2^53 を超える整数は正しく渡せません。Promise を返す（非同期の）関数は、まだ扱えません。
+- JavaScript との境界では `int` を number に変換するので、2^53 を超える整数は正しく渡せません。
 - ネイティブのバックエンドはメモリを解放しません。長く動くプログラムには GC（Boehm GC など）を入れる必要があります。
 - JavaScript とネイティブの実行時エラーには、ソース上の位置が出ません。
 - 型エラー以外の実行時エラー（0 除算・オーバーフロー・`slice` の範囲外）には位置が出ません。

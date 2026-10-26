@@ -23,3 +23,8 @@ export function point(x: number, y: number): Point {
 export function words(s: string): string[] {
   return s.split(" ");
 }
+
+export async function later(x: number): Promise<number> {
+  await new Promise((r) => setTimeout(r, 10));
+  return x * 2;
+}

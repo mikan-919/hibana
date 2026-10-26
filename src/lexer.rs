@@ -48,7 +48,8 @@ pub struct Token {
 
 const KEYWORDS: &[&str] = &[
     "fn", "let", "mut", "if", "else", "while", "return", "true", "false", "syntax", "macro",
-    "type", "match", "quote", "partial", "for", "in", "use", "module", "extern",
+    "type", "match", "quote", "partial", "for", "in", "use", "module", "extern", "effect",
+    "handle",
 ];
 // 最長一致のため、2文字の記号を先に置く
 const PUNCTS: &[&str] = &[

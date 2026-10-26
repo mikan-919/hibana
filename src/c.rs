@@ -12,6 +12,7 @@ const PRELUDE: &str = r#"#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <setjmp.h>
 enum { T_UNIT, T_INT, T_BOOL, T_STR, T_ARR, T_DATA, T_FN, T_TY };
 typedef struct V V;
 struct V { int tag; union { int64_t i; bool b; struct Str* s; struct Arr* a; struct Data* d; struct Fn* f; const char* ty; }; };
@@ -162,6 +163,27 @@ static V h_slice(V s, V i, V j) {
     if (k == s.s->len || (s.s->s[k] & 0xC0) != 0x80) { if (c == i.i) a = k; if (c == j.i) { b = k; break; } c++; }
   }
   return mk_str(s.s->s + a, b - a);
+}
+// 処理中の handle。内側ほど後ろ。腕の中の操作は、その handle より外で処理する
+// resume した腕の値は構築子の番号 -1 の data で表す
+typedef struct H { int n; const char** ops; V* arms; jmp_buf jb; V v; int depth; } H;
+static H* HS[1024]; static int hn = 0;
+static V mk_res(V v) { return mk_data(-1, 1, &v); }
+static void h_push(H* h) { if (hn == 1024) die("handle の入れ子が深すぎる"); h->depth = hn; HS[hn++] = h; }
+static V h_op(const char* op, V* args) {
+  for (int i = hn - 1; i >= 0; i--) {
+    H* h = HS[i];
+    for (int k = 0; k < h->n; k++) {
+      if (strcmp(h->ops[k], op) != 0) continue;
+      int top = hn; H** saved = alloc((top - i) * sizeof(H*)); memcpy(saved, HS + i, (top - i) * sizeof(H*));
+      hn = i;
+      V r = h_call(h->arms[k], args);
+      memcpy(HS + i, saved, (top - i) * sizeof(H*)); hn = top;
+      if (r.tag == T_DATA && r.d->ctor == -1) return r.d->f[0];
+      h->v = r; longjmp(h->jb, 1);
+    }
+  }
+  die("操作を処理する handle が無い"); return U;
 }
 static V h_field(V x, const char* f) {
   for (int k = 0; k < x.d->n; k++) if (strcmp(CTOR_FIELDS[x.d->ctor][k], f) == 0) return x.d->f[k];
@@ -314,6 +336,7 @@ impl Gen<'_> {
             .collect();
         let r = self.block(&f.body);
         self.push(format!("return {r};"));
+        self.volatile_if_handle();
         let body = std::mem::take(&mut self.lines).join("\n");
         // 関数を値として使う時の入口
         let args: Vec<String> = (0..f.params.len()).map(|i| format!("a[{i}]")).collect();
@@ -323,6 +346,17 @@ impl Gen<'_> {
             ident("w_", &f.name),
             args.join(", ")
         )
+    }
+
+    // longjmp の後も局所変数の値が保たれるよう、handle を含む関数では局所変数を volatile にする
+    fn volatile_if_handle(&mut self) {
+        if self.lines.iter().any(|l| l.contains("setjmp(")) {
+            for l in &mut self.lines {
+                if let Some(rest) = l.strip_prefix("V ") {
+                    *l = format!("volatile V {rest}");
+                }
+            }
+        }
     }
 
     fn block(&mut self, b: &Block) -> String {
@@ -421,6 +455,12 @@ impl Gen<'_> {
                 }
                 let mut vs = self.args(args);
                 let v = match name.as_str() {
+                    "resume" => format!("mk_res({})", vs.first().map_or("U", |v| v)),
+                    n if self.fns.get(n).is_some_and(|f| f.op.is_some()) => {
+                        let f = self.fns[n];
+                        let k = vs.len() - (f.params.len() - f.implicit);
+                        format!("h_op({}, {})", lit(n), Self::array(&vs[k..]))
+                    }
                     "print" => format!("h_print({})", vs[0]),
                     "to_str" => format!("h_str({})", vs[0]),
                     "len" | "split" | "starts_with" | "slice" => {
@@ -526,6 +566,37 @@ impl Gen<'_> {
                 "U".into()
             }
             Expr::Lam(params, _, body) => self.lambda(params, body),
+            Expr::Handle(body, arms) => {
+                // 腕は無名関数にする。resume しなかった腕の値は longjmp で受け取る
+                let fs: Vec<String> = arms
+                    .iter()
+                    .map(|a| {
+                        let params: Vec<_> = a.binds.iter().map(|b| (b.clone(), None)).collect();
+                        let body = Block {
+                            stmts: vec![],
+                            tail: Some(Box::new(a.body.clone())),
+                        };
+                        self.lambda(&params, &body)
+                    })
+                    .collect();
+                let h = self.tmp();
+                let n = arms.len();
+                self.push(format!("H* {h} = alloc(sizeof(H)); {h}->n = {n}; {h}->ops = alloc({n} * sizeof(char*)); {h}->arms = alloc({n} * sizeof(V));"));
+                for (k, (a, f)) in arms.iter().zip(&fs).enumerate() {
+                    self.push(format!(
+                        "{h}->ops[{k}] = {}; {h}->arms[{k}] = {f};",
+                        lit(&a.ctor)
+                    ));
+                }
+                let t = self.tmp();
+                self.push(format!("V {t} = U;"));
+                self.push(format!("h_push({h});"));
+                self.push(format!("if (setjmp({h}->jb) == 0) {{"));
+                let v = self.expr(body);
+                self.push(format!("{t} = {v}; hn = {h}->depth;"));
+                self.push(format!("}} else {{ hn = {h}->depth; {t} = {h}->v; }}"));
+                t
+            }
             Expr::Pi(..) => "mk_ty(\"fn\")".into(),
             Expr::Refine(..) => "mk_ty(\"refine\")".into(),
             Expr::Macro(..) | Expr::Quote(_) | Expr::Method(..) => unreachable!("型検査で弾く"),
@@ -558,6 +629,7 @@ impl Gen<'_> {
         }
         let r = self.block(body);
         self.push(format!("return {r};"));
+        self.volatile_if_handle();
         let lines = std::mem::replace(&mut self.lines, saved_lines);
         self.scopes = saved_scopes;
         self.protos

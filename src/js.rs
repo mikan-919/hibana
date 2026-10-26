@@ -32,6 +32,22 @@ function $show(v) {
   if (v.$c.endsWith("{}")) return v.$c.slice(0, -2) + " { " + $fields[v.$c].map((f, i) => f + ": " + $show(v.$f[i])).join(", ") + " }";
   return v.$f.length === 0 ? v.$c : v.$c + "(" + v.$f.map($show).join(", ") + ")";
 }
+// 処理中の handle。内側ほど後ろ。腕の中の操作は、その handle より外で処理する
+let $h = [];
+class $Abort { constructor(h, v) { this.h = h; this.v = v; } }
+function $op(op, args) {
+  for (let i = $h.length - 1; i >= 0; i--) {
+    const h = $h[i];
+    if (!Object.hasOwn(h.arms, op)) continue;
+    const saved = $h;
+    $h = $h.slice(0, i);
+    let r;
+    try { r = h.arms[op](...args); } finally { $h = saved; }
+    if (r && r.$c === "$resume") return r.$f[0];
+    throw new $Abort(h, r);
+  }
+  throw new Error("操作 " + op + " を処理する handle が無い");
+}
 function $str(v) { return typeof v === "string" ? v : $show(v); }
 function $print(v) { console.log($str(v)); }
 function $len(v) { return BigInt(typeof v === "string" ? [...v].length : v.length); }
@@ -76,6 +92,12 @@ pub fn emit(prog: &Program) -> String {
         lines: Vec::new(),
         scopes: Vec::new(),
         next: 0,
+        async_fns: prog
+            .fns
+            .iter()
+            .filter(|f| is_async(f))
+            .map(|f| f.name.as_str())
+            .collect(),
     };
     let mut out = String::from(PRELUDE);
     let fields: Vec<String> = prog
@@ -101,7 +123,7 @@ pub fn emit(prog: &Program) -> String {
     }
     // import は ES モジュールの先頭に置く
     let mut out = imports + &out;
-    out += "try { f_main(); } catch (e) { console.error(\"実行時エラー: \" + e.message); process.exitCode = 1; }\n";
+    out += "(async () => { try { await f_main(); } catch (e) { console.error(\"実行時エラー: \" + e.message); process.exitCode = 1; } })();\n";
     out
 }
 
@@ -156,6 +178,13 @@ fn desc(prog: &Program, t: &Expr, depth: usize) -> String {
     }
 }
 
+// Async の効果を起こす関数は、JavaScript の async 関数にする
+fn is_async(f: &Fn) -> bool {
+    f.effects
+        .iter()
+        .any(|e| matches!(e.peel(), Expr::Var(n) if n == "Async"))
+}
+
 // JavaScript の文字列リテラル
 fn lit(s: &str) -> String {
     let mut o = String::from("\"");
@@ -186,6 +215,8 @@ struct Gen<'a> {
     // hibana の変数名から (JavaScript の名前, 可変か)
     scopes: Vec<HashMap<String, (String, bool)>>,
     next: usize,
+    // async 関数にする関数。呼び出しを await する
+    async_fns: std::collections::HashSet<&'a str>,
 }
 
 impl Gen<'_> {
@@ -214,7 +245,7 @@ impl Gen<'_> {
     }
 
     // 関数の本体を、別の文の並びとして出力する
-    fn function(&mut self, params: &[String], body: &Block) -> String {
+    fn function(&mut self, params: &[String], body: &Block, is_async: bool) -> String {
         let saved = std::mem::take(&mut self.lines);
         self.scopes.push(HashMap::new());
         let ps: Vec<String> = params.iter().map(|p| self.bind(p, false)).collect();
@@ -222,7 +253,12 @@ impl Gen<'_> {
         self.push(format!("return {r};"));
         self.scopes.pop();
         let lines = std::mem::replace(&mut self.lines, saved);
-        format!("function({}) {{\n{}\n}}", ps.join(", "), lines.join("\n"))
+        format!(
+            "{}function({}) {{\n{}\n}}",
+            if is_async { "async " } else { "" },
+            ps.join(", "),
+            lines.join("\n")
+        )
     }
 
     // extern の関数。(import 文, hibana の値を変換して呼ぶ関数)
@@ -248,8 +284,13 @@ impl Gen<'_> {
             .ret
             .as_ref()
             .map_or("\"unit\"".to_string(), |t| desc(prog, t, 0));
+        let (a, w) = if is_async(f) {
+            ("async ", "await ")
+        } else {
+            ("", "")
+        };
         let def = format!(
-            "const {} = function({}) {{ return $from({ret}, {imp}({})); }};\n",
+            "const {} = {a}function({}) {{ return $from({ret}, {w}{imp}({})); }};\n",
             ident("f_", &f.name),
             params.join(", "),
             args.join(", ")
@@ -262,7 +303,7 @@ impl Gen<'_> {
         format!(
             "const {} = {};\n",
             ident("f_", &f.name),
-            self.function(&params, &f.body)
+            self.function(&params, &f.body, is_async(f))
         )
     }
 
@@ -367,6 +408,16 @@ impl Gen<'_> {
                 }
                 let mut vs = self.args(args);
                 let v = match name.as_str() {
+                    // 腕の値として返し、$op が操作の戻り値にする
+                    "resume" => format!(
+                        "$d(\"$resume\", [{}])",
+                        vs.first().map_or("undefined", |v| v)
+                    ),
+                    n if self.fns.get(n).is_some_and(|f| f.op.is_some()) => {
+                        let f = self.fns[n];
+                        let k = vs.len() - (f.params.len() - f.implicit);
+                        format!("$op({}, [{}])", lit(n), vs[k..].join(", "))
+                    }
                     "print" => format!("$print({})", vs[0]),
                     "to_str" => format!("$str({})", vs[0]),
                     "len" | "split" | "starts_with" | "slice" => {
@@ -381,7 +432,12 @@ impl Gen<'_> {
                                 full.append(&mut vs);
                                 vs = full;
                             }
-                            format!("{}({})", ident("f_", n), vs.join(", "))
+                            let w = if self.async_fns.contains(n) {
+                                "await "
+                            } else {
+                                ""
+                            };
+                            format!("{w}{}({})", ident("f_", n), vs.join(", "))
                         }
                         // 型を作る呼び出し（Vec<int> など）。実行時には名前だけ
                         None => lit(n),
@@ -479,8 +535,32 @@ impl Gen<'_> {
                     .map(|(js, _)| js.clone())
                     .collect();
                 let params: Vec<String> = params.iter().map(|p| p.0.clone()).collect();
-                let f = self.function(&params, body);
+                let f = self.function(&params, body, false);
                 self.let_(format!("(({0}) => {f})({0})", muts.join(", ")))
+            }
+            Expr::Handle(body, arms) => {
+                // 腕は無名関数にする。本体はその場に書き、resume しなかった腕の値を例外で受け取る
+                let fs: Vec<String> = arms
+                    .iter()
+                    .map(|a| {
+                        let params = a.binds.iter().map(|b| (b.clone(), None)).collect();
+                        let body = Block {
+                            stmts: vec![],
+                            tail: Some(Box::new(a.body.clone())),
+                        };
+                        let f = self.expr(&Expr::Lam(params, None, body));
+                        format!("{}: {f}", lit(&a.ctor))
+                    })
+                    .collect();
+                let h = self.let_(format!("{{ arms: {{ {} }} }}", fs.join(", ")));
+                let t = self.tmp();
+                self.push(format!("let {t};"));
+                self.push(format!("$h.push({h});"));
+                self.push("try {".into());
+                let v = self.expr(body);
+                self.push(format!("{t} = {v};"));
+                self.push(format!("}} catch (e) {{ if (e instanceof $Abort && e.h === {h}) {t} = e.v; else throw e; }} finally {{ $h.pop(); }}"));
+                t
             }
             Expr::Pi(..) => lit("fn"),
             Expr::Refine(..) => lit("refine"),

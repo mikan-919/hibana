@@ -3,7 +3,12 @@
 use "./js/util.ts"
 use "./js/greet.js"
 
-fn main() {
+// Promise を返す関数は Async の効果を持つ。呼ぶ関数にも ! Async を書き、await は書かない
+fn twice_later(x: int) -> int ! Async {
+    util.later(x) + util.later(x)
+}
+
+fn main() ! Async {
     print(util.add(2, 3) * 10)
     print(util.shout("hibana"))
     print(util.applyTwice(fn(x) { x * 3 }, 2))
@@ -12,4 +17,5 @@ fn main() {
     print(len(util.words("a b c")))
     print(greet.hello("world"))
     print(greet.size(greet.Size { w: 3, h: 4 }).w)
+    print(twice_later(5))
 }

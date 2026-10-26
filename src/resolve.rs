@@ -18,6 +18,9 @@ pub fn resolve(prog: &mut Program, uses: &HashMap<String, Vec<Use>>, known: &Has
         if let Some(t) = &mut f.ret {
             r.expr(t);
         }
+        for t in &mut f.effects {
+            r.expr(t);
+        }
         r.block(&mut f.body);
     }
     for d in &mut prog.datas {
@@ -153,7 +156,7 @@ impl Resolver<'_> {
                 self.with(&[x], |r| r.block(body));
             }
             Expr::Block(b) => self.block(b),
-            Expr::Match(s, arms) => {
+            Expr::Match(s, arms) | Expr::Handle(s, arms) => {
                 self.expr(s);
                 for a in arms {
                     if a.ctor != "_" {

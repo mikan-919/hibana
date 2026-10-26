@@ -91,8 +91,8 @@ pub(crate) enum Neu {
     Opaque(usize),
 }
 
-// js は JavaScript の値をそのまま持ち回る型（extern で使う）
-const PRIMS: &[&str] = &["int", "bool", "str", "syn", "unit", "js"];
+// js は JavaScript の値をそのまま持ち回る型（extern で使う）。never は戻らない効果の操作（fail など）の戻り値の型
+const PRIMS: &[&str] = &["int", "bool", "str", "syn", "unit", "js", "never"];
 
 // マクロ本体の中でだけ使える組み込み関数 (名前, 引数, 戻り値)
 const SYN_FNS: &[(&str, &[&str], &str)] = &[
@@ -115,6 +115,8 @@ const BUILTINS: &[&str] = &[
     "split",
     "starts_with",
     "slice",
+    "resume",
+    "Async",
 ];
 
 // 文字列の組み込み関数 (名前, 引数, 戻り値)。split の戻り値は Vec<str>
@@ -641,6 +643,7 @@ impl Norm<'_> {
             | Expr::For(..)
             | Expr::While(..)
             | Expr::Return(_)
+            | Expr::Handle(..)
             | Expr::Field(..)
             | Expr::Method(..)
             | Expr::Quote(_)
@@ -759,6 +762,14 @@ struct Ck<'a> {
     sub: HashMap<usize, usize>,
     // マクロ本体の検査で使う、syntax 規則ごとのフィールドの種類
     rules: HashMap<String, Kinds>,
+    // 今起こしてよい効果 (効果の名前, 型)。handle の本体の効果の型は、本体で初めて起こした時に決まる
+    avail: Vec<(String, Option<V>)>,
+    // 検査中の handle の腕で、resume に渡す値の型
+    resume: Vec<V>,
+    // 検査中の handle の腕の入れ子の深さ
+    in_arm: usize,
+    // 効果の名前（Async と effect 宣言）
+    effect_names: std::collections::HashSet<String>,
 }
 
 // never はどの型とも一致する。細分化された値は元の型として使える
@@ -827,7 +838,7 @@ fn walk(e: &Expr, f: &mut dyn FnMut(&Expr)) {
             block(b, f);
         }
         Expr::Block(b) => block(b, f),
-        Expr::Match(s, arms) => {
+        Expr::Match(s, arms) | Expr::Handle(s, arms) => {
             walk(s, f);
             arms.iter().for_each(|a| walk(&a.body, f));
         }
@@ -848,6 +859,53 @@ fn walk(e: &Expr, f: &mut dyn FnMut(&Expr)) {
             xs.iter().for_each(|x| walk(x, f));
         }
         _ => {}
+    }
+}
+
+// resume が handle の腕の末尾（腕の値になる位置）にだけあるか確かめる
+fn resume_tail(e: &Expr, tail: bool) -> R<()> {
+    let block = |b: &Block, tail: bool| -> R<()> {
+        for s in &b.stmts {
+            match s {
+                Stmt::Let { init, .. } => resume_tail(init, false)?,
+                Stmt::Expr(e) => resume_tail(e, false)?,
+            }
+        }
+        b.tail.as_ref().map_or(Ok(()), |t| resume_tail(t, tail))
+    };
+    match e {
+        Expr::At(sp, x) => resume_tail(x, tail).map_err(|err| err.at(*sp)),
+        Expr::Call(n, args) if n == "resume" => {
+            if !tail {
+                return Err(
+                    "resume は腕の最後に置く（続きの再開は腕の値になる位置でだけできる）".into(),
+                );
+            }
+            args.iter().try_for_each(|a| resume_tail(a, false))
+        }
+        Expr::If(c, t, e) => {
+            resume_tail(c, false)?;
+            // else の無い if の値は捨てられる
+            block(t, tail && e.is_some())?;
+            e.as_ref().map_or(Ok(()), |e| resume_tail(e, tail))
+        }
+        Expr::Block(b) => block(b, tail),
+        Expr::Match(s, arms) => {
+            resume_tail(s, false)?;
+            arms.iter().try_for_each(|a| resume_tail(&a.body, tail))
+        }
+        e => {
+            let mut found = false;
+            walk(e, &mut |x| {
+                found |= matches!(x, Expr::Call(n, _) if n == "resume");
+            });
+            if found {
+                return Err(
+                    "resume は腕の最後に置く（続きの再開は腕の値になる位置でだけできる）".into(),
+                );
+            }
+            Ok(())
+        }
     }
 }
 
@@ -935,6 +993,18 @@ pub fn check(prog: &Program) -> R<()> {
         decr: Vec::new(),
         sub: HashMap::new(),
         rules: HashMap::new(),
+        avail: Vec::new(),
+        resume: Vec::new(),
+        in_arm: 0,
+        effect_names: std::iter::once("Async".to_string())
+            .chain(prog.fns.iter().filter_map(|f| f.op.clone()))
+            .chain(
+                prog.datas
+                    .iter()
+                    .filter(|d| d.ctors.is_empty())
+                    .map(|d| d.name.clone()),
+            )
+            .collect(),
     };
     // 関数名・型名・構築子名は同じ名前空間にある
     let mut names: Vec<&str> = Vec::new();
@@ -999,18 +1069,35 @@ pub fn check(prog: &Program) -> R<()> {
             let id = ck.norm.fresh();
             ck.bind(n, ty, neu(Neu::Var(id, n.clone())), false).ctx(r)?;
         }
+        ck.avail = Vec::new();
+        for e in &f.effects {
+            let mut env = ck.val_env();
+            let v = ck.effect_inst(e, &mut env).ctx(r)?;
+            let V::DataT(d) = &v else { unreachable!() };
+            if f.name == "main" && d.0 != "Async" {
+                return Err(r(
+                    "main 関数が起こせる効果は Async だけ（ほかの効果は handle で処理する）",
+                )
+                .into());
+            }
+            ck.avail.push((d.0.clone(), Some(v)));
+        }
         ck.ret = match &f.ret {
             Some(t) => ck.eval_type(t).ctx(|e| r(&format!("戻り値: {e}")))?,
             None => prim("unit"),
         };
+        // never はどの型とも一致するので、戻らないことを確かめられない効果の操作でだけ使える
+        if f.op.is_none() && ck.ret == prim("never") {
+            return Err(r("never を戻り値の型にできるのは効果の操作だけ").into());
+        }
         if !f.alias && matches!(base(&ck.ret), V::Univ(_)) {
             return Err(r("関数は型を返せない。型を計算するなら type で定義する").into());
         }
         if f.partial && ck.is_proof_type(&ck.ret) {
             return Err(r("partial fn は証明の型（添字付きの型族）を返せない。止まらない関数で偽の証明が作れてしまうため").into());
         }
-        // extern の関数は本体が無いので、型の宣言だけを検査する
-        if f.js.is_some() {
+        // extern の関数と効果の操作は本体が無いので、型の宣言だけを検査する
+        if f.js.is_some() || f.op.is_some() {
             continue;
         }
         ck.cur_fn = (!f.partial).then(|| f.name.clone());
@@ -1049,6 +1136,10 @@ pub fn check_macro(b: &Block, params: &Kinds, rules: &HashMap<String, Kinds>) ->
         decr: Vec::new(),
         sub: HashMap::new(),
         rules: rules.clone(),
+        avail: Vec::new(),
+        resume: Vec::new(),
+        in_arm: 0,
+        effect_names: Default::default(),
     };
     for (p, k) in params {
         let v = ck.norm.opaque();
@@ -1528,6 +1619,22 @@ impl Ck<'_> {
                     }
                 }
             }
+            Expr::Handle(body, arms) => return self.handle(body, arms),
+            Expr::Call(name, args) if name == "resume" && self.lookup(name).is_none() => {
+                let Some(t) = self.resume.last().cloned() else {
+                    return Err("resume は handle の腕の中でだけ使える".into());
+                };
+                if t == prim("never") {
+                    return Err("戻り値の型が never の操作は resume できない".into());
+                }
+                // resume() は unit で再開する
+                match args.as_slice() {
+                    [] => want(&t, &prim("unit"), "resume")?,
+                    [a] => self.check(a, &t)?,
+                    _ => return Err("resume の引数は1個".into()),
+                }
+                prim("never")
+            }
             Expr::Call(name, args) if self.lookup(name).is_some() => {
                 let t = self.lookup(name).unwrap().ty.clone();
                 return self.apply_type(&t, args);
@@ -1805,6 +1912,14 @@ impl Ck<'_> {
         } else {
             &f.params[..]
         };
+        // 操作の呼び出しでは、効果の型引数を、起こしてよい効果の型から決める
+        if let (Some(eff), true) = (&f.op, infer)
+            && let Some((_, Some(V::DataT(d)))) = self.avail.iter().rev().find(|(n, _)| n == eff)
+        {
+            for ((id, _), v) in metas.iter().zip(&d.1) {
+                sol.insert(*id, v.clone());
+            }
+        }
         let ids: Vec<usize> = metas.iter().map(|m| m.0).collect();
         // 期待する型が分かれば、先に戻り値の型と合わせる
         if infer && let (Some(exp), Some(rt)) = (expected, &f.ret) {
@@ -1855,6 +1970,17 @@ impl Ck<'_> {
         if self.cur_fn.as_deref() == Some(name) {
             self.check_decrease(&vals)?;
         }
+        if let Some(eff) = &f.op {
+            let args = f.params[..f.implicit]
+                .iter()
+                .map(|(p, _)| fenv[0][p].clone())
+                .collect();
+            self.use_effect(V::DataT(Rc::new((eff.clone(), args))))?;
+        }
+        for e in &f.effects {
+            let v = self.effect_inst(e, &mut fenv)?;
+            self.use_effect(v)?;
+        }
         let ret = match &f.ret {
             Some(t) => self.norm.eval_or_opaque(t, &mut fenv)?,
             None => prim("unit"),
@@ -1862,8 +1988,130 @@ impl Ck<'_> {
         self.apply(&sol, &ret)
     }
 
+    // 効果の型の式を評価する。Async は組み込みの効果
+    fn effect_inst(&mut self, e: &Expr, env: &mut Env) -> R<V> {
+        if let Expr::Var(n) = e.peel()
+            && n == "Async"
+        {
+            return Ok(V::DataT(Rc::new(("Async".into(), vec![]))));
+        }
+        let v = self.norm.eval_or_opaque(e, env)?;
+        match &v {
+            V::DataT(d) if self.effect_names.contains(&d.0) => Ok(v),
+            _ => Err(format!("{} は効果でない", show(&v)).into()),
+        }
+    }
+
+    // 効果 inst を起こしてよいか確かめる。handle の本体の効果の型がまだ決まっていなければ、ここで決める
+    fn use_effect(&mut self, inst: V) -> R<()> {
+        let V::DataT(d) = &inst else { unreachable!() };
+        // ponytail: 腕は同期的に呼ぶので、腕の中では待てない。待つなら腕を async にして $op も待つ
+        if d.0 == "Async" && self.in_arm > 0 {
+            return Err("handle の腕の中では Async の効果を起こせない".into());
+        }
+        let Some(slot) = self.avail.iter_mut().rev().find(|(n, _)| *n == d.0) else {
+            let s = show(&inst);
+            return Err(format!(
+                "効果 {s} を起こすには、関数の型に ! {s} を書くか、handle で処理する"
+            )
+            .into());
+        };
+        match &slot.1 {
+            None => slot.1 = Some(inst),
+            Some(have) if same(have, &inst) => {}
+            Some(have) => {
+                return Err(format!("効果 {} が必要だが {}", show(have), show(&inst)).into());
+            }
+        }
+        Ok(())
+    }
+
+    // handle 本体 { 操作(引数) => 式 }。本体では腕の効果を起こしてよい。腕は handle の外の効果を起こせる（Async は除く）
+    // ponytail: resume は腕の末尾でだけ使える（続きを1回、その場で再開する）。末尾以外で再開するなら継続を実装する
+    fn handle(&mut self, body: &Expr, arms: &[Arm]) -> R<V> {
+        let mut effs: Vec<String> = Vec::new();
+        for a in arms {
+            let Some(f) = self.norm.fns.get(a.ctor.as_str()).copied() else {
+                return Err(format!("未定義の操作 {}", a.ctor).into());
+            };
+            let Some(e) = &f.op else {
+                return Err(format!("{} は効果の操作でない", a.ctor).into());
+            };
+            if arms.iter().filter(|b| b.ctor == a.ctor).count() > 1 {
+                return Err(format!("操作 {} の腕が重複している", a.ctor).into());
+            }
+            if a.binds.len() != f.params.len() - f.implicit {
+                return Err(
+                    format!("操作 {} の引数は{}個", a.ctor, f.params.len() - f.implicit).into(),
+                );
+            }
+            if !effs.contains(e) {
+                effs.push(e.clone());
+            }
+            resume_tail(&a.body, true)?;
+        }
+        let mut ret = false;
+        for e in std::iter::once(body).chain(arms.iter().map(|a| &a.body)) {
+            walk(e, &mut |x| ret |= matches!(x, Expr::Return(_)));
+        }
+        if ret {
+            return Err("handle の中では return を使えない".into());
+        }
+        let n = self.avail.len();
+        self.avail.extend(effs.iter().map(|e| (e.clone(), None)));
+        let t = self.expr(body);
+        let insts = self.avail.split_off(n);
+        let t = t?;
+        self.in_arm += 1;
+        let r = arms.iter().try_for_each(|a| self.arm(a, &insts, &t));
+        self.in_arm -= 1;
+        r?;
+        Ok(t)
+    }
+
+    // handle の腕を、handle の値の型 t で検査する。resume には操作の戻り値の型の値を渡す
+    fn arm(&mut self, a: &Arm, insts: &[(String, Option<V>)], t: &V) -> R<()> {
+        let f = self.norm.fns[a.ctor.as_str()];
+        let eff = f.op.as_ref().unwrap();
+        let Some((_, Some(V::DataT(d)))) = insts.iter().find(|(n, _)| n == eff) else {
+            return Err(format!("handle の本体が効果 {eff} を起こしていない").into());
+        };
+        let d = d.clone();
+        self.push();
+        let r = (|| {
+            let mut fenv: Env = vec![HashMap::new()];
+            for ((p, _), v) in f.params[..f.implicit].iter().zip(&d.1) {
+                fenv[0].insert(p.clone(), v.clone());
+            }
+            for ((p, pt), b) in f.params[f.implicit..].iter().zip(&a.binds) {
+                let ty = self.norm.eval_or_opaque(pt, &mut fenv)?;
+                let id = self.norm.fresh();
+                let v = neu(Neu::Var(id, b.clone()));
+                self.bind(b, ty, v.clone(), false)?;
+                fenv[0].insert(p.clone(), v);
+            }
+            let rt = match &f.ret {
+                Some(t) => self.norm.eval_or_opaque(t, &mut fenv)?,
+                None => prim("unit"),
+            };
+            self.resume.push(rt);
+            let r = self.check(&a.body, t);
+            self.resume.pop();
+            r
+        })();
+        self.pop();
+        r.ctx(|e| format!("操作 {} の腕: {e}", a.ctor))
+    }
+
     // トップレベルの関数を値として使った時の型
     fn fn_type(&mut self, f: &Fn) -> R<V> {
+        if f.op.is_some() || !f.effects.is_empty() {
+            return Err(format!(
+                "効果を起こす関数 {} は値として使えない（関数型にはまだ効果を書けないため）",
+                f.name
+            )
+            .into());
+        }
         if self.cur_fn.as_deref() == Some(f.name.as_str()) {
             return Err(format!(
                 "再帰する関数 {} を値として使えない（停止性を検査できないため）",
@@ -1911,6 +2159,11 @@ impl Ck<'_> {
             return Err("関数は型を返せない。型を計算するなら type で定義する".into());
         }
         let saved = self.ret.clone();
+        // ponytail: 関数型に効果を書けないので、無名関数の中では効果を起こせない
+        let saved_eff = (
+            std::mem::take(&mut self.avail),
+            std::mem::take(&mut self.resume),
+        );
         let r = match rt {
             Some(rt) => {
                 self.ret = rt.clone();
@@ -1927,6 +2180,7 @@ impl Ck<'_> {
             }
         };
         self.ret = saved;
+        (self.avail, self.resume) = saved_eff;
         if let Ok(V::Univ(_)) = r.as_ref().map(base) {
             return Err("関数は型を返せない。型を計算するなら type で定義する".into());
         }

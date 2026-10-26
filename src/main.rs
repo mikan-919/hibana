@@ -198,7 +198,7 @@ mod tests {
         std::fs::remove_file(&js).unwrap();
         assert_eq!(
             String::from_utf8(r.stdout).unwrap(),
-            "50\nHIBANA!\n18\n3\n3\nHello, world\n6\n"
+            "50\nHIBANA!\n18\n3\n3\nHello, world\n6\n20\n"
         );
         let e = out(&src).unwrap_err();
         assert!(e.contains("JS ターゲット"), "{e}");
@@ -307,6 +307,65 @@ fn main() {
             out(src).unwrap(),
             "0\n1\n1\n2\n3\n5\n8\n13\n21\n34\n55\ntrue\n"
         );
+    }
+
+    // 効果の型検査。3つの実行方式で同じ結果になることは examples/effects.hb で確かめる
+    #[test]
+    fn effects() {
+        let src = include_str!("../examples/effects.hb");
+        assert_eq!(
+            out(src).unwrap(),
+            "[log] find 1\nuser1\n[log] find 0\nnot found: 0\n[log] find 2\nuser2\n3\n"
+        );
+        let p = "effect Log { fn log(msg: str) }\neffect Ask { fn ask() -> int }\neffect Fail { fn fail(m: str) -> never }\n";
+        for (src, msg) in [
+            (
+                "fn main() { log(\"x\") }",
+                "! Log を書くか、handle で処理する",
+            ),
+            (
+                "fn f() ! Log { log(\"x\") }\nfn main() { f() }",
+                "! Log を書くか",
+            ),
+            ("fn main() ! Log { }", "Async だけ"),
+            (
+                "fn main() { handle log(\"a\") { log(m) => { resume()\nprint(m) } } }",
+                "resume は腕の最後に置く",
+            ),
+            (
+                "fn main() { let x = handle ask() + 1 { ask() => resume(\"s\") } }",
+                "int が必要だが str",
+            ),
+            (
+                "fn main() { handle fail(\"a\") { fail(m) => resume() } }",
+                "never の操作は resume できない",
+            ),
+            (
+                "fn main() { let x = handle 1 { ask() => resume(2) } }",
+                "効果 Ask を起こしていない",
+            ),
+            (
+                "fn f() ! Log { let g = fn() { log(\"a\") } }\nfn main() {}",
+                "! Log を書くか",
+            ),
+            (
+                "fn f() ! Log { let g = f }\nfn main() {}",
+                "値として使えない",
+            ),
+            ("fn g() -> never { g() }\nfn main() {}", "効果の操作だけ"),
+            (
+                "fn f() -> int { handle { return 1 } { ask() => resume(2) } }\nfn main() {}",
+                "return を使えない",
+            ),
+        ] {
+            let e = out(&format!("{p}{src}")).unwrap_err();
+            assert!(e.contains(msg), "{src} => {e}");
+        }
+        // 腕の中の操作は外側の handle が処理し、resume しない腕は handle の値になる
+        let src = format!(
+            "{p}fn main() {{\n let x = handle {{ handle {{ fail(\"in\")\n 1 }} {{ fail(m) => {{ log(m)\n 2 }} }} }} {{ log(m) => {{ print(\"log \" + m)\n resume() }} }}\n print(x) }}"
+        );
+        assert_eq!(out(&src).unwrap(), "log in\n2\n");
     }
 
     #[test]
