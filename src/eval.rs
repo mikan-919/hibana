@@ -1,4 +1,5 @@
 use crate::error::Error;
+use crate::lexer::{Span, Tok, Token};
 use crate::meta::{self, Node, Syn};
 use crate::parser::{Block, Expr, Fn, Program, Stmt};
 use std::collections::HashMap;
@@ -160,7 +161,18 @@ impl Interp<'_> {
     fn syn_fn(&mut self, name: &str, vs: &mut Vec<Value>) -> R<Option<Value>> {
         if !matches!(
             name,
-            "len" | "at" | "is_null" | "int_of" | "str_of" | "error" | "Vec"
+            "len"
+                | "at"
+                | "is_null"
+                | "int_of"
+                | "str_of"
+                | "error"
+                | "Vec"
+                | "to_str"
+                | "split"
+                | "starts_with"
+                | "slice"
+                | "ident"
         ) || self.fns.contains_key(name)
         {
             return Ok(None);
@@ -170,6 +182,41 @@ impl Interp<'_> {
             ("error", _) => return error(str_val(a).to_string()),
             ("Vec", _) => return Ok(Some(Value::Ty("Vec".into()))),
             ("len", Value::Arr(xs)) => return Ok(Some(Value::Int(xs.len() as i64))),
+            ("len", Value::Str(s)) => return Ok(Some(Value::Int(s.chars().count() as i64))),
+            ("to_str", Value::Str(_)) => return Ok(Some(a)),
+            ("to_str", v) => return Ok(Some(Value::Str(self.show(v).into()))),
+            ("split", Value::Str(s)) => {
+                let sep = str_val(vs.remove(0));
+                return Ok(Some(Value::Arr(Rc::new(
+                    s.split(&*sep).map(|p| Value::Str(p.into())).collect(),
+                ))));
+            }
+            ("starts_with", Value::Str(s)) => {
+                return Ok(Some(Value::Bool(s.starts_with(&*str_val(vs.remove(0))))));
+            }
+            ("slice", Value::Str(s)) => {
+                let (i, j) = (int(vs.remove(0)), int(vs.remove(0)));
+                let cs: Vec<char> = s.chars().collect();
+                if !(0 <= i && i <= j && j as usize <= cs.len()) {
+                    return error(format!("slice の範囲 {i}..{j} が文字列の外"));
+                }
+                return Ok(Some(Value::Str(
+                    cs[i as usize..j as usize].iter().collect::<String>().into(),
+                )));
+            }
+            ("ident", Value::Str(s)) => {
+                let tok = Token {
+                    tok: Tok::Ident(s.to_string()),
+                    span: Span::default(),
+                    gap_before: true,
+                    nl_before: false,
+                };
+                let node = Node::At(0..1, Box::new(Node::Ident(s.to_string(), Span::default())));
+                return Ok(Some(Value::Syn(Rc::new(Syn {
+                    node,
+                    toks: Rc::new(vec![tok]),
+                }))));
+            }
             _ => {}
         }
         let s = syn(a);
@@ -382,6 +429,9 @@ impl Interp<'_> {
             Expr::Binary(op, l, r) => {
                 let (a, b) = (self.expr(l, env)?, self.expr(r, env)?);
                 match *op {
+                    "+" if matches!(a, Value::Str(_)) => {
+                        Value::Str(format!("{}{}", str_val(a), str_val(b)).into())
+                    }
                     "==" => Value::Bool(a == b),
                     "!=" => Value::Bool(a != b),
                     "<" => Value::Bool(int(a) < int(b)),
@@ -477,6 +527,24 @@ impl Interp<'_> {
                 } else {
                     Value::Unit
                 }
+            }
+            Expr::For(x, it, end, body) => {
+                let items: Vec<Value> = match end {
+                    Some(end) => (int(self.expr(it, env)?)..int(self.expr(end, env)?))
+                        .map(Value::Int)
+                        .collect(),
+                    None => match self.expr(it, env)? {
+                        Value::Arr(xs) => xs.to_vec(),
+                        _ => unreachable!("型検査済み"),
+                    },
+                };
+                for v in items {
+                    env.push(HashMap::from([(x.clone(), v)]));
+                    let r = self.block(body, env);
+                    env.pop();
+                    r?;
+                }
+                Value::Unit
             }
             Expr::While(c, body) => {
                 while boolean(self.expr(c, env)?) {

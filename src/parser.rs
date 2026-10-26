@@ -36,6 +36,8 @@ pub enum Expr {
     Pi(Vec<(String, Expr)>, Box<Expr>),
     // 式の値の関数を呼ぶ
     Apply(Box<Expr>, Vec<Expr>),
+    // for x in 式 { } と for x in a..b { }
+    For(String, Box<Expr>, Option<Box<Expr>>, Block),
     // ソース上の位置。エラー表示に使う
     At(Span, Box<Expr>),
 }
@@ -158,8 +160,23 @@ pub fn parse(src: &str) -> R<Program> {
     let mut generic_fns: HashSet<String> = HashSet::new();
     // 関数・型・構築子・組み込みの名前。マクロの衛生性で名前を付け替えない
     let mut globals: HashSet<String> = [
-        "print", "len", "at", "is_null", "int_of", "str_of", "error", "int", "bool", "str", "syn",
+        "print",
+        "len",
+        "at",
+        "is_null",
+        "int_of",
+        "str_of",
+        "error",
+        "int",
+        "bool",
+        "str",
+        "syn",
         "unit",
+        "ident",
+        "to_str",
+        "split",
+        "starts_with",
+        "slice",
     ]
     .map(String::from)
     .into();
@@ -785,6 +802,18 @@ impl Parser<'_> {
                 let cond = self.expr()?;
                 self.expect("{")?;
                 Expr::While(Box::new(cond), self.block()?)
+            }
+            Tok::Punct("for") => {
+                let x = self.ident()?;
+                self.expect("in")?;
+                let it = self.expr()?;
+                let end = if self.eat("..") {
+                    Some(Box::new(self.expr()?))
+                } else {
+                    None
+                };
+                self.expect("{")?;
+                Expr::For(x, Box::new(it), end, self.block()?)
             }
             Tok::Punct("match") => {
                 let s = self.expr()?;

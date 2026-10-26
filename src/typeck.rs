@@ -100,10 +100,28 @@ const SYN_FNS: &[(&str, &[&str], &str)] = &[
     ("int_of", &["syn"], "int"),
     ("str_of", &["syn"], "str"),
     ("error", &["str"], "never"),
+    // 文字列から識別子のコード片を作る。呼び出し側から見える名前を導入する時に使う
+    ("ident", &["str"], "syn"),
 ];
 
 // どこでも使える組み込み関数
-const BUILTINS: &[&str] = &["print", "len", "Vec", "Type"];
+const BUILTINS: &[&str] = &[
+    "print",
+    "len",
+    "Vec",
+    "Type",
+    "to_str",
+    "split",
+    "starts_with",
+    "slice",
+];
+
+// 文字列の組み込み関数 (名前, 引数, 戻り値)。split の戻り値は Vec<str>
+const STR_FNS: &[(&str, &[&str], &str)] = &[
+    ("split", &["str", "str"], "Vec<str>"),
+    ("starts_with", &["str", "str"], "bool"),
+    ("slice", &["str", "int", "int"], "str"),
+];
 
 fn prim(name: &str) -> V {
     V::Prim(
@@ -330,6 +348,7 @@ impl Norm<'_> {
         use V::*;
         let r = match (op, &a, &b) {
             ("+", Int(x), Int(y)) => x.checked_add(*y).map(Int),
+            ("+", Str(x), Str(y)) => Some(Str(format!("{x}{y}").into())),
             ("-", Int(x), Int(y)) => x.checked_sub(*y).map(Int),
             ("*", Int(x), Int(y)) => x.checked_mul(*y).map(Int),
             ("/", Int(x), Int(y)) => x.checked_div(*y).map(Int),
@@ -362,6 +381,7 @@ impl Norm<'_> {
     fn len(v: V) -> V {
         match &v {
             V::Arr(xs) => V::Int(xs.len() as i64),
+            V::Str(s) => V::Int(s.chars().count() as i64),
             _ => neu(Neu::Call("len".into(), vec![v])),
         }
     }
@@ -614,6 +634,7 @@ impl Norm<'_> {
             },
             Expr::Block(b) => self.block(b, env)?,
             Expr::Assign(..)
+            | Expr::For(..)
             | Expr::While(..)
             | Expr::Return(_)
             | Expr::Field(..)
@@ -807,6 +828,13 @@ fn walk(e: &Expr, f: &mut dyn FnMut(&Expr)) {
             arms.iter().for_each(|a| walk(&a.body, f));
         }
         Expr::Lam(_, _, b) => block(b, f),
+        Expr::For(_, a, b, body) => {
+            walk(a, f);
+            if let Some(b) = b {
+                walk(b, f);
+            }
+            block(body, f);
+        }
         Expr::Pi(bs, r) => {
             bs.iter().for_each(|(_, t)| walk(t, f));
             walk(r, f);
@@ -1451,8 +1479,22 @@ impl Ck<'_> {
                 t
             }
             Expr::Binary(op, l, r) => {
-                let (lt, rt) = (self.expr(l)?, self.expr(r)?);
+                let lt = self.expr(l)?;
+                // a && b の b では a が真、a || b の b では a が偽と分かっている
+                let rt = if matches!(*op, "&&" | "||") {
+                    let lv = self.eval_value(l)?;
+                    self.enter_branch(&lv, *op == "&&");
+                    let rt = self.expr(r);
+                    self.pop();
+                    rt?
+                } else {
+                    self.expr(r)?
+                };
                 match *op {
+                    "+" if base(&lt) == prim("str") => {
+                        want(&prim("str"), &rt, op)?;
+                        prim("str")
+                    }
                     "+" | "-" | "*" | "/" | "%" | "<" | "<=" | ">" | ">=" => {
                         want(&int, &lt, op)?;
                         want(&int, &rt, op)?;
@@ -1520,7 +1562,7 @@ impl Ck<'_> {
                     return Ok(V::Univ(k));
                 }
                 match base(&self.expr(&args[0])?) {
-                    V::VecT(_) => int,
+                    V::VecT(_) | V::Prim("str") => int,
                     t if self.in_macro && same(&prim("syn"), &t) => int,
                     t => return Err(format!("len は Vec に使う（実際は {}）", show(&t)).into()),
                 }
@@ -1545,7 +1587,7 @@ impl Ck<'_> {
                 }
                 prim(ret)
             }
-            Expr::Call(name, args) => {
+            Expr::Call(name, args) if name != "to_str" && !STR_FNS.iter().any(|s| s.0 == name) => {
                 if !self.norm.fns.contains_key(name.as_str()) {
                     return Err(format!("未定義の関数 {name}").into());
                 }
@@ -1583,6 +1625,66 @@ impl Ck<'_> {
                     want(&tb, &eb, "if の分岐")?;
                     if tb == prim("never") { eb } else { tb }
                 }
+            }
+            Expr::Call(name, args) if name == "to_str" => {
+                let [a] = args.as_slice() else {
+                    return Err("to_str の引数は1個".into());
+                };
+                self.expr(a)?;
+                prim("str")
+            }
+            // 残りは文字列の組み込み関数
+            Expr::Call(name, args) => {
+                let (_, params, ret) = STR_FNS.iter().find(|s| s.0 == name).unwrap();
+                if params.len() != args.len() {
+                    return Err(format!("{name} の引数は{}個", params.len()).into());
+                }
+                for (p, a) in params.iter().zip(args) {
+                    self.check(a, &prim(p))?;
+                }
+                if *ret == "Vec<str>" {
+                    V::VecT(Rc::new(prim("str")))
+                } else {
+                    prim(ret)
+                }
+            }
+            Expr::For(x, it, end, body) => {
+                // 繰り返しの中で代入される変数についての事実は、2回目以降には成り立たない
+                let mut names = Vec::new();
+                assigned(e, &mut names);
+                for n in &names {
+                    self.forget(n)?;
+                }
+                self.push();
+                let r = (|| {
+                    match end {
+                        // for i in a..b では a <= i < b
+                        Some(end) => {
+                            self.check(it, &int)?;
+                            self.check(end, &int)?;
+                            let (a, b) = (self.eval_value(it)?, self.eval_value(end)?);
+                            let id = self.norm.fresh();
+                            let v = neu(Neu::Var(id, x.clone()));
+                            self.bind(x, int.clone(), v.clone(), false)?;
+                            self.add_fact(Norm::bin("<=", a, v.clone()));
+                            self.add_fact(Norm::bin("<", v, b));
+                        }
+                        None => {
+                            let V::VecT(el) = base(&self.expr(it)?) else {
+                                return Err("for は Vec か a..b に使う".into());
+                            };
+                            let v = self.norm.opaque();
+                            self.bind(x, (*el).clone(), v, false)?;
+                        }
+                    }
+                    self.block(body)
+                })();
+                self.pop();
+                r?;
+                for n in &names {
+                    self.forget(n)?;
+                }
+                prim("unit")
             }
             Expr::While(c, body) => {
                 want(&boolean, &self.expr(c)?, "while の条件")?;
@@ -2657,7 +2759,39 @@ fn main() {
             ),
             ("Size { w: 3, h: 4 }", "Size { w: 0, h: 4 }", "証明できない"),
             ("print(q.x + q.y)", "print(q.z)", "フィールド z は無い"),
-            ("print(pr.snd)", "print(pr.snd + 1)", "int が必要だが str"),
+            ("print(pr.snd)", "print(pr.snd + 1)", "str が必要だが int"),
+        ] {
+            let e = check(&src.replace(from, to)).unwrap_err();
+            assert!(e.contains(msg), "{to} => {e}");
+        }
+    }
+
+    #[test]
+    fn strings_and_for() {
+        let src = include_str!("../examples/strings.hb");
+        check(src).unwrap();
+        for (from, to, msg) in [
+            (
+                "for i in 0..len(parts) {",
+                "for i in 0..len(parts) + 1 {",
+                "添字の範囲",
+            ),
+            (
+                "len(parts) > 2 && parts[2]",
+                "len(parts) > 2 || parts[2]",
+                "添字の範囲",
+            ),
+            (
+                "\"Hello, \" + name",
+                "\"Hello, \" + 1",
+                "str が必要だが int",
+            ),
+            ("for p in parts {", "for p in 3 {", "Vec か a..b"),
+            (
+                "slice(\"hibana\", 0, 3)",
+                "slice(\"hibana\", \"0\", 3)",
+                "int が必要だが str",
+            ),
         ] {
             let e = check(&src.replace(from, to)).unwrap_err();
             assert!(e.contains(msg), "{to} => {e}");
