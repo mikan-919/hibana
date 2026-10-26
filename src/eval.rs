@@ -1,13 +1,17 @@
+use crate::meta::{self, Node, Syn};
 use crate::parser::{Block, Expr, Fn, Stmt};
 use std::collections::HashMap;
 use std::io::Write;
+use std::rc::Rc;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Int(i64),
     Bool(bool),
     Unit,
-    Str(std::rc::Rc<str>),
+    Str(Rc<str>),
+    // コード片。マクロ本体の中でだけ現れる
+    Syn(Rc<Syn>),
 }
 
 // 通常の値以外で評価を抜ける理由
@@ -36,6 +40,37 @@ pub fn run(fns: &[Fn], out: &mut dyn Write) -> Result<Value, String> {
     }
 }
 
+// マクロ本体を実行する。print はコンパイル時の出力として標準エラーに書く
+pub fn run_macro(b: &Block, vars: Vec<(String, Value)>) -> Result<Value, String> {
+    let mut err = std::io::stderr();
+    let mut it = Interp {
+        fns: HashMap::new(),
+        out: &mut err,
+    };
+    match it.block(b, &mut vec![vars.into_iter().collect()]) {
+        Ok(v) | Err(Flow::Return(v)) => Ok(v),
+        Err(Flow::Error(e)) => Err(e),
+    }
+}
+
+fn syn(v: Value) -> Rc<Syn> {
+    match v {
+        Value::Syn(s) => s,
+        _ => unreachable!("型検査済み"),
+    }
+}
+
+fn str_val(v: Value) -> Rc<str> {
+    match v {
+        Value::Str(s) => s,
+        _ => unreachable!("型検査済み"),
+    }
+}
+
+fn error<T>(msg: String) -> R<T> {
+    Err(Flow::Error(msg))
+}
+
 fn int(v: Value) -> i64 {
     match v {
         Value::Int(n) => n,
@@ -61,6 +96,39 @@ fn arith(op: &str, a: i64, b: i64) -> Option<i64> {
 }
 
 impl Interp<'_> {
+    // マクロ本体用の組み込み関数。該当しなければ None
+    fn syn_fn(&mut self, name: &str, vs: &mut Vec<Value>) -> R<Option<Value>> {
+        if !matches!(
+            name,
+            "len" | "at" | "is_null" | "int_of" | "str_of" | "error"
+        ) || self.fns.contains_key(name)
+        {
+            return Ok(None);
+        }
+        let a = vs.remove(0);
+        if name == "error" {
+            return error(str_val(a).to_string());
+        }
+        let s = syn(a);
+        let n = s.node.strip();
+        Ok(Some(match (name, n) {
+            ("len", Node::List(v)) => Value::Int(v.len() as i64),
+            ("at", Node::List(v)) => {
+                let i = int(vs.remove(0));
+                match usize::try_from(i).ok().and_then(|i| v.get(i)) {
+                    Some(x) => Value::Syn(Rc::new(s.child(x.clone()))),
+                    None => return error(format!("添字 {i} が範囲外")),
+                }
+            }
+            ("is_null", n) => Value::Bool(matches!(n, Node::Null)),
+            ("int_of", Node::Int(i)) => Value::Int(*i),
+            ("str_of", Node::Str(x) | Node::Ident(x, _) | Node::Text(x, _) | Node::Token(x, _)) => {
+                Value::Str(x.as_str().into())
+            }
+            _ => return error(format!("{name} を {n:?} に使えない")),
+        }))
+    }
+
     fn call(&mut self, name: &str, args: Vec<Value>) -> R<Value> {
         let f = self.fns[name];
         let mut env = vec![f.params.iter().map(|(n, _)| n.clone()).zip(args).collect()];
@@ -100,7 +168,36 @@ impl Interp<'_> {
             Expr::Int(n) => Value::Int(*n),
             Expr::Bool(b) => Value::Bool(*b),
             Expr::Str(s) => Value::Str(s.as_str().into()),
-            Expr::Field(..) | Expr::Method(..) | Expr::Macro(..) => unreachable!("型検査で弾く"),
+            Expr::Method(..) | Expr::Macro(..) => unreachable!("型検査で弾く"),
+            Expr::Field(x, name) => {
+                let s = syn(self.expr(x, env)?);
+                match s.node.get(name) {
+                    Some(n) => Value::Syn(Rc::new(s.child(n.clone()))),
+                    None => return error(format!("フィールド {name} が無い")),
+                }
+            }
+            Expr::Quote(q) => {
+                let mut flat: Vec<(String, Value)> = env
+                    .iter()
+                    .flat_map(|s| s.iter().map(|(k, v)| (k.clone(), v.clone())))
+                    .collect();
+                let mut out = Vec::new();
+                let mut ev = |e: &Expr, vars: &[(String, Value)]| {
+                    env.push(vars.iter().cloned().collect());
+                    let r = self.expr(e, env);
+                    env.pop();
+                    r.map_err(|f| match f {
+                        Flow::Error(e) => e,
+                        Flow::Return(_) => "${ } の中で return した".into(),
+                    })
+                };
+                meta::splice(q, &mut flat, &mut out, &mut ev).map_err(Flow::Error)?;
+                let n = out.len();
+                Value::Syn(Rc::new(Syn {
+                    node: Node::At(0..n, Box::new(Node::Raw)),
+                    toks: Rc::new(out),
+                }))
+            }
             Expr::Var(n) => env.iter().rev().find_map(|s| s.get(n)).unwrap().clone(),
             Expr::Unary("-", x) => {
                 let n = int(self.expr(x, env)?);
@@ -139,12 +236,15 @@ impl Interp<'_> {
                 for a in args {
                     vs.push(self.expr(a, env)?);
                 }
-                if name == "print" {
+                if let Some(v) = self.syn_fn(name, &mut vs)? {
+                    v
+                } else if name == "print" {
                     let s = match &vs[0] {
                         Value::Int(n) => n.to_string(),
                         Value::Bool(b) => b.to_string(),
                         Value::Unit => "()".into(),
                         Value::Str(s) => s.to_string(),
+                        Value::Syn(s) => format!("{:?}", s.node.strip()),
                     };
                     writeln!(self.out, "{s}").map_err(|e| Flow::Error(e.to_string()))?;
                     Value::Unit

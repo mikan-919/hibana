@@ -1,5 +1,5 @@
 use crate::lexer::{Tok, Token, lex};
-use crate::meta::{Grammar, Node};
+use crate::meta::{Grammar, Node, Q};
 use std::rc::Rc;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -7,6 +7,8 @@ pub enum Type {
     Int,
     Bool,
     Str,
+    // コード片（マクロ本体の中で使う）
+    Syn,
     Unit,
     // return の型。どの型とも一致する
     Never,
@@ -32,6 +34,8 @@ pub enum Expr {
     Return(Option<Box<Expr>>),
     // 展開コードの無いマクロの照合結果
     Macro(String, Box<Node>),
+    // quote { ... }。評価すると syn 型の値になる
+    Quote(Vec<Q>),
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +99,7 @@ pub fn parse(src: &str) -> R<Vec<Fn>> {
     }
     g.validate()?;
     p.g = Rc::new(g);
+    p.check_macros()?;
     fn_starts
         .into_iter()
         .map(|s| {
@@ -181,6 +186,7 @@ impl Parser<'_> {
             "int" => Ok(Type::Int),
             "bool" => Ok(Type::Bool),
             "str" => Ok(Type::Str),
+            "syn" => Ok(Type::Syn),
             _ => {
                 self.pos -= 1;
                 self.err("不明な型")
@@ -373,6 +379,10 @@ impl Parser<'_> {
                 self.expect("{")?;
                 Expr::While(Box::new(cond), self.block()?)
             }
+            Tok::Punct("quote") => {
+                self.expect("{")?;
+                Expr::Quote(self.quote_body("}")?)
+            }
             Tok::Punct("return") => {
                 if self.at_newline() || matches!(self.peek(), Tok::Punct(";" | "}")) {
                     Expr::Return(None)
@@ -396,6 +406,65 @@ impl Parser<'_> {
             };
         }
         Ok(e)
+    }
+
+    // 閉じ括弧 close までのトークンを読む。開き括弧は読み終えた状態で呼ぶ
+    fn quote_body(&mut self, close: &str) -> R<Vec<Q>> {
+        let open = if close == "}" { "{" } else { "(" };
+        let mut out = Vec::new();
+        let mut depth = 0;
+        loop {
+            let t = self.toks[self.pos].clone();
+            match &t.tok {
+                Tok::Eof => return self.err(&format!("quote の {close:?} が足りない")),
+                Tok::Punct(p) if *p == close && depth == 0 => {
+                    self.pos += 1;
+                    return Ok(out);
+                }
+                Tok::Punct(p) if *p == close => depth -= 1,
+                Tok::Punct(p) if *p == open => depth += 1,
+                Tok::Punct("$") => {
+                    self.pos += 1;
+                    out.push(self.quote_dollar(t)?);
+                    continue;
+                }
+                _ => {}
+            }
+            out.push(Q::Tok(t));
+            self.pos += 1;
+        }
+    }
+
+    // $x.y、${ 式 }、$( ... ) 区切り? *
+    fn quote_dollar(&mut self, dollar: Token) -> R<Q> {
+        if self.eat("{") {
+            let e = self.expr()?;
+            self.expect("}")?;
+            return Ok(Q::Splice(dollar, e));
+        }
+        if self.eat("(") {
+            let inner = self.quote_body(")")?;
+            let sep = if self.peek() == &Tok::Punct("*") {
+                None
+            } else {
+                Some(self.toks[self.pos].clone())
+            };
+            if sep.is_some() {
+                self.pos += 1;
+            }
+            self.expect("*")?;
+            return Ok(Q::Rep(inner, sep));
+        }
+        let (mut path, mut rest) = (vec![self.ident()?], Vec::new());
+        while self.peek() == &Tok::Punct(".") && !self.toks[self.pos].gap_before {
+            let Some(Tok::Ident(s)) = self.toks.get(self.pos + 1).map(|t| &t.tok) else {
+                break;
+            };
+            path.push(s.clone());
+            rest.extend(self.toks[self.pos..self.pos + 2].iter().cloned());
+            self.pos += 2;
+        }
+        Ok(Q::Var { dollar, path, rest })
     }
 
     // "if" は読み終えた状態で呼ぶ

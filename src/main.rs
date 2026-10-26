@@ -38,7 +38,7 @@ mod tests {
     #[test]
     fn macros_example() {
         let src = include_str!("../examples/macros.hb");
-        assert_eq!(out(src).unwrap(), "1\n3\n3\n3\n11\n-3\n10\n20\n");
+        assert_eq!(out(src).unwrap(), "1\n81\n11\n-3\na\n10\nb\n20\n");
     }
 
     #[test]
@@ -61,6 +61,7 @@ mod tests {
             ("fn main() { y; }", "未定義の変数"),
             ("fn main() { 1 + ; }", "式が必要"),
             ("fn main() { let x = 1 print(x) }", "文の区切り"),
+            ("fn main() { let x = quote { 1 } }", "マクロ本体の中でだけ"),
         ] {
             let e = out(src).unwrap_err();
             assert!(e.contains(msg), "{src} => {e}");

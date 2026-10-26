@@ -1,3 +1,4 @@
+use crate::meta::Q;
 use crate::parser::{Block, Expr, Fn, Stmt, Type};
 use std::collections::HashMap;
 
@@ -9,7 +10,19 @@ struct Ck<'a> {
     // (型, 可変か) のスコープ列
     scopes: Vec<HashMap<String, (Type, bool)>>,
     ret: Type,
+    // マクロ本体（コンパイル時に実行するコード）の中か
+    in_macro: bool,
 }
+
+// マクロ本体の中でだけ使える組み込み関数 (名前, 引数, 戻り値)
+const SYN_FNS: &[(&str, &[Type], Type)] = &[
+    ("len", &[Type::Syn], Type::Int),
+    ("at", &[Type::Syn, Type::Int], Type::Syn),
+    ("is_null", &[Type::Syn], Type::Bool),
+    ("int_of", &[Type::Syn], Type::Int),
+    ("str_of", &[Type::Syn], Type::Str),
+    ("error", &[Type::Str], Type::Never),
+];
 
 // Never はどの型とも一致する
 fn same(a: Type, b: Type) -> bool {
@@ -29,9 +42,13 @@ pub fn check(fns: &[Fn]) -> R<()> {
         fns: HashMap::new(),
         scopes: Vec::new(),
         ret: Type::Unit,
+        in_macro: false,
     };
     for f in fns {
-        if f.name == "print" || ck.fns.insert(&f.name, f).is_some() {
+        if f.name == "print"
+            || SYN_FNS.iter().any(|s| s.0 == f.name)
+            || ck.fns.insert(&f.name, f).is_some()
+        {
             return Err(format!("関数 {} が重複している", f.name));
         }
     }
@@ -54,6 +71,23 @@ pub fn check(fns: &[Fn]) -> R<()> {
         }
     }
     Ok(())
+}
+
+// マクロ本体を、束縛名を syn 型の変数として検査する。値は syn 型でなければならない
+pub fn check_macro(b: &Block, params: &[String]) -> R<()> {
+    let mut ck = Ck {
+        fns: HashMap::new(),
+        scopes: vec![
+            params
+                .iter()
+                .map(|n| (n.clone(), (Type::Syn, false)))
+                .collect(),
+        ],
+        ret: Type::Syn,
+        in_macro: true,
+    };
+    let t = ck.block(b)?;
+    want(Type::Syn, t, "マクロ本体の値")
 }
 
 impl Ck<'_> {
@@ -108,7 +142,18 @@ impl Ck<'_> {
             Expr::Int(_) => Int,
             Expr::Bool(_) => Bool,
             Expr::Str(_) => Str,
-            Expr::Field(..) | Expr::Method(..) => return Err("フィールドとメソッドは未対応".into()),
+            Expr::Field(x, _) => {
+                want(Syn, self.expr(x)?, "フィールド参照")?;
+                Syn
+            }
+            Expr::Method(..) => return Err("メソッドは未対応".into()),
+            Expr::Quote(q) => {
+                if !self.in_macro {
+                    return Err("quote はマクロ本体の中でだけ使える".into());
+                }
+                self.check_q(q)?;
+                Syn
+            }
             Expr::Macro(n, _) => return Err(format!("マクロ {n} に展開コードが無い")),
             Expr::Var(n) => self.lookup(n)?.0,
             Expr::Unary(op, x) => {
@@ -136,6 +181,9 @@ impl Ck<'_> {
                     _ => {
                         // == と !=
                         want(lt, rt, op)?;
+                        if lt == Syn {
+                            return Err("syn は比較できない".into());
+                        }
                         Bool
                     }
                 }
@@ -146,6 +194,16 @@ impl Ck<'_> {
                 }
                 self.expr(&args[0])?;
                 Unit
+            }
+            Expr::Call(name, args) if self.in_macro && SYN_FNS.iter().any(|s| s.0 == name) => {
+                let (_, params, ret) = SYN_FNS.iter().find(|s| s.0 == name).unwrap();
+                if params.len() != args.len() {
+                    return Err(format!("{name} の引数は{}個", params.len()));
+                }
+                for (p, a) in params.iter().zip(args) {
+                    want(*p, self.expr(a)?, name)?;
+                }
+                *ret
             }
             Expr::Call(name, args) => {
                 let f = *self
@@ -198,5 +256,26 @@ impl Ck<'_> {
                 Never
             }
         })
+    }
+
+    fn check_q(&mut self, q: &[Q]) -> R<()> {
+        for x in q {
+            match x {
+                Q::Tok(_) => {}
+                Q::Var { path, .. } => {
+                    let t = self.lookup(&path[0])?.0;
+                    if path.len() > 1 {
+                        want(Type::Syn, t, &format!("${}", path.join(".")))?;
+                    }
+                }
+                Q::Splice(_, e) => {
+                    if matches!(self.expr(e)?, Type::Unit | Type::Never) {
+                        return Err("${ } の値を差し込めない".into());
+                    }
+                }
+                Q::Rep(inner, _) => self.check_q(inner)?,
+            }
+        }
+        Ok(())
     }
 }
