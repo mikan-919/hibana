@@ -167,7 +167,10 @@ pub struct Program {
 }
 
 // 組み込みのライブラリ。実行ファイルに埋め込むので、どこからでも use できる
-const LIBS: &[(&str, &str)] = &[("web", include_str!("../lib/web.hb"))];
+const LIBS: &[(&str, &str)] = &[
+    ("web", include_str!("../lib/web.hb")),
+    ("std", include_str!("../lib/std.hb")),
+];
 
 // use した名前の取り込み方
 #[derive(Debug, Clone)]
@@ -363,6 +366,7 @@ pub fn parse(src: &str) -> R<Program> {
         "slice",
         "resume",
         "all",
+        "push",
         "Async",
         "Vec",
         "Type",

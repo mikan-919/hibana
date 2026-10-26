@@ -185,6 +185,12 @@ static V h_op(const char* op, V* args) {
   }
   die("操作を処理する handle が無い"); return U;
 }
+static V h_vpush(V v, V x) {
+  V* items = alloc((v.a->n + 1) * sizeof(V));
+  if (v.a->n) memcpy(items, v.a->items, v.a->n * sizeof(V));
+  items[v.a->n] = x;
+  return mk_arr(v.a->n + 1, items);
+}
 // all。並行の処理が無いので順に実行する
 static V h_all(V fs) {
   V* out = alloc(fs.a->n * sizeof(V));
@@ -476,6 +482,7 @@ impl Gen<'_> {
                 let mut vs = self.args(args);
                 let v = match name.as_str() {
                     "all" => format!("h_all({})", vs[0]),
+                    "push" => format!("h_vpush({}, {})", vs[0], vs[1]),
                     "resume" => format!("mk_res({})", vs.first().map_or("U", |v| v)),
                     n if self.fns.get(n).is_some_and(|f| f.op.is_some()) => {
                         let f = self.fns[n];

@@ -316,8 +316,26 @@ macro pow ("pow" "(" x:Expr "," n:Int ")") {
 | `split(s, sep)` | `(str, str) -> Vec<str>` |
 | `starts_with(s, p)` | `(str, str) -> bool` |
 | `slice(s, i, j)` | `(str, int, int) -> str`。範囲外は実行時エラー |
+| `push(v, x)` | `(Vec<T>, T) -> Vec<T>`。`v` の後ろに `x` を足した新しい `Vec`（`v` は変わらない） |
+| `all(fs)` | `(Vec<() -> T ! Async>) -> Vec<T> ! Async`（3.5 節） |
+| `resume(x)` | `handle` の腕の中で、続きを再開する（3.5 節） |
 
 ## 10. ライブラリ
+
+### std
+
+`use std.*` で、修飾なしに使うのが普通です（`lib/std.hb`、例は `examples/std.hb`）。
+
+| 名前 | 内容 |
+|---|---|
+| `Option<A>` = `None` \| `Some(value)`、`unwrap_or(o, d)` | 値が無いかもしれないこと |
+| `Result<A, E>` = `Ok(value)` \| `Err(error)` | 成功か失敗 |
+| `Map<V>`、`empty()` `get(m, k)` `set(m, k, v)` `keys(m)` | 文字列のキーから値への表。`set` は新しい `Map` を返す。線形探索 |
+| `Json` = `JNull` \| `JBool` \| `JInt` \| `JStr` \| `JArr(Vec<Json>)` \| `JObj(Vec<Field>)`、`Field { key, value }` | JSON の値 |
+| `stringify(j)` `quote_str(s)` | JSON の文字列にする |
+
+- `empty()` の型引数は引数から決まらないので、`let e: Map<int> = empty()` のように期待する型を書きます。
+- JSON を読む（文字列から `Json` にする）関数はまだありません。
 
 ### web
 
@@ -325,10 +343,11 @@ macro pow ("pow" "(" x:Expr "," n:Int ")") {
 
 | 名前 | 内容 |
 |---|---|
-| `Request` | `{ method: str, path: str, body: str }` |
+| `Request` | `{ method: str, path: str, query: str, headers: Vec<Header>, body: str }`。`Header` は `{ name, value }` で、名前は小文字。`request(method, path)` で試しの要求を作る |
+| `header(req, name)` `query(req, name)` | ヘッダーとクエリ（`?a=1&b=2`）の値。無ければ `""` |
 | `Response` | `{ status: int, content_type: str, body: str }` |
-| `ok(body)` `html(body)` `not_found()` | 応答を作る（200 の text/plain・200 の text/html・404） |
-| `routes { メソッド "パス" { 本体 } ... }` | `(Request) -> Response` の関数を作る。パスの `{名前}` はその名前の変数になる。どれにも合わなければ `not_found()`。`routes ! Async, Need<Db> { ... }` と書くと、ルートの本体でその効果を起こせる（`(Request) -> Response ! Async, Need<Db>` の関数になる） |
+| `ok(body)` `html(body)` `json(body)` `status(code, body)` `not_found()` | 応答を作る（200 の text/plain・text/html・application/json、任意の番号の text/plain、404） |
+| `routes { メソッド "パス" { 本体 } ... }` | `(Request) -> Response` の関数を作る。パスの `{名前}` はその名前の変数になる。どれにも合わなければ `not_found()`。ルートの本体では、要求を `req` として使える。`routes ! Async, Need<Db> { ... }` と書くと、ルートの本体でその効果を起こせる（`(Request) -> Response ! Async, Need<Db>` の関数になる） |
 | `serve(port, app)` | Node.js の HTTP サーバーとして `app: (Request) -> Response ! Async` を動かす（`Async`）。`port` が 0 なら空いている番号を使う。起動すると URL を表示する |
 | `worker(app)` | Cloudflare Workers の `fetch` として `app` を動かす。`use web` したプログラムの JS の出力は `export default { fetch }` を持つ ES モジュールになる |
 | `@f(引数) -> x` | `routes` のルートの前に書く注釈。本体の前で `let x = f(引数)` する |
@@ -342,7 +361,7 @@ fn main() {
         GET "/" { web.html(<h1>Welcome</h1>) }
         GET "/user/{id}" { web.ok("user " + id) }
     }
-    let res = app(web.Request { method: "GET", path: "/user/42", body: "" })
+    let res = app(web.request("GET", "/user/42"))
     print(res.body)    // user 42
 }
 ```

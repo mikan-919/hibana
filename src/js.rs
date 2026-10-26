@@ -39,7 +39,9 @@ globalThis.hibana_serve = async (port, app) => {
     try {
       let body = "";
       for await (const c of req) body += c;
-      const r = await app({ method: req.method, path: new URL(req.url, "http://localhost").pathname, body });
+      const u = new URL(req.url, "http://localhost");
+      const headers = Object.entries(req.headers).map(([name, value]) => ({ name, value: String(value) }));
+      const r = await app({ method: req.method, path: u.pathname, query: u.search.slice(1), headers, body });
       res.writeHead(r.status, { "content-type": r.content_type });
       res.end(r.body);
     } catch (e) {
@@ -54,7 +56,9 @@ globalThis.hibana_serve = async (port, app) => {
 let $worker;
 globalThis.hibana_worker = (app) => { $worker = app; };
 const $fetch = async (req) => {
-  const r = await $worker({ method: req.method, path: new URL(req.url).pathname, body: await req.text() });
+  const u = new URL(req.url);
+  const headers = [...req.headers].map(([name, value]) => ({ name, value }));
+  const r = await $worker({ method: req.method, path: u.pathname, query: u.search.slice(1), headers, body: await req.text() });
   return new Response(r.body, { status: r.status, headers: { "content-type": r.content_type } });
 };
 // 処理中の handle。内側ほど後ろ。腕の中の操作は、その handle より外で処理する
@@ -483,6 +487,7 @@ impl Gen<'_> {
                         let k = vs.len() - (f.params.len() - f.implicit);
                         format!("$op({}, [{}])", lit(n), vs[k..].join(", "))
                     }
+                    "push" => format!("[...{}, {}]", vs[0], vs[1]),
                     "all" => wait(true, format!("$all({})", vs[0])),
                     "print" => format!("$print({})", vs[0]),
                     "to_str" => format!("$str({})", vs[0]),

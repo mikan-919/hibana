@@ -282,19 +282,26 @@ mod tests {
         assert_eq!(lines.next().unwrap().unwrap(), "found alice");
         let url = lines.next().unwrap().unwrap();
         let addr = url.trim_start_matches("http://");
-        let get = |path: &str| {
+        let send = |req: String| {
             let mut s = std::net::TcpStream::connect(addr).unwrap();
-            std::io::Write::write_all(
-                &mut s,
-                format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").as_bytes(),
-            )
-            .unwrap();
+            std::io::Write::write_all(&mut s, req.as_bytes()).unwrap();
             let mut r = String::new();
             s.read_to_string(&mut r).unwrap();
             r
         };
         // 確かめる前にサーバーを止める（失敗しても node が残らないように）
-        let rs = [get("/users/bob"), get("/users/zed"), get("/")];
+        let get = |path: &str| {
+            send(format!(
+                "GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+            ))
+        };
+        let rs = [
+            get("/users/bob"),
+            get("/users/zed"),
+            get("/"),
+            get("/users"),
+            send("POST /echo?from=me HTTP/1.1\r\nHost: x\r\nX-Agent: t\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi".into()),
+        ];
         child.kill().unwrap();
         child.wait().unwrap();
         assert!(
@@ -304,6 +311,12 @@ mod tests {
         );
         assert!(rs[1].starts_with("HTTP/1.1 404"), "{}", rs[1]);
         assert!(rs[2].contains("content-type: text/html"), "{}", rs[2]);
+        assert!(rs[3].contains(r#"{"users":["alice","bob"]}"#), "{}", rs[3]);
+        assert!(
+            rs[4].contains(r#"{"from":"me","agent":"t","body":"hi"}"#),
+            "{}",
+            rs[4]
+        );
         // Workers では export default { fetch } を呼ぶ
         let js = tmp.join("worker.mjs");
         std::fs::write(
@@ -345,10 +358,10 @@ mod tests {
         let e = out("use web\nfn main() { print(ok(\"a\").body) }").unwrap_err();
         assert!(e.contains("未定義の関数 ok"), "{e}");
         // use web.* はすべて、use web.{..} は挙げた名前だけ修飾なしで使える
-        let all = "fn main() { let r = Request { method: \"GET\", path: \"/\", body: \"\" }\n print(ok(r.path).status) }";
+        let all = "fn main() { let r = request(\"GET\", \"/\")\n print(ok(r.path).status) }";
         assert_eq!(out(&format!("use web.*\n{all}")).unwrap(), "200\n");
         assert_eq!(
-            out(&format!("use web.{{ok, Request}}\n{all}")).unwrap(),
+            out(&format!("use web.{{ok, request}}\n{all}")).unwrap(),
             "200\n"
         );
         let e = out("use web.{ok}\nfn main() { print(html(\"a\").body) }").unwrap_err();

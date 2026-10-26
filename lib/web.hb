@@ -3,7 +3,9 @@
 //   let app = routes {
 //       GET "/user/{id}" { ok("user " + id) }
 //   }
-//   let res = app(Request { method: "GET", path: "/user/42", body: "" })
+//   let res = app(request("GET", "/user/42"))
+//
+// ルートの本体では、要求を変数 req として使える（req.body、header(req, "x")、query(req, "q")）
 //
 // routes ! Async, Need<Db> { ... } のように、ルートの本体で起こす効果を書ける。
 // serve(port, app) は Node.js の HTTP サーバー、worker(app) は Cloudflare Workers の fetch として app を動かす（JS ターゲットだけ）
@@ -12,7 +14,9 @@
 
 // ---- リクエストと応答 ----
 
-type Request = { method: str, path: str, body: str }
+type Header = { name: str, value: str }
+// query は ? の後ろ（? は含まない）。ヘッダーの名前は小文字
+type Request = { method: str, path: str, query: str, headers: Vec<Header>, body: str }
 type Response = { status: int, content_type: str, body: str }
 
 fn ok(body: str) -> Response {
@@ -21,6 +25,41 @@ fn ok(body: str) -> Response {
 
 fn html(body: str) -> Response {
     Response { status: 200, content_type: "text/html", body: body }
+}
+
+// 本文が JSON の応答
+fn json(body: str) -> Response {
+    Response { status: 200, content_type: "application/json", body: body }
+}
+
+fn status(code: int, body: str) -> Response {
+    Response { status: code, content_type: "text/plain", body: body }
+}
+
+// 試しに呼ぶための要求。ヘッダーと本文は空
+fn request(method: str, path: str) -> Request {
+    let hs: Vec<Header> = []
+    Request { method: method, path: path, query: "", headers: hs, body: "" }
+}
+
+// ヘッダーの値。無ければ ""
+fn header(req: Request, name: str) -> str {
+    let mut v = ""
+    for h in req.headers {
+        if h.name == name { v = h.value }
+    }
+    v
+}
+
+// クエリの値（a=1&b=2 の a）。無ければ ""
+// ponytail: % エスケープは戻さない
+fn query(req: Request, name: str) -> str {
+    let mut v = ""
+    for p in split(req.query, "&") {
+        let kv = split(p, "=")
+        if len(kv) == 2 && kv[0] == name { v = kv[1] }
+    }
+    v
 }
 
 fn not_found() -> Response {
@@ -85,7 +124,8 @@ macro routes ("routes" effs:RouteEffects? "{" rs:Route* "}") -> Expr {
         let r = at(rs, i)
         let segs = split(str_of(r.path), "/")
         let mut cond = quote { req.method == ${str_of(r.method)} && len(parts) == ${len(segs)} }
-        let mut binds = quote { }
+        // 本体から見える req（衛生性で隠れた引数の req を指す）
+        let mut binds = quote { let ${ident("req")} = req; }
         let mut k: int[x -> x >= 0] = 0
         while k < len(segs) {
             let s = segs[k]

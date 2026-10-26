@@ -500,6 +500,14 @@ impl Interp<'_> {
                         out.push(self.apply(f, vec![])?);
                     }
                     Value::Arr(Rc::new(out))
+                } else if name == "push" && !self.fns.contains_key(name.as_str()) {
+                    let x = vs.pop().unwrap();
+                    let Value::Arr(xs) = vs.pop().unwrap() else {
+                        unreachable!("型検査済み")
+                    };
+                    let mut xs = xs.to_vec();
+                    xs.push(x);
+                    Value::Arr(Rc::new(xs))
                 } else if name == "resume" {
                     // 腕の値として返し、perform が操作の戻り値にする
                     Value::Data(Rc::new((

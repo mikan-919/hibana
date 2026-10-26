@@ -27,8 +27,8 @@ fn main() {
         }
     }
     for path in ["/", "/user/42", "/nothing"] {
-        let res = app(web.Request { method: "GET", path: path, body: "" })
+        let res = app(web.request("GET", path))
         print(to_str(res.status) + " " + res.body)
     }
-    print(app(web.Request { method: "POST", path: "/post/bob/7", body: "" }))
+    print(app(web.request("POST", "/post/bob/7")))
 }

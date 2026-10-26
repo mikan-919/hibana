@@ -119,6 +119,7 @@ const BUILTINS: &[&str] = &[
     "slice",
     "resume",
     "all",
+    "push",
     "Async",
 ];
 
@@ -1679,6 +1680,18 @@ impl Ck<'_> {
                 }
             }
             Expr::Handle(body, arms) => return self.handle(body, arms),
+            // push(v, x) は v の後ろに x を足した新しい Vec
+            Expr::Call(name, args) if name == "push" && self.lookup(name).is_none() => {
+                let [v, x] = args.as_slice() else {
+                    return Err("push の引数は2個".into());
+                };
+                let t = base(&self.expr(v)?);
+                let V::VecT(a) = &t else {
+                    return Err(format!("push は Vec に使う（実際は {}）", show(&t)).into());
+                };
+                self.check(x, a)?;
+                t
+            }
             Expr::Call(name, args) if name == "all" && self.lookup(name).is_none() => {
                 let [a] = args.as_slice() else {
                     return Err("all の引数は1個".into());
