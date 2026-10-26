@@ -252,7 +252,20 @@ fn base(v: &V) -> V {
     split(v).0
 }
 
-// 比較を a <= b + k の形に直す。a < b は a <= b - 1、b が定数なら a <= 0 + k
+// 項と定数の和に分ける。定数だけなら項は 0
+fn lin(v: &V) -> (V, i64) {
+    match v {
+        V::Int(c) => (V::Int(0), *c),
+        V::Neu(m) => match &**m {
+            Neu::Bin("+", x, V::Int(c)) => (x.clone(), *c),
+            Neu::Bin("-", x, V::Int(c)) => (x.clone(), c.saturating_neg()),
+            _ => (v.clone(), 0),
+        },
+        _ => (v.clone(), 0),
+    }
+}
+
+// 比較を a <= b + k の形に直す。a < b は a <= b - 1。両辺の定数は k に寄せる（2 <= n は 0 <= n - 2）
 fn le_form(v: &V) -> Option<(V, V, i64)> {
     let V::Neu(n) = v else { return None };
     let (a, b, k): (&V, &V, i64) = match &**n {
@@ -260,16 +273,21 @@ fn le_form(v: &V) -> Option<(V, V, i64)> {
         Neu::Bin("<", a, b) => (a, b, -1),
         _ => return None,
     };
-    let (b, kb) = match b {
-        V::Int(c) => (V::Int(0), *c),
-        V::Neu(m) => match &**m {
-            Neu::Bin("+", x, V::Int(c)) => (x.clone(), *c),
-            Neu::Bin("-", x, V::Int(c)) => (x.clone(), c.saturating_neg()),
-            _ => (b.clone(), 0),
-        },
-        _ => (b.clone(), 0),
-    };
-    Some((a.clone(), b, k.saturating_add(kb)))
+    let ((ta, ca), (tb, cb)) = (lin(a), lin(b));
+    Some((ta, tb, k.saturating_add(cb).saturating_sub(ca)))
+}
+
+// 項 from を to に置き換え、計算できる所を計算し直す
+fn replace(v: &V, from: &V, to: &V) -> V {
+    if v == from {
+        return to.clone();
+    }
+    let V::Neu(n) = v else { return v.clone() };
+    match &**n {
+        Neu::Bin(op, a, b) => Norm::bin(op, replace(a, from, to), replace(b, from, to)),
+        Neu::Un(op, x) => Norm::un(op, replace(x, from, to)),
+        _ => v.clone(),
+    }
 }
 
 // 変数 id が値の中に現れるか
@@ -387,8 +405,13 @@ impl Norm<'_> {
             ("<=", Int(x), Int(y)) => Some(Bool(x <= y)),
             (">", Int(x), Int(y)) => Some(Bool(x > y)),
             (">=", Int(x), Int(y)) => Some(Bool(x >= y)),
-            ("&&", Bool(x), Bool(y)) => Some(Bool(*x && *y)),
-            ("||", Bool(x), Bool(y)) => Some(Bool(*x || *y)),
+            // 片方が分かれば簡約する（true && p は p）
+            ("&&", Bool(true), _) => Some(b.clone()),
+            ("&&", _, Bool(true)) => Some(a.clone()),
+            ("&&", Bool(false), _) | ("&&", _, Bool(false)) => Some(Bool(false)),
+            ("||", Bool(false), _) => Some(b.clone()),
+            ("||", _, Bool(false)) => Some(a.clone()),
+            ("||", Bool(true), _) | ("||", _, Bool(true)) => Some(Bool(true)),
             // 同じ項は値が分からなくても等しい
             ("==", _, _) if a == b => Some(Bool(true)),
             ("!=", _, _) if a == b => Some(Bool(false)),
@@ -1302,10 +1325,31 @@ impl Ck<'_> {
         Ok(())
     }
 
-    // まず事実との字面の照合と a <= b + k の弱めで示し、だめなら Z3 に問い合わせる
+    // まず事実との字面の照合と a <= b + k の弱めで示し、次に x == 定数 の事実で x を置き換えて計算する。
+    // それでもだめなら Z3 に問い合わせる
     fn prove(&mut self, goal: &V) -> bool {
         if self.prove_facts(goal) {
             return true;
+        }
+        let eqs: Vec<(V, V)> = self
+            .scopes
+            .iter()
+            .flat_map(|s| &s.facts)
+            .filter_map(|f| match f {
+                V::Neu(n) => match &**n {
+                    Neu::Bin("==", x, c @ V::Int(_)) | Neu::Bin("==", c @ V::Int(_), x) => {
+                        Some((x.clone(), c.clone()))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        if !eqs.is_empty() {
+            let g = eqs.iter().fold(goal.clone(), |g, (x, c)| replace(&g, x, c));
+            if g == V::Bool(true) || self.prove_facts(&g) {
+                return true;
+            }
         }
         let facts: Vec<V> = self
             .scopes
@@ -1324,6 +1368,13 @@ impl Ck<'_> {
             }
         }
         let g_le = le_form(goal);
+        // a <= a + k は k >= 0 なら成り立つ
+        if let Some((a, b, k)) = &g_le
+            && a == b
+            && *k >= 0
+        {
+            return true;
+        }
         let implies = |f: &V| {
             if f == goal {
                 return true;

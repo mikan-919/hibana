@@ -9,6 +9,18 @@ pub struct Smt {
     solver: Option<Solver>,
 }
 
+thread_local! {
+    static NO_Z3: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub fn without_z3<T>(f: impl FnOnce() -> T) -> T {
+    NO_Z3.set(true);
+    let r = f();
+    NO_Z3.set(false);
+    r
+}
+
 // Z3 の項。int か bool
 enum T {
     I(Int),
@@ -22,6 +34,10 @@ impl Smt {
 
     // facts がすべて真なら goal も真か。答えが出ない時は false
     pub fn prove(&mut self, facts: &[V], goal: &V) -> bool {
+        // HIBANA_NO_Z3 を設定するか without_z3 の中では Z3 を使わない（組み込みの証明器だけで示せるかを確かめる）
+        if NO_Z3.get() || std::env::var_os("HIBANA_NO_Z3").is_some() {
+            return false;
+        }
         let s = self.solver.get_or_insert_with(Solver::new);
         s.push();
         let mut tr = Tr {

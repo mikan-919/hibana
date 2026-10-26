@@ -497,6 +497,23 @@ fn main() {
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 
+    // よくある条件（routes の添字、fib の停止性など）は Z3 なしで証明できる
+    #[test]
+    fn builtin_prover() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+        crate::parser::set_base_dir(&dir);
+        for p in std::fs::read_dir(&dir).unwrap() {
+            let p = p.unwrap().path();
+            let name = p.file_name().unwrap().to_str().unwrap().to_string();
+            // smt.hb は Z3 の例、struct.hb は掛け算の条件を Z3 で示す
+            if !name.ends_with(".hb") || name == "smt.hb" || name == "struct.hb" {
+                continue;
+            }
+            let src = std::fs::read_to_string(&p).unwrap();
+            crate::smt::without_z3(|| super::to_js(&src)).unwrap_or_else(|e| panic!("{name}: {e}"));
+        }
+    }
+
     #[test]
     fn errors() {
         for (src, msg) in [
