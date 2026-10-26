@@ -60,6 +60,21 @@ mod tests {
     }
 
     #[test]
+    fn web_macros() {
+        let src = include_str!("../examples/web.hb");
+        assert_eq!(
+            out(src).unwrap(),
+            "<div class=\"card\">Hello Alice!<Icon name=\"star\"></Icon></div>\nuser 42\nstub(ACCOUNT): post 7 by bob\n404 Not Found\n"
+        );
+        // 閉じタグが合わなければマクロがコンパイルエラーにする
+        let e = out(&src.replace("</Icon>", "</Star>")).unwrap_err();
+        assert!(e.contains("閉じタグ Star が Icon と合わない"), "{e}");
+        // ルートの本体からは、マクロが導入した parts は見えない（衛生性）
+        let e = out(&src.replace("\"user \" + id", "\"user \" + parts[0]")).unwrap_err();
+        assert!(e.contains("未定義の変数 parts"), "{e}");
+    }
+
+    #[test]
     fn hygiene() {
         // マクロの中の tmp は呼び出し側の tmp と別の変数になる
         let src = r#"

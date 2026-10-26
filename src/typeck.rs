@@ -185,6 +185,7 @@ fn show(v: &V) -> String {
             Neu::Var(_, name) => name.clone(),
             Neu::Un(op, x) => format!("{op}{}", show(x)),
             Neu::Bin(op, a, b) => format!("({} {op} {})", show(a), show(b)),
+            Neu::Call(f, args) if f == "[]" => format!("{}[{}]", show(&args[0]), show(&args[1])),
             // 型の別名は大文字で始まる名前とみなして <> で表す
             Neu::Call(f, args) if f.starts_with(|c: char| c.is_ascii_uppercase()) => {
                 format!(
@@ -615,6 +616,8 @@ impl Norm<'_> {
                 (V::Arr(xs), V::Int(i)) if usize::try_from(i).is_ok_and(|i| i < xs.len()) => {
                     xs[i as usize].clone()
                 }
+                // 値の分からない配列や添字は v[i] という項にする（範囲は型検査で証明済み）
+                (v @ V::Neu(_), i) | (v, i @ V::Neu(_)) => neu(Neu::Call("[]".into(), vec![v, i])),
                 _ => return Err(Halt::Stuck),
             },
             Expr::Refine(b, x, p) => {
