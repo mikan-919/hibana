@@ -145,6 +145,8 @@ struct Macro {
     body: Option<Vec<Token>>,
     compiled: OnceCell<Block>,
     first: Firsts,
+    // 定義したモジュール。quote の中のそのモジュールの名前は、修飾した名前にする
+    module: String,
 }
 
 #[derive(Default)]
@@ -284,9 +286,10 @@ fn record(rule: Option<&str>, span: Span, fields: &[(String, bool)], binds: Bind
     }
 }
 
-// 展開中のマクロの (番号, 大域の名前)。quote の中の名前の付け替えに使う
+// 展開中のマクロの (番号, 大域の名前, マクロのモジュール, そのモジュールの名前)。quote の中の名前の付け替えに使う
+type Hygiene = (usize, Rc<HashSet<String>>, String, HashSet<String>);
 thread_local! {
-    static HYGIENE: RefCell<Option<(usize, Rc<HashSet<String>>)>> = const { RefCell::new(None) };
+    static HYGIENE: RefCell<Option<Hygiene>> = const { RefCell::new(None) };
 }
 static NEXT_EXPANSION: AtomicUsize = AtomicUsize::new(1);
 
@@ -294,14 +297,16 @@ static NEXT_EXPANSION: AtomicUsize = AtomicUsize::new(1);
 // 大域の名前と、. の後のフィールド名はそのまま。$x で差し込んだ呼び出し側のトークンはここを通らない
 fn hygienic(t: &Token, prev: Option<&Token>) -> Token {
     HYGIENE.with(|h| match (&*h.borrow(), &t.tok) {
-        (Some((id, globals)), Tok::Ident(n))
-            if !globals.contains(n) && !matches!(prev.map(|p| &p.tok), Some(Tok::Punct("."))) =>
-        {
-            Token {
-                tok: Tok::Ident(format!("{n}#{id}")),
-                ..t.clone()
-            }
-        }
+        _ if matches!(prev.map(|p| &p.tok), Some(Tok::Punct("."))) => t.clone(),
+        // ライブラリのマクロが自分のモジュールの名前を使うなら、使う側でもその名前を指すよう修飾する
+        (Some((_, _, m, names)), Tok::Ident(n)) if !m.is_empty() && names.contains(n) => Token {
+            tok: Tok::Ident(format!("{m}.{n}")),
+            ..t.clone()
+        },
+        (Some((id, globals, _, _)), Tok::Ident(n)) if !globals.contains(n) => Token {
+            tok: Tok::Ident(format!("{n}#{id}")),
+            ..t.clone()
+        },
         _ => t.clone(),
     })
 }
@@ -777,6 +782,7 @@ impl Parser<'_> {
             body,
             first: (vec![], true),
             compiled: OnceCell::new(),
+            module: self.cur_module(),
         });
         Ok(())
     }
@@ -925,6 +931,11 @@ impl Parser<'_> {
             globals: self.globals.clone(),
             structs: self.structs.clone(),
             no_struct: false,
+            module_at: Rc::new(vec![(0, m.module.clone())]),
+            mod_names: self.mod_names.clone(),
+            uses: self.uses.clone(),
+            modules: self.modules.clone(),
+            known: self.known.clone(),
         };
         let wrap = |e: &str| format!("マクロ {}: {e}", m.name);
         let b = p.block().ctx(wrap)?;
@@ -973,7 +984,9 @@ impl Parser<'_> {
         let wrap = |e: &str| format!("マクロ {} の展開: {e}", m.name);
         // 展開ごとに番号を振り、quote に書いた名前をその番号で付け替える
         let id = NEXT_EXPANSION.fetch_add(1, Ordering::Relaxed);
-        let prev = HYGIENE.with(|h| h.replace(Some((id, self.globals.clone()))));
+        let names = self.mod_names.get(&m.module).cloned().unwrap_or_default();
+        let prev =
+            HYGIENE.with(|h| h.replace(Some((id, self.globals.clone(), m.module.clone(), names))));
         let v = eval::run_macro(&block, vars);
         HYGIENE.with(|h| h.replace(prev));
         let v = v.map_err(Error::from).ctx(wrap)?;
@@ -995,6 +1008,11 @@ impl Parser<'_> {
             globals: self.globals.clone(),
             structs: self.structs.clone(),
             no_struct: false,
+            module_at: Rc::new(vec![(0, self.cur_module())]),
+            mod_names: self.mod_names.clone(),
+            uses: self.uses.clone(),
+            modules: self.modules.clone(),
+            known: self.known.clone(),
         };
         if m.stmt {
             // 文の並びとして読み、ブロックにする

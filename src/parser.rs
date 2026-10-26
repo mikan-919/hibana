@@ -78,6 +78,8 @@ pub struct Fn {
     pub body: Block,
     // type Name(引数) = 式 で書いた別名。引数が無ければ () を省いて呼べる
     pub alias: bool,
+    // 定義したモジュール（利用者のファイルは ""）
+    pub module: String,
     // partial fn。停止性を検査しない代わりに、型の計算で展開しない
     pub partial: bool,
     // params の先頭の何個がジェネリック引数か
@@ -101,6 +103,16 @@ pub struct Parser<'s> {
     pub structs: Rc<HashMap<String, Vec<String>>>,
     // 戻り値の型を読んでいる間は、続く { を構造体の値と読まない
     pub no_struct: bool,
+    // トークンの位置から、そこを含むモジュール（利用者のファイルは ""）
+    pub module_at: Rc<Vec<(usize, String)>>,
+    // モジュールごとの名前（修飾しない形）
+    pub mod_names: Rc<HashMap<String, HashSet<String>>>,
+    // モジュールごとの use
+    pub uses: Rc<HashMap<String, Vec<Use>>>,
+    // use されたモジュールの名前。web.ok の web
+    pub modules: Rc<HashSet<String>>,
+    // 修飾した形の大域の名前（関数・型・構築子）
+    pub known: Rc<HashSet<String>>,
 }
 
 use crate::error::Error;
@@ -110,6 +122,7 @@ pub use crate::error::R;
 #[derive(Debug)]
 pub struct Data {
     pub name: String,
+    pub module: String,
     pub params: Vec<(String, Expr)>,
     pub ctors: Vec<Ctor>,
 }
@@ -143,8 +156,51 @@ pub struct Program {
 // 組み込みのライブラリ。実行ファイルに埋め込むので、どこからでも use できる
 const LIBS: &[(&str, &str)] = &[("web", include_str!("../lib/web.hb"))];
 
-// use web（組み込みのライブラリ）と use "path.hb"（ファイル）を、ソースの後ろに足す。同じものは1回だけ読む
-// ponytail: 名前空間が無いので、読み込んだ名前はすべて同じ場所に並ぶ。衝突するなら use web as w のような修飾を入れる
+// use した名前の取り込み方
+#[derive(Debug, Clone)]
+pub enum UseNames {
+    // use web: web.ok のように修飾して使う
+    Qualified,
+    // use web.*: すべて修飾なしで使える
+    All,
+    // use web.{ok, Request}: 挙げた名前だけ修飾なしで使える
+    List(Vec<String>),
+}
+
+#[derive(Debug, Clone)]
+pub struct Use {
+    pub module: String,
+    pub names: UseNames,
+}
+
+// モジュール名 m の中の名前 n の内部での名前。利用者のファイル（m が空）では n のまま
+pub fn qual(m: &str, n: &str) -> String {
+    if m.is_empty() {
+        n.to_string()
+    } else {
+        format!("{m}.{n}")
+    }
+}
+
+// use の対象のモジュール名と本文。組み込みのライブラリか、ファイル（モジュール名は拡張子を除いた名前）
+fn load(name: &str, span: crate::lexer::Span) -> R<(String, String)> {
+    if let Some((_, t)) = LIBS.iter().find(|l| l.0 == name) {
+        return Ok((name.to_string(), t.to_string()));
+    }
+    if name.ends_with(".hb") {
+        let text = std::fs::read_to_string(name)
+            .map_err(|e| Error::from(format!("{name}: {e}")).at(span))?;
+        let stem = std::path::Path::new(name)
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        return Ok((stem, text));
+    }
+    Err(Error::from(format!("ライブラリ {name} が無い")).at(span))
+}
+
+// use したモジュールの本文を、`module 名前` を前に付けてソースの後ろに足す。同じものは1回だけ読む
 pub fn with_uses(src: &str) -> R<String> {
     let mut out = src.to_string();
     let mut done: Vec<String> = Vec::new();
@@ -164,14 +220,9 @@ pub fn with_uses(src: &str) -> R<String> {
             if done.contains(&name) {
                 continue;
             }
-            let text = match LIBS.iter().find(|l| l.0 == name) {
-                Some((_, t)) => t.to_string(),
-                None if name.ends_with(".hb") => std::fs::read_to_string(&name)
-                    .map_err(|e| Error::from(format!("{name}: {e}")).at(w[1].span))?,
-                None => return Err(Error::from(format!("ライブラリ {name} が無い")).at(w[1].span)),
-            };
+            let (module, text) = load(&name, w[1].span)?;
             done.push(name);
-            out += "\n";
+            out += &format!("\nmodule {module}\n");
             out += &text;
             todo.push(text);
         }
@@ -191,13 +242,18 @@ pub fn parse(src: &str) -> R<Program> {
         globals: Rc::default(),
         structs: Rc::default(),
         no_struct: false,
+        module_at: Rc::default(),
+        mod_names: Rc::default(),
+        uses: Rc::default(),
+        modules: Rc::default(),
+        known: Rc::default(),
     };
     let mut g = Grammar::default();
     let mut fn_starts = Vec::new();
     let mut data_starts = Vec::new();
     let mut types: HashSet<String> = ["Vec", "Type"].map(String::from).into();
     let mut generic_fns: HashSet<String> = HashSet::new();
-    // 関数・型・構築子・組み込みの名前。マクロの衛生性で名前を付け替えない
+    // 組み込みと利用者のファイルの名前・モジュール名・パターンのリテラル。マクロの衛生性で名前を付け替えない
     let mut globals: HashSet<String> = [
         "print",
         "len",
@@ -216,15 +272,44 @@ pub fn parse(src: &str) -> R<Program> {
         "split",
         "starts_with",
         "slice",
+        "Vec",
+        "Type",
     ]
     .map(String::from)
     .into();
+    // モジュールごとの名前（修飾しない形）と、修飾した形の大域の名前
+    let mut mod_names: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut known: HashSet<String> = HashSet::new();
+    let mut uses: HashMap<String, Vec<Use>> = HashMap::new();
+    let mut modules: HashSet<String> = HashSet::new();
+    let mut module_at: Vec<(usize, String)> = vec![(0, String::new())];
+    let mut declare = |m: &str, n: &str, globals: &mut HashSet<String>| {
+        mod_names
+            .entry(m.to_string())
+            .or_default()
+            .insert(n.to_string());
+        known.insert(qual(m, n));
+        if m.is_empty() {
+            globals.insert(n.to_string());
+        }
+    };
     // 1周目は syntax と macro だけを読む（宣言より前の関数でもマクロを使えるようにする）
     loop {
+        let cur = module_at.last().unwrap().1.clone();
         match p.peek() {
             Tok::Eof => break,
-            // 読み込みは with_uses で済んでいる（use 名前 を読み飛ばす）
-            Tok::Punct("use") => p.pos += 2,
+            // with_uses が足したモジュールの始まり
+            Tok::Punct("module") => {
+                p.pos += 1;
+                let m = p.ident()?;
+                module_at.push((p.pos, m));
+                p.module_at = Rc::new(module_at.clone());
+            }
+            Tok::Punct("use") => {
+                let u = p.use_decl()?;
+                modules.insert(u.module.clone());
+                uses.entry(cur).or_default().push(u);
+            }
             Tok::Punct("syntax") => p.syntax_decl(&mut g)?,
             Tok::Punct("macro") => p.macro_decl(&mut g)?,
             Tok::Punct("fn" | "partial") => {
@@ -233,21 +318,19 @@ pub fn parse(src: &str) -> R<Program> {
                 } else {
                     1
                 };
-                if let (Some(Tok::Ident(n)), Some(Tok::Punct("<"))) = (
-                    p.toks.get(p.pos + k).map(|t| &t.tok),
-                    p.toks.get(p.pos + k + 1).map(|t| &t.tok),
-                ) {
-                    generic_fns.insert(n.clone());
-                }
-                if let Some(Tok::Ident(n)) = p.toks.get(p.pos + k).map(|t| &t.tok) {
-                    globals.insert(n.clone());
+                if let Some(Tok::Ident(n)) = p.toks.get(p.pos + k).map(|t| t.tok.clone()) {
+                    if p.toks.get(p.pos + k + 1).map(|t| &t.tok) == Some(&Tok::Punct("<")) {
+                        generic_fns.insert(qual(&cur, &n));
+                    }
+                    declare(&cur, &n, &mut globals);
                 }
                 fn_starts.push(p.pos);
                 p.skip_fn()?;
             }
             Tok::Punct("type") => {
-                if let Some(Tok::Ident(n)) = p.toks.get(p.pos + 1).map(|t| &t.tok) {
-                    types.insert(n.clone());
+                if let Some(Tok::Ident(n)) = p.toks.get(p.pos + 1).map(|t| t.tok.clone()) {
+                    types.insert(qual(&cur, &n));
+                    declare(&cur, &n, &mut globals);
                 }
                 data_starts.push(p.pos);
                 let start = p.pos;
@@ -255,7 +338,8 @@ pub fn parse(src: &str) -> R<Program> {
                 // = や | の直後の名前は構築子（別名なら型の式の先頭だが、どちらも大域の名前なので構わない）
                 for w in p.toks[start..p.pos].windows(2) {
                     if let (Tok::Punct("=" | "|"), Tok::Ident(n)) = (&w[0].tok, &w[1].tok) {
-                        globals.insert(n.clone());
+                        let n = n.clone();
+                        declare(&cur, &n, &mut globals);
                     }
                 }
             }
@@ -265,9 +349,14 @@ pub fn parse(src: &str) -> R<Program> {
     p.types = Rc::new(types.clone());
     p.generic_fns = Rc::new(generic_fns);
     g.validate()?;
-    globals.extend(types.iter().cloned());
     globals.extend(g.literals());
+    globals.extend(modules.iter().cloned());
     p.globals = Rc::new(globals);
+    p.mod_names = Rc::new(mod_names);
+    p.known = Rc::new(known);
+    p.uses = Rc::new(uses);
+    p.modules = Rc::new(modules);
+    p.module_at = Rc::new(module_at);
     p.g = Rc::new(g);
     p.check_macros()?;
     let mut prog = Program::default();
@@ -295,6 +384,7 @@ pub fn parse(src: &str) -> R<Program> {
         p.pos = s;
         prog.fns.push(p.func()?);
     }
+    crate::resolve::resolve(&mut prog, &p.uses, &p.known);
     Ok(prog)
 }
 
@@ -367,6 +457,106 @@ impl Parser<'_> {
             _ => self.err("識別子が必要"),
         }
     }
+    // 今のトークンが名前なら、修飾した名前に書き換える。web.ok は1個の名前にし、型名は今のモジュールから見た名前にする
+    // （構造体の値と <> の判定に使う。それ以外の名前は resolve で局所変数と区別してから解決する）
+    fn qualify_here(&mut self) {
+        let Tok::Ident(n) = self.peek().clone() else {
+            return;
+        };
+        let at = |k: usize| self.toks.get(self.pos + k).map(|t| t.tok.clone());
+        if self.modules.contains(&n)
+            && at(1) == Some(Tok::Punct("."))
+            && !self.toks[self.pos + 1].gap_before
+        {
+            if let Some(Tok::Ident(x)) = at(2) {
+                self.pos += 2;
+                // 巻き戻して読み直した時は、既に書き換えてある
+                if !x.contains('.') {
+                    self.toks[self.pos].tok = Tok::Ident(format!("{n}.{x}"));
+                }
+            }
+            return;
+        }
+        let q = self.qualify(&n);
+        if q != n
+            && (self.types.contains(&q)
+                || self.structs.contains_key(&q)
+                || self.generic_fns.contains(&q))
+        {
+            self.toks[self.pos].tok = Tok::Ident(q);
+        }
+    }
+
+    // 今のトークンを含むモジュール
+    pub fn cur_module(&self) -> String {
+        self.module_at
+            .iter()
+            .rev()
+            .find(|(i, _)| *i <= self.pos)
+            .map(|m| m.1.clone())
+            .unwrap_or_default()
+    }
+
+    // 修飾していない名前 n を、今のモジュールから見た大域の名前にする。自分のモジュール、利用者のファイル、
+    // use で取り込んだ名前の順に探す。見つからなければ n のまま
+    pub fn qualify(&self, n: &str) -> String {
+        if n.contains('.') {
+            return n.to_string();
+        }
+        let m = self.cur_module();
+        let mut cands = vec![qual(&m, n)];
+        if m.is_empty() {
+            for u in self.uses.get(&m).into_iter().flatten() {
+                match &u.names {
+                    UseNames::All => cands.push(qual(&u.module, n)),
+                    UseNames::List(ns) if ns.iter().any(|x| x == n) => {
+                        cands.push(qual(&u.module, n))
+                    }
+                    _ => {}
+                }
+            }
+        } else {
+            for u in self.uses.get(&m).into_iter().flatten() {
+                if !matches!(u.names, UseNames::Qualified) {
+                    cands.push(qual(&u.module, n));
+                }
+            }
+        }
+        let known = |c: &String| self.known.contains(c) || self.types.contains(c);
+        cands.into_iter().find(known).unwrap_or(n.to_string())
+    }
+
+    // use 名前、use 名前.*、use 名前.{a, b}、use "file.hb"
+    fn use_decl(&mut self) -> R<Use> {
+        self.expect("use")?;
+        let module = match self.next() {
+            Tok::Ident(n) => n,
+            Tok::Str(f) => std::path::Path::new(&f)
+                .file_stem()
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
+            _ => return self.err("use の後にはライブラリ名かファイル名が必要"),
+        };
+        let names = if self.toks[self.pos].tok == Tok::Punct(".") && !self.at_newline() {
+            self.pos += 1;
+            if self.eat("*") {
+                UseNames::All
+            } else {
+                self.expect("{")?;
+                let mut ns = Vec::new();
+                while !self.eat("}") {
+                    ns.push(self.ident()?);
+                    self.eat(",");
+                }
+                UseNames::List(ns)
+            }
+        } else {
+            UseNames::Qualified
+        };
+        Ok(Use { module, names })
+    }
+
     // fn f() -> T { の T。続く { は本体
     fn ret_ty(&mut self) -> R<Expr> {
         let saved = std::mem::replace(&mut self.no_struct, true);
@@ -401,7 +591,8 @@ impl Parser<'_> {
     fn func(&mut self) -> R<Fn> {
         let partial = self.eat("partial");
         self.expect("fn")?;
-        let name = self.ident()?;
+        let module = self.cur_module();
+        let name = qual(&module, &self.ident()?);
         // ジェネリック引数は引数の先頭に置き、呼び出しで省けるようにする
         let mut params = if self.eat("<") {
             self.type_params()?
@@ -423,6 +614,7 @@ impl Parser<'_> {
             ret,
             body: self.block()?,
             alias: false,
+            module,
             partial,
             implicit,
         })
@@ -465,7 +657,8 @@ impl Parser<'_> {
 
     fn type_decl(&mut self) -> R<TypeDecl> {
         self.expect("type")?;
-        let name = self.ident()?;
+        let module = self.cur_module();
+        let name = qual(&module, &self.ident()?);
         let params = if self.eat("<") {
             self.type_params()?
         } else {
@@ -488,6 +681,7 @@ impl Parser<'_> {
             };
             return Ok(TypeDecl::Data(Data {
                 name,
+                module,
                 params,
                 ctors: vec![ctor],
             }));
@@ -505,6 +699,7 @@ impl Parser<'_> {
                 ret,
                 body,
                 alias: true,
+                module,
                 partial: false,
                 implicit: 0,
             }));
@@ -523,13 +718,18 @@ impl Parser<'_> {
             } else {
                 None
             };
-            ctors.push(Ctor { name, fields, ret });
+            ctors.push(Ctor {
+                name: qual(&module, &name),
+                fields,
+                ret,
+            });
             if !self.eat("|") {
                 break;
             }
         }
         Ok(TypeDecl::Data(Data {
             name,
+            module,
             params,
             ctors,
         }))
@@ -543,7 +743,8 @@ impl Parser<'_> {
                 Tok::Punct("(" | "[" | "{") => depth += 1,
                 Tok::Punct(")" | "]" | "}") => depth -= 1,
                 Tok::Punct("|") if depth == 0 => return true,
-                Tok::Punct("fn" | "partial" | "type" | "syntax" | "macro" | "use") | Tok::Eof
+                Tok::Punct("fn" | "partial" | "type" | "syntax" | "macro" | "use" | "module")
+                | Tok::Eof
                     if depth == 0 =>
                 {
                     return false;
@@ -563,7 +764,7 @@ impl Parser<'_> {
                 Tok::Eof => return,
                 Tok::Punct("(" | "[" | "{") => depth += 1,
                 Tok::Punct(")" | "]" | "}") => depth -= 1,
-                Tok::Punct("fn" | "partial" | "type" | "syntax" | "macro" | "use")
+                Tok::Punct("fn" | "partial" | "type" | "syntax" | "macro" | "use" | "module")
                     if depth == 0 =>
                 {
                     return;
@@ -697,6 +898,7 @@ impl Parser<'_> {
         if let Some(e) = self.try_macros(false)? {
             return Ok(e);
         }
+        self.qualify_here();
         let mut e = match self.next() {
             Tok::Int(n) => Expr::Int(n),
             Tok::Str(s) => Expr::Str(s),

@@ -94,7 +94,7 @@ fn lit(s: &str) -> String {
 
 // 衛生性で付けた # などを JavaScript の名前に使える形にする
 fn ident(prefix: &str, n: &str) -> String {
-    format!("{prefix}{}", n.replace('#', "$"))
+    format!("{prefix}{}", n.replace('#', "$").replace('.', "$_"))
 }
 
 struct Gen<'a> {

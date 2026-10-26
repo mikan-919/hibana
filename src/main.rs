@@ -5,6 +5,7 @@ mod js;
 mod lexer;
 mod meta;
 mod parser;
+mod resolve;
 mod smt;
 mod typeck;
 
@@ -168,16 +169,31 @@ mod tests {
         let src = include_str!("../examples/web.hb");
         assert_eq!(
             out(src).unwrap(),
-            "<div class=\"card\">Hello Alice!<Icon name=\"star\"></Icon></div>\n200 <h1>Welcome</h1>\n200 user 42\n404 Not Found\nResponse { status: 200, content_type: \"text/plain\", body: \"stub(ACCOUNT): post 7 by bob\" }\n"
+            "<div class=\"card\">Hello Alice!<Icon name=\"star\"></Icon></div>\n200 <h1>Welcome</h1>\n200 user 42\n404 Not Found\nweb.Response { status: 200, content_type: \"text/plain\", body: \"stub(ACCOUNT): post 7 by bob\" }\n"
         );
         // 閉じタグが合わなければマクロがコンパイルエラーにする
         let e = out(&src.replace("</Icon>", "</Star>")).unwrap_err();
         assert!(e.contains("閉じタグ Star が Icon と合わない"), "{e}");
         // ルートの本体からは、マクロが導入した parts は見えない（衛生性）
-        let e = out(&src.replace("ok(\"user \" + id)", "ok(\"user \" + parts[0])")).unwrap_err();
+        let e = out(&src.replace("web.ok(\"user \" + id)", "web.ok(\"user \" + parts[0])"))
+            .unwrap_err();
         assert!(e.contains("未定義の変数 parts"), "{e}");
         let e = out("use nothing\nfn main() {}").unwrap_err();
         assert!(e.contains("ライブラリ nothing が無い"), "{e}");
+        // 名前空間: use web は修飾して使い、利用者の同じ名前とは衝突しない
+        let ok = "fn ok(n: int) -> int { n + 1 }\nfn main() { print(ok(1))\n print(web.ok(\"a\").body) }";
+        assert_eq!(out(&format!("use web\n{ok}")).unwrap(), "2\na\n");
+        let e = out("use web\nfn main() { print(ok(\"a\").body) }").unwrap_err();
+        assert!(e.contains("未定義の関数 ok"), "{e}");
+        // use web.* はすべて、use web.{..} は挙げた名前だけ修飾なしで使える
+        let all = "fn main() { let r = Request { method: \"GET\", path: \"/\" }\n print(ok(r.path).status) }";
+        assert_eq!(out(&format!("use web.*\n{all}")).unwrap(), "200\n");
+        assert_eq!(
+            out(&format!("use web.{{ok, Request}}\n{all}")).unwrap(),
+            "200\n"
+        );
+        let e = out("use web.{ok}\nfn main() { print(html(\"a\").body) }").unwrap_err();
+        assert!(e.contains("未定義の関数 html"), "{e}");
     }
 
     #[test]

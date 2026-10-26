@@ -251,7 +251,7 @@ fn str_lit(s: &str) -> String {
 
 // 衛生性で付けた # などを C の名前に使える形にする
 fn ident(prefix: &str, n: &str) -> String {
-    format!("{prefix}{}", n.replace('#', "_h"))
+    format!("{prefix}{}", n.replace('#', "_h").replace('.', "__"))
 }
 
 struct Gen<'a> {
