@@ -67,6 +67,8 @@ pub struct Fn {
     // None は unit
     pub ret: Option<Expr>,
     pub body: Block,
+    // type Name(引数) = 式 で書いた別名。引数が無ければ () を省いて呼べる
+    pub alias: bool,
 }
 
 pub struct Parser<'s> {
@@ -104,6 +106,11 @@ pub struct Arm {
     pub body: Expr,
 }
 
+enum TypeDecl {
+    Data(Data),
+    Alias(Fn),
+}
+
 #[derive(Debug, Default)]
 pub struct Program {
     pub fns: Vec<Fn>,
@@ -131,11 +138,11 @@ pub fn parse(src: &str) -> R<Program> {
                 fn_starts.push(p.pos);
                 p.skip_fn()?;
             }
-            Tok::Punct("data") => {
+            Tok::Punct("type") => {
                 data_starts.push(p.pos);
-                p.skip_fn()?;
+                p.skip_decl();
             }
-            _ => return p.err("fn・data・syntax・macro のいずれかが必要"),
+            _ => return p.err("fn・type・syntax・macro のいずれかが必要"),
         }
     }
     g.validate()?;
@@ -144,7 +151,10 @@ pub fn parse(src: &str) -> R<Program> {
     let mut prog = Program::default();
     for s in data_starts {
         p.pos = s;
-        prog.datas.push(p.data()?);
+        match p.type_decl()? {
+            TypeDecl::Data(d) => prog.datas.push(d),
+            TypeDecl::Alias(f) => prog.fns.push(f),
+        }
     }
     for s in fn_starts {
         p.pos = s;
@@ -261,6 +271,7 @@ impl Parser<'_> {
             params,
             ret,
             body: self.block()?,
+            alias: false,
         })
     }
 
@@ -279,17 +290,34 @@ impl Parser<'_> {
         Ok(params)
     }
 
-    fn data(&mut self) -> R<Data> {
-        self.expect("data")?;
+    // type Name(引数) = | 構築子 | ... は新しい型、type Name(引数) = 式 は別名
+    fn type_decl(&mut self) -> R<TypeDecl> {
+        self.expect("type")?;
         let name = self.ident()?;
         let params = if self.eat("(") {
             self.params()?
         } else {
             vec![]
         };
-        self.expect("{")?;
+        self.expect("=")?;
+        if !self.has_bar() {
+            let e = self.ty()?;
+            let body = Block {
+                stmts: vec![],
+                tail: Some(Box::new(e)),
+            };
+            let ret = Some(Expr::Var("Type".into()));
+            return Ok(TypeDecl::Alias(Fn {
+                name,
+                params,
+                ret,
+                body,
+                alias: true,
+            }));
+        }
+        self.eat("|");
         let mut ctors = Vec::new();
-        while !self.eat("}") {
+        loop {
             let name = self.ident()?;
             let fields = if self.eat("(") {
                 self.params()?
@@ -302,13 +330,48 @@ impl Parser<'_> {
                 None
             };
             ctors.push(Ctor { name, fields, ret });
-            self.eat(",");
+            if !self.eat("|") {
+                break;
+            }
         }
-        Ok(Data {
+        Ok(TypeDecl::Data(Data {
             name,
             params,
             ctors,
-        })
+        }))
+    }
+
+    // 宣言の終わり（次の宣言の始まり）までに、括弧の外の | があるか
+    fn has_bar(&self) -> bool {
+        let mut depth = 0;
+        for t in &self.toks[self.pos..] {
+            match &t.tok {
+                Tok::Punct("(" | "[" | "{") => depth += 1,
+                Tok::Punct(")" | "]" | "}") => depth -= 1,
+                Tok::Punct("|") if depth == 0 => return true,
+                Tok::Punct("fn" | "type" | "syntax" | "macro") | Tok::Eof if depth == 0 => {
+                    return false;
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    // 次の宣言の始まりまで読み飛ばす
+    fn skip_decl(&mut self) {
+        self.pos += 1;
+        let mut depth = 0;
+        loop {
+            match self.peek() {
+                Tok::Eof => return,
+                Tok::Punct("(" | "[" | "{") => depth += 1,
+                Tok::Punct(")" | "]" | "}") => depth -= 1,
+                Tok::Punct("fn" | "type" | "syntax" | "macro") if depth == 0 => return,
+                _ => {}
+            }
+            self.pos += 1;
+        }
     }
 
     fn let_stmt(&mut self) -> R<Stmt> {

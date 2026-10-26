@@ -1,5 +1,5 @@
 // 型は値なので、関数で計算できる
-fn T(b: bool) -> Type { if b { int } else { str } }
+type T(b: bool) = if b { int } else { str }
 
 // 戻り値の型が引数 b の値で決まる。各分岐では b の値が分かっているものとして検査する
 fn f(b: bool) -> T(b) { if b { 42 } else { "forty-two" } }

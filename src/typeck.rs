@@ -349,6 +349,13 @@ impl Norm<'_> {
                 Some(v) => v.clone(),
                 None if n == "Type" => V::Univ(0),
                 None if PRIMS.contains(&n.as_str()) => prim(n),
+                None if self
+                    .fns
+                    .get(n.as_str())
+                    .is_some_and(|f| f.alias && f.params.is_empty()) =>
+                {
+                    self.call(n, vec![]).map_err(Halt::Err)?
+                }
                 None if self.ctors.contains_key(n.as_str())
                     || self.datas.contains_key(n.as_str()) =>
                 {
@@ -974,6 +981,14 @@ impl Ck<'_> {
                 Some(en) => en.ty.clone(),
                 None if n == "Type" => V::Univ(1),
                 None if PRIMS.contains(&n.as_str()) => V::Univ(0),
+                None if self
+                    .norm
+                    .fns
+                    .get(n.as_str())
+                    .is_some_and(|f| f.alias && f.params.is_empty()) =>
+                {
+                    return self.expr(&Expr::Call(n.clone(), vec![]));
+                }
                 None if self.norm.ctors.contains_key(n.as_str()) => {
                     return self.ctor_call(n, &[], None);
                 }
@@ -1661,7 +1676,7 @@ fn main() {
     fn inductive() {
         let src = include_str!("../examples/inductive.hb");
         check(src).unwrap();
-        let extra = "data TBox { MkT(t: Type) }\nfn id(A: Type, x: A) -> A { x }\nfn two() -> Eq(int, 1 + 1, 2) { Refl }\n";
+        let extra = "type TBox = | MkT(t: Type)\nfn id(A: Type, x: A) -> A { x }\nfn two() -> Eq(int, 1 + 1, 2) { Refl }\n";
         check(&format!("{src}{extra}")).unwrap();
         for (from, to, msg) in [
             ("Succ(k) => Succ(add(k, n))", "Succ(k) => n", "が必要だが"),

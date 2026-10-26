@@ -254,6 +254,13 @@ impl Interp<'_> {
             }
             Expr::Var(n) => match env.iter().rev().find_map(|s| s.get(n)) {
                 Some(v) => v.clone(),
+                None if self
+                    .fns
+                    .get(n.as_str())
+                    .is_some_and(|f| f.alias && f.params.is_empty()) =>
+                {
+                    self.call(n, vec![])?
+                }
                 None if self.ctors.contains(n.as_str()) => {
                     Value::Data(Rc::new((n.clone(), vec![])))
                 }
