@@ -1,5 +1,5 @@
 // 依存型の型検査。型は式であり、検査中に評価（正規化）して比べる
-use crate::meta::Q;
+use crate::meta::{Kinds, Q};
 use crate::parser::{Arm, Block, Ctor, Data, Expr, Fn, Program, Stmt};
 use crate::smt::Smt;
 use std::collections::HashMap;
@@ -33,6 +33,8 @@ pub(crate) enum V {
     Lam(Rc<Clo>),
     // トップレベルの関数を値として使ったもの
     FnRef(String),
+    // 種類の分かっているコード片 syn<種類>。種類の分からないものは Prim("syn")
+    Syn(Rc<str>),
     // 値が分からず計算が止まった項
     Neu(Rc<Neu>),
 }
@@ -111,6 +113,14 @@ fn prim(name: &str) -> V {
     )
 }
 
+fn syn_of(kind: &str) -> V {
+    if kind.is_empty() {
+        prim("syn")
+    } else {
+        V::Syn(kind.into())
+    }
+}
+
 fn neu(n: Neu) -> V {
     V::Neu(Rc::new(n))
 }
@@ -149,6 +159,7 @@ fn show(v: &V) -> String {
             show(&p.cod)
         ),
         V::Lam(_) => "<fn>".into(),
+        V::Syn(k) => format!("syn<{k}>"),
         V::FnRef(n) => n.clone(),
         V::Neu(n) => match &**n {
             Neu::Var(_, name) => name.clone(),
@@ -695,6 +706,8 @@ struct Ck<'a> {
     decr: Vec<bool>,
     // match で取り出したフィールドの変数から、取り出し元の変数へ
     sub: HashMap<usize, usize>,
+    // マクロ本体の検査で使う、syntax 規則ごとのフィールドの種類
+    rules: HashMap<String, Kinds>,
 }
 
 // never はどの型とも一致する。細分化された値は元の型として使える
@@ -706,6 +719,8 @@ fn same(a: &V, b: &V) -> bool {
     // Vec は書き換えられないので、要素の細分化を外して使ってよい
     match (a, &base(b)) {
         (V::VecT(x), V::VecT(y)) => same(x, y),
+        // 種類の分からない syn とは互いに使える
+        (V::Prim("syn"), V::Syn(_)) | (V::Syn(_), V::Prim("syn")) => true,
         // 下の階層の型は上の階層の型としても使える
         (V::Univ(i), V::Univ(j)) => j <= i,
         (a, b) => a == b,
@@ -808,6 +823,17 @@ fn occurs(v: &V, name: &str) -> bool {
     }
 }
 
+// quote の中の $x.y の先頭の名前を集める
+fn q_names(q: &[Q], out: &mut Vec<String>) {
+    for x in q {
+        match x {
+            Q::Var { path, .. } => out.push(path[0].clone()),
+            Q::Rep(inner, _) => q_names(inner, out),
+            _ => {}
+        }
+    }
+}
+
 // 呼び出しの関係を辿って from から to に着くか
 fn reaches(graph: &HashMap<&str, Vec<String>>, from: &str, to: &str) -> bool {
     let mut seen = vec![from.to_string()];
@@ -850,6 +876,7 @@ pub fn check(prog: &Program) -> R<()> {
         cur_params: Vec::new(),
         decr: Vec::new(),
         sub: HashMap::new(),
+        rules: HashMap::new(),
     };
     // 関数名・型名・構築子名は同じ名前空間にある
     let mut names: Vec<&str> = Vec::new();
@@ -947,7 +974,7 @@ pub fn check(prog: &Program) -> R<()> {
 }
 
 // マクロ本体を、束縛名を syn 型の変数として検査する。値は syn 型でなければならない
-pub fn check_macro(b: &Block, params: &[String]) -> R<()> {
+pub fn check_macro(b: &Block, params: &Kinds, rules: &HashMap<String, Kinds>) -> R<()> {
     let mut ck = Ck {
         norm: Norm::new(),
         scopes: vec![Scope::default()],
@@ -959,10 +986,11 @@ pub fn check_macro(b: &Block, params: &[String]) -> R<()> {
         cur_params: Vec::new(),
         decr: Vec::new(),
         sub: HashMap::new(),
+        rules: rules.clone(),
     };
-    for p in params {
+    for (p, k) in params {
         let v = ck.norm.opaque();
-        ck.bind(p, prim("syn"), v, false)?;
+        ck.bind(p, syn_of(k), v, false)?;
     }
     let t = ck.block(b)?;
     want(&prim("syn"), &t, "マクロ本体の値")
@@ -1305,9 +1333,10 @@ impl Ck<'_> {
                 }
                 None => return Err(format!("未定義の変数 {n}").into()),
             },
-            Expr::Field(x, _) => {
-                want(&prim("syn"), &self.expr(x)?, "フィールド参照")?;
-                prim("syn")
+            Expr::Field(x, f) => {
+                let t = self.expr(x)?;
+                want(&prim("syn"), &t, "フィールド参照")?;
+                self.syn_field(&base(&t), f)?
             }
             Expr::Method(..) => return Err("メソッドは未対応".into()),
             Expr::Macro(n, _) => return Err(format!("マクロ {n} に展開コードが無い").into()),
@@ -1433,8 +1462,18 @@ impl Ck<'_> {
                 }
                 match base(&self.expr(&args[0])?) {
                     V::VecT(_) => int,
-                    t if self.in_macro && t == prim("syn") => int,
+                    t if self.in_macro && same(&prim("syn"), &t) => int,
                     t => return Err(format!("len は Vec に使う（実際は {}）", show(&t)).into()),
+                }
+            }
+            Expr::Call(name, args) if self.in_macro && name == "at" && args.len() == 2 => {
+                let t = self.expr(&args[0])?;
+                want(&prim("syn"), &t, "at")?;
+                self.check(&args[1], &int)?;
+                match base(&t) {
+                    V::Syn(k) if k.starts_with('[') => syn_of(&k[1..k.len() - 1]),
+                    V::Syn(k) => return Err(format!("at は配列に使う（実際は syn<{k}>）").into()),
+                    _ => prim("syn"),
                 }
             }
             Expr::Call(name, args) if self.in_macro && SYN_FNS.iter().any(|s| s.0 == name) => {
@@ -2267,6 +2306,28 @@ impl Ck<'_> {
         Ok(expected.cloned().or(result).unwrap_or(prim("never")))
     }
 
+    // syn<種類> のフィールド f の型。種類が syntax 規則なら、そのフィールドがあることを確かめる
+    fn syn_field(&self, t: &V, f: &str) -> R<V> {
+        let V::Syn(k) = t else { return Ok(prim("syn")) };
+        if k.starts_with('[') {
+            return Err(format!("syn<{k}> は配列なので、要素は at で取り出す").into());
+        }
+        match self.rules.get(&**k) {
+            Some(fs) => match fs.iter().find(|x| x.0 == f) {
+                Some((_, fk)) => Ok(syn_of(fk)),
+                None => Err(format!(
+                    "syntax {k} にフィールド {f} は無い（あるのは {}）",
+                    fs.iter()
+                        .map(|x| x.0.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+                .into()),
+            },
+            None => Err(format!("syn<{k}> にフィールドは無い").into()),
+        }
+    }
+
     fn check_q(&mut self, q: &[Q]) -> R<()> {
         for x in q {
             match x {
@@ -2279,6 +2340,14 @@ impl Ck<'_> {
                         .clone();
                     if path.len() > 1 {
                         want(&prim("syn"), &t, &format!("${}", path.join(".")))?;
+                        // $( )* の中では配列の要素を指すので、配列の括弧を外して辿る
+                        let mut t = base(&t);
+                        for f in &path[1..] {
+                            if let V::Syn(k) = &t {
+                                let k = k.trim_start_matches('[').trim_end_matches(']').to_string();
+                                t = self.syn_field(&V::Syn(k.into()), f)?;
+                            }
+                        }
                     }
                 }
                 Q::Splice(_, e) => {
@@ -2287,7 +2356,23 @@ impl Ck<'_> {
                         return Err("${ } の値を差し込めない".into());
                     }
                 }
-                Q::Rep(inner, _) => self.check_q(inner)?,
+                Q::Rep(inner, _) => {
+                    // 繰り返しの中では、配列の束縛はその要素を指す
+                    let mut names = Vec::new();
+                    q_names(inner, &mut names);
+                    self.push();
+                    for n in names {
+                        if let Some(V::Syn(k)) = self.lookup(&n).map(|e| base(&e.ty))
+                            && k.starts_with('[')
+                        {
+                            let v = self.norm.opaque();
+                            self.bind(&n, syn_of(&k[1..k.len() - 1]), v, false)?;
+                        }
+                    }
+                    let r = self.check_q(inner);
+                    self.pop();
+                    r?
+                }
             }
         }
         Ok(())

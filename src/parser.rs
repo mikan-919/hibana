@@ -93,6 +93,8 @@ pub struct Parser<'s> {
     pub types: Rc<HashSet<String>>,
     // ジェネリック引数を持つ関数の名前。f<int>(x) の < を型引数として読む
     pub generic_fns: Rc<HashSet<String>>,
+    // 大域の名前（関数・型・構築子・組み込み・パターンのリテラル）
+    pub globals: Rc<HashSet<String>>,
 }
 
 use crate::error::Error;
@@ -141,12 +143,20 @@ pub fn parse(src: &str) -> R<Program> {
         depth: 0,
         types: Rc::default(),
         generic_fns: Rc::default(),
+        globals: Rc::default(),
     };
     let mut g = Grammar::default();
     let mut fn_starts = Vec::new();
     let mut data_starts = Vec::new();
     let mut types: HashSet<String> = ["Vec", "Type"].map(String::from).into();
     let mut generic_fns: HashSet<String> = HashSet::new();
+    // 関数・型・構築子・組み込みの名前。マクロの衛生性で名前を付け替えない
+    let mut globals: HashSet<String> = [
+        "print", "len", "at", "is_null", "int_of", "str_of", "error", "int", "bool", "str", "syn",
+        "unit",
+    ]
+    .map(String::from)
+    .into();
     // 1周目は syntax と macro だけを読む（宣言より前の関数でもマクロを使えるようにする）
     loop {
         match p.peek() {
@@ -165,6 +175,9 @@ pub fn parse(src: &str) -> R<Program> {
                 ) {
                     generic_fns.insert(n.clone());
                 }
+                if let Some(Tok::Ident(n)) = p.toks.get(p.pos + k).map(|t| &t.tok) {
+                    globals.insert(n.clone());
+                }
                 fn_starts.push(p.pos);
                 p.skip_fn()?;
             }
@@ -173,14 +186,24 @@ pub fn parse(src: &str) -> R<Program> {
                     types.insert(n.clone());
                 }
                 data_starts.push(p.pos);
+                let start = p.pos;
                 p.skip_decl();
+                // = や | の直後の名前は構築子（別名なら型の式の先頭だが、どちらも大域の名前なので構わない）
+                for w in p.toks[start..p.pos].windows(2) {
+                    if let (Tok::Punct("=" | "|"), Tok::Ident(n)) = (&w[0].tok, &w[1].tok) {
+                        globals.insert(n.clone());
+                    }
+                }
             }
             _ => return p.err("fn・type・syntax・macro のいずれかが必要"),
         }
     }
-    p.types = Rc::new(types);
+    p.types = Rc::new(types.clone());
     p.generic_fns = Rc::new(generic_fns);
     g.validate()?;
+    globals.extend(types.iter().cloned());
+    globals.extend(g.literals());
+    p.globals = Rc::new(globals);
     p.g = Rc::new(g);
     p.check_macros()?;
     let mut prog = Program::default();

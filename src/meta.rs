@@ -5,9 +5,11 @@ use crate::lexer::{Span, Tok, Token, lex};
 use crate::parser::{Block, Expr, Parser, R, Stmt};
 use crate::typeck;
 use std::cell::OnceCell;
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 // パターン照合の結果。検査用に全フィールドを保持する
 #[allow(dead_code)]
@@ -166,6 +168,64 @@ pub enum Q {
     // $( ... ) 区切り? *
     Rep(Vec<Q>, Option<Token>),
 }
+// 束縛名ごとの種類（マクロ本体での型 syn<種類> に使う）。規則名・Ident・Expr などで、配列は [種類]、分からなければ ""
+pub type Kinds = Vec<(String, String)>;
+
+fn field_kinds(p: &Pattern) -> Kinds {
+    let mut out: Kinds = Vec::new();
+    for t in p.0.iter().flat_map(|s| &s.0) {
+        let rep = !matches!(t.op, Op::One | Op::Opt);
+        let wrap = |k: String| {
+            if rep && !k.is_empty() {
+                format!("[{k}]")
+            } else if rep {
+                String::new()
+            } else {
+                k
+            }
+        };
+        let fs = match (&t.name, &t.atom) {
+            (Some(n), a) => vec![(n.clone(), wrap(atom_kind(a)))],
+            (None, Atom::Group(inner)) => field_kinds(inner)
+                .into_iter()
+                .map(|(n, k)| (n, wrap(k)))
+                .collect(),
+            _ => vec![],
+        };
+        for (n, k) in fs {
+            match out.iter_mut().find(|f| f.0 == n) {
+                // 選択枝ごとに種類が違えば分からないものとする
+                Some(f) if f.1 != k => f.1 = String::new(),
+                Some(_) => {}
+                None => out.push((n, k)),
+            }
+        }
+    }
+    out
+}
+
+fn atom_kind(a: &Atom) -> String {
+    match a {
+        Atom::Lit(_) => "Token".into(),
+        Atom::Builtin(b) => format!("{b:?}"),
+        Atom::Rule(r) => r.clone(),
+        Atom::Text(_) => "Text".into(),
+        // 束縛の無い1項だけのグループ (P % ",") はその項の値になる。それ以外は種類を付けない
+        Atom::Group(p) => match p.0.as_slice() {
+            [s] if s.0.len() == 1 && s.0[0].name.is_none() && field_kinds(p).is_empty() => {
+                let t = &s.0[0];
+                let k = atom_kind(&t.atom);
+                if matches!(t.op, Op::One | Op::Opt) || k.is_empty() {
+                    k
+                } else {
+                    format!("[{k}]")
+                }
+            }
+            _ => String::new(),
+        },
+    }
+}
+
 // パターンが持つ束縛名と、それが繰り返し（配列）かを求める。同じ連接内の重複はエラー
 fn fields(p: &Pattern) -> R<Vec<(String, bool)>> {
     let mut all: Vec<(String, bool)> = Vec::new();
@@ -221,6 +281,45 @@ fn record(rule: Option<&str>, span: Span, fields: &[(String, bool)], binds: Bind
         rule: rule.map(String::from),
         span,
         fields: fs,
+    }
+}
+
+// 展開中のマクロの (番号, 大域の名前)。quote の中の名前の付け替えに使う
+thread_local! {
+    static HYGIENE: RefCell<Option<(usize, Rc<HashSet<String>>)>> = const { RefCell::new(None) };
+}
+static NEXT_EXPANSION: AtomicUsize = AtomicUsize::new(1);
+
+// quote に直接書いた名前を、展開ごとに固有の名前 名前#番号 にする（利用者は # を書けないので衝突しない）。
+// 大域の名前と、. の後のフィールド名はそのまま。$x で差し込んだ呼び出し側のトークンはここを通らない
+fn hygienic(t: &Token, prev: Option<&Token>) -> Token {
+    HYGIENE.with(|h| match (&*h.borrow(), &t.tok) {
+        (Some((id, globals)), Tok::Ident(n))
+            if !globals.contains(n) && !matches!(prev.map(|p| &p.tok), Some(Tok::Punct("."))) =>
+        {
+            Token {
+                tok: Tok::Ident(format!("{n}#{id}")),
+                ..t.clone()
+            }
+        }
+        _ => t.clone(),
+    })
+}
+
+// パターンのリテラルを集める
+fn collect_lits(p: &Pattern, out: &mut Vec<String>) {
+    for t in p.0.iter().flat_map(|s| &s.0) {
+        let sep = match &t.op {
+            Op::Sep(a) => Some(&**a),
+            _ => None,
+        };
+        for a in std::iter::once(&t.atom).chain(sep) {
+            match a {
+                Atom::Lit(s) => out.push(s.clone()),
+                Atom::Group(inner) => collect_lits(inner, out),
+                _ => {}
+            }
+        }
     }
 }
 
@@ -318,7 +417,7 @@ pub fn splice(
 ) -> R<()> {
     for x in q {
         match x {
-            Q::Tok(t) => out.push(t.clone()),
+            Q::Tok(t) => out.push(hygienic(t, out.last())),
             Q::Var { dollar, path, rest } => {
                 let (v, n) = walk(env, path, false)?;
                 emit(&v, dollar, out).map_err(|e| {
@@ -472,6 +571,19 @@ fn emit_syn(s: &Syn, dollar: &Token, out: &mut Vec<Token>) -> R<()> {
 }
 
 impl Grammar {
+    pub fn literals(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for p in self
+            .rules
+            .values()
+            .map(|r| &r.pat)
+            .chain(self.macros.iter().map(|m| &m.pat))
+        {
+            collect_lits(p, &mut out);
+        }
+        out
+    }
+
     pub fn validate(&mut self) -> R<()> {
         let mut refs = Vec::new();
         for r in self.rules.values() {
@@ -813,11 +925,17 @@ impl Parser<'_> {
             depth: self.depth + 1,
             types: self.types.clone(),
             generic_fns: self.generic_fns.clone(),
+            globals: self.globals.clone(),
         };
         let wrap = |e: &str| format!("マクロ {}: {e}", m.name);
         let b = p.block().ctx(wrap)?;
-        let names: Vec<String> = m.fields.iter().map(|f| f.0.clone()).collect();
-        typeck::check_macro(&b, &names).ctx(wrap)?;
+        let rules: HashMap<String, Kinds> = self
+            .g
+            .rules
+            .iter()
+            .map(|(n, r)| (n.clone(), field_kinds(&r.pat)))
+            .collect();
+        typeck::check_macro(&b, &field_kinds(&m.pat), &rules).ctx(wrap)?;
         let _ = m.compiled.set(b.clone());
         Ok(b)
     }
@@ -854,9 +972,12 @@ impl Parser<'_> {
             })
             .collect();
         let wrap = |e: &str| format!("マクロ {} の展開: {e}", m.name);
-        let v = eval::run_macro(&block, vars)
-            .map_err(Error::from)
-            .ctx(wrap)?;
+        // 展開ごとに番号を振り、quote に書いた名前をその番号で付け替える
+        let id = NEXT_EXPANSION.fetch_add(1, Ordering::Relaxed);
+        let prev = HYGIENE.with(|h| h.replace(Some((id, self.globals.clone()))));
+        let v = eval::run_macro(&block, vars);
+        HYGIENE.with(|h| h.replace(prev));
+        let v = v.map_err(Error::from).ctx(wrap)?;
         let end = self.toks[self.pos].clone();
         let mut toks = Vec::new();
         emit(&v, &end, &mut toks).ctx(wrap)?;
@@ -872,6 +993,7 @@ impl Parser<'_> {
             depth: self.depth + 1,
             types: self.types.clone(),
             generic_fns: self.generic_fns.clone(),
+            globals: self.globals.clone(),
         };
         if m.stmt {
             // 文の並びとして読み、ブロックにする
@@ -1268,6 +1390,16 @@ fn main() {
             ("macro m (e:Expr \"!\") {}", "左再帰"),
             ("macro m (\"m\") { quote { $x } }", "未定義の変数 x"),
             ("macro m (\"m\") { 1 }", "マクロ本体の値"),
+            (
+                "syntax P = k:Ident \"=\" v:Expr\nmacro m (\"m\" p:P) -> Stmt { quote { print($p.vv) } }",
+                "フィールド vv は無い",
+            ),
+            (
+                "syntax P = k:Ident \"=\" v:Expr\nmacro m (\"m\" p:P) { p.v.w }",
+                "syn<Expr> にフィールドは無い",
+            ),
+            ("macro m (\"m\" x:Expr) { at(x, 0) }", "at は配列に使う"),
+            ("macro m (\"m\" xs:Expr*) { xs.f }", "要素は at で取り出す"),
             (
                 "macro m (\"m\") { error(\"だめ\") } fn main() { let x = m }",
                 "だめ",

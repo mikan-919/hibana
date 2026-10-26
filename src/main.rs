@@ -60,6 +60,28 @@ mod tests {
     }
 
     #[test]
+    fn hygiene() {
+        // マクロの中の tmp は呼び出し側の tmp と別の変数になる
+        let src = r#"
+macro swap ("swap" a:Ident b:Ident) -> Stmt {
+    quote {
+        let tmp = $a
+        $a = $b
+        $b = tmp
+    }
+}
+fn main() {
+    let mut tmp = 1
+    let mut y = 2
+    swap tmp y
+    print(tmp)
+    print(y)
+}
+"#;
+        assert_eq!(out(src).unwrap(), "2\n1\n");
+    }
+
+    #[test]
     fn example_runs() {
         let src = include_str!("../examples/fib.hb");
         assert_eq!(
