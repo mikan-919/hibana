@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-easy-smt = "0.3.2"
 miette = { version = "7.6.0", features = ["fancy"] }
 thiserror = "2.0.21"
+z3 = "0.21.1"
+
+[features]
+# Z3 をソースからビルドして静的にリンクする（時間がかかる。実行ファイル1つで動く）
+static = ["z3/bundled"]

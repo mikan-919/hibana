@@ -29,6 +29,8 @@
             pkgs.nodejs
           ];
           RUST_SRC_PATH = "${toolchain}/lib/rustlib/src/rust/library";
+          # build.rs が実行ファイルの rpath に入れる（Z3 のライブラリを FFI で使う）
+          Z3_LIB_DIR = "${pkgs.z3.lib}/lib";
         };
       }
     );

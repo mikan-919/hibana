@@ -1,56 +1,46 @@
-// 型検査の証明器で示せなかった条件を、Z3 に問い合わせる
+// 型検査の証明器で示せなかった条件を、Z3 に問い合わせる（z3 クレートで Z3 のライブラリを直接呼ぶ）
 use crate::typeck::{Neu, V};
-use easy_smt::{Context, ContextBuilder, Response, SExpr};
 use std::collections::HashMap;
-use std::io;
+use z3::ast::{Bool, Int};
+use z3::{SatResult, Solver};
 
 // ponytail: int を上限の無い整数として扱う。オーバーフローは実行時に検査している。厳密にするなら BitVec 64 にする
 pub struct Smt {
-    // None は未起動、Some(None) は z3 が無い
-    ctx: Option<Option<Context>>,
+    solver: Option<Solver>,
+}
+
+// Z3 の項。int か bool
+enum T {
+    I(Int),
+    B(Bool),
 }
 
 impl Smt {
     pub fn new() -> Self {
-        Smt { ctx: None }
+        Smt { solver: None }
     }
 
-    // facts がすべて真なら goal も真か。z3 が無い・答えが出ない時は false
+    // facts がすべて真なら goal も真か。答えが出ない時は false
     pub fn prove(&mut self, facts: &[V], goal: &V) -> bool {
-        let ctx = self
-            .ctx
-            .get_or_insert_with(|| ContextBuilder::new().with_z3_defaults().build().ok());
-        let Some(ctx) = ctx else { return false };
-        if ctx.push().is_err() {
-            return false;
+        let s = self.solver.get_or_insert_with(Solver::new);
+        s.push();
+        let mut tr = Tr {
+            atoms: HashMap::new(),
+        };
+        for f in facts {
+            s.assert(tr.bool(f));
         }
-        let r = query(ctx, facts, goal);
-        // pop に失敗しても、次の問い合わせで宣言が重複するだけなので結果は使う
-        let _ = ctx.pop();
-        r.unwrap_or(false)
+        // goal の否定が充足不能なら証明できたことになる
+        s.assert(tr.bool(goal).not());
+        let r = s.check() == SatResult::Unsat;
+        s.pop(1);
+        r
     }
 }
 
-// facts を仮定し、goal の否定が充足不能なら証明できたことになる
-fn query(ctx: &mut Context, facts: &[V], goal: &V) -> io::Result<bool> {
-    let mut tr = Tr {
-        ctx,
-        atoms: HashMap::new(),
-    };
-    for f in facts {
-        let s = tr.term(f, false)?;
-        tr.ctx.assert(s)?;
-    }
-    let g = tr.term(goal, false)?;
-    let not_g = tr.ctx.list(vec![tr.ctx.atom("not"), g]);
-    tr.ctx.assert(not_g)?;
-    Ok(tr.ctx.check()? == Response::Unsat)
-}
-
-// V を SMT-LIB の項に訳す。訳せない項（関数呼び出し・変数など）は、同じ項ごとに1個の定数にする
-struct Tr<'a> {
-    ctx: &'a mut Context,
-    atoms: HashMap<(String, bool), SExpr>,
+// V を Z3 の項に訳す。訳せない項（関数呼び出し・変数など）は、同じ項ごとに1個の定数にする
+struct Tr {
+    atoms: HashMap<(String, bool), T>,
 }
 
 // 項が int か bool か分かれば返す
@@ -67,67 +57,81 @@ fn sort_of(v: &V) -> Option<bool> {
     }
 }
 
-impl Tr<'_> {
-    fn app(&self, f: &str, args: Vec<SExpr>) -> SExpr {
-        let mut l = vec![self.ctx.atom(f)];
-        l.extend(args);
-        self.ctx.list(l)
+impl Tr {
+    fn int(&mut self, v: &V) -> Int {
+        match self.term(v, true) {
+            T::I(i) => i,
+            T::B(_) => unreachable!("int として訳した"),
+        }
+    }
+
+    fn bool(&mut self, v: &V) -> Bool {
+        match self.term(v, false) {
+            T::B(b) => b,
+            T::I(_) => unreachable!("bool として訳した"),
+        }
     }
 
     // int なら Int、そうでなければ Bool の項にする
-    fn term(&mut self, v: &V, int: bool) -> io::Result<SExpr> {
+    fn term(&mut self, v: &V, int: bool) -> T {
         match (v, int) {
-            (V::Int(n), true) => {
-                let a = self.ctx.atom(n.unsigned_abs().to_string());
-                return Ok(if *n < 0 { self.app("-", vec![a]) } else { a });
-            }
-            (V::Bool(b), false) => {
-                return Ok(if *b {
-                    self.ctx.true_()
-                } else {
-                    self.ctx.false_()
-                });
-            }
+            (V::Int(n), true) => return T::I(Int::from_i64(*n)),
+            (V::Bool(b), false) => return T::B(Bool::from_bool(*b)),
             (V::Neu(n), _) => {
                 let r = match (&**n, int) {
-                    (Neu::Un("-", x), true) => Some(("-", vec![self.term(x, true)?])),
-                    (Neu::Un("!", x), false) => Some(("not", vec![self.term(x, false)?])),
+                    (Neu::Un("-", x), true) => Some(T::I(-self.int(x))),
+                    (Neu::Un("!", x), false) => Some(T::B(self.bool(x).not())),
                     (Neu::Bin(op @ ("+" | "-" | "*"), a, b), true) => {
-                        Some((*op, vec![self.term(a, true)?, self.term(b, true)?]))
+                        let xs = [self.int(a), self.int(b)];
+                        Some(T::I(match *op {
+                            "+" => Int::add(&xs),
+                            "-" => Int::sub(&xs),
+                            _ => Int::mul(&xs),
+                        }))
                     }
                     (Neu::Bin(op @ ("<" | "<="), a, b), false) => {
-                        Some((*op, vec![self.term(a, true)?, self.term(b, true)?]))
+                        let (a, b) = (self.int(a), self.int(b));
+                        Some(T::B(if *op == "<" { a.lt(&b) } else { a.le(&b) }))
                     }
                     (Neu::Bin(op @ ("&&" | "||"), a, b), false) => {
-                        let f = if *op == "&&" { "and" } else { "or" };
-                        Some((f, vec![self.term(a, false)?, self.term(b, false)?]))
+                        let xs = [self.bool(a), self.bool(b)];
+                        Some(T::B(if *op == "&&" {
+                            Bool::and(&xs)
+                        } else {
+                            Bool::or(&xs)
+                        }))
                     }
                     (Neu::Bin(op @ ("==" | "!="), a, b), false) => {
-                        let s = sort_of(a).or(sort_of(b)).unwrap_or(true);
-                        let f = if *op == "==" { "=" } else { "distinct" };
-                        Some((f, vec![self.term(a, s)?, self.term(b, s)?]))
+                        let eq = match sort_of(a).or(sort_of(b)).unwrap_or(true) {
+                            true => self.int(a).eq(self.int(b)),
+                            false => self.bool(a).eq(self.bool(b)),
+                        };
+                        Some(T::B(if *op == "==" { eq } else { eq.not() }))
                     }
                     _ => None,
                 };
-                if let Some((f, args)) = r {
-                    return Ok(self.app(f, args));
+                if let Some(t) = r {
+                    return t;
                 }
             }
             _ => {}
         }
         let key = (format!("{v:?}"), int);
         if let Some(a) = self.atoms.get(&key) {
-            return Ok(*a);
+            return match a {
+                T::I(i) => T::I(i.clone()),
+                T::B(b) => T::B(b.clone()),
+            };
         }
-        let sort = if int {
-            self.ctx.int_sort()
+        let name = format!("t{}", self.atoms.len());
+        let (a, b) = if int {
+            let c = Int::new_const(name);
+            (T::I(c.clone()), T::I(c))
         } else {
-            self.ctx.bool_sort()
+            let c = Bool::new_const(name);
+            (T::B(c.clone()), T::B(c))
         };
-        let a = self
-            .ctx
-            .declare_const(format!("t{}", self.atoms.len()), sort)?;
         self.atoms.insert(key, a);
-        Ok(a)
+        b
     }
 }
