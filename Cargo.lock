@@ -3,5 +3,30 @@
 version = 4
 
 [[package]]
+name = "easy-smt"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "515cd4ec35e586919a532a81ed1e9285e2502ed3f49ecb9ba75fa3fe29eb950f"
+dependencies = [
+ "log",
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "hibana"
 version = "0.1.0"
+dependencies = [
+ "easy-smt",
+]
+
+[[package]]
+name = "log"
+version = "0.4.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
+
+[[package]]
+name = "unicode-segmentation"
+version = "1.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"

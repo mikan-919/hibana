@@ -1,6 +1,7 @@
 // 依存型の型検査。型は式であり、検査中に評価（正規化）して比べる
 use crate::meta::Q;
 use crate::parser::{Block, Expr, Fn, Stmt};
+use crate::smt::Smt;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -8,7 +9,7 @@ type R<T> = Result<T, String>;
 
 // 型検査中の値。型そのものも値として表す
 #[derive(Debug, Clone, PartialEq)]
-enum V {
+pub(crate) enum V {
     Int(i64),
     Bool(bool),
     Str(Rc<str>),
@@ -28,7 +29,7 @@ enum V {
 }
 
 #[derive(Debug, PartialEq)]
-enum Neu {
+pub(crate) enum Neu {
     // 引数など、値の分からない変数。番号で区別する。0 は細分化型の条件の変数
     Var(usize, String),
     Un(&'static str, V),
@@ -441,6 +442,7 @@ struct Ck<'a> {
     ret: V,
     // マクロ本体（コンパイル時に実行するコード）の中か
     in_macro: bool,
+    smt: Smt,
 }
 
 // never はどの型とも一致する。細分化された値は元の型として使える
@@ -515,6 +517,7 @@ pub fn check(fns: &[Fn]) -> R<()> {
         scopes: Vec::new(),
         ret: V::Unit,
         in_macro: false,
+        smt: Smt::new(),
     };
     for f in fns {
         let reserved = BUILTINS.contains(&f.name.as_str()) || PRIMS.contains(&f.name.as_str());
@@ -561,6 +564,7 @@ pub fn check_macro(b: &Block, params: &[String]) -> R<()> {
         scopes: vec![Scope::default()],
         ret: prim("syn"),
         in_macro: true,
+        smt: Smt::new(),
     };
     for p in params {
         let v = ck.norm.opaque();
@@ -626,12 +630,24 @@ impl Ck<'_> {
         Ok(())
     }
 
-    // ponytail: 事実との字面の照合と、< から <= への弱めしかしない。算術の推論が要るなら SMT ソルバーを使う
-    fn prove(&self, goal: &V) -> bool {
+    // まず事実との字面の照合と a <= b + k の弱めで示し、だめなら Z3 に問い合わせる
+    fn prove(&mut self, goal: &V) -> bool {
+        if self.prove_facts(goal) {
+            return true;
+        }
+        let facts: Vec<V> = self
+            .scopes
+            .iter()
+            .flat_map(|s| s.facts.iter().cloned())
+            .collect();
+        self.smt.prove(&facts, goal)
+    }
+
+    fn prove_facts(&self, goal: &V) -> bool {
         if let V::Neu(n) = goal {
             match &**n {
-                Neu::Bin("&&", a, b) => return self.prove(a) && self.prove(b),
-                Neu::Bin("||", a, b) => return self.prove(a) || self.prove(b),
+                Neu::Bin("&&", a, b) => return self.prove_facts(a) && self.prove_facts(b),
+                Neu::Bin("||", a, b) => return self.prove_facts(a) || self.prove_facts(b),
                 _ => {}
             }
         }
@@ -1136,6 +1152,7 @@ fn sum(v: NumVec<Pos()>) -> int {
     }
     s
 }
+fn add(x: Pos(), y: Pos()) -> int[r -> r > 1] { x + y }
 fn main() {
     let p: Pos() = 3
     let v: NumVec<int[x -> x > 0]> = [1, 2, p]
@@ -1145,6 +1162,11 @@ fn main() {
         check(src).unwrap();
         for (from, to, msg) in [
             ("let p: Pos() = 3", "let p: Pos() = 0", "証明できない"),
+            (
+                "-> int[r -> r > 1] { x + y }",
+                "-> int[r -> r > 2] { x + y }",
+                "証明できない",
+            ),
             ("[1, 2, p]", "[1, -2, p]", "証明できない"),
             ("+ v[2]", "+ v[3]", "添字の範囲"),
             ("get(v, 1)", "get(v, 0 - 1)", "証明できない"),

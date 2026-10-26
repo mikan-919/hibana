@@ -2,6 +2,7 @@ mod eval;
 mod lexer;
 mod meta;
 mod parser;
+mod smt;
 mod typeck;
 
 use std::io::Write;
