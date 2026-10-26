@@ -53,6 +53,7 @@ mod tests {
             ("fn main() { print(1 / 0); }", "0 で除算"),
             ("fn main() { y; }", "未定義の変数"),
             ("fn main() { 1 + ; }", "式が必要"),
+            ("fn main() { let x = 1 print(x) }", "文の区切り"),
         ] {
             let e = out(src).unwrap_err();
             assert!(e.contains(msg), "{src} => {e}");

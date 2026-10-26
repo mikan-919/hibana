@@ -48,7 +48,10 @@ pub fn check(fns: &[Fn]) -> R<()> {
                 .collect(),
         ];
         let t = ck.block(&f.body)?;
-        want(f.ret, t, &format!("関数 {} の戻り値", f.name))?;
+        // 戻り値が unit の関数は最後の式の値を捨てる
+        if f.ret != Type::Unit {
+            want(f.ret, t, &format!("関数 {} の戻り値", f.name))?;
+        }
     }
     Ok(())
 }
@@ -170,6 +173,10 @@ impl Ck<'_> {
                     Some(x) => self.expr(x)?,
                     None => Unit,
                 };
+                if els.is_none() {
+                    // else が無い if の値は捨てる
+                    return Ok(Unit);
+                }
                 want(tt, et, "if の分岐")?;
                 if tt == Never { et } else { tt }
             }

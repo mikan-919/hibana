@@ -95,6 +95,18 @@ impl Parser {
         let t = &self.toks[self.pos];
         Err(format!("{}行: {msg}（実際は {:?}）", t.line, t.tok))
     }
+    // 次のトークンが前のトークンと別の行にあるか
+    fn at_newline(&self) -> bool {
+        self.pos > 0 && self.toks[self.pos].line > self.toks[self.pos - 1].line
+    }
+    // 文の区切り: ";"、改行、"}" の直前のいずれか
+    fn end_stmt(&mut self) -> R<()> {
+        if self.eat(";") || self.at_newline() || self.peek() == &Tok::Punct("}") {
+            Ok(())
+        } else {
+            self.err("文の区切り（\";\" か改行）が必要")
+        }
+    }
     fn eat(&mut self, p: &str) -> bool {
         if matches!(self.peek(), Tok::Punct(q) if *q == p) {
             self.pos += 1;
@@ -175,7 +187,7 @@ impl Parser {
                 };
                 self.expect("=")?;
                 let init = self.expr()?;
-                self.expect(";")?;
+                self.end_stmt()?;
                 stmts.push(Stmt::Let {
                     name,
                     mutable,
@@ -192,11 +204,9 @@ impl Parser {
                     stmts,
                     tail: Some(Box::new(e)),
                 });
-            } else if matches!(e, Expr::If(..) | Expr::While(..) | Expr::Block(_)) {
-                // Rust と同じく、ブロック形式の式は ";" を省略できる
-                stmts.push(Stmt::Expr(e));
             } else {
-                return self.err("\";\" か \"}\" が必要");
+                self.end_stmt()?;
+                stmts.push(Stmt::Expr(e));
             }
         }
     }
@@ -213,7 +223,8 @@ impl Parser {
     fn binary(&mut self, min: u8) -> R<Expr> {
         let mut lhs = self.unary()?;
         while let Some((prec, op)) = binop(self.peek()) {
-            if prec < min {
+            // 行頭の演算子は前の行に続けない（"-x" を新しい文として読むため）
+            if prec < min || self.at_newline() {
                 break;
             }
             self.pos += 1;
@@ -238,7 +249,7 @@ impl Parser {
             Tok::Punct("true") => Ok(Expr::Bool(true)),
             Tok::Punct("false") => Ok(Expr::Bool(false)),
             Tok::Ident(name) => {
-                if !self.eat("(") {
+                if self.at_newline() || !self.eat("(") {
                     return Ok(Expr::Var(name));
                 }
                 let mut args = Vec::new();
@@ -264,7 +275,7 @@ impl Parser {
                 Ok(Expr::While(Box::new(cond), self.block()?))
             }
             Tok::Punct("return") => {
-                if matches!(self.peek(), Tok::Punct(";" | "}")) {
+                if self.at_newline() || matches!(self.peek(), Tok::Punct(";" | "}")) {
                     Ok(Expr::Return(None))
                 } else {
                     Ok(Expr::Return(Some(Box::new(self.expr()?))))
