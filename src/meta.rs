@@ -735,10 +735,7 @@ impl Parser<'_> {
 
     pub fn macro_decl(&mut self, g: &mut Grammar) -> R<()> {
         self.expect("macro")?;
-        let mut name = self.ident()?;
-        if !self.toks[self.pos].gap_before && self.eat("!") {
-            name.push('!');
-        }
+        let name = self.ident()?;
         if g.macros.iter().any(|m| m.name == name) {
             return self.err_at(format!("マクロ {name} が重複している"));
         }
@@ -1313,11 +1310,11 @@ mod tests {
 syntax Annotation = "@" ~ name:Ident "(" args:ExprList? ")" "->" alias:Ident ;
 syntax ExprList = items:(Expr % ",") ;
 syntax Route = annotations:Annotation* method:Ident path:String body:Block ;
-macro routes! ("routes" ~ "!" "{" rs:Route* "}") -> Expr {
+macro routes ("routes" "{" rs:Route* "}") -> Expr {
     // 展開コード
 }
 fn main() {
-    let r = routes! {
+    let r = routes {
         GET "/user/{id}" {
             return Response.json({ id });
         }
@@ -1344,7 +1341,6 @@ fn main() {
         assert_eq!(list(f(f(a, "args"), "items")).len(), 1);
         assert!(matches!(f(&rs[1], "path"), Node::Str(s) if s == "/post/{user}/{post}"));
 
-        assert!(parse(&ROUTES.replace("routes! {", "routes ! {")).is_err());
         assert!(parse(&ROUTES.replace("@durable", "@ durable")).is_err());
     }
 

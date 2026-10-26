@@ -9,7 +9,7 @@ hibana は、依存型（型の中に値を書ける型）と、構文を拡張�
 - 識別子は英字か `_` で始まり、英数字と `_` が続きます。
 - 整数（`42`、`0xFF`）と文字列（`"a\n"`）を書けます。浮動小数（`3.14`）と文字（`'a'`）は字句解析だけ対応していて、式には書けません（マクロのパターンの `Float` `Char` で使えます）。文字列のエスケープは `\n \t \r \0 \\ \" \'` です。
 - コメントは `// 行末まで` と `/* ... */` です。
-- キーワード: `fn partial let mut if else while for in return match type syntax macro quote true false`
+- キーワード: `fn partial let mut if else while for in return match type syntax macro quote import true false`
 - 各トークンは、直前に空白があるか（`gap_before`）と改行があるか（`nl_before`）を持ちます。前者はマクロのパターンの `~`（空白なしで続く）に、後者は文の区切りに使います。
 
 ## 2. 文の区切り
@@ -18,7 +18,7 @@ hibana は、依存型（型の中に値を書ける型）と、構文を拡張�
 
 ## 3. 宣言
 
-ファイルの最上位には `fn`・`partial fn`・`type`・`syntax`・`macro` を並べます。宣言の順序は自由で、後で宣言した型や関数・マクロも使えます。`main` という引数の無い関数が入口です。
+ファイルの最上位には `import`・`fn`・`partial fn`・`type`・`syntax`・`macro` を並べます。宣言の順序は自由で、後で宣言した型や関数・マクロも使えます。`main` という引数の無い関数が入口です。
 
 ### 3.1 関数
 
@@ -32,7 +32,7 @@ partial fn spin(n: int) -> int { spin(n) }
 - 本体の最後の式が戻り値です。途中で返す時は `return` を使います。
 - `<A, B>` はジェネリック引数です（`<A>` は `<A: Type>` の省略形）。呼ぶ側では省くことができ、引数の型と期待する型から推論します。明示する時は `map<int, int>(f, l)` と書きます。型以外の値もジェネリック引数にできます（`<n: Nat>`）。
 - 関数は型を返せません。型の計算は `type` の別名で書きます。型を引数に取ることはできます（`fn id(A: Type, x: A) -> A`）。
-- `fn` は停止することを示す必要があります（7.3 節）。`partial fn` は停止性を検査しない代わりに、型の計算では展開されず、証明の型（添字付きの型族）を返せません。
+- `fn` は停止することを示す必要があります（7.2 節）。`partial fn` は停止性を検査しない代わりに、型の計算では展開されず、証明の型（添字付きの型族）を返せません。
 
 ### 3.2 型
 
@@ -60,6 +60,15 @@ type T<b: bool> = if b { int } else { str }
 - 構造体の値は `Point { x: 1, y: 2 }` で作り（フィールドの順序は自由）、`p.x` で取り出します。構造体は、構築子を1つ持つ型として扱います。
 - 自分自身を関数型の引数の側に持つ定義（`type Bad = | MkBad(f: (Bad) -> int)`）は禁止です（正値性の検査）。
 - 名前の決まり: 組み込みのプリミティブ型は小文字（`int bool str syn unit`）、それ以外の型は大文字で始めます。
+
+### 3.3 読み込み
+
+```
+import web          // 組み込みのライブラリ（lib/ 以下。実行ファイルに埋め込まれている）
+import "util.hb"    // ファイル（今のディレクトリからの経路）
+```
+
+読み込んだファイルの宣言は、読み込んだ側の宣言と同じ場所に並びます（名前空間はまだ無い）。同じものは1回だけ読みます。
 
 ## 4. 式
 
@@ -147,7 +156,7 @@ fn add_zero(n: Nat) -> Eq<Nat, add(n, Zero), n> {
 
 ```
 syntax Route = annotations:Annotation* method:Ident path:String body:Block
-macro routes! ("routes" ~ "!" "{" rs:Route* "}") -> Expr { ...本体... }
+macro routes ("routes" "{" rs:Route* "}") -> Expr { ...本体... }
 ```
 
 パターンの書き方:
@@ -184,7 +193,7 @@ macro pow ("pow" "(" x:Expr "," n:Int ")") {
 ```
 
 - `quote { ... }` はコード片を作ります。中では `$x`（変数の値）、`$x.f`（フィールド）、`${式}`（式の値）、`$( ... ) 区切り? *`（配列を繰り返す）が使えます。差し込める値は `syn`・`int`・`str`・`bool` です。
-- パターンで束縛した式は、括弧で囲んで差し込みます（`-sum!(1 + 2)` は `-(1 + 2)`）。`quote` で作った断片は囲みません。
+- パターンで束縛した式は、括弧で囲んで差し込みます（`-sum(1 + 2)` は `-(1 + 2)`）。`quote` で作った断片は囲みません。
 - 束縛の型は、パターンから決まる `syn<種類>` です（`p:Pair` は `syn<Pair>`、`ps:(Pair % ",")` は `syn<[Pair]>`、`x:Expr` は `syn<Expr>`）。存在しないフィールドの参照や、配列でない値への `at` は、マクロ定義の時点で型エラーになります。
 - 組み込み関数: `len(x)`、`at(xs, i)`、`is_null(x)`、`int_of(x)`、`str_of(x)`、`ident(s)`（文字列から識別子を作る）、`error(msg)`（コンパイルエラーにする）。文字列の関数（9 節）も使えます。マクロ本体の `print` は標準エラーに出ます。
 - 本体から普通の `fn` は呼べません。マクロは関数の構文解析より前に実行するためです。
@@ -204,7 +213,37 @@ macro pow ("pow" "(" x:Expr "," n:Int ")") {
 | `starts_with(s, p)` | `(str, str) -> bool` |
 | `slice(s, i, j)` | `(str, int, int) -> str`。範囲外は実行時エラー |
 
-## 10. 実行方式
+## 10. ライブラリ
+
+### web
+
+`import web` で、Web アプリのための型・関数・マクロを使えます（`lib/web.hb`、例は `examples/web.hb`）。
+
+| 名前 | 内容 |
+|---|---|
+| `Request` | `{ method: str, path: str }` |
+| `Response` | `{ status: int, content_type: str, body: str }` |
+| `ok(body)` `html(body)` `not_found()` | 応答を作る（200 の text/plain・200 の text/html・404） |
+| `routes { メソッド "パス" { 本体 } ... }` | `(Request) -> Response` の関数を作る。パスの `{名前}` はその名前の変数になる。どれにも合わなければ `not_found()` |
+| `@f(引数) -> x` | `routes` のルートの前に書く注釈。本体の前で `let x = f(引数)` する |
+| JSX | `<div class={c}>Hello {name}</div>` を HTML の文字列にする。閉じタグが合わなければコンパイルエラー |
+
+```
+import web
+
+fn main() {
+    let app = routes {
+        GET "/" { html(<h1>Welcome</h1>) }
+        GET "/user/{id}" { ok("user " + id) }
+    }
+    let res = app(Request { method: "GET", path: "/user/42" })
+    print(res.body)    // user 42
+}
+```
+
+`routes` の展開は、ルートの本体から見えない変数（`req` `parts`）を衛生性で隠しています。パスの区切りの位置 `parts[k]` は、条件の `len(parts) == N &&` から範囲を証明しています。
+
+## 11. 実行方式
 
 目標は Web とネイティブの両方です。型検査を通ったプログラムから型を消し、出力先ごとのバックエンドでコードを作ります。依存型の型と証明は実行に影響しないので、どのバックエンドも普通の値と関数だけを扱います。
 
@@ -231,8 +270,9 @@ macro pow ("pow" "(" x:Expr "," n:Int ")") {
 
 構文木を直接評価する評価器は、型の計算（依存型の正規化）とマクロ本体の実行に必要なので残します。
 
-## 11. 既知の制約
+## 12. 既知の制約
 
+- `import` に名前空間が無いので、ライブラリと同じ名前を定義すると衝突します。
 - ネイティブのバックエンドはメモリを解放しません。長く動くプログラムには GC（Boehm GC など）を入れる必要があります。
 - JavaScript とネイティブの実行時エラーには、ソース上の位置が出ません。
 - 型エラー以外の実行時エラー（0 除算・オーバーフロー・`slice` の範囲外）には位置が出ません。

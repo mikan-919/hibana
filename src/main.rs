@@ -11,21 +11,21 @@ mod typeck;
 use std::io::Write;
 
 fn run(src: &str, out: &mut dyn Write) -> error::R<eval::Value> {
-    let prog = parser::parse(src)?;
+    let prog = parser::parse(&parser::with_imports(src)?)?;
     typeck::check(&prog)?;
     Ok(eval::run(&prog, out)?)
 }
 
 // JavaScript に変換する
 fn to_js(src: &str) -> error::R<String> {
-    let prog = parser::parse(src)?;
+    let prog = parser::parse(&parser::with_imports(src)?)?;
     typeck::check(&prog)?;
     Ok(js::emit(&prog))
 }
 
 // C に変換する
 fn to_c(src: &str) -> error::R<String> {
-    let prog = parser::parse(src)?;
+    let prog = parser::parse(&parser::with_imports(src)?)?;
     typeck::check(&prog)?;
     Ok(c::emit(&prog))
 }
@@ -83,7 +83,8 @@ fn main() {
     if let Err(e) = r {
         let report = Report {
             msg: e.msg,
-            src: miette::NamedSource::new(&path, src.clone()),
+            // 読み込んだライブラリの中のエラーも指せるよう、ライブラリを足したソースを渡す
+            src: miette::NamedSource::new(&path, parser::with_imports(&src).unwrap_or(src.clone())),
             span: e.span.map(Into::into),
         };
         eprintln!("{:?}", miette::Report::new(report));
@@ -167,14 +168,16 @@ mod tests {
         let src = include_str!("../examples/web.hb");
         assert_eq!(
             out(src).unwrap(),
-            "<div class=\"card\">Hello Alice!<Icon name=\"star\"></Icon></div>\nuser 42\nstub(ACCOUNT): post 7 by bob\n404 Not Found\n"
+            "<div class=\"card\">Hello Alice!<Icon name=\"star\"></Icon></div>\n200 <h1>Welcome</h1>\n200 user 42\n404 Not Found\nResponse { status: 200, content_type: \"text/plain\", body: \"stub(ACCOUNT): post 7 by bob\" }\n"
         );
         // 閉じタグが合わなければマクロがコンパイルエラーにする
         let e = out(&src.replace("</Icon>", "</Star>")).unwrap_err();
         assert!(e.contains("閉じタグ Star が Icon と合わない"), "{e}");
         // ルートの本体からは、マクロが導入した parts は見えない（衛生性）
-        let e = out(&src.replace("\"user \" + id", "\"user \" + parts[0]")).unwrap_err();
+        let e = out(&src.replace("ok(\"user \" + id)", "ok(\"user \" + parts[0])")).unwrap_err();
         assert!(e.contains("未定義の変数 parts"), "{e}");
+        let e = out("import nothing\nfn main() {}").unwrap_err();
+        assert!(e.contains("ライブラリ nothing が無い"), "{e}");
     }
 
     #[test]

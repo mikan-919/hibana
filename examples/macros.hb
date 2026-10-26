@@ -19,7 +19,7 @@ macro pow ("pow" "(" x:Expr "," n:Int ")") {
 }
 
 // 配列の束縛は len と at で辿れる
-macro sum! ("sum" ~ "!" "(" xs:(Expr % ",") ")") {
+macro sum ("sum" "(" xs:(Expr % ",") ")") {
     let mut acc = quote { 0 }
     let mut i = 0
     while i < len(xs) {
@@ -40,8 +40,8 @@ fn main() {
     unless false { print(1) }
     unless true { print(2) }
     print(pow(3, 4))
-    print(sum!(1, 2 * 3, 4))
+    print(sum(1, 2 * 3, 4))
     // 束縛した式は括弧で囲んで差し込むので -(1 + 2) になる
-    print(-sum!(1 + 2))
+    print(-sum(1 + 2))
     show { a = 10, b = 20 }
 }
