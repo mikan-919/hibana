@@ -614,7 +614,8 @@ impl Parser<'_> {
         }
         self.expect("=")?;
         let pat = self.pattern()?;
-        self.expect(";")?;
+        // 宣言の終わりは次の宣言の始まりで分かるので、";" は省ける
+        self.eat(";");
         let fields = fields(&pat).ctx(|e| format!("規則 {name}: {e}"))?;
         g.rules.insert(name, Rule { pat, fields });
         Ok(())
@@ -1223,7 +1224,7 @@ fn main() {
     fn jsx() {
         let n = macro_node(
             r#"
-syntax JsxAttr = name:Ident "=" "{" value:Expr "}" ;
+syntax JsxAttr = name:Ident "=" "{" value:Expr "}"
 syntax JsxElement =
     "<" ~ tag:Ident attrs:JsxAttr* ">"
     children:JsxChild*
@@ -1231,7 +1232,7 @@ syntax JsxElement =
 syntax JsxChild =
     | el:JsxElement
     | "{" expr:Expr "}"
-    | text:Text ;
+    | text:Text
 macro jsx (el:JsxElement) -> Expr {}
 fn main() {
     let v = <Button onClick={handleClick}>

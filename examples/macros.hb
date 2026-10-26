@@ -30,7 +30,7 @@ macro sum! ("sum" ~ "!" "(" xs:(Expr % ",") ")") {
 }
 
 // syntax 規則のフィールドは .名前 で参照する。$( ... )* でも繰り返せる
-syntax Pair = key:Ident "=" value:Expr ;
+syntax Pair = key:Ident "=" value:Expr
 
 macro show ("show" "{" ps:(Pair % ",") "}") -> Stmt {
     quote { $( print(${str_of(ps.key)}); print($ps.value); )* }
