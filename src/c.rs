@@ -185,6 +185,12 @@ static V h_op(const char* op, V* args) {
   }
   die("操作を処理する handle が無い"); return U;
 }
+// all。並行の処理が無いので順に実行する
+static V h_all(V fs) {
+  V* out = alloc(fs.a->n * sizeof(V));
+  for (int64_t k = 0; k < fs.a->n; k++) out[k] = h_call(fs.a->items[k], NULL);
+  return mk_arr(fs.a->n, out);
+}
 static V h_field(V x, const char* f) {
   for (int k = 0; k < x.d->n; k++) if (strcmp(CTOR_FIELDS[x.d->ctor][k], f) == 0) return x.d->f[k];
   die("フィールドが無い"); return U;
@@ -455,6 +461,7 @@ impl Gen<'_> {
                 }
                 let mut vs = self.args(args);
                 let v = match name.as_str() {
+                    "all" => format!("h_all({})", vs[0]),
                     "resume" => format!("mk_res({})", vs.first().map_or("U", |v| v)),
                     n if self.fns.get(n).is_some_and(|f| f.op.is_some()) => {
                         let f = self.fns[n];

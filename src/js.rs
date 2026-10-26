@@ -33,7 +33,19 @@ function $show(v) {
   return v.$f.length === 0 ? v.$c : v.$c + "(" + v.$f.map($show).join(", ") + ")";
 }
 // 処理中の handle。内側ほど後ろ。腕の中の操作は、その handle より外で処理する
+// 並べ替えずに作り直す（並行に動く処理と共有するため）。await の後は $k で、待つ前の並びに戻す
 let $h = [];
+function $k(h, v) { $h = h; return v; }
+// all。すべて終わるのを待ち、失敗したものがあれば最初の失敗を投げる
+// ponytail: 失敗しても残りを中断しない（終わるまで待つだけ）。中断するなら AbortSignal を各処理に渡す
+async function $all(fs) {
+  const h = $h;
+  const rs = await Promise.allSettled(fs.map((f) => { $h = h; return f(); }));
+  $h = h;
+  const bad = rs.find((r) => r.status === "rejected");
+  if (bad) throw bad.reason;
+  return rs.map((r) => r.value);
+}
 class $Abort { constructor(h, v) { this.h = h; this.v = v; } }
 function $op(op, args) {
   for (let i = $h.length - 1; i >= 0; i--) {
@@ -187,6 +199,15 @@ fn is_async(f: &Fn) -> bool {
     has_async(&f.effects)
 }
 
+// 待つ呼び出し。待った後に、待つ前の handle の並びに戻す
+fn wait(yes: bool, call: String) -> String {
+    if yes {
+        format!("$k($h, await {call})")
+    } else {
+        call
+    }
+}
+
 fn has_async(effs: &[Expr]) -> bool {
     effs.iter()
         .any(|e| matches!(e.peel(), Expr::Var(n) if n == "Async"))
@@ -234,12 +255,9 @@ impl Gen<'_> {
         format!("t{}", self.next)
     }
 
-    fn await_(&self, e: &Expr) -> &'static str {
-        if self.awaits.contains(&(e as *const Expr as usize)) {
-            "await "
-        } else {
-            ""
-        }
+    // 型検査が待つと記録した呼び出しなら待つ
+    fn await_(&self, e: &Expr, call: String) -> String {
+        wait(self.awaits.contains(&(e as *const Expr as usize)), call)
     }
 
     fn push(&mut self, s: String) {
@@ -421,8 +439,8 @@ impl Gen<'_> {
             Expr::Call(name, args) => {
                 if let Some((js, _)) = self.lookup(name).cloned() {
                     let vs = self.args(args);
-                    let w = self.await_(e);
-                    return self.let_(format!("{w}{js}({})", vs.join(", ")));
+                    let v = self.await_(e, format!("{js}({})", vs.join(", ")));
+                    return self.let_(v);
                 }
                 let mut vs = self.args(args);
                 let v = match name.as_str() {
@@ -436,6 +454,7 @@ impl Gen<'_> {
                         let k = vs.len() - (f.params.len() - f.implicit);
                         format!("$op({}, [{}])", lit(n), vs[k..].join(", "))
                     }
+                    "all" => wait(true, format!("$all({})", vs[0])),
                     "print" => format!("$print({})", vs[0]),
                     "to_str" => format!("$str({})", vs[0]),
                     "len" | "split" | "starts_with" | "slice" => {
@@ -450,12 +469,10 @@ impl Gen<'_> {
                                 full.append(&mut vs);
                                 vs = full;
                             }
-                            let w = if self.async_fns.contains(n) {
-                                "await "
-                            } else {
-                                ""
-                            };
-                            format!("{w}{}({})", ident("f_", n), vs.join(", "))
+                            wait(
+                                self.async_fns.contains(n),
+                                format!("{}({})", ident("f_", n), vs.join(", ")),
+                            )
                         }
                         // 型を作る呼び出し（Vec<int> など）。実行時には名前だけ
                         None => lit(n),
@@ -466,8 +483,8 @@ impl Gen<'_> {
             Expr::Apply(f, args) => {
                 let f = self.expr(f);
                 let vs = self.args(args);
-                let w = self.await_(e);
-                self.let_(format!("{w}{f}({})", vs.join(", ")))
+                let v = self.await_(e, format!("{f}({})", vs.join(", ")));
+                self.let_(v)
             }
             Expr::Field(x, f) => {
                 let a = self.expr(x);
@@ -575,11 +592,12 @@ impl Gen<'_> {
                 let h = self.let_(format!("{{ arms: {{ {} }} }}", fs.join(", ")));
                 let t = self.tmp();
                 self.push(format!("let {t};"));
-                self.push(format!("$h.push({h});"));
+                let saved = self.tmp();
+                self.push(format!("const {saved} = $h; $h = [...$h, {h}];"));
                 self.push("try {".into());
                 let v = self.expr(body);
                 self.push(format!("{t} = {v};"));
-                self.push(format!("}} catch (e) {{ if (e instanceof $Abort && e.h === {h}) {t} = e.v; else throw e; }} finally {{ $h.pop(); }}"));
+                self.push(format!("}} catch (e) {{ if (e instanceof $Abort && e.h === {h}) {t} = e.v; else throw e; }} finally {{ $h = {saved}; }}"));
                 t
             }
             Expr::Pi(..) => lit("fn"),

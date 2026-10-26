@@ -118,6 +118,7 @@ const BUILTINS: &[&str] = &[
     "starts_with",
     "slice",
     "resume",
+    "all",
     "Async",
 ];
 
@@ -1665,6 +1666,65 @@ impl Ck<'_> {
                 }
             }
             Expr::Handle(body, arms) => return self.handle(body, arms),
+            Expr::Call(name, args) if name == "all" && self.lookup(name).is_none() => {
+                let [a] = args.as_slice() else {
+                    return Err("all の引数は1個".into());
+                };
+                let async_eff = V::DataT(Rc::new(("Async".into(), vec![])));
+                let el = match a.peel() {
+                    // all([fn() { ... }, ...]) の無名関数では Async の効果を起こしてよい
+                    Expr::Array(items)
+                        if !items.is_empty()
+                            && items.iter().all(
+                                |i| matches!(i.peel(), Expr::Lam(ps, _, _) if ps.is_empty()),
+                            ) =>
+                    {
+                        let mut t: Option<V> = None;
+                        for it in items {
+                            let Expr::Lam(_, ret, body) = it.peel() else {
+                                unreachable!()
+                            };
+                            let rt = match ret {
+                                Some(r) => Some(self.eval_type(r)?),
+                                None => None,
+                            };
+                            self.awaits.insert(body as *const Block as usize);
+                            self.push();
+                            let avail = vec![("Async".to_string(), Some(async_eff.clone()))];
+                            let c = self.fn_body(body, rt, avail);
+                            self.pop();
+                            let c = base(&c?);
+                            match &t {
+                                None => t = Some(c),
+                                Some(t0) => want(t0, &c, "all の要素")?,
+                            }
+                        }
+                        t.unwrap()
+                    }
+                    _ => {
+                        let at = self.expr(a)?;
+                        let msg = || {
+                            format!(
+                                "all には () -> T ! Async の Vec を渡す（実際は {}）",
+                                show(&at)
+                            )
+                        };
+                        let V::VecT(f) = base(&at) else {
+                            return Err(msg().into());
+                        };
+                        match base(&f) {
+                            V::Pi(p)
+                                if p.doms.is_empty() && p.effs.iter().all(|e| *e == async_eff) =>
+                            {
+                                p.cod.clone()
+                            }
+                            _ => return Err(msg().into()),
+                        }
+                    }
+                };
+                self.use_effect(async_eff)?;
+                V::VecT(Rc::new(el))
+            }
             Expr::Call(name, args) if name == "resume" && self.lookup(name).is_none() => {
                 let Some(t) = self.resume.last().cloned() else {
                     return Err("resume は handle の腕の中でだけ使える".into());

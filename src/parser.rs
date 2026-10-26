@@ -357,6 +357,7 @@ pub fn parse(src: &str) -> R<Program> {
         "starts_with",
         "slice",
         "resume",
+        "all",
         "Async",
         "Vec",
         "Type",
@@ -749,7 +750,11 @@ impl Parser<'_> {
         let mut es = Vec::new();
         if self.eat("!") {
             loop {
-                es.push(self.ret_ty()?);
+                // Vec<() -> T ! E> の閉じの > を比較と読まないよう、加減乗除より弱い演算子は読まない
+                let saved = std::mem::replace(&mut self.no_struct, true);
+                let e = self.binary(5);
+                self.no_struct = saved;
+                es.push(e?);
                 let next_param = matches!(
                     self.toks.get(self.pos + 1).map(|t| &t.tok),
                     Some(Tok::Ident(_))
@@ -1260,7 +1265,7 @@ impl Parser<'_> {
                         .into_iter()
                         .map(|(n, t)| (n.unwrap_or("_".into()), t))
                         .collect();
-                    let ret = Box::new(self.ty()?);
+                    let ret = Box::new(self.binary(5)?);
                     Expr::Pi(binders, ret, self.effects()?)
                 } else if let [(None, _)] = entries.as_slice() {
                     entries.pop().unwrap().1

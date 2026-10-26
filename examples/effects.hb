@@ -29,6 +29,13 @@ fn find(id: str) -> User ! Fail<NotFound>, Need<Db>, Log {
     }
 }
 
+fn describe_or(id: str) -> str {
+    handle describe(id) {
+        need() => resume(Db { prefix: "u" })
+        log(msg) => resume()
+    }
+}
+
 fn describe(id: str) -> str ! Need<Db>, Log {
     handle find(id).name {
         fail(e) => "not found: " + e.id
@@ -40,7 +47,9 @@ fn each(xs: Vec<str>, f: (str) -> unit ! Log) ! Log {
     for x in xs { f(x) }
 }
 
-fn main() {
+// all は Async の効果。インタプリタと C では順に実行する
+fn main() ! Async {
+    print(all([fn() { describe_or("7") }, fn() { describe_or("0") }]))
     handle each(["a", "b"], fn(x) { log("each " + x) }) {
         log(msg) => {
             print(msg)

@@ -198,7 +198,7 @@ mod tests {
         std::fs::remove_file(&js).unwrap();
         assert_eq!(
             String::from_utf8(r.stdout).unwrap(),
-            "50\nHIBANA!\n18\n3\n3\nHello, world\n6\n20\n[3, 5]\n"
+            "50\nHIBANA!\n18\n3\n3\nHello, world\n6\n20\n[3, 5]\n[\"a2a\", \"b4b\"]\n"
         );
         let e = out(&src).unwrap_err();
         assert!(e.contains("JS ターゲット"), "{e}");
@@ -315,7 +315,7 @@ fn main() {
         let src = include_str!("../examples/effects.hb");
         assert_eq!(
             out(src).unwrap(),
-            "each a\neach b\n[log] find 1\nuser1\n[log] find 0\nnot found: 0\n[log] find 2\nuser2\n3\n"
+            "[\"u7\", \"not found: 0\"]\neach a\neach b\n[log] find 1\nuser1\n[log] find 0\nnot found: 0\n[log] find 2\nuser2\n3\n"
         );
         let p = "effect Log { fn log(msg: str) }\neffect Ask { fn ask() -> int }\neffect Fail { fn fail(m: str) -> never }\n";
         for (src, msg) in [

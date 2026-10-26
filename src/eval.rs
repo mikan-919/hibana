@@ -490,6 +490,16 @@ impl Interp<'_> {
                 }
                 if let Some(f) = env.iter().rev().find_map(|s| s.get(name)).cloned() {
                     self.apply(&f, vs)?
+                } else if name == "all" && !self.fns.contains_key(name.as_str()) {
+                    // 並行の処理が無いので順に実行する
+                    let Value::Arr(fs) = &vs[0] else {
+                        unreachable!("型検査済み")
+                    };
+                    let mut out = Vec::new();
+                    for f in fs.iter() {
+                        out.push(self.apply(f, vec![])?);
+                    }
+                    Value::Arr(Rc::new(out))
                 } else if name == "resume" {
                     // 腕の値として返し、perform が操作の戻り値にする
                     Value::Data(Rc::new((
