@@ -25,7 +25,13 @@ typedef struct Fn { Code code; int n; V env[]; } Fn;
 
 const RUNTIME: &str = r#"
 static V U = { .tag = T_UNIT };
-static void die(const char* m) { fflush(stdout); fprintf(stderr, "実行時エラー: %s\n", m); exit(1); }
+// 最後に通った、失敗しうる式の位置
+static const char* h_at = 0;
+static void die(const char* m) {
+  fflush(stdout);
+  if (h_at) fprintf(stderr, "実行時エラー: %s（%s）\n", m, h_at); else fprintf(stderr, "実行時エラー: %s\n", m);
+  exit(1);
+}
 static void* alloc(size_t n) { void* p = malloc(n ? n : 1); if (!p) die("メモリが足りない"); return p; }
 static V mk_int(int64_t i) { V v = { .tag = T_INT }; v.i = i; return v; }
 static V mk_bool(bool b) { V v = { .tag = T_BOOL }; v.b = b; return v; }
@@ -311,6 +317,22 @@ impl Gen<'_> {
         format!("t{}", self.next)
     }
 
+    // 失敗しうる式か（算術・slice・操作・JavaScript の関数の呼び出し）。実行時エラーの位置を記録する所
+    fn risky(&self, e: &Expr) -> bool {
+        match e {
+            Expr::Binary(op, ..) => matches!(*op, "+" | "-" | "*" | "/" | "%"),
+            Expr::Unary(op, _) => *op == "-",
+            Expr::Call(n, _) => {
+                n == "slice"
+                    || self
+                        .fns
+                        .get(n.as_str())
+                        .is_some_and(|f| f.op.is_some() || f.js.is_some())
+            }
+            _ => false,
+        }
+    }
+
     fn push(&mut self, s: String) {
         self.lines.push(s);
     }
@@ -432,7 +454,13 @@ impl Gen<'_> {
 
     fn expr(&mut self, e: &Expr) -> String {
         match e {
-            Expr::At(_, x) => self.expr(x),
+            Expr::At(sp, x) => {
+                if self.risky(x) {
+                    let p = sp.start;
+                    self.push(format!("h_at = \"{} 行 {} 列\";", p.line, p.column));
+                }
+                self.expr(x)
+            }
             Expr::Int(n) => format!("mk_int({n}LL)"),
             Expr::Bool(b) => format!("mk_bool({})", *b as u8),
             Expr::Str(s) => self.let_(str_lit(s)),

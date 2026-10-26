@@ -63,10 +63,12 @@ struct Interp<'a> {
     // 処理中の handle (番号, 操作の名前から腕の関数)。内側ほど後ろ
     handlers: Vec<(usize, HashMap<String, Value>)>,
     next_h: usize,
+    // 実行時エラーが起きた一番内側の式の位置
+    err_at: Option<Span>,
 }
 
 // 型検査を通ったプログラムを前提とする
-pub fn run(prog: &Program, out: &mut dyn Write) -> Result<Value, String> {
+pub fn run(prog: &Program, out: &mut dyn Write) -> Result<Value, Error> {
     let mut it = Interp {
         fns: prog.fns.iter().map(|f| (f.name.as_str(), f)).collect(),
         ctors: prog
@@ -83,10 +85,17 @@ pub fn run(prog: &Program, out: &mut dyn Write) -> Result<Value, String> {
         out,
         handlers: Vec::new(),
         next_h: 0,
+        err_at: None,
     };
     match it.call("main", vec![]) {
         Ok(v) | Err(Flow::Return(v)) => Ok(v),
-        Err(Flow::Error(e)) => Err(e),
+        Err(Flow::Error(e)) => {
+            let e = Error::from(format!("実行時エラー: {e}"));
+            Err(match it.err_at {
+                Some(s) => e.at(s),
+                None => e,
+            })
+        }
         Err(Flow::Abort(..)) => unreachable!("handle の外には出ない"),
     }
 }
@@ -100,6 +109,7 @@ pub fn run_macro(b: &Block, vars: Vec<(String, Value)>) -> Result<Value, String>
         out: &mut err,
         handlers: Vec::new(),
         next_h: 0,
+        err_at: None,
     };
     match it.block(b, &mut vec![vars.into_iter().collect()]) {
         Ok(v) | Err(Flow::Return(v)) => Ok(v),
@@ -373,7 +383,13 @@ impl Interp<'_> {
 
     fn expr(&mut self, e: &Expr, env: &mut Vec<HashMap<String, Value>>) -> R<Value> {
         Ok(match e {
-            Expr::At(_, x) => self.expr(x, env)?,
+            Expr::At(sp, x) => {
+                let r = self.expr(x, env);
+                if matches!(r, Err(Flow::Error(_))) && self.err_at.is_none() {
+                    self.err_at = Some(*sp);
+                }
+                r?
+            }
             Expr::Int(n) => Value::Int(*n),
             Expr::Bool(b) => Value::Bool(*b),
             Expr::Str(s) => Value::Str(s.as_str().into()),

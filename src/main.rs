@@ -15,7 +15,7 @@ use std::io::Write;
 fn run(src: &str, out: &mut dyn Write) -> error::R<eval::Value> {
     let prog = parser::parse(&parser::with_uses(src)?)?;
     typeck::check(&prog)?;
-    Ok(eval::run(&prog, out)?)
+    eval::run(&prog, out)
 }
 
 // JavaScript に変換する
@@ -68,8 +68,10 @@ struct Report {
     msg: String,
     #[source_code]
     src: miette::NamedSource<String>,
-    #[label("ここ")]
+    // 下線に付ける説明。メッセージの一番内側の部分（"関数 f: 引数 x: int が必要だが str" の "int が必要だが str"）
+    #[label("{label}")]
     span: Option<miette::SourceSpan>,
+    label: String,
 }
 
 fn main() {
@@ -101,7 +103,9 @@ fn main() {
         _ => run(&src, &mut std::io::stdout()).map(|_| ()),
     };
     if let Err(e) = r {
+        let label = e.msg.rsplit(": ").next().unwrap_or("ここ").to_string();
         let report = Report {
+            label,
             msg: e.msg,
             // 読み込んだライブラリの中のエラーも指せるよう、ライブラリを足したソースを渡す
             src: miette::NamedSource::new(&path, parser::with_uses(&src).unwrap_or(src.clone())),
@@ -468,6 +472,29 @@ fn main() {
             "{p}fn main() {{\n let x = handle {{ handle {{ fail(\"in\")\n 1 }} {{ fail(m) => {{ log(m)\n 2 }} }} }} {{ log(m) => {{ print(\"log \" + m)\n resume() }} }}\n print(x) }}"
         );
         assert_eq!(out(&src).unwrap(), "log in\n2\n");
+    }
+
+    // 実行時エラーの位置。インタプリタはエラーに位置を付け、JS と C はメッセージに行と列を足す
+    #[test]
+    fn runtime_error_positions() {
+        let src = "fn half(x: int, y: int) -> int {\n    x / y\n}\nfn main() {\n    print(half(1, 0))\n}\n";
+        let e = out(src).unwrap_err();
+        assert_eq!(e.span, Some((37, 5)), "{e:?}");
+        let tmp = std::env::temp_dir().join(format!("hibana-pos-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let js = tmp.join("d.mjs");
+        std::fs::write(&js, super::to_js(src).unwrap()).unwrap();
+        let r = std::process::Command::new("node")
+            .arg(&js)
+            .output()
+            .unwrap();
+        let want = "実行時エラー: 0 で除算した（2 行 5 列）\n";
+        assert_eq!(String::from_utf8(r.stderr).unwrap(), want);
+        let exe = tmp.join("d");
+        super::build(src, &exe).unwrap();
+        let r = std::process::Command::new(&exe).output().unwrap();
+        assert_eq!(String::from_utf8(r.stderr).unwrap(), want);
+        std::fs::remove_dir_all(&tmp).unwrap();
     }
 
     #[test]

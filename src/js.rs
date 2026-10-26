@@ -16,6 +16,8 @@ function $div(a, b) { if (b === 0n) throw new Error("0 で除算した"); return
 function $rem(a, b) { if (b === 0n) throw new Error("0 で除算した"); return a % b; }
 function $neg(a) { return $chk(-a); }
 let $w;
+// 最後に通った、失敗しうる式の位置
+let $at;
 // 書き換えられる参照
 class $Ref { constructor(v) { this.v = v; } }
 function $d(c, f) { return { $c: c, $f: f }; }
@@ -50,7 +52,7 @@ globalThis.hibana_serve = async (port, app) => {
       res.writeHead(r.status, { "content-type": r.content_type });
       res.end(r.body);
     } catch (e) {
-      console.error("実行時エラー: " + e.message);
+      console.error("実行時エラー: " + e.message + ($at ? "（" + $at + "）" : ""));
       res.writeHead(500, { "content-type": "text/plain" });
       res.end("Internal Server Error");
     }
@@ -176,7 +178,7 @@ pub fn emit(prog: &Program, info: &crate::typeck::Info) -> String {
     if g.fns.contains_key("web.worker") {
         out += "export default { fetch: $fetch };\n";
     }
-    out += "(async () => { try { await f_main(); } catch (e) { console.error(\"実行時エラー: \" + e.message); if (globalThis.process) process.exitCode = 1; } })();\n";
+    out += "(async () => { try { await f_main(); } catch (e) { console.error(\"実行時エラー: \" + e.message + ($at ? \"（\" + $at + \"）\" : \"\")); if (globalThis.process) process.exitCode = 1; } })();\n";
     out
 }
 
@@ -296,6 +298,22 @@ impl Gen<'_> {
     // 型検査が待つと記録した呼び出しなら待つ
     fn await_(&self, e: &Expr, call: String) -> String {
         wait(self.awaits.contains(&(e as *const Expr as usize)), call)
+    }
+
+    // 失敗しうる式か（算術・slice・操作・JavaScript の関数の呼び出し）。実行時エラーの位置を記録する所
+    fn risky(&self, e: &Expr) -> bool {
+        match e {
+            Expr::Binary(op, ..) => matches!(*op, "+" | "-" | "*" | "/" | "%"),
+            Expr::Unary(op, _) => *op == "-",
+            Expr::Call(n, _) => {
+                n == "slice"
+                    || self
+                        .fns
+                        .get(n.as_str())
+                        .is_some_and(|f| f.op.is_some() || f.js.is_some())
+            }
+            _ => false,
+        }
     }
 
     fn push(&mut self, s: String) {
@@ -428,7 +446,13 @@ impl Gen<'_> {
 
     fn expr(&mut self, e: &Expr) -> String {
         match e {
-            Expr::At(_, x) => self.expr(x),
+            Expr::At(sp, x) => {
+                if self.risky(x) {
+                    let p = sp.start;
+                    self.push(format!("$at = \"{} 行 {} 列\";", p.line, p.column));
+                }
+                self.expr(x)
+            }
             Expr::Int(n) => format!("{n}n"),
             Expr::Bool(b) => b.to_string(),
             Expr::Str(s) => lit(s),
