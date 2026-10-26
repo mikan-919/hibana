@@ -2,11 +2,12 @@ use crate::parser::{Block, Expr, Fn, Stmt};
 use std::collections::HashMap;
 use std::io::Write;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Int(i64),
     Bool(bool),
     Unit,
+    Str(std::rc::Rc<str>),
 }
 
 // 通常の値以外で評価を抜ける理由
@@ -98,7 +99,9 @@ impl Interp<'_> {
         Ok(match e {
             Expr::Int(n) => Value::Int(*n),
             Expr::Bool(b) => Value::Bool(*b),
-            Expr::Var(n) => *env.iter().rev().find_map(|s| s.get(n)).unwrap(),
+            Expr::Str(s) => Value::Str(s.as_str().into()),
+            Expr::Field(..) | Expr::Method(..) | Expr::Macro(..) => unreachable!("型検査で弾く"),
+            Expr::Var(n) => env.iter().rev().find_map(|s| s.get(n)).unwrap().clone(),
             Expr::Unary("-", x) => {
                 let n = int(self.expr(x, env)?);
                 Value::Int(
@@ -137,10 +140,11 @@ impl Interp<'_> {
                     vs.push(self.expr(a, env)?);
                 }
                 if name == "print" {
-                    let s = match vs[0] {
+                    let s = match &vs[0] {
                         Value::Int(n) => n.to_string(),
                         Value::Bool(b) => b.to_string(),
                         Value::Unit => "()".into(),
+                        Value::Str(s) => s.to_string(),
                     };
                     writeln!(self.out, "{s}").map_err(|e| Flow::Error(e.to_string()))?;
                     Value::Unit

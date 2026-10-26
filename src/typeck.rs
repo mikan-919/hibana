@@ -107,6 +107,9 @@ impl Ck<'_> {
         Ok(match e {
             Expr::Int(_) => Int,
             Expr::Bool(_) => Bool,
+            Expr::Str(_) => Str,
+            Expr::Field(..) | Expr::Method(..) => return Err("フィールドとメソッドは未対応".into()),
+            Expr::Macro(n, _) => return Err(format!("マクロ {n} に展開コードが無い")),
             Expr::Var(n) => self.lookup(n)?.0,
             Expr::Unary(op, x) => {
                 let t = if *op == "-" { Int } else { Bool };

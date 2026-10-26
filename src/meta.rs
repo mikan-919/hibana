@@ -1,0 +1,1018 @@
+// syntax / macro 宣言の解析、パターン照合、マクロ展開
+use crate::lexer::{Span, Tok, lex};
+use crate::parser::{Block, Expr, Parser, R, Stmt, Type};
+use std::collections::HashMap;
+
+// パターン照合の結果。展開コードと検査用に全フィールドを保持する
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub enum Node {
+    Token(String, Span),
+    Ident(String, Span),
+    Int(i64),
+    Float(f64),
+    Str(String),
+    Char(char),
+    Text(String, Span),
+    Expr(Expr),
+    Block(Block),
+    Stmt(Stmt),
+    Type(Type),
+    // syntax 規則・マクロ・名前付きグループの束縛。rule は規則名
+    Record {
+        rule: Option<String>,
+        span: Span,
+        fields: Vec<(String, Node)>,
+    },
+    List(Vec<Node>),
+    Null,
+}
+
+impl Node {
+    pub fn get(&self, k: &str) -> Option<&Node> {
+        match self {
+            Node::Record { fields, .. } => fields.iter().find(|(n, _)| n == k).map(|(_, v)| v),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Builtin {
+    Ident,
+    Int,
+    Float,
+    Str,
+    Char,
+    Expr,
+    Block,
+    Stmt,
+    Type,
+}
+
+fn builtin(name: &str) -> Option<Builtin> {
+    use Builtin::*;
+    Some(match name {
+        "Ident" => Ident,
+        "Int" => Int,
+        "Float" => Float,
+        "String" => Str,
+        "Char" => Char,
+        "Expr" => Expr,
+        "Block" => Block,
+        "Stmt" => Stmt,
+        "Type" => Type,
+        _ => return None,
+    })
+}
+
+// 選択枝の並び
+#[derive(Debug, Clone)]
+struct Pattern(Vec<Seq>);
+
+#[derive(Debug, Clone)]
+struct Seq(Vec<Term>);
+
+#[derive(Debug, Clone)]
+struct Term {
+    adjacent: bool,
+    name: Option<String>,
+    atom: Atom,
+    op: Op,
+}
+
+#[derive(Debug, Clone)]
+enum Op {
+    One,
+    Opt,
+    Many,
+    Many1,
+    Sep(Box<Atom>),
+}
+
+#[derive(Debug, Clone)]
+enum Atom {
+    Lit(String),
+    Builtin(Builtin),
+    Rule(String),
+    Group(Pattern),
+    // 停止集合（このリテラルで始まるトークンの手前で止まる）
+    Text(Vec<String>),
+}
+
+// FIRST 集合の要素
+#[derive(Debug, Clone, PartialEq)]
+enum First {
+    Lit(String),
+    Class(Builtin),
+    // Expr か Stmt。マクロの先頭にあると左再帰になる
+    Expr,
+    Any,
+}
+
+type Firsts = (Vec<First>, bool);
+
+struct Rule {
+    pat: Pattern,
+    fields: Vec<(String, bool)>,
+}
+
+struct Macro {
+    name: String,
+    pat: Pattern,
+    fields: Vec<(String, bool)>,
+    // -> Stmt なら文の位置、-> Expr なら式の位置で試す
+    stmt: bool,
+    body: Option<Tmpl>,
+    first: Firsts,
+}
+
+#[derive(Default)]
+pub struct Grammar {
+    rules: HashMap<String, Rule>,
+    macros: Vec<Macro>,
+}
+
+// 展開コード: return 構築子 { フィールド: 値, ... }
+#[derive(Debug)]
+enum Tmpl {
+    Ctor(String, Vec<(String, Tmpl)>),
+    Var(String),
+    Null,
+}
+
+// (構築子, 必須フィールド, 省略可能フィールド)
+const CTORS: &[(&str, &[&str], &[&str])] = &[
+    ("If", &["cond", "then"], &["els"]),
+    ("Not", &["expr"], &[]),
+    ("While", &["cond", "body"], &[]),
+];
+
+// パターンが持つ束縛名と、それが繰り返し（配列）かを求める。同じ連接内の重複はエラー
+fn fields(p: &Pattern) -> R<Vec<(String, bool)>> {
+    let mut all: Vec<(String, bool)> = Vec::new();
+    for seq in &p.0 {
+        let mut seen: Vec<(String, bool)> = Vec::new();
+        for t in &seq.0 {
+            let fs = match (&t.name, &t.atom) {
+                (Some(n), _) => vec![(n.clone(), false)],
+                // 無名グループの束縛は親に持ち上げる
+                (None, Atom::Group(inner)) => {
+                    let rep = !matches!(t.op, Op::One | Op::Opt);
+                    fields(inner)?
+                        .into_iter()
+                        .map(|(n, r)| (n, r || rep))
+                        .collect()
+                }
+                _ => vec![],
+            };
+            for f in fs {
+                if seen.iter().any(|s| s.0 == f.0) {
+                    return Err(format!("束縛名 {} が重複している", f.0));
+                }
+                seen.push(f);
+            }
+        }
+        // 選択枝をまたぐ同名は1個のフィールドにまとめる
+        for f in seen {
+            if !all.iter().any(|a| a.0 == f.0) {
+                all.push(f);
+            }
+        }
+    }
+    Ok(all)
+}
+
+// 全フィールドを Null か空配列で埋めてから束縛を書き込む
+fn record(rule: Option<&str>, span: Span, fields: &[(String, bool)], binds: Binds) -> Node {
+    let mut fs: Vec<(String, Node)> = fields
+        .iter()
+        .map(|(n, rep)| {
+            (
+                n.clone(),
+                if *rep { Node::List(vec![]) } else { Node::Null },
+            )
+        })
+        .collect();
+    for (n, v) in binds {
+        if let Some(f) = fs.iter_mut().find(|f| f.0 == n) {
+            f.1 = v;
+        }
+    }
+    Node::Record {
+        rule: rule.map(String::from),
+        span,
+        fields: fs,
+    }
+}
+
+fn collect_refs(p: &Pattern, out: &mut Vec<String>) {
+    for t in p.0.iter().flat_map(|s| &s.0) {
+        let sep = match &t.op {
+            Op::Sep(a) => Some(&**a),
+            _ => None,
+        };
+        for a in std::iter::once(&t.atom).chain(sep) {
+            match a {
+                Atom::Rule(n) => out.push(n.clone()),
+                Atom::Group(inner) => collect_refs(inner, out),
+                _ => {}
+            }
+        }
+    }
+}
+
+fn lits(f: &[First]) -> Vec<String> {
+    f.iter()
+        .filter_map(|x| match x {
+            First::Lit(s) => Some(s.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn check_tmpl(t: &Tmpl, fields: &[(String, bool)]) -> R<()> {
+    match t {
+        Tmpl::Null => Ok(()),
+        Tmpl::Var(v) if fields.iter().any(|f| &f.0 == v) => Ok(()),
+        Tmpl::Var(v) => Err(format!("未定義の束縛 {v}")),
+        Tmpl::Ctor(n, fs) => {
+            let (_, req, opt) = CTORS
+                .iter()
+                .find(|c| c.0 == n)
+                .ok_or(format!("不明な構築子 {n}"))?;
+            if let Some(r) = req.iter().find(|r| !fs.iter().any(|(f, _)| f == *r)) {
+                return Err(format!("{n} に {r} が無い"));
+            }
+            for (f, t) in fs {
+                if !req.contains(&f.as_str()) && !opt.contains(&f.as_str()) {
+                    return Err(format!("{n} に {f} というフィールドは無い"));
+                }
+                check_tmpl(t, fields)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn to_expr(n: Node) -> R<Expr> {
+    Ok(match n {
+        Node::Expr(e) | Node::Stmt(Stmt::Expr(e)) => e,
+        Node::Ident(s, _) => Expr::Var(s),
+        Node::Int(i) => Expr::Int(i),
+        Node::Str(s) => Expr::Str(s),
+        Node::Block(b) => Expr::Block(b),
+        other => return Err(format!("式にできない値 {other:?}")),
+    })
+}
+
+fn to_block(n: Node) -> R<Block> {
+    match n {
+        Node::Block(b) => Ok(b),
+        n => Ok(Block {
+            stmts: vec![],
+            tail: Some(Box::new(to_expr(n)?)),
+        }),
+    }
+}
+
+fn eval_tmpl(t: &Tmpl, rec: &Node) -> R<Node> {
+    Ok(match t {
+        Tmpl::Null => Node::Null,
+        Tmpl::Var(v) => rec.get(v).cloned().unwrap_or(Node::Null),
+        Tmpl::Ctor(n, fs) => {
+            let get = |k: &str| match fs.iter().find(|(f, _)| f == k) {
+                Some((_, t)) => eval_tmpl(t, rec),
+                None => Ok(Node::Null),
+            };
+            Node::Expr(match n.as_str() {
+                "If" => {
+                    let els = match get("els")? {
+                        Node::Null => None,
+                        n => Some(Box::new(to_expr(n)?)),
+                    };
+                    Expr::If(
+                        Box::new(to_expr(get("cond")?)?),
+                        to_block(get("then")?)?,
+                        els,
+                    )
+                }
+                "Not" => Expr::Unary("!", Box::new(to_expr(get("expr")?)?)),
+                _ => Expr::While(Box::new(to_expr(get("cond")?)?), to_block(get("body")?)?),
+            })
+        }
+    })
+}
+
+impl Grammar {
+    pub fn validate(&mut self) -> R<()> {
+        let mut refs = Vec::new();
+        for r in self.rules.values() {
+            collect_refs(&r.pat, &mut refs);
+        }
+        for m in &self.macros {
+            collect_refs(&m.pat, &mut refs);
+        }
+        if let Some(n) = refs.iter().find(|n| !self.rules.contains_key(*n)) {
+            return Err(format!("未定義の規則 {n}"));
+        }
+        for (n, r) in &self.rules {
+            self.first_pat(&r.pat, &mut vec![n.clone()])?;
+        }
+        let names: Vec<String> = self.rules.keys().cloned().collect();
+        for n in names {
+            let mut p = self.rules[&n].pat.clone();
+            self.resolve_text(&mut p, &[])?;
+            self.rules.get_mut(&n).unwrap().pat = p;
+        }
+        for i in 0..self.macros.len() {
+            let mut p = self.macros[i].pat.clone();
+            self.resolve_text(&mut p, &[])?;
+            let first = self.first_pat(&p, &mut vec![])?;
+            if first.0.contains(&First::Expr) {
+                return Err(format!(
+                    "マクロ {} が Expr か Stmt で始まる（左再帰になる）",
+                    self.macros[i].name
+                ));
+            }
+            let m = &mut self.macros[i];
+            m.pat = p;
+            m.first = first;
+        }
+        Ok(())
+    }
+
+    // st は辿っている規則の列。同じ規則に先頭で戻ったら左再帰
+    fn first_pat(&self, p: &Pattern, st: &mut Vec<String>) -> R<Firsts> {
+        let (mut acc, mut nullable) = (Vec::new(), false);
+        for s in &p.0 {
+            let (f, n) = self.first_seq(&s.0, st)?;
+            acc.extend(f);
+            nullable |= n;
+        }
+        Ok((acc, nullable))
+    }
+
+    fn first_seq(&self, terms: &[Term], st: &mut Vec<String>) -> R<Firsts> {
+        let mut acc = Vec::new();
+        for t in terms {
+            let (f, n) = self.first_term(t, st)?;
+            acc.extend(f);
+            if !n {
+                return Ok((acc, false));
+            }
+        }
+        Ok((acc, true))
+    }
+
+    fn first_term(&self, t: &Term, st: &mut Vec<String>) -> R<Firsts> {
+        let (f, n) = match &t.atom {
+            Atom::Lit(s) => (vec![First::Lit(s.clone())], false),
+            Atom::Text(_) => (vec![First::Any], false),
+            Atom::Builtin(b) => (
+                vec![match b {
+                    Builtin::Expr | Builtin::Stmt => First::Expr,
+                    Builtin::Block => First::Lit("{".into()),
+                    Builtin::Type => First::Class(Builtin::Ident),
+                    b => First::Class(*b),
+                }],
+                false,
+            ),
+            Atom::Group(p) => self.first_pat(p, st)?,
+            Atom::Rule(n) => {
+                if st.contains(n) {
+                    return Err(format!("規則 {n} が左再帰している"));
+                }
+                st.push(n.clone());
+                let r = self.first_pat(&self.rules[n].pat, st);
+                st.pop();
+                r?
+            }
+        };
+        Ok((f, n || matches!(t.op, Op::Opt | Op::Many | Op::Sep(_))))
+    }
+
+    // Text の停止集合を、同じ選択の他の枝の先頭と、連接で次に来る項の先頭から決める
+    fn resolve_text(&self, p: &mut Pattern, outer: &[String]) -> R<()> {
+        let firsts: Vec<Vec<String>> =
+            p.0.iter()
+                .map(|s| Ok(lits(&self.first_seq(&s.0, &mut vec![])?.0)))
+                .collect::<R<_>>()?;
+        for i in 0..p.0.len() {
+            let mut stop = outer.to_vec();
+            for (j, f) in firsts.iter().enumerate() {
+                if j != i {
+                    stop.extend(f.iter().cloned());
+                }
+            }
+            for k in 0..p.0[i].0.len() {
+                let mut s = stop.clone();
+                if let Some(next) = p.0[i].0.get(k + 1) {
+                    s.extend(lits(&self.first_term(next, &mut vec![])?.0));
+                }
+                let t = &mut p.0[i].0[k];
+                let sep = match &mut t.op {
+                    Op::Sep(a) => Some(&mut **a),
+                    _ => None,
+                };
+                for a in std::iter::once(&mut t.atom).chain(sep) {
+                    match a {
+                        Atom::Text(st) => *st = s.clone(),
+                        Atom::Group(inner) => self.resolve_text(inner, &s)?,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+// 照合失敗。Fail は巻き戻して次を試す。Fatal は解析全体を止める
+enum Miss {
+    Fail,
+    Fatal(String),
+}
+
+type M<T> = Result<T, Miss>;
+type Binds = Vec<(String, Node)>;
+
+impl Parser<'_> {
+    pub fn syntax_decl(&mut self, g: &mut Grammar) -> R<()> {
+        self.expect("syntax")?;
+        let name = self.ident()?;
+        if builtin(&name).is_some() || name == "Text" || g.rules.contains_key(&name) {
+            return Err(format!("{}行: 規則 {name} が重複している", self.line()));
+        }
+        self.expect("=")?;
+        let pat = self.pattern()?;
+        self.expect(";")?;
+        let fields = fields(&pat).map_err(|e| format!("規則 {name}: {e}"))?;
+        g.rules.insert(name, Rule { pat, fields });
+        Ok(())
+    }
+
+    pub fn macro_decl(&mut self, g: &mut Grammar) -> R<()> {
+        self.expect("macro")?;
+        let mut name = self.ident()?;
+        if !self.toks[self.pos].gap_before && self.eat("!") {
+            name.push('!');
+        }
+        if g.macros.iter().any(|m| m.name == name) {
+            return Err(format!("{}行: マクロ {name} が重複している", self.line()));
+        }
+        self.expect("(")?;
+        let pat = self.pattern()?;
+        self.expect(")")?;
+        let stmt = if self.eat("->") {
+            match self.ident()?.as_str() {
+                "Expr" => false,
+                "Stmt" => true,
+                _ => return Err(format!("{}行: マクロの戻り値は Expr か Stmt", self.line())),
+            }
+        } else {
+            false
+        };
+        self.expect("{")?;
+        let body = if self.eat("}") {
+            None
+        } else {
+            self.expect("return")?;
+            let t = self.tmpl()?;
+            self.eat(";");
+            self.expect("}")?;
+            Some(t)
+        };
+        let fields = fields(&pat).map_err(|e| format!("マクロ {name}: {e}"))?;
+        if let Some(t) = &body {
+            check_tmpl(t, &fields).map_err(|e| format!("マクロ {name}: {e}"))?;
+        }
+        g.macros.push(Macro {
+            name,
+            pat,
+            fields,
+            stmt,
+            body,
+            first: (vec![], true),
+        });
+        Ok(())
+    }
+
+    fn tmpl(&mut self) -> R<Tmpl> {
+        let n = self.ident()?;
+        if n == "null" {
+            return Ok(Tmpl::Null);
+        }
+        if !self.eat("{") {
+            return Ok(Tmpl::Var(n));
+        }
+        let mut fs = Vec::new();
+        while !self.eat("}") {
+            let f = self.ident()?;
+            self.expect(":")?;
+            fs.push((f, self.tmpl()?));
+            if !self.eat(",") {
+                self.expect("}")?;
+                break;
+            }
+        }
+        Ok(Tmpl::Ctor(n, fs))
+    }
+
+    fn pattern(&mut self) -> R<Pattern> {
+        self.eat("|");
+        let mut branches = vec![self.seq()?];
+        while self.eat("|") {
+            branches.push(self.seq()?);
+        }
+        Ok(Pattern(branches))
+    }
+
+    fn seq(&mut self) -> R<Seq> {
+        let mut terms = Vec::new();
+        while matches!(
+            self.peek(),
+            Tok::Punct("~" | "(") | Tok::Ident(_) | Tok::Str(_)
+        ) {
+            terms.push(self.term()?);
+        }
+        if terms.is_empty() {
+            return self.err("パターンの項が必要");
+        }
+        Ok(Seq(terms))
+    }
+
+    fn term(&mut self) -> R<Term> {
+        let adjacent = self.eat("~");
+        let mut name = None;
+        if let Tok::Ident(n) = self.peek().clone()
+            && matches!(
+                self.toks.get(self.pos + 1).map(|t| &t.tok),
+                Some(Tok::Punct(":"))
+            )
+        {
+            self.pos += 2;
+            name = Some(n);
+        }
+        let atom = self.atom()?;
+        let op = if self.eat("*") {
+            Op::Many
+        } else if self.eat("+") {
+            Op::Many1
+        } else if self.eat("?") {
+            Op::Opt
+        } else if self.eat("%") {
+            Op::Sep(Box::new(self.atom()?))
+        } else {
+            Op::One
+        };
+        Ok(Term {
+            adjacent,
+            name,
+            atom,
+            op,
+        })
+    }
+
+    fn atom(&mut self) -> R<Atom> {
+        let a = match self.peek().clone() {
+            Tok::Str(s) => {
+                let ts = lex(&s)?;
+                if ts.len() != 2 || ts[0].tok.text() != Some(s.as_str()) {
+                    return Err(format!(
+                        "{}行: リテラル {s:?} は1個のトークンでない",
+                        self.line()
+                    ));
+                }
+                Atom::Lit(s)
+            }
+            Tok::Ident(n) if n == "Text" => Atom::Text(vec![]),
+            Tok::Ident(n) => builtin(&n).map(Atom::Builtin).unwrap_or(Atom::Rule(n)),
+            Tok::Punct("(") => {
+                self.pos += 1;
+                let p = self.pattern()?;
+                self.expect(")")?;
+                return Ok(Atom::Group(p));
+            }
+            _ => return self.err("パターンの項が必要"),
+        };
+        self.pos += 1;
+        Ok(a)
+    }
+
+    // 文の位置（stmt）か式の位置で、全マクロを照合する
+    pub fn try_macros(&mut self, stmt: bool) -> R<Option<Expr>> {
+        let g = self.g.clone();
+        let start = self.pos;
+        let mut hits = Vec::new();
+        for m in g.macros.iter().filter(|m| m.stmt == stmt) {
+            self.pos = start;
+            if !self.could_start(&m.first) {
+                continue;
+            }
+            let mut b = Vec::new();
+            match self.m_pattern(&m.pat, &mut b) {
+                Ok(_) => hits.push((m, b, self.pos)),
+                Err(Miss::Fail) => {}
+                Err(Miss::Fatal(e)) => return Err(format!("{}行: {e}", self.line())),
+            }
+        }
+        self.pos = start;
+        match hits.len() {
+            0 => Ok(None),
+            1 => {
+                let (m, b, end) = hits.pop().unwrap();
+                self.pos = end;
+                let rec = record(Some(&m.name), self.span_from(start), &m.fields, b);
+                match &m.body {
+                    None => Ok(Some(Expr::Macro(m.name.clone(), Box::new(rec)))),
+                    Some(t) => Ok(Some(to_expr(eval_tmpl(t, &rec)?)?)),
+                }
+            }
+            _ => {
+                let names: Vec<&str> = hits.iter().map(|h| h.0.name.as_str()).collect();
+                Err(format!(
+                    "{}行: Ambiguous macro match（{}）",
+                    self.line(),
+                    names.join(", ")
+                ))
+            }
+        }
+    }
+
+    fn could_start(&self, (f, nullable): &Firsts) -> bool {
+        let t = &self.toks[self.pos].tok;
+        *nullable
+            || f.iter().any(|x| match x {
+                First::Lit(s) => t.text() == Some(s.as_str()),
+                First::Class(b) => matches!(
+                    (b, t),
+                    (Builtin::Ident, Tok::Ident(_))
+                        | (Builtin::Int, Tok::Int(_))
+                        | (Builtin::Float, Tok::Float(_))
+                        | (Builtin::Str, Tok::Str(_))
+                        | (Builtin::Char, Tok::Char(_))
+                ),
+                First::Expr | First::Any => true,
+            })
+    }
+
+    fn span_from(&self, start: usize) -> Span {
+        let s = self.toks[start].span.start;
+        let end = if self.pos > start {
+            self.toks[self.pos - 1].span.end
+        } else {
+            s
+        };
+        Span { start: s, end }
+    }
+
+    // 選択枝を順に試し、最初に一致した枝を採る
+    fn m_pattern(&mut self, p: &Pattern, b: &mut Binds) -> M<Node> {
+        let save = self.pos;
+        for seq in &p.0 {
+            let mut sb = Vec::new();
+            match self.m_seq(seq, &mut sb) {
+                Ok(v) => {
+                    b.extend(sb);
+                    return Ok(v);
+                }
+                Err(Miss::Fail) => self.pos = save,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(Miss::Fail)
+    }
+
+    fn m_seq(&mut self, seq: &Seq, b: &mut Binds) -> M<Node> {
+        let mut vals = Vec::new();
+        for t in &seq.0 {
+            if t.adjacent && self.toks[self.pos].gap_before {
+                return Err(Miss::Fail);
+            }
+            let start = self.pos;
+            let v = match &t.name {
+                Some(n) => {
+                    let mut inner = Vec::new();
+                    let v = self.m_term(t, &mut inner)?;
+                    let v = if inner.is_empty() {
+                        v
+                    } else {
+                        Node::Record {
+                            rule: None,
+                            span: self.span_from(start),
+                            fields: inner,
+                        }
+                    };
+                    b.push((n.clone(), v.clone()));
+                    v
+                }
+                None => self.m_term(t, b)?,
+            };
+            vals.push(v);
+        }
+        Ok(if vals.len() == 1 {
+            vals.pop().unwrap()
+        } else {
+            Node::List(vals)
+        })
+    }
+
+    // 繰り返しの1回分の束縛を、名前ごとの配列に積む
+    fn push_binds(lists: &mut Vec<(String, Vec<Node>)>, ib: Binds) {
+        for (n, v) in ib {
+            match lists.iter_mut().find(|l| l.0 == n) {
+                Some(l) => l.1.push(v),
+                None => lists.push((n, vec![v])),
+            }
+        }
+    }
+
+    fn m_term(&mut self, t: &Term, b: &mut Binds) -> M<Node> {
+        let mut items = Vec::new();
+        let mut lists = Vec::new();
+        match &t.op {
+            Op::One => return self.m_atom(&t.atom, b),
+            Op::Opt => {
+                let save = self.pos;
+                let mut ob = Vec::new();
+                return match self.m_atom(&t.atom, &mut ob) {
+                    Ok(v) => {
+                        b.extend(ob);
+                        Ok(v)
+                    }
+                    Err(Miss::Fail) => {
+                        self.pos = save;
+                        Ok(Node::Null)
+                    }
+                    Err(e) => Err(e),
+                };
+            }
+            Op::Many | Op::Many1 => loop {
+                let save = self.pos;
+                let mut ib = Vec::new();
+                match self.m_atom(&t.atom, &mut ib) {
+                    // 空一致は無限ループになるので止める
+                    Ok(_) if self.pos == save => break,
+                    Ok(v) => {
+                        items.push(v);
+                        Self::push_binds(&mut lists, ib);
+                    }
+                    Err(Miss::Fail) => {
+                        self.pos = save;
+                        break;
+                    }
+                    Err(e) => return Err(e),
+                }
+            },
+            Op::Sep(sep) => {
+                let save = self.pos;
+                let mut ib = Vec::new();
+                match self.m_atom(&t.atom, &mut ib) {
+                    Ok(v) => {
+                        items.push(v);
+                        Self::push_binds(&mut lists, ib);
+                        loop {
+                            let save = self.pos;
+                            if let Err(e) = self.m_atom(sep, &mut Vec::new()) {
+                                if let Miss::Fatal(_) = e {
+                                    return Err(e);
+                                }
+                                self.pos = save;
+                                break;
+                            }
+                            let mut ib = Vec::new();
+                            match self.m_atom(&t.atom, &mut ib) {
+                                Ok(v) => {
+                                    items.push(v);
+                                    Self::push_binds(&mut lists, ib);
+                                }
+                                Err(Miss::Fail) => {
+                                    return Err(Miss::Fatal("区切りの後に要素が無い".into()));
+                                }
+                                Err(e) => return Err(e),
+                            }
+                        }
+                    }
+                    Err(Miss::Fail) => self.pos = save,
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        if matches!(t.op, Op::Many1) && items.is_empty() {
+            return Err(Miss::Fail);
+        }
+        b.extend(lists.into_iter().map(|(n, v)| (n, Node::List(v))));
+        Ok(Node::List(items))
+    }
+
+    fn m_atom(&mut self, a: &Atom, b: &mut Binds) -> M<Node> {
+        let start = self.pos;
+        match a {
+            Atom::Lit(s) => {
+                let t = &self.toks[self.pos];
+                if t.tok.text() != Some(s.as_str()) {
+                    return Err(Miss::Fail);
+                }
+                let span = t.span;
+                self.pos += 1;
+                Ok(Node::Token(s.clone(), span))
+            }
+            Atom::Builtin(k) => self.m_builtin(*k),
+            Atom::Rule(name) => {
+                let g = self.g.clone();
+                let r = &g.rules[name];
+                let mut rb = Vec::new();
+                self.m_pattern(&r.pat, &mut rb)?;
+                Ok(record(Some(name), self.span_from(start), &r.fields, rb))
+            }
+            Atom::Group(p) => self.m_pattern(p, b),
+            Atom::Text(stop) => self.m_text(stop),
+        }
+    }
+
+    fn m_builtin(&mut self, k: Builtin) -> M<Node> {
+        let t = self.toks[self.pos].clone();
+        let fail = |_| Miss::Fail;
+        let n = match (k, t.tok) {
+            (Builtin::Ident, Tok::Ident(s)) => Node::Ident(s, t.span),
+            (Builtin::Int, Tok::Int(n)) => Node::Int(n),
+            (Builtin::Float, Tok::Float(n)) => Node::Float(n),
+            (Builtin::Str, Tok::Str(s)) => Node::Str(s),
+            (Builtin::Char, Tok::Char(c)) => Node::Char(c),
+            // ponytail: コア構文のエラーは Fail として巻き戻すため、入れ子のマクロの曖昧性エラーも消える
+            (Builtin::Expr, _) => return self.expr().map(Node::Expr).map_err(fail),
+            (Builtin::Stmt, _) => return self.stmt().map(Node::Stmt).map_err(fail),
+            (Builtin::Type, _) => return self.ty().map(Node::Type).map_err(fail),
+            (Builtin::Block, _) if self.eat("{") => {
+                return self.block().map(Node::Block).map_err(fail);
+            }
+            _ => return Err(Miss::Fail),
+        };
+        self.pos += 1;
+        Ok(n)
+    }
+
+    // ponytail: トークン単位で切り出すので、字句解析できない文字（例: Don't の '）は Text に書けない
+    fn m_text(&mut self, stop: &[String]) -> M<Node> {
+        let start = self.pos;
+        loop {
+            let stops = match self.peek() {
+                Tok::Eof => true,
+                Tok::Punct(p) => stop.iter().any(|s| p.starts_with(s.as_str())),
+                Tok::Ident(i) => stop.iter().any(|s| s == i),
+                _ => false,
+            };
+            if stops {
+                break;
+            }
+            self.pos += 1;
+        }
+        if self.pos == start {
+            return Err(Miss::Fail);
+        }
+        let raw =
+            &self.src[self.toks[start].span.start.offset..self.toks[self.pos].span.start.offset];
+        // JSX と同じく、改行を含む末尾の空白は捨てる
+        let trimmed = raw.trim_end();
+        let text = if raw[trimmed.len()..].contains('\n') {
+            trimmed
+        } else {
+            raw
+        };
+        Ok(Node::Text(text.to_string(), self.span_from(start)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::parse;
+
+    // main の最初の let に書いたマクロの照合結果を取り出す
+    fn macro_node(src: &str) -> Node {
+        let fns = parse(src).unwrap();
+        let main = fns.iter().find(|f| f.name == "main").unwrap();
+        match &main.body.stmts[0] {
+            Stmt::Let {
+                init: Expr::Macro(_, n),
+                ..
+            } => (**n).clone(),
+            s => panic!("{s:?}"),
+        }
+    }
+
+    fn f<'a>(n: &'a Node, k: &str) -> &'a Node {
+        n.get(k).unwrap_or_else(|| panic!("{k} が無い: {n:?}"))
+    }
+
+    fn list(n: &Node) -> &[Node] {
+        match n {
+            Node::List(v) => v,
+            _ => panic!("{n:?}"),
+        }
+    }
+
+    fn ident(n: &Node) -> &str {
+        match n {
+            Node::Ident(s, _) => s,
+            _ => panic!("{n:?}"),
+        }
+    }
+
+    const ROUTES: &str = r#"
+syntax Annotation = "@" ~ name:Ident "(" args:ExprList? ")" "->" alias:Ident ;
+syntax ExprList = items:(Expr % ",") ;
+syntax Route = annotations:Annotation* method:Ident path:String body:Block ;
+macro routes! ("routes" ~ "!" "{" rs:Route* "}") -> Expr {
+    // 展開コード
+}
+fn main() {
+    let r = routes! {
+        GET "/user/{id}" {
+            return Response.json({ id });
+        }
+
+        @durable_objects("ACCOUNT") -> account
+        POST "/post/{user}/{post}" {
+            let stub = account.get(user);
+            return stub.fetch(request);
+        }
+    }
+}
+"#;
+
+    #[test]
+    fn routes() {
+        let n = macro_node(ROUTES);
+        let rs = list(f(&n, "rs"));
+        assert_eq!(rs.len(), 2);
+        assert_eq!(ident(f(&rs[0], "method")), "GET");
+        assert!(list(f(&rs[0], "annotations")).is_empty());
+        let a = &list(f(&rs[1], "annotations"))[0];
+        assert_eq!(ident(f(a, "name")), "durable_objects");
+        assert_eq!(ident(f(a, "alias")), "account");
+        assert_eq!(list(f(f(a, "args"), "items")).len(), 1);
+        assert!(matches!(f(&rs[1], "path"), Node::Str(s) if s == "/post/{user}/{post}"));
+
+        assert!(parse(&ROUTES.replace("routes! {", "routes ! {")).is_err());
+        assert!(parse(&ROUTES.replace("@durable", "@ durable")).is_err());
+    }
+
+    #[test]
+    fn jsx() {
+        let n = macro_node(
+            r#"
+syntax JsxAttr = name:Ident "=" "{" value:Expr "}" ;
+syntax JsxElement =
+    "<" ~ tag:Ident attrs:JsxAttr* ">"
+    children:JsxChild*
+    "</" ~ close:Ident ~ ">" ;
+syntax JsxChild =
+    | el:JsxElement
+    | "{" expr:Expr "}"
+    | text:Text ;
+macro jsx (el:JsxElement) -> Expr {}
+fn main() {
+    let v = <Button onClick={handleClick}>
+        Hello {userName}!
+        <Icon name={"star"}></Icon>
+    </Button>
+}
+"#,
+        );
+        let el = f(&n, "el");
+        assert_eq!(ident(f(el, "tag")), "Button");
+        assert_eq!(list(f(el, "attrs")).len(), 1);
+        let cs = list(f(el, "children"));
+        assert_eq!(cs.len(), 4);
+        assert!(matches!(f(&cs[0], "text"), Node::Text(s, _) if s == "Hello "));
+        assert!(matches!(f(&cs[1], "expr"), Node::Expr(Expr::Var(s)) if s == "userName"));
+        assert!(matches!(f(&cs[2], "text"), Node::Text(s, _) if s == "!"));
+        assert_eq!(ident(f(f(&cs[3], "el"), "tag")), "Icon");
+        assert!(matches!(f(&cs[3], "text"), Node::Null));
+    }
+
+    #[test]
+    fn definition_errors() {
+        for (src, msg) in [
+            ("syntax L = items:Expr (\",\" items:Expr)* ;", "重複"),
+            ("syntax E = E \"+\" Int ;", "左再帰"),
+            ("syntax A = \"a b\" ;", "1個のトークンでない"),
+            ("syntax A = B ;", "未定義の規則"),
+            ("macro m (e:Expr \"!\") {}", "左再帰"),
+            ("macro m (\"m\") { return Not { expr: x } }", "未定義の束縛"),
+            (
+                "macro a (\"hey\") {} macro b (\"hey\") {} fn main() { let x = hey }",
+                "Ambiguous",
+            ),
+            (
+                "syntax L = (Expr % \",\") ; macro m (\"m\" L) {} fn main() { let x = m 1, }",
+                "区切り",
+            ),
+        ] {
+            let e = parse(src).unwrap_err();
+            assert!(e.contains(msg), "{src} => {e}");
+        }
+    }
+}

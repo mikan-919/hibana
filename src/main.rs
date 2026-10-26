@@ -1,12 +1,13 @@
 mod eval;
 mod lexer;
+mod meta;
 mod parser;
 mod typeck;
 
 use std::io::Write;
 
 fn run(src: &str, out: &mut dyn Write) -> Result<eval::Value, String> {
-    let fns = parser::parse(lexer::lex(src)?)?;
+    let fns = parser::parse(src)?;
     typeck::check(&fns)?;
     eval::run(&fns, out)
 }
@@ -32,6 +33,22 @@ mod tests {
         let mut buf = Vec::new();
         super::run(src, &mut buf)?;
         Ok(String::from_utf8(buf).unwrap())
+    }
+
+    #[test]
+    fn unless_macro() {
+        let src = r#"
+fn do_work() { print(1) }
+macro unless ("unless" cond:Expr body:Block) -> Stmt {
+    return If { cond: Not { expr: cond }, then: body, els: null };
+}
+fn main() {
+    let is_ready = false
+    unless is_ready { do_work(); }
+    unless true { print(2) }
+}
+"#;
+        assert_eq!(out(src).unwrap(), "1\n");
     }
 
     #[test]
