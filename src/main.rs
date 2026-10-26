@@ -1,3 +1,4 @@
+mod c;
 mod error;
 mod eval;
 mod js;
@@ -22,6 +23,30 @@ fn to_js(src: &str) -> error::R<String> {
     Ok(js::emit(&prog))
 }
 
+// C に変換する
+fn to_c(src: &str) -> error::R<String> {
+    let prog = parser::parse(src)?;
+    typeck::check(&prog)?;
+    Ok(c::emit(&prog))
+}
+
+// C に変換し、cc でネイティブの実行ファイル out を作る
+fn build(src: &str, out: &std::path::Path) -> error::R<()> {
+    let code = to_c(src)?;
+    let c_path = out.with_extension("c");
+    std::fs::write(&c_path, code).map_err(|e| e.to_string())?;
+    let r = std::process::Command::new(std::env::var("CC").unwrap_or("cc".into()))
+        .args(["-O2", "-w", "-o"])
+        .arg(out)
+        .arg(&c_path)
+        .status()
+        .map_err(|e| format!("cc を起動できない: {e}"))?;
+    if !r.success() {
+        return Err(format!("cc が失敗した（{}）", c_path.display()).into());
+    }
+    Ok(())
+}
+
 // ソースの該当箇所に下線を引いて表示するためのエラー
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 #[error("{msg}")]
@@ -35,12 +60,12 @@ struct Report {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let (js, path) = match args.as_slice() {
-        [p] => (false, p.clone()),
-        [cmd, p] if cmd == "js" => (true, p.clone()),
+    let (cmd, path) = match args.as_slice() {
+        [p] => ("run", p.clone()),
+        [cmd, p] if cmd == "js" || cmd == "c" || cmd == "build" => (cmd.as_str(), p.clone()),
         _ => {
             eprintln!(
-                "使い方: hibana <ファイル>（実行） | hibana js <ファイル>（JavaScript を出力）"
+                "使い方: hibana <ファイル>（実行） | hibana js <ファイル>（JavaScript を出力） | hibana c <ファイル>（C を出力） | hibana build <ファイル>（ネイティブの実行ファイルを作る）"
             );
             std::process::exit(2);
         }
@@ -49,10 +74,11 @@ fn main() {
         eprintln!("{path}: {e}");
         std::process::exit(2);
     });
-    let r = if js {
-        to_js(&src).map(|s| print!("{s}"))
-    } else {
-        run(&src, &mut std::io::stdout()).map(|_| ())
+    let r = match cmd {
+        "js" => to_js(&src).map(|s| print!("{s}")),
+        "c" => to_c(&src).map(|s| print!("{s}")),
+        "build" => build(&src, &std::path::Path::new(&path).with_extension("")),
+        _ => run(&src, &mut std::io::stdout()).map(|_| ()),
     };
     if let Err(e) = r {
         let report = Report {
@@ -93,6 +119,33 @@ mod tests {
                 .arg(&js)
                 .output()
                 .expect("node が要る（nix develop の中で実行する）");
+            assert_eq!(
+                String::from_utf8(r.stdout).unwrap(),
+                want,
+                "{}",
+                p.display()
+            );
+        }
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    // すべての例について、C に変換してネイティブにビルドした実行結果がインタプリタと同じか
+    #[test]
+    fn native_backend_matches_interpreter() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+        let tmp = std::env::temp_dir().join(format!("hibana-c-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        names.sort();
+        for p in names {
+            let src = std::fs::read_to_string(&p).unwrap();
+            let want = out(&src).unwrap();
+            let exe = tmp.join(p.file_stem().unwrap());
+            super::build(&src, &exe).unwrap();
+            let r = std::process::Command::new(&exe).output().unwrap();
             assert_eq!(
                 String::from_utf8(r.stdout).unwrap(),
                 want,
