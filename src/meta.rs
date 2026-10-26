@@ -926,6 +926,8 @@ impl Parser<'_> {
             types: self.types.clone(),
             generic_fns: self.generic_fns.clone(),
             globals: self.globals.clone(),
+            structs: self.structs.clone(),
+            no_struct: false,
         };
         let wrap = |e: &str| format!("マクロ {}: {e}", m.name);
         let b = p.block().ctx(wrap)?;
@@ -994,6 +996,8 @@ impl Parser<'_> {
             types: self.types.clone(),
             generic_fns: self.generic_fns.clone(),
             globals: self.globals.clone(),
+            structs: self.structs.clone(),
+            no_struct: false,
         };
         if m.stmt {
             // 文の並びとして読み、ブロックにする

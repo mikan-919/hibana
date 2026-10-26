@@ -2,7 +2,6 @@ use crate::error::Error;
 use crate::meta::{self, Node, Syn};
 use crate::parser::{Block, Expr, Fn, Program, Stmt};
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::io::Write;
 use std::rc::Rc;
 
@@ -53,7 +52,8 @@ type R<T> = Result<T, Flow>;
 // ponytail: 構文木を直接評価する方式。速度が必要ならバイトコードVMに置き換える
 struct Interp<'a> {
     fns: HashMap<&'a str, &'a Fn>,
-    ctors: HashSet<&'a str>,
+    // 構築子の名前からフィールド名の並び
+    ctors: HashMap<&'a str, Vec<&'a str>>,
     out: &'a mut dyn Write,
 }
 
@@ -65,7 +65,12 @@ pub fn run(prog: &Program, out: &mut dyn Write) -> Result<Value, String> {
             .datas
             .iter()
             .flat_map(|d| &d.ctors)
-            .map(|c| c.name.as_str())
+            .map(|c| {
+                (
+                    c.name.as_str(),
+                    c.fields.iter().map(|f| f.0.as_str()).collect(),
+                )
+            })
             .collect(),
         out,
     };
@@ -80,7 +85,7 @@ pub fn run_macro(b: &Block, vars: Vec<(String, Value)>) -> Result<Value, String>
     let mut err = std::io::stderr();
     let mut it = Interp {
         fns: HashMap::new(),
-        ctors: HashSet::new(),
+        ctors: HashMap::new(),
         out: &mut err,
     };
     match it.block(b, &mut vec![vars.into_iter().collect()]) {
@@ -187,6 +192,39 @@ impl Interp<'_> {
         }))
     }
 
+    // 値を表示用の文字列にする。構造体はフィールド名を付けて表す
+    fn show(&self, v: &Value) -> String {
+        match v {
+            Value::Arr(xs) => format!(
+                "[{}]",
+                xs.iter()
+                    .map(|x| self.show(x))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Value::Data(d) if d.0.ends_with("{}") => {
+                let fs = &self.ctors[d.0.as_str()];
+                let body: Vec<String> = fs
+                    .iter()
+                    .zip(&d.1)
+                    .map(|(f, x)| format!("{f}: {}", self.show(x)))
+                    .collect();
+                format!("{} {{ {} }}", &d.0[..d.0.len() - 2], body.join(", "))
+            }
+            Value::Data(d) if !d.1.is_empty() => {
+                format!(
+                    "{}({})",
+                    d.0,
+                    d.1.iter()
+                        .map(|x| self.show(x))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
+            v => show(v),
+        }
+    }
+
     // 関数の値を呼ぶ
     fn apply(&mut self, f: &Value, args: Vec<Value>) -> R<Value> {
         let Value::Fn(c) = f else {
@@ -273,7 +311,15 @@ impl Interp<'_> {
                 xs[i as usize].clone()
             }
             Expr::Field(x, name) => {
-                let s = syn(self.expr(x, env)?);
+                let v = self.expr(x, env)?;
+                if let Value::Data(d) = &v {
+                    let i = self.ctors[d.0.as_str()]
+                        .iter()
+                        .position(|f| f == name)
+                        .expect("型検査済み");
+                    return Ok(d.1[i].clone());
+                }
+                let s = syn(v);
                 match s.node.get(name) {
                     Some(n) => Value::Syn(Rc::new(s.child(n.clone()))),
                     None => return error(format!("フィールド {name} が無い")),
@@ -313,7 +359,7 @@ impl Interp<'_> {
                 None if self.fns.contains_key(n.as_str()) => {
                     Value::Fn(Rc::new(Callable::Named(n.clone())))
                 }
-                None if self.ctors.contains(n.as_str()) => {
+                None if self.ctors.contains_key(n.as_str()) => {
                     Value::Data(Rc::new((n.clone(), vec![])))
                 }
                 // 型検査を通っているので、残りは int などの型名
@@ -358,7 +404,7 @@ impl Interp<'_> {
                 }
                 if let Some(f) = env.iter().rev().find_map(|s| s.get(name)).cloned() {
                     self.apply(&f, vs)?
-                } else if self.ctors.contains(name.as_str()) {
+                } else if self.ctors.contains_key(name.as_str()) {
                     Value::Data(Rc::new((name.clone(), vs)))
                 } else if !self.fns.contains_key(name.as_str())
                     && name != "print"
@@ -375,7 +421,7 @@ impl Interp<'_> {
                         Value::Unit => "()".into(),
                         Value::Str(s) => s.to_string(),
                         Value::Ty(t) => t.to_string(),
-                        Value::Arr(_) | Value::Data(_) | Value::Fn(_) => show(&vs[0]),
+                        Value::Arr(_) | Value::Data(_) | Value::Fn(_) => self.show(&vs[0]),
                         Value::Syn(s) => format!("{:?}", s.node.strip()),
                     };
                     writeln!(self.out, "{s}").map_err(|e| Flow::Error(e.to_string()))?;

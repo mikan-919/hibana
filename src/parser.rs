@@ -1,6 +1,6 @@
 use crate::lexer::{Span, Tok, Token, lex};
 use crate::meta::{Grammar, Node, Q};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 #[derive(Debug, Clone)]
@@ -95,6 +95,10 @@ pub struct Parser<'s> {
     pub generic_fns: Rc<HashSet<String>>,
     // 大域の名前（関数・型・構築子・組み込み・パターンのリテラル）
     pub globals: Rc<HashSet<String>>,
+    // 構造体の名前からフィールド名の並び
+    pub structs: Rc<HashMap<String, Vec<String>>>,
+    // 戻り値の型を読んでいる間は、続く { を構造体の値と読まない
+    pub no_struct: bool,
 }
 
 use crate::error::Error;
@@ -144,6 +148,8 @@ pub fn parse(src: &str) -> R<Program> {
         types: Rc::default(),
         generic_fns: Rc::default(),
         globals: Rc::default(),
+        structs: Rc::default(),
+        no_struct: false,
     };
     let mut g = Grammar::default();
     let mut fn_starts = Vec::new();
@@ -214,6 +220,19 @@ pub fn parse(src: &str) -> R<Program> {
             TypeDecl::Alias(f) => prog.fns.push(f),
         }
     }
+    // 構造体の値 Name { ... } をフィールドの順に並べるため、フィールド名を覚えておく
+    p.structs = Rc::new(
+        prog.datas
+            .iter()
+            .filter(|d| d.ctors.len() == 1 && d.ctors[0].name.ends_with("{}"))
+            .map(|d| {
+                (
+                    d.name.clone(),
+                    d.ctors[0].fields.iter().map(|f| f.0.clone()).collect(),
+                )
+            })
+            .collect(),
+    );
     for s in fn_starts {
         p.pos = s;
         prog.fns.push(p.func()?);
@@ -290,6 +309,14 @@ impl Parser<'_> {
             _ => self.err("識別子が必要"),
         }
     }
+    // fn f() -> T { の T。続く { は本体
+    fn ret_ty(&mut self) -> R<Expr> {
+        let saved = std::mem::replace(&mut self.no_struct, true);
+        let r = self.ty();
+        self.no_struct = saved;
+        r
+    }
+
     // 型は式として読む。"=" を代入と取り違えないよう二項演算から読む
     pub fn ty(&mut self) -> R<Expr> {
         self.binary(0)
@@ -327,7 +354,7 @@ impl Parser<'_> {
         self.expect("(")?;
         params.extend(self.params()?);
         let ret = if self.eat("->") {
-            Some(self.ty()?)
+            Some(self.ret_ty()?)
         } else {
             None
         };
@@ -387,6 +414,26 @@ impl Parser<'_> {
             vec![]
         };
         self.expect("=")?;
+        // type Name = { フィールド: 型, ... } は構造体。構築子 Name{} を1つ持つ型として扱う
+        if self.eat("{") {
+            let mut fields = Vec::new();
+            while !self.eat("}") {
+                let n = self.ident()?;
+                self.expect(":")?;
+                fields.push((n, self.ty()?));
+                self.eat(",");
+            }
+            let ctor = Ctor {
+                name: format!("{name}{{}}"),
+                fields,
+                ret: None,
+            };
+            return Ok(TypeDecl::Data(Data {
+                name,
+                params,
+                ctors: vec![ctor],
+            }));
+        }
         if !self.has_bar() {
             let e = self.ty()?;
             let body = Block {
@@ -602,6 +649,34 @@ impl Parser<'_> {
                 self.pos -= 1;
                 return self.err_at(format!("型 {name} には <> で引数を渡す"));
             }
+            // 構造体の値 Name { フィールド: 式, ... }。構築子 Name{} の呼び出しにする
+            Tok::Ident(name)
+                if self.structs.contains_key(&name)
+                    && !self.no_struct
+                    && !self.at_newline()
+                    && self.peek() == &Tok::Punct("{") =>
+            {
+                self.pos += 1;
+                let mut given = Vec::new();
+                while !self.eat("}") {
+                    let f = self.ident()?;
+                    self.expect(":")?;
+                    given.push((f, self.expr()?));
+                    self.eat(",");
+                }
+                let order = self.structs[&name].clone();
+                let mut args = Vec::new();
+                for f in &order {
+                    let Some(i) = given.iter().position(|g| &g.0 == f) else {
+                        return self.err_at(format!("構造体 {name} のフィールド {f} が無い"));
+                    };
+                    args.push(given.remove(i).1);
+                }
+                if let Some((f, _)) = given.first() {
+                    return self.err_at(format!("構造体 {name} にフィールド {f} は無い"));
+                }
+                Expr::Call(format!("{name}{{}}"), args)
+            }
             Tok::Ident(name) if self.types.contains(&name) && self.peek() == &Tok::Punct("<") => {
                 self.pos += 1;
                 let mut args = Vec::new();
@@ -697,7 +772,7 @@ impl Parser<'_> {
                     }
                 }
                 let ret = if self.eat("->") {
-                    Some(Box::new(self.ty()?))
+                    Some(Box::new(self.ret_ty()?))
                 } else {
                     None
                 };

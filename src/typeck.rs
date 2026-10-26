@@ -85,6 +85,8 @@ pub(crate) enum Neu {
     Call(String, Vec<V>),
     // 値の分からない関数の呼び出し
     App(V, Vec<V>),
+    // 値の分からない構造体のフィールド
+    Proj(V, String),
     // 型の計算で扱えない式（while・代入・print など）。どの値とも等しくない
     Opaque(usize),
 }
@@ -181,6 +183,7 @@ fn show(v: &V) -> String {
                 show(f),
                 args.iter().map(show).collect::<Vec<_>>().join(", ")
             ),
+            Neu::Proj(x, f) => format!("{}.{f}", show(x)),
             Neu::Opaque(_) => "?".into(),
         },
     }
@@ -235,6 +238,7 @@ fn mentions(v: &V, id: usize) -> bool {
             Neu::Un(_, x) => mentions(x, id),
             Neu::Bin(_, a, b) => mentions(a, id) || mentions(b, id),
             Neu::App(f, args) => mentions(f, id) || args.iter().any(|a| mentions(a, id)),
+            Neu::Proj(x, _) => mentions(x, id),
             Neu::Call(_, args) => args.iter().any(|a| mentions(a, id)),
             Neu::Opaque(_) => false,
         },
@@ -360,6 +364,17 @@ impl Norm<'_> {
             V::Arr(xs) => V::Int(xs.len() as i64),
             _ => neu(Neu::Call("len".into(), vec![v])),
         }
+    }
+
+    // 構造体のフィールド。値が分からなければ x.f という項にする
+    fn proj(&self, x: V, f: &str) -> V {
+        if let V::Data(d) = &x
+            && let Some((_, c)) = self.ctors.get(d.0.as_str())
+            && let Some(i) = c.fields.iter().position(|(n, _)| n == f)
+        {
+            return d.1[i].clone();
+        }
+        neu(Neu::Proj(x, f.to_string()))
     }
 
     // 関数の値を呼ぶ
@@ -552,6 +567,13 @@ impl Norm<'_> {
                 }
                 V::Arr(Rc::new(vs))
             }
+            Expr::Field(x, f) if !matches!(self.eval(x, env)?, V::Prim("syn") | V::Syn(_)) => {
+                let v = self.eval(x, env)?;
+                if !matches!(v, V::Data(_) | V::Neu(_)) {
+                    return Err(Halt::Stuck);
+                }
+                self.proj(v, f)
+            }
             Expr::Match(s, arms) => {
                 let V::Data(d) = self.eval(s, env)? else {
                     return Err(Halt::Stuck);
@@ -658,6 +680,10 @@ impl Norm<'_> {
                         .map(|a| self.subst(a, id, by))
                         .collect::<R<_>>()?;
                     self.call(f, args)?
+                }
+                Neu::Proj(x, f) => {
+                    let x = self.subst(x, id, by)?;
+                    self.proj(x, f)
                 }
                 Neu::App(f, args) => {
                     let f = self.subst(f, id, by)?;
@@ -1005,12 +1031,42 @@ impl Ck<'_> {
         self.scopes.pop();
     }
 
+    // 構造体の値なら、フィールドの型の細分化の条件を v.f についての事実として加える
+    fn struct_facts(&mut self, ty: &V, val: &V) -> R<()> {
+        let V::DataT(d) = base(ty) else { return Ok(()) };
+        let data = self.norm.datas[d.0.as_str()];
+        let [c] = data.ctors.as_slice() else {
+            return Ok(());
+        };
+        if !c.name.ends_with("{}") {
+            return Ok(());
+        }
+        let mut env: Env = vec![
+            data.params
+                .iter()
+                .map(|p| p.0.clone())
+                .zip(d.1.iter().cloned())
+                .collect(),
+        ];
+        for (n, ft) in &c.fields {
+            let t = self.norm.eval_or_opaque(ft, &mut env)?;
+            let fv = self.norm.proj(val.clone(), n);
+            for p in split(&t).1 {
+                let f = self.norm.subst(&p, 0, &fv)?;
+                self.add_fact(f);
+            }
+            env[0].insert(n.clone(), fv);
+        }
+        Ok(())
+    }
+
     // 変数を束縛し、型の細分化の条件をその変数についての事実として加える
     fn bind(&mut self, name: &str, ty: V, val: V, mutable: bool) -> R<()> {
         for p in split(&ty).1 {
             let f = self.norm.subst(&p, 0, &val)?;
             self.add_fact(f);
         }
+        self.struct_facts(&ty, &val)?;
         self.scopes
             .last_mut()
             .unwrap()
@@ -1335,6 +1391,9 @@ impl Ck<'_> {
             },
             Expr::Field(x, f) => {
                 let t = self.expr(x)?;
+                if let V::DataT(d) = base(&t) {
+                    return self.struct_field(&d, x, f);
+                }
                 want(&prim("syn"), &t, "フィールド参照")?;
                 self.syn_field(&base(&t), f)?
             }
@@ -2306,6 +2365,37 @@ impl Ck<'_> {
         Ok(expected.cloned().or(result).unwrap_or(prim("never")))
     }
 
+    // 構造体の値 x のフィールド f の型。フィールドの型は前のフィールドの値に依存しうる
+    fn struct_field(&mut self, d: &(String, Vec<V>), x: &Expr, f: &str) -> R<V> {
+        let data = self.norm.datas[d.0.as_str()];
+        let [c] = data.ctors.as_slice() else {
+            return Err(format!("型 {} は構造体でないのでフィールドは無い", d.0).into());
+        };
+        if !c.name.ends_with("{}") {
+            return Err(format!("型 {} は構造体でないのでフィールドは無い", d.0).into());
+        }
+        let xv = self.eval_value(x)?;
+        let mut env: Env = vec![
+            data.params
+                .iter()
+                .map(|p| p.0.clone())
+                .zip(d.1.iter().cloned())
+                .collect(),
+        ];
+        for (i, (n, ft)) in c.fields.iter().enumerate() {
+            let t = self.norm.eval_or_opaque(ft, &mut env)?;
+            if n == f {
+                return Ok(t);
+            }
+            let v = match &xv {
+                V::Data(dv) => dv.1[i].clone(),
+                _ => self.norm.opaque(),
+            };
+            env[0].insert(n.clone(), v);
+        }
+        Err(format!("構造体 {} にフィールド {f} は無い", d.0).into())
+    }
+
     // syn<種類> のフィールド f の型。種類が syntax 規則なら、そのフィールドがあることを確かめる
     fn syn_field(&self, t: &V, f: &str) -> R<V> {
         let V::Syn(k) = t else { return Ok(prim("syn")) };
@@ -2543,6 +2633,35 @@ fn main() {
         ))
         .unwrap_err();
         assert!(e.contains("値として使えない"), "{e}");
+    }
+
+    #[test]
+    fn structs() {
+        let src = include_str!("../examples/struct.hb");
+        check(src).unwrap();
+        for (from, to, msg) in [
+            (
+                "Point { x: 1, y: 2 }",
+                "Point { x: 1 }",
+                "フィールド y が無い",
+            ),
+            (
+                "Point { x: 1, y: 2 }",
+                "Point { x: 1, y: 2, z: 3 }",
+                "フィールド z は無い",
+            ),
+            (
+                "Point { x: 1, y: 2 }",
+                "Point { x: 1, y: true }",
+                "int が必要だが bool",
+            ),
+            ("Size { w: 3, h: 4 }", "Size { w: 0, h: 4 }", "証明できない"),
+            ("print(q.x + q.y)", "print(q.z)", "フィールド z は無い"),
+            ("print(pr.snd)", "print(pr.snd + 1)", "int が必要だが str"),
+        ] {
+            let e = check(&src.replace(from, to)).unwrap_err();
+            assert!(e.contains(msg), "{to} => {e}");
+        }
     }
 
     #[test]
