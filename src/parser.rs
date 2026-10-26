@@ -24,6 +24,10 @@ pub enum Expr {
     Macro(String, Box<Node>),
     // quote { ... }。評価すると syn 型の値になる
     Quote(Vec<Q>),
+    Array(Vec<Expr>),
+    Index(Box<Expr>, Box<Expr>),
+    // 細分化型 型[変数 -> 条件]
+    Refine(Box<Expr>, String, Box<Expr>),
 }
 
 #[derive(Debug, Clone)]
@@ -341,6 +345,35 @@ impl Parser<'_> {
             Tok::Str(s) => Expr::Str(s),
             Tok::Punct("true") => Expr::Bool(true),
             Tok::Punct("false") => Expr::Bool(false),
+            // 大文字で始まる名前に空白なしで続く < は型引数。比較の < と区別する
+            Tok::Ident(name)
+                if name.starts_with(|c: char| c.is_ascii_uppercase())
+                    && self.peek() == &Tok::Punct("<")
+                    && !self.toks[self.pos].gap_before =>
+            {
+                self.pos += 1;
+                let mut args = Vec::new();
+                loop {
+                    // 閉じの > を比較と読まないよう、加減乗除より弱い演算子は読まない
+                    args.push(self.binary(5)?);
+                    if !self.eat(",") {
+                        self.expect(">")?;
+                        break;
+                    }
+                }
+                Expr::Call(name, args)
+            }
+            Tok::Punct("[") => {
+                let mut items = Vec::new();
+                while !self.eat("]") {
+                    items.push(self.expr()?);
+                    if !self.eat(",") {
+                        self.expect("]")?;
+                        break;
+                    }
+                }
+                Expr::Array(items)
+            }
             Tok::Ident(name) => {
                 if !self.at_newline() && self.eat("(") {
                     Expr::Call(name, self.args()?)
@@ -378,13 +411,28 @@ impl Parser<'_> {
                 return self.err("式が必要");
             }
         };
-        while !self.at_newline() && self.eat(".") {
-            let name = self.ident()?;
-            e = if !self.at_newline() && self.eat("(") {
-                Expr::Method(Box::new(e), name, self.args()?)
+        while !self.at_newline() {
+            if self.eat(".") {
+                let name = self.ident()?;
+                e = if !self.at_newline() && self.eat("(") {
+                    Expr::Method(Box::new(e), name, self.args()?)
+                } else {
+                    Expr::Field(Box::new(e), name)
+                };
+            } else if self.eat("[") {
+                let at = |p: &Self, k: usize| p.toks.get(p.pos + k).map(|t| t.tok.clone());
+                e = if let (Some(Tok::Ident(x)), Some(Tok::Punct("->"))) =
+                    (at(self, 0), at(self, 1))
+                {
+                    self.pos += 2;
+                    Expr::Refine(Box::new(e), x, Box::new(self.expr()?))
+                } else {
+                    Expr::Index(Box::new(e), Box::new(self.expr()?))
+                };
+                self.expect("]")?;
             } else {
-                Expr::Field(Box::new(e), name)
-            };
+                break;
+            }
         }
         Ok(e)
     }

@@ -14,6 +14,7 @@ pub enum Value {
     Syn(Rc<Syn>),
     // 型。実行時には名前だけを持つ
     Ty(Rc<str>),
+    Arr(Rc<Vec<Value>>),
 }
 
 // 通常の値以外で評価を抜ける理由
@@ -52,6 +53,18 @@ pub fn run_macro(b: &Block, vars: Vec<(String, Value)>) -> Result<Value, String>
     match it.block(b, &mut vec![vars.into_iter().collect()]) {
         Ok(v) | Err(Flow::Return(v)) => Ok(v),
         Err(Flow::Error(e)) => Err(e),
+    }
+}
+
+fn show(v: &Value) -> String {
+    match v {
+        Value::Arr(xs) => format!("[{}]", xs.iter().map(show).collect::<Vec<_>>().join(", ")),
+        Value::Int(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Str(s) => format!("{s:?}"),
+        Value::Ty(t) => t.to_string(),
+        Value::Unit => "()".into(),
+        Value::Syn(s) => format!("{:?}", s.node.strip()),
     }
 }
 
@@ -102,14 +115,17 @@ impl Interp<'_> {
     fn syn_fn(&mut self, name: &str, vs: &mut Vec<Value>) -> R<Option<Value>> {
         if !matches!(
             name,
-            "len" | "at" | "is_null" | "int_of" | "str_of" | "error"
+            "len" | "at" | "is_null" | "int_of" | "str_of" | "error" | "Vec"
         ) || self.fns.contains_key(name)
         {
             return Ok(None);
         }
         let a = vs.remove(0);
-        if name == "error" {
-            return error(str_val(a).to_string());
+        match (name, &a) {
+            ("error", _) => return error(str_val(a).to_string()),
+            ("Vec", _) => return Ok(Some(Value::Ty("Vec".into()))),
+            ("len", Value::Arr(xs)) => return Ok(Some(Value::Int(xs.len() as i64))),
+            _ => {}
         }
         let s = syn(a);
         let n = s.node.strip();
@@ -171,6 +187,23 @@ impl Interp<'_> {
             Expr::Bool(b) => Value::Bool(*b),
             Expr::Str(s) => Value::Str(s.as_str().into()),
             Expr::Method(..) | Expr::Macro(..) => unreachable!("型検査で弾く"),
+            // 細分化型は実行時には名前だけを持つ型
+            Expr::Refine(..) => Value::Ty("refine".into()),
+            Expr::Array(items) => {
+                let mut vs = Vec::new();
+                for a in items {
+                    vs.push(self.expr(a, env)?);
+                }
+                Value::Arr(Rc::new(vs))
+            }
+            Expr::Index(v, i) => {
+                let Value::Arr(xs) = self.expr(v, env)? else {
+                    unreachable!("型検査済み")
+                };
+                let i = int(self.expr(i, env)?);
+                // 範囲は型検査で証明済み
+                xs[i as usize].clone()
+            }
             Expr::Field(x, name) => {
                 let s = syn(self.expr(x, env)?);
                 match s.node.get(name) {
@@ -251,6 +284,7 @@ impl Interp<'_> {
                         Value::Unit => "()".into(),
                         Value::Str(s) => s.to_string(),
                         Value::Ty(t) => t.to_string(),
+                        Value::Arr(_) => show(&vs[0]),
                         Value::Syn(s) => format!("{:?}", s.node.strip()),
                     };
                     writeln!(self.out, "{s}").map_err(|e| Flow::Error(e.to_string()))?;
