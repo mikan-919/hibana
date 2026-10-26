@@ -19,6 +19,27 @@ pub enum Value {
     Arr(Rc<Vec<Value>>),
     // data の値 (構築子, フィールド)
     Data(Rc<(String, Vec<Value>)>),
+    Fn(Rc<Callable>),
+}
+
+// 関数の値
+#[derive(Debug)]
+pub enum Callable {
+    // ponytail: 作った時の変数を値で写し取る。後から代入しても関数の中には届かない
+    Lam {
+        params: Vec<String>,
+        body: Block,
+        env: HashMap<String, Value>,
+    },
+    // トップレベルの関数
+    Named(String),
+}
+
+// 関数の値は同じものの時だけ等しい（型検査で比較を禁止していないので、ここで決める）
+impl PartialEq for Callable {
+    fn eq(&self, o: &Self) -> bool {
+        std::ptr::eq(self, o)
+    }
 }
 
 // 通常の値以外で評価を抜ける理由
@@ -77,6 +98,7 @@ fn show(v: &Value) -> String {
         Value::Ty(t) => t.to_string(),
         Value::Unit => "()".into(),
         Value::Syn(s) => format!("{:?}", s.node.strip()),
+        Value::Fn(_) => "<fn>".into(),
         Value::Data(d) if d.1.is_empty() => d.0.clone(),
         Value::Data(d) => format!(
             "{}({})",
@@ -163,6 +185,24 @@ impl Interp<'_> {
             }
             _ => return error(format!("{name} を {n:?} に使えない")),
         }))
+    }
+
+    // 関数の値を呼ぶ
+    fn apply(&mut self, f: &Value, args: Vec<Value>) -> R<Value> {
+        let Value::Fn(c) = f else {
+            unreachable!("型検査済み")
+        };
+        match &**c {
+            Callable::Named(n) => self.call(n, args),
+            Callable::Lam { params, body, env } => {
+                let mut scope = env.clone();
+                scope.extend(params.iter().cloned().zip(args));
+                match self.block(body, &mut vec![scope]) {
+                    Err(Flow::Return(v)) => Ok(v),
+                    r => r,
+                }
+            }
+        }
     }
 
     fn call(&mut self, name: &str, args: Vec<Value>) -> R<Value> {
@@ -261,6 +301,9 @@ impl Interp<'_> {
                 {
                     self.call(n, vec![])?
                 }
+                None if self.fns.contains_key(n.as_str()) => {
+                    Value::Fn(Rc::new(Callable::Named(n.clone())))
+                }
                 None if self.ctors.contains(n.as_str()) => {
                     Value::Data(Rc::new((n.clone(), vec![])))
                 }
@@ -304,7 +347,9 @@ impl Interp<'_> {
                 for a in args {
                     vs.push(self.expr(a, env)?);
                 }
-                if self.ctors.contains(name.as_str()) {
+                if let Some(f) = env.iter().rev().find_map(|s| s.get(name)).cloned() {
+                    self.apply(&f, vs)?
+                } else if self.ctors.contains(name.as_str()) {
                     Value::Data(Rc::new((name.clone(), vs)))
                 } else if !self.fns.contains_key(name.as_str())
                     && name != "print"
@@ -321,7 +366,7 @@ impl Interp<'_> {
                         Value::Unit => "()".into(),
                         Value::Str(s) => s.to_string(),
                         Value::Ty(t) => t.to_string(),
-                        Value::Arr(_) | Value::Data(_) => show(&vs[0]),
+                        Value::Arr(_) | Value::Data(_) | Value::Fn(_) => show(&vs[0]),
                         Value::Syn(s) => format!("{:?}", s.node.strip()),
                     };
                     writeln!(self.out, "{s}").map_err(|e| Flow::Error(e.to_string()))?;
@@ -329,6 +374,23 @@ impl Interp<'_> {
                 } else {
                     self.call(name, vs)?
                 }
+            }
+            Expr::Lam(params, _, body) => Value::Fn(Rc::new(Callable::Lam {
+                params: params.iter().map(|p| p.0.clone()).collect(),
+                body: body.clone(),
+                env: env
+                    .iter()
+                    .flat_map(|s| s.iter().map(|(k, v)| (k.clone(), v.clone())))
+                    .collect(),
+            })),
+            Expr::Pi(..) => Value::Ty("fn".into()),
+            Expr::Apply(f, args) => {
+                let f = self.expr(f, env)?;
+                let mut vs = Vec::new();
+                for a in args {
+                    vs.push(self.expr(a, env)?);
+                }
+                self.apply(&f, vs)?
             }
             Expr::Match(s, arms) => {
                 let Value::Data(d) = self.expr(s, env)? else {

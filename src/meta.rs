@@ -406,7 +406,9 @@ fn emit(v: &Value, dollar: &Token, out: &mut Vec<Token>) -> R<()> {
         Value::Bool(b) => Tok::Punct(if *b { "true" } else { "false" }),
         Value::Str(s) => Tok::Str(s.to_string()),
         Value::Ty(t) => Tok::Ident(t.to_string()),
-        Value::Arr(_) | Value::Data(_) => return Err("配列と data の値は差し込めない".into()),
+        Value::Arr(_) | Value::Data(_) | Value::Fn(_) => {
+            return Err("配列・data・関数の値は差し込めない".into());
+        }
         Value::Unit => return Err("() は差し込めない".into()),
         Value::Syn(s) => return emit_syn(s, dollar, out),
     };

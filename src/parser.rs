@@ -29,6 +29,12 @@ pub enum Expr {
     // 細分化型 型[変数 -> 条件]
     Refine(Box<Expr>, String, Box<Expr>),
     Match(Box<Expr>, Vec<Arm>),
+    // 無名関数 fn(引数) -> 戻り値の型 { 本体 }。引数の型は期待する型から分かれば省ける
+    Lam(Vec<(String, Option<Expr>)>, Option<Box<Expr>>, Block),
+    // 関数型 (x: A, ...) -> B。名前の無い引数は "_"
+    Pi(Vec<(String, Expr)>, Box<Expr>),
+    // 式の値の関数を呼ぶ
+    Apply(Box<Expr>, Vec<Expr>),
     // ソース上の位置。エラー表示に使う
     At(Span, Box<Expr>),
 }
@@ -546,9 +552,58 @@ impl Parser<'_> {
                 }
             }
             Tok::Punct("(") => {
-                let e = self.expr()?;
-                self.expect(")")?;
-                e
+                // (x: A, B) -> C は関数型。名前の無い1個だけなら括弧で囲んだ式
+                let mut entries = Vec::new();
+                while !self.eat(")") {
+                    let after = self.toks.get(self.pos + 1).map(|t| &t.tok);
+                    let name = match (self.peek().clone(), after) {
+                        (Tok::Ident(n), Some(Tok::Punct(":"))) => {
+                            self.pos += 2;
+                            Some(n)
+                        }
+                        _ => None,
+                    };
+                    entries.push((name, self.expr()?));
+                    if !self.eat(",") {
+                        self.expect(")")?;
+                        break;
+                    }
+                }
+                if self.eat("->") {
+                    let binders = entries
+                        .into_iter()
+                        .map(|(n, t)| (n.unwrap_or("_".into()), t))
+                        .collect();
+                    Expr::Pi(binders, Box::new(self.ty()?))
+                } else if let [(None, _)] = entries.as_slice() {
+                    entries.pop().unwrap().1
+                } else {
+                    return self.err("関数型なら ) の後に -> が必要");
+                }
+            }
+            Tok::Punct("fn") => {
+                self.expect("(")?;
+                let mut params = Vec::new();
+                while !self.eat(")") {
+                    let n = self.ident()?;
+                    let t = if self.eat(":") {
+                        Some(self.ty()?)
+                    } else {
+                        None
+                    };
+                    params.push((n, t));
+                    if !self.eat(",") {
+                        self.expect(")")?;
+                        break;
+                    }
+                }
+                let ret = if self.eat("->") {
+                    Some(Box::new(self.ty()?))
+                } else {
+                    None
+                };
+                self.expect("{")?;
+                Expr::Lam(params, ret, self.block()?)
             }
             Tok::Punct("{") => Expr::Block(self.block()?),
             Tok::Punct("if") => self.if_rest()?,
@@ -606,6 +661,8 @@ impl Parser<'_> {
                 } else {
                     Expr::Field(Box::new(e), name)
                 };
+            } else if self.eat("(") {
+                e = Expr::Apply(Box::new(e), self.args()?);
             } else if self.eat("[") {
                 let at = |p: &Self, k: usize| p.toks.get(p.pos + k).map(|t| t.tok.clone());
                 e = if let (Some(Tok::Ident(x)), Some(Tok::Punct("->"))) =

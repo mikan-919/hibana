@@ -27,8 +27,50 @@ pub(crate) enum V {
     VecT(Rc<V>),
     // 細分化型 base[x -> 条件]。条件は x を Var(0) として評価した値
     Refine(Rc<(V, V)>),
+    // 関数型 (x: A, ...) -> B
+    Pi(Rc<PiV>),
+    // 無名関数の値
+    Lam(Rc<Clo>),
+    // トップレベルの関数を値として使ったもの
+    FnRef(String),
     // 値が分からず計算が止まった項
     Neu(Rc<Neu>),
+}
+
+// 関数型の値。引数 i は Var(binder(level, i)) として doms と cod の中に現れる
+#[derive(Debug)]
+pub(crate) struct PiV {
+    doms: Vec<V>,
+    cod: V,
+    level: usize,
+}
+
+// 深さ level は比べない。依存しない関数型は、どの深さで書いても同じ型になる
+impl PartialEq for PiV {
+    fn eq(&self, o: &Self) -> bool {
+        self.doms == o.doms && self.cod == o.cod
+    }
+}
+
+// 無名関数。作った時の変数の値を持つ
+#[derive(Debug)]
+pub(crate) struct Clo {
+    params: Vec<String>,
+    body: Block,
+    env: HashMap<String, V>,
+}
+
+// ponytail: 無名関数は同じ値の時だけ等しいとみなす。中身を比べるなら本体を正規化して比べる
+impl PartialEq for Clo {
+    fn eq(&self, o: &Self) -> bool {
+        std::ptr::eq(self, o)
+    }
+}
+
+// 関数型の引数を表す変数の番号。入れ子の深さ level ごとに分け、内側の関数型の引数と混ざらないようにする
+// ponytail: 深さの違う所で書いた同じ依存関数型は別の型になる。α同値で比べるなら de Bruijn 添字にする
+fn binder(level: usize, i: usize) -> usize {
+    (1 << 40) + level * 64 + i
 }
 
 #[derive(Debug, PartialEq)]
@@ -39,6 +81,8 @@ pub(crate) enum Neu {
     Bin(&'static str, V, V),
     // 展開しきれなかった関数呼び出し
     Call(String, Vec<V>),
+    // 値の分からない関数の呼び出し
+    App(V, Vec<V>),
     // 型の計算で扱えない式（while・代入・print など）。どの値とも等しくない
     Opaque(usize),
 }
@@ -94,12 +138,24 @@ fn show(v: &V) -> String {
         V::Prim(p) => p.to_string(),
         V::VecT(a) => format!("Vec<{}>", show(a)),
         V::Refine(r) => format!("{}[_ -> {}]", show(&r.0), show(&r.1)),
+        V::Pi(p) => format!(
+            "({}) -> {}",
+            p.doms.iter().map(show).collect::<Vec<_>>().join(", "),
+            show(&p.cod)
+        ),
+        V::Lam(_) => "<fn>".into(),
+        V::FnRef(n) => n.clone(),
         V::Neu(n) => match &**n {
             Neu::Var(_, name) => name.clone(),
             Neu::Un(op, x) => format!("{op}{}", show(x)),
             Neu::Bin(op, a, b) => format!("({} {op} {})", show(a), show(b)),
             Neu::Call(f, args) => format!(
                 "{f}({})",
+                args.iter().map(show).collect::<Vec<_>>().join(", ")
+            ),
+            Neu::App(f, args) => format!(
+                "{}({})",
+                show(f),
                 args.iter().map(show).collect::<Vec<_>>().join(", ")
             ),
             Neu::Opaque(_) => "?".into(),
@@ -149,10 +205,13 @@ fn mentions(v: &V, id: usize) -> bool {
         V::Arr(xs) => xs.iter().any(|x| mentions(x, id)),
         V::VecT(a) => mentions(a, id),
         V::Refine(r) => mentions(&r.0, id) || mentions(&r.1, id),
+        V::Pi(p) => p.doms.iter().any(|x| mentions(x, id)) || mentions(&p.cod, id),
+        V::Lam(c) => c.env.values().any(|x| mentions(x, id)),
         V::Neu(n) => match &**n {
             Neu::Var(i, _) => *i == id,
             Neu::Un(_, x) => mentions(x, id),
             Neu::Bin(_, a, b) => mentions(a, id) || mentions(b, id),
+            Neu::App(f, args) => mentions(f, id) || args.iter().any(|a| mentions(a, id)),
             Neu::Call(_, args) => args.iter().any(|a| mentions(a, id)),
             Neu::Opaque(_) => false,
         },
@@ -178,6 +237,8 @@ struct Norm<'a> {
     fuel: usize,
     // 展開の入れ子の深さ。スタックあふれを防ぐ
     depth: usize,
+    // 関数型の入れ子の深さ。関数型の引数の変数の番号に使う
+    pi_depth: usize,
     next_id: usize,
 }
 
@@ -191,6 +252,7 @@ impl Norm<'_> {
             ctors: HashMap::new(),
             fuel: 100_000,
             depth: 0,
+            pi_depth: 0,
             next_id: 0,
         }
     }
@@ -275,6 +337,52 @@ impl Norm<'_> {
             V::Arr(xs) => V::Int(xs.len() as i64),
             _ => neu(Neu::Call("len".into(), vec![v])),
         }
+    }
+
+    // 関数の値を呼ぶ
+    fn app(&mut self, f: V, args: Vec<V>) -> R<V> {
+        let V::Lam(c) = &f else {
+            return match &f {
+                V::FnRef(n) => self.call(n, args),
+                _ => Ok(neu(Neu::App(f.clone(), args))),
+            };
+        };
+        if self.fuel == 0 || self.depth >= 64 {
+            return Err("型の計算が終わらない（無名関数の展開）".into());
+        }
+        self.fuel -= 1;
+        let mut scope = c.env.clone();
+        scope.extend(c.params.iter().cloned().zip(args.iter().cloned()));
+        let mut env = vec![scope];
+        self.depth += 1;
+        let r = self.block(&c.body, &mut env);
+        self.depth -= 1;
+        match r {
+            Ok(v) => Ok(v),
+            Err(Halt::Stuck) => Ok(neu(Neu::App(f.clone(), args))),
+            Err(Halt::Err(e)) => Err(e),
+        }
+    }
+
+    // 関数型の式を評価する。引数は Var(binder(深さ, i)) にする
+    fn eval_pi(&mut self, binders: &[(String, Expr)], ret: &Expr, env: &mut Env) -> H<V> {
+        let level = self.pi_depth;
+        self.pi_depth += 1;
+        env.push(HashMap::new());
+        let r = (|| {
+            let mut doms = Vec::new();
+            for (i, (n, t)) in binders.iter().enumerate() {
+                doms.push(self.eval(t, env)?);
+                env.last_mut()
+                    .unwrap()
+                    .insert(n.clone(), neu(Neu::Var(binder(level, i), n.clone())));
+            }
+            let cod = self.eval(ret, env)?;
+            Ok(V::Pi(Rc::new(PiV { doms, cod, level })))
+        })();
+        env.pop();
+        self.pi_depth -= 1;
+        r
     }
 
     // 関数を展開する。中で止まったら呼び出しのまま残す
@@ -362,6 +470,7 @@ impl Norm<'_> {
                 {
                     self.call(n, vec![]).map_err(Halt::Err)?
                 }
+                None if self.fns.contains_key(n.as_str()) => V::FnRef(n.clone()),
                 None => return Err(Halt::Err(format!("未定義の変数 {n}").into())),
             },
             Expr::Unary(op, x) => Self::un(op, self.eval(x, env)?),
@@ -383,8 +492,28 @@ impl Norm<'_> {
                 for a in args {
                     vs.push(self.eval(a, env)?);
                 }
-                self.call(name, vs).map_err(Halt::Err)?
+                match env.iter().rev().find_map(|s| s.get(name)).cloned() {
+                    Some(f) => self.app(f, vs).map_err(Halt::Err)?,
+                    None => self.call(name, vs).map_err(Halt::Err)?,
+                }
             }
+            Expr::Apply(f, args) => {
+                let f = self.eval(f, env)?;
+                let mut vs = Vec::new();
+                for a in args {
+                    vs.push(self.eval(a, env)?);
+                }
+                self.app(f, vs).map_err(Halt::Err)?
+            }
+            Expr::Lam(params, _, body) => V::Lam(Rc::new(Clo {
+                params: params.iter().map(|p| p.0.clone()).collect(),
+                body: body.clone(),
+                env: env
+                    .iter()
+                    .flat_map(|s| s.iter().map(|(k, v)| (k.clone(), v.clone())))
+                    .collect(),
+            })),
+            Expr::Pi(binders, ret) => self.eval_pi(binders, ret, env)?,
             Expr::Array(items) => {
                 let mut vs = Vec::new();
                 for a in items {
@@ -464,6 +593,26 @@ impl Norm<'_> {
                 self.subst(&r.0, id, by)?,
                 self.subst(&r.1, id, by)?,
             ))),
+            V::Pi(p) => V::Pi(Rc::new(PiV {
+                doms: p
+                    .doms
+                    .iter()
+                    .map(|x| self.subst(x, id, by))
+                    .collect::<R<_>>()?,
+                cod: self.subst(&p.cod, id, by)?,
+                level: p.level,
+            })),
+            V::Lam(c) if c.env.values().any(|x| mentions(x, id)) => {
+                let mut env = HashMap::new();
+                for (k, x) in &c.env {
+                    env.insert(k.clone(), self.subst(x, id, by)?);
+                }
+                V::Lam(Rc::new(Clo {
+                    params: c.params.clone(),
+                    body: c.body.clone(),
+                    env,
+                }))
+            }
             V::Neu(n) => match &**n {
                 Neu::Var(i, _) if *i == id => by.clone(),
                 Neu::Var(..) | Neu::Opaque(_) => v.clone(),
@@ -478,6 +627,14 @@ impl Norm<'_> {
                         .map(|a| self.subst(a, id, by))
                         .collect::<R<_>>()?;
                     self.call(f, args)?
+                }
+                Neu::App(f, args) => {
+                    let f = self.subst(f, id, by)?;
+                    let args = args
+                        .iter()
+                        .map(|a| self.subst(a, id, by))
+                        .collect::<R<_>>()?;
+                    self.app(f, args)?
                 }
             },
             v => v.clone(),
@@ -588,6 +745,15 @@ fn walk(e: &Expr, f: &mut dyn FnMut(&Expr)) {
             walk(s, f);
             arms.iter().for_each(|a| walk(&a.body, f));
         }
+        Expr::Lam(_, _, b) => block(b, f),
+        Expr::Pi(bs, r) => {
+            bs.iter().for_each(|(_, t)| walk(t, f));
+            walk(r, f);
+        }
+        Expr::Apply(x, xs) => {
+            walk(x, f);
+            xs.iter().for_each(|x| walk(x, f));
+        }
         _ => {}
     }
 }
@@ -599,6 +765,27 @@ fn assigned(e: &Expr, out: &mut Vec<String>) {
             out.push(n.clone());
         }
     });
+}
+
+// 型 name が関数型の引数の側に現れるか（正値性の検査）
+fn negative(v: &V, name: &str) -> bool {
+    match v {
+        V::Pi(p) => p.doms.iter().any(|x| occurs(x, name)) || negative(&p.cod, name),
+        V::DataT(d) => d.1.iter().any(|x| negative(x, name)),
+        V::VecT(a) => negative(a, name),
+        V::Refine(r) => negative(&r.0, name),
+        _ => false,
+    }
+}
+
+fn occurs(v: &V, name: &str) -> bool {
+    match v {
+        V::DataT(d) => d.0 == name || d.1.iter().any(|x| occurs(x, name)),
+        V::Pi(p) => p.doms.iter().any(|x| occurs(x, name)) || occurs(&p.cod, name),
+        V::VecT(a) => occurs(a, name),
+        V::Refine(r) => occurs(&r.0, name),
+        _ => false,
+    }
 }
 
 // 呼び出しの関係を辿って from から to に着くか
@@ -1020,6 +1207,12 @@ impl Ck<'_> {
             }
             Expr::Block(b) => self.check_block(b, expected),
             Expr::Match(s, arms) => self.check_match(s, arms, Some(expected)).map(|_| ()),
+            Expr::Lam(params, ret, body) if matches!(base(expected), V::Pi(_)) => {
+                let V::Pi(p) = base(expected) else {
+                    unreachable!()
+                };
+                self.lam_check(params, ret, body, &p)
+            }
             Expr::Call(n, args) if self.norm.ctors.contains_key(n.as_str()) => {
                 let t = self.ctor_call(n, args, Some(expected))?;
                 self.subsume(e, &t, expected)
@@ -1072,6 +1265,10 @@ impl Ck<'_> {
                     return self.ctor_call(n, &[], None);
                 }
                 None if self.norm.datas.contains_key(n.as_str()) => return self.data_app(n, &[]),
+                None if self.norm.fns.contains_key(n.as_str()) => {
+                    let f = self.norm.fns[n.as_str()];
+                    return self.fn_type(f);
+                }
                 None => return Err(format!("未定義の変数 {n}").into()),
             },
             Expr::Field(x, _) => {
@@ -1159,6 +1356,10 @@ impl Ck<'_> {
                     }
                 }
             }
+            Expr::Call(name, args) if self.lookup(name).is_some() => {
+                let t = self.lookup(name).unwrap().ty.clone();
+                return self.apply_type(&t, args);
+            }
             Expr::Call(name, args) if name == "print" => {
                 if args.len() != 1 {
                     return Err("print の引数は1個".into());
@@ -1179,6 +1380,12 @@ impl Ck<'_> {
             Expr::Call(name, args) if self.norm.datas.contains_key(name.as_str()) => {
                 return self.data_app(name, args);
             }
+            Expr::Apply(f, args) => {
+                let t = self.expr(f)?;
+                return self.apply_type(&t, args);
+            }
+            Expr::Lam(params, ret, body) => return self.lam_infer(params, ret, body),
+            Expr::Pi(binders, ret) => return self.pi_type(binders, ret),
             Expr::Match(s, arms) => return self.check_match(s, arms, None),
             Expr::Call(name, args) if name == "len" || name == "Vec" => {
                 if args.len() != 1 {
@@ -1356,6 +1563,203 @@ impl Ck<'_> {
         }
     }
 
+    // トップレベルの関数を値として使った時の型
+    fn fn_type(&mut self, f: &Fn) -> R<V> {
+        if self.cur_fn.as_deref() == Some(f.name.as_str()) {
+            return Err(format!(
+                "再帰する関数 {} を値として使えない（停止性を検査できないため）",
+                f.name
+            )
+            .into());
+        }
+        let ret = f.ret.clone().unwrap_or(Expr::Var("unit".into()));
+        let mut env: Env = vec![HashMap::new()];
+        match self.norm.eval_pi(&f.params, &ret, &mut env) {
+            Ok(v) => Ok(v),
+            Err(Halt::Stuck) => Ok(self.norm.opaque()),
+            Err(Halt::Err(e)) => Err(e),
+        }
+    }
+
+    // 関数型 t の値を args で呼んだ時の型。引数の型は前の引数の値に依存しうる
+    fn apply_type(&mut self, t: &V, args: &[Expr]) -> R<V> {
+        let V::Pi(p) = base(t) else {
+            return Err(format!("関数でない値（{}）を呼んでいる", show(t)).into());
+        };
+        if p.doms.len() != args.len() {
+            return Err(format!("引数は{}個", p.doms.len()).into());
+        }
+        let mut vals: Vec<V> = Vec::new();
+        for (i, a) in args.iter().enumerate() {
+            let mut d = p.doms[i].clone();
+            for (j, v) in vals.iter().enumerate() {
+                d = self.norm.subst(&d, binder(p.level, j), v)?;
+            }
+            self.check(a, &d)
+                .ctx(|e| format!("{} 番目の引数: {e}", i + 1))?;
+            vals.push(self.eval_value(a)?);
+        }
+        let mut c = p.cod.clone();
+        for (j, v) in vals.iter().enumerate() {
+            c = self.norm.subst(&c, binder(p.level, j), v)?;
+        }
+        Ok(c)
+    }
+
+    // 関数の本体を、戻り値の型 rt で検査する
+    fn fn_body(&mut self, body: &Block, rt: Option<V>) -> R<V> {
+        let saved = self.ret.clone();
+        let r = match rt {
+            Some(rt) => {
+                self.ret = rt.clone();
+                if rt == prim("unit") {
+                    self.block(body).map(|_| rt)
+                } else {
+                    self.check_block(body, &rt).map(|_| rt)
+                }
+            }
+            None => {
+                // 戻り値の型が無いと return の型が分からない
+                self.ret = self.norm.opaque();
+                self.block(body)
+            }
+        };
+        self.ret = saved;
+        r
+    }
+
+    // 無名関数の型を、書かれた引数の型から求める
+    fn lam_infer(
+        &mut self,
+        params: &[(String, Option<Expr>)],
+        ret: &Option<Box<Expr>>,
+        body: &Block,
+    ) -> R<V> {
+        let level = self.norm.pi_depth;
+        self.norm.pi_depth += 1;
+        self.push();
+        let r = self.lam_infer_inner(level, params, ret, body);
+        self.pop();
+        self.norm.pi_depth -= 1;
+        r
+    }
+
+    fn lam_infer_inner(
+        &mut self,
+        level: usize,
+        params: &[(String, Option<Expr>)],
+        ret: &Option<Box<Expr>>,
+        body: &Block,
+    ) -> R<V> {
+        let mut doms = Vec::new();
+        let mut ids = Vec::new();
+        for (n, t) in params {
+            let Some(t) = t else {
+                return Err(format!(
+                    "無名関数の引数 {n} の型を書く（期待する型が無いので推論できない）"
+                )
+                .into());
+            };
+            let ty = self.eval_type(t)?;
+            let id = self.norm.fresh();
+            self.bind(n, ty.clone(), neu(Neu::Var(id, n.clone())), false)?;
+            doms.push(ty);
+            ids.push(id);
+        }
+        let rt = match ret {
+            Some(t) => Some(self.eval_type(t)?),
+            None => None,
+        };
+        let cod = self.fn_body(body, rt)?;
+        // 引数の変数を、関数型の引数の番号に置き換える
+        let mut out = Vec::new();
+        for (i, d) in doms.iter().enumerate() {
+            let mut d = d.clone();
+            for (j, id) in ids[..i].iter().enumerate() {
+                d = self.norm.subst(
+                    &d,
+                    *id,
+                    &neu(Neu::Var(binder(level, j), params[j].0.clone())),
+                )?;
+            }
+            out.push(d);
+        }
+        let mut cod = cod;
+        for (j, id) in ids.iter().enumerate() {
+            cod = self.norm.subst(
+                &cod,
+                *id,
+                &neu(Neu::Var(binder(level, j), params[j].0.clone())),
+            )?;
+        }
+        Ok(V::Pi(Rc::new(PiV {
+            doms: out,
+            cod,
+            level,
+        })))
+    }
+
+    // 無名関数を、期待する関数型 p で検査する。引数の型は省いてよい
+    fn lam_check(
+        &mut self,
+        params: &[(String, Option<Expr>)],
+        ret: &Option<Box<Expr>>,
+        body: &Block,
+        p: &PiV,
+    ) -> R<()> {
+        if params.len() != p.doms.len() {
+            return Err(format!("引数は{}個", p.doms.len()).into());
+        }
+        self.norm.pi_depth += 1;
+        self.push();
+        let r = (|| {
+            let mut vals: Vec<V> = Vec::new();
+            for (i, (n, t)) in params.iter().enumerate() {
+                let mut d = p.doms[i].clone();
+                for (j, v) in vals.iter().enumerate() {
+                    d = self.norm.subst(&d, binder(p.level, j), v)?;
+                }
+                if let Some(t) = t {
+                    let tt = self.eval_type(t)?;
+                    want(&tt, &d, &format!("引数 {n}"))?;
+                }
+                let id = self.norm.fresh();
+                let v = neu(Neu::Var(id, n.clone()));
+                self.bind(n, d, v.clone(), false)?;
+                vals.push(v);
+            }
+            let mut cod = p.cod.clone();
+            for (j, v) in vals.iter().enumerate() {
+                cod = self.norm.subst(&cod, binder(p.level, j), v)?;
+            }
+            if let Some(rt) = ret {
+                let rt = self.eval_type(rt)?;
+                want(&cod, &rt, "戻り値")?;
+            }
+            self.fn_body(body, Some(cod)).map(|_| ())
+        })();
+        self.pop();
+        self.norm.pi_depth -= 1;
+        r
+    }
+
+    // 関数型 (x: A, ...) -> B の型。引数と戻り値の型の階層の最大
+    fn pi_type(&mut self, binders: &[(String, Expr)], ret: &Expr) -> R<V> {
+        self.push();
+        let r = (|| {
+            let mut level = 0;
+            for (n, t) in binders {
+                level = level.max(self.type_level(t)?);
+                let ty = self.eval_value(t)?;
+                let id = self.norm.fresh();
+                self.bind(n, ty, neu(Neu::Var(id, n.clone())), false)?;
+            }
+            Ok(V::Univ(level.max(self.type_level(ret)?)))
+        })();
+        self.pop();
+        r
+    }
+
     // 式が型なら、その型の階層を返す
     fn type_level(&mut self, t: &Expr) -> R<u32> {
         match base(&self.expr(t)?) {
@@ -1381,6 +1785,13 @@ impl Ck<'_> {
             for (n, t) in &c.fields {
                 level = level.max(self.type_level(t).ctx(r)?);
                 let ty = self.eval_value(t)?;
+                if negative(&ty, &d.name) {
+                    return Err(r(&format!(
+                        "型 {} が関数型の引数の側に現れる（正値でない型は矛盾を導けるので禁止）",
+                        d.name
+                    ))
+                    .into());
+                }
                 let id = self.norm.fresh();
                 self.bind(n, ty, neu(Neu::Var(id, n.clone())), false)?;
             }
@@ -1889,6 +2300,40 @@ fn main() {
             "{src}fn down(n: int) -> int {{ if n > 0 {{ down(n - 1) }} else {{ 0 }} }}"
         ))
         .unwrap();
+    }
+
+    #[test]
+    fn closure() {
+        let src = include_str!("../examples/closure.hb");
+        check(src).unwrap();
+        for (from, to, msg) in [
+            ("print(twice(inc)(3))", "print(twice(add)(3))", "が必要だが"),
+            (
+                "fn(b) { if b { 1 } else { \"no\" } }",
+                "fn(b) { if b { \"no\" } else { 1 } }",
+                "int が必要だが str",
+            ),
+            (
+                "let inc = fn(x: int) -> int { x + 1 }",
+                "let inc = fn(x) { x + 1 }",
+                "型を書く",
+            ),
+            ("print(f(2, 3))", "print(f(2))", "引数は2個"),
+            ("print(adder(10)(5))", "print(inc(10)(5))", "関数でない値"),
+        ] {
+            let e = check(&src.replace(from, to)).unwrap_err();
+            assert!(e.contains(msg), "{to} => {e}");
+        }
+        // 正値性: 自分を関数型の引数に持つ型は矛盾を導ける
+        let e = check("type Bad = | MkBad(f: (Bad) -> int)\nfn main() {}").unwrap_err();
+        assert!(e.contains("正値でない"), "{e}");
+        check("type Ok = | MkOk(f: (int) -> Ok)\nfn main() {}").unwrap();
+        // 再帰する関数を値にすると、減る引数の検査をすり抜けられる
+        let e = check(&format!(
+            "{src}fn bad(n: int) -> int {{ let g = bad\n g(n) }}"
+        ))
+        .unwrap_err();
+        assert!(e.contains("値として使えない"), "{e}");
     }
 
     #[test]
