@@ -69,6 +69,8 @@ pub struct Fn {
     pub body: Block,
     // type Name(引数) = 式 で書いた別名。引数が無ければ () を省いて呼べる
     pub alias: bool,
+    // partial fn。停止性を検査しない代わりに、型の計算で展開しない
+    pub partial: bool,
 }
 
 pub struct Parser<'s> {
@@ -134,7 +136,7 @@ pub fn parse(src: &str) -> R<Program> {
             Tok::Eof => break,
             Tok::Punct("syntax") => p.syntax_decl(&mut g)?,
             Tok::Punct("macro") => p.macro_decl(&mut g)?,
-            Tok::Punct("fn") => {
+            Tok::Punct("fn" | "partial") => {
                 fn_starts.push(p.pos);
                 p.skip_fn()?;
             }
@@ -256,6 +258,7 @@ impl Parser<'_> {
     }
 
     fn func(&mut self) -> R<Fn> {
+        let partial = self.eat("partial");
         self.expect("fn")?;
         let name = self.ident()?;
         self.expect("(")?;
@@ -272,6 +275,7 @@ impl Parser<'_> {
             ret,
             body: self.block()?,
             alias: false,
+            partial,
         })
     }
 
@@ -313,6 +317,7 @@ impl Parser<'_> {
                 ret,
                 body,
                 alias: true,
+                partial: false,
             }));
         }
         self.eat("|");
@@ -349,7 +354,9 @@ impl Parser<'_> {
                 Tok::Punct("(" | "[" | "{") => depth += 1,
                 Tok::Punct(")" | "]" | "}") => depth -= 1,
                 Tok::Punct("|") if depth == 0 => return true,
-                Tok::Punct("fn" | "type" | "syntax" | "macro") | Tok::Eof if depth == 0 => {
+                Tok::Punct("fn" | "partial" | "type" | "syntax" | "macro") | Tok::Eof
+                    if depth == 0 =>
+                {
                     return false;
                 }
                 _ => {}
@@ -367,7 +374,7 @@ impl Parser<'_> {
                 Tok::Eof => return,
                 Tok::Punct("(" | "[" | "{") => depth += 1,
                 Tok::Punct(")" | "]" | "}") => depth -= 1,
-                Tok::Punct("fn" | "type" | "syntax" | "macro") if depth == 0 => return,
+                Tok::Punct("fn" | "partial" | "type" | "syntax" | "macro") if depth == 0 => return,
                 _ => {}
             }
             self.pos += 1;

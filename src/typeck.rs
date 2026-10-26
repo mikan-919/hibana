@@ -289,7 +289,8 @@ impl Norm<'_> {
             }
             _ => {}
         }
-        let Some(f) = self.fns.get(name).copied() else {
+        // partial fn は止まるとは限らないので展開しない
+        let Some(f) = self.fns.get(name).copied().filter(|f| !f.partial) else {
             return Ok(neu(Neu::Call(name.into(), args)));
         };
         if self.fuel == 0 || self.depth >= 64 {
@@ -511,6 +512,12 @@ struct Ck<'a> {
     smt: Smt,
     // data の型の階層
     levels: HashMap<String, u32>,
+    // 停止性の検査。検査中の関数、その引数の (最初の値, 型)、どの引数が再帰呼び出しで減り続けているか
+    cur_fn: Option<String>,
+    cur_params: Vec<(V, V)>,
+    decr: Vec<bool>,
+    // match で取り出したフィールドの変数から、取り出し元の変数へ
+    sub: HashMap<usize, usize>,
 }
 
 // never はどの型とも一致する。細分化された値は元の型として使える
@@ -536,54 +543,91 @@ fn want(e: &V, got: &V, what: &str) -> R<()> {
     }
 }
 
-// 式の中で代入される変数名を集める
-fn assigned(e: &Expr, out: &mut Vec<String>) {
-    let block = |b: &Block, out: &mut Vec<String>| {
+// 式とその部分式をすべて f に渡す
+fn walk(e: &Expr, f: &mut dyn FnMut(&Expr)) {
+    f(e);
+    let block = |b: &Block, f: &mut dyn FnMut(&Expr)| {
         for s in &b.stmts {
             match s {
-                Stmt::Let { init, .. } => assigned(init, out),
-                Stmt::Expr(e) => assigned(e, out),
+                Stmt::Let { init, .. } => walk(init, f),
+                Stmt::Expr(e) => walk(e, f),
             }
         }
         if let Some(t) = &b.tail {
-            assigned(t, out);
+            walk(t, f);
         }
     };
     match e {
-        Expr::At(_, x) => assigned(x, out),
-        Expr::Assign(n, x) => {
-            out.push(n.clone());
-            assigned(x, out);
-        }
-        Expr::Unary(_, x) | Expr::Field(x, _) => assigned(x, out),
-        Expr::Return(Some(x)) => assigned(x, out),
+        Expr::At(_, x)
+        | Expr::Unary(_, x)
+        | Expr::Field(x, _)
+        | Expr::Assign(_, x)
+        | Expr::Return(Some(x)) => walk(x, f),
         Expr::Binary(_, a, b) | Expr::Index(a, b) | Expr::Refine(a, _, b) => {
-            assigned(a, out);
-            assigned(b, out);
+            walk(a, f);
+            walk(b, f);
         }
-        Expr::Call(_, xs) | Expr::Array(xs) => xs.iter().for_each(|x| assigned(x, out)),
+        Expr::Call(_, xs) | Expr::Array(xs) => xs.iter().for_each(|x| walk(x, f)),
         Expr::Method(x, _, xs) => {
-            assigned(x, out);
-            xs.iter().for_each(|x| assigned(x, out));
+            walk(x, f);
+            xs.iter().for_each(|x| walk(x, f));
         }
         Expr::If(c, t, e) => {
-            assigned(c, out);
-            block(t, out);
+            walk(c, f);
+            block(t, f);
             if let Some(e) = e {
-                assigned(e, out);
+                walk(e, f);
             }
         }
         Expr::While(c, b) => {
-            assigned(c, out);
-            block(b, out);
+            walk(c, f);
+            block(b, f);
         }
-        Expr::Block(b) => block(b, out),
+        Expr::Block(b) => block(b, f),
         Expr::Match(s, arms) => {
-            assigned(s, out);
-            arms.iter().for_each(|a| assigned(&a.body, out));
+            walk(s, f);
+            arms.iter().for_each(|a| walk(&a.body, f));
         }
         _ => {}
     }
+}
+
+// 式の中で代入される変数名を集める
+fn assigned(e: &Expr, out: &mut Vec<String>) {
+    walk(e, &mut |x| {
+        if let Expr::Assign(n, _) = x {
+            out.push(n.clone());
+        }
+    });
+}
+
+// 呼び出しの関係を辿って from から to に着くか
+fn reaches(graph: &HashMap<&str, Vec<String>>, from: &str, to: &str) -> bool {
+    let mut seen = vec![from.to_string()];
+    let mut todo = vec![from.to_string()];
+    while let Some(f) = todo.pop() {
+        for g in graph.get(f.as_str()).into_iter().flatten() {
+            if g == to {
+                return true;
+            }
+            if !seen.contains(g) {
+                seen.push(g.clone());
+                todo.push(g.clone());
+            }
+        }
+    }
+    false
+}
+
+// 関数の本体から呼ぶ関数名を集める
+fn callees(f: &Fn) -> Vec<String> {
+    let mut out = Vec::new();
+    walk(&Expr::Block(f.body.clone()), &mut |x| {
+        if let Expr::Call(n, _) | Expr::Var(n) = x {
+            out.push(n.clone());
+        }
+    });
+    out
 }
 
 pub fn check(prog: &Program) -> R<()> {
@@ -595,6 +639,10 @@ pub fn check(prog: &Program) -> R<()> {
         in_macro: false,
         smt: Smt::new(),
         levels: HashMap::new(),
+        cur_fn: None,
+        cur_params: Vec::new(),
+        decr: Vec::new(),
+        sub: HashMap::new(),
     };
     // 関数名・型名・構築子名は同じ名前空間にある
     let mut names: Vec<&str> = Vec::new();
@@ -622,6 +670,19 @@ pub fn check(prog: &Program) -> R<()> {
     for f in fns {
         ck.norm.fns.insert(&f.name, f);
     }
+    // 相互再帰は減る引数の対応を追えないので、partial fn にしてもらう
+    let graph: HashMap<&str, Vec<String>> =
+        fns.iter().map(|f| (f.name.as_str(), callees(f))).collect();
+    for f in fns.iter().filter(|f| !f.partial) {
+        for g in graph[f.name.as_str()]
+            .iter()
+            .filter(|g| **g != f.name && graph.contains_key(g.as_str()))
+        {
+            if reaches(&graph, g, &f.name) {
+                return Err(format!("関数 {} と {g} が互いに呼び合っている。停止性を検査できないので partial fn にする", f.name).into());
+            }
+        }
+    }
     // data は自分自身を含みうるので、階層が変わらなくなるまで計算し直す
     for _ in 0..8 {
         let mut changed = false;
@@ -640,6 +701,7 @@ pub fn check(prog: &Program) -> R<()> {
     for f in fns {
         let r = |e: &str| format!("関数 {}: {e}", f.name);
         ck.scopes = vec![Scope::default()];
+        ck.cur_fn = None;
         for (n, t) in &f.params {
             let ty = ck.eval_type(t).ctx(|e| r(&format!("引数 {n}: {e}")))?;
             let id = ck.norm.fresh();
@@ -649,6 +711,19 @@ pub fn check(prog: &Program) -> R<()> {
             Some(t) => ck.eval_type(t).ctx(|e| r(&format!("戻り値: {e}")))?,
             None => prim("unit"),
         };
+        if f.partial && ck.is_proof_type(&ck.ret) {
+            return Err(r("partial fn は証明の型（添字付きの型族）を返せない。止まらない関数で偽の証明が作れてしまうため").into());
+        }
+        ck.cur_fn = (!f.partial).then(|| f.name.clone());
+        ck.cur_params = f
+            .params
+            .iter()
+            .map(|(n, _)| {
+                let e = ck.lookup(n).unwrap();
+                (e.val.clone(), e.ty.clone())
+            })
+            .collect();
+        ck.decr = vec![true; f.params.len()];
         let ret = ck.ret.clone();
         // 戻り値が unit の関数は最後の式の値を捨てる
         if ret == prim("unit") {
@@ -670,6 +745,10 @@ pub fn check_macro(b: &Block, params: &[String]) -> R<()> {
         in_macro: true,
         smt: Smt::new(),
         levels: HashMap::new(),
+        cur_fn: None,
+        cur_params: Vec::new(),
+        decr: Vec::new(),
+        sub: HashMap::new(),
     };
     for p in params {
         let v = ck.norm.opaque();
@@ -1137,13 +1216,18 @@ impl Ck<'_> {
                     return Err(format!("関数 {name} の引数は{}個", f.params.len()).into());
                 }
                 // 引数の型は前の引数の値に依存しうるので、値を順に積みながら計算する
+                let mut vals = Vec::new();
                 let mut fenv: Env = vec![HashMap::new()];
                 for ((pn, pt), a) in f.params.iter().zip(args) {
                     let t = self.norm.eval_or_opaque(pt, &mut fenv)?;
                     self.check(a, &t)
                         .ctx(|e| format!("関数 {name} の引数 {pn}: {e}"))?;
                     let v = self.eval_value(a)?;
+                    vals.push(v.clone());
                     fenv[0].insert(pn.clone(), v);
+                }
+                if self.cur_fn.as_deref() == Some(name.as_str()) {
+                    self.check_decrease(&vals)?;
                 }
                 match &f.ret {
                     Some(t) => self.norm.eval_or_opaque(t, &mut fenv)?,
@@ -1213,6 +1297,63 @@ impl Ck<'_> {
                 prim("never")
             }
         })
+    }
+
+    // 添字付きの型族（構築子が戻り値の型を指定する型）か。こうした型の値は証明になりうる
+    fn is_proof_type(&self, t: &V) -> bool {
+        match base(t) {
+            V::DataT(d) => self.norm.datas[d.0.as_str()]
+                .ctors
+                .iter()
+                .any(|c| c.ret.is_some()),
+            _ => false,
+        }
+    }
+
+    // v は match で p から取り出した部分（を何段か辿ったもの）か
+    fn is_subterm(&self, v: &V, p: &V) -> bool {
+        let (V::Neu(v), V::Neu(p)) = (v, p) else {
+            return false;
+        };
+        let (Neu::Var(id, _), Neu::Var(pid, _)) = (&**v, &**p) else {
+            return false;
+        };
+        let mut id = *id;
+        while let Some(parent) = self.sub.get(&id) {
+            if parent == pid {
+                return true;
+            }
+            id = *parent;
+        }
+        false
+    }
+
+    // 再帰呼び出しで、少なくとも1つの引数がすべての呼び出しを通して小さくなっているか
+    fn check_decrease(&mut self, vals: &[V]) -> R<()> {
+        for (i, v) in vals.iter().enumerate() {
+            if !self.decr[i] {
+                continue;
+            }
+            let (p, t) = self.cur_params[i].clone();
+            self.decr[i] = match base(&t) {
+                // int は 0 以上で、元の値より小さければよい
+                V::Prim("int") => {
+                    let goal = Norm::bin(
+                        "&&",
+                        Norm::bin("<=", V::Int(0), v.clone()),
+                        Norm::bin("<", v.clone(), p),
+                    );
+                    self.prove(&goal)
+                }
+                V::DataT(_) => self.is_subterm(v, &p),
+                _ => false,
+            };
+        }
+        if self.decr.iter().any(|d| *d) {
+            Ok(())
+        } else {
+            Err("再帰呼び出しで小さくなる引数が無いので、停止することを示せない（match で取り出した部分か、0 以上で元より小さい int を渡す。検査しないなら partial fn にする）".into())
+        }
     }
 
     // 式が型なら、その型の階層を返す
@@ -1556,6 +1697,16 @@ impl Ck<'_> {
                     self.pop();
                     continue;
                 };
+                // 取り出したフィールドは match した値より小さい（停止性の検査に使う）
+                if let Some(sid) = svar {
+                    for fv in &fvals {
+                        if let V::Neu(n) = fv
+                            && let Neu::Var(fid, _) = &**n
+                        {
+                            self.sub.insert(*fid, sid);
+                        }
+                    }
+                }
                 if let Some(id) = svar {
                     substs.push((id, V::Data(Rc::new((c.name.clone(), fvals)))));
                 }
@@ -1669,7 +1820,13 @@ fn main() {
     fn type_level_loop_is_bounded() {
         let e = check("fn loop(n: int) -> Type { loop(n + 1) } fn main() { let x: loop(0) = 1 }")
             .unwrap_err();
-        assert!(e.contains("終わらない"), "{e}");
+        assert!(e.contains("停止することを示せない"), "{e}");
+        // partial fn は型の計算で展開しない
+        let e = check(
+            "partial fn loop(n: int) -> Type { loop(n + 1) } fn main() { let x: loop(0) = 1 }",
+        )
+        .unwrap_err();
+        assert!(e.contains("loop(0) が必要だが int"), "{e}");
     }
 
     #[test]
@@ -1704,6 +1861,34 @@ fn main() {
         assert!(e.contains("Type が必要だが Type(1)"), "{e}");
         let e = check(&format!("{src}{extra}fn bad() -> Eq(int, 1, 2) {{ Refl }}")).unwrap_err();
         assert!(e.contains("が必要だが"), "{e}");
+        // 停止性: 止まらない関数で偽の証明を作れない
+        for (bad, msg) in [
+            (
+                "fn bad() -> Eq(int, 1, 2) { bad() }",
+                "停止することを示せない",
+            ),
+            ("partial fn bad() -> Eq(int, 1, 2) { bad() }", "証明の型"),
+            ("fn bad(n: Nat) -> Nat { bad(n) }", "停止することを示せない"),
+            (
+                "fn bad(n: int) -> int { bad(n - 1) }",
+                "停止することを示せない",
+            ),
+            (
+                "fn ev(n: Nat) -> bool { match n { Zero => true, Succ(k) => od(k) } }\nfn od(n: Nat) -> bool { match n { Zero => false, Succ(k) => ev(k) } }",
+                "互いに呼び合っている",
+            ),
+        ] {
+            let e = check(&format!("{src}{bad}")).unwrap_err();
+            assert!(e.contains(msg), "{bad} => {e}");
+        }
+        check(&format!(
+            "{src}partial fn spin(n: int) -> int {{ spin(n) }}"
+        ))
+        .unwrap();
+        check(&format!(
+            "{src}fn down(n: int) -> int {{ if n > 0 {{ down(n - 1) }} else {{ 0 }} }}"
+        ))
+        .unwrap();
     }
 
     #[test]
