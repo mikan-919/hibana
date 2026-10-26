@@ -28,6 +28,13 @@ fn to_js(src: &str) -> error::R<String> {
 fn to_c(src: &str) -> error::R<String> {
     let prog = parser::parse(&parser::with_uses(src)?)?;
     typeck::check(&prog)?;
+    if let Some(f) = prog.fns.iter().find(|f| f.js.is_some()) {
+        return Err(format!(
+            "extern の関数 {} は JS ターゲット（hibana js）でだけ使える",
+            f.name
+        )
+        .into());
+    }
     Ok(c::emit(&prog))
 }
 
@@ -110,10 +117,15 @@ mod tests {
         let mut names: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|x| x == "hb"))
             .collect();
         names.sort();
         for p in names {
             let src = std::fs::read_to_string(&p).unwrap();
+            // extern を使う例はインタプリタでは動かないので、js_extern で確かめる
+            if src.contains("\nextern") {
+                continue;
+            }
             let want = out(&src).unwrap();
             let js = tmp.join(p.file_stem().unwrap()).with_extension("js");
             std::fs::write(&js, super::to_js(&src).unwrap()).unwrap();
@@ -140,10 +152,15 @@ mod tests {
         let mut names: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|x| x == "hb"))
             .collect();
         names.sort();
         for p in names {
             let src = std::fs::read_to_string(&p).unwrap();
+            // extern を使う例はインタプリタでは動かないので、js_extern で確かめる
+            if src.contains("\nextern") {
+                continue;
+            }
             let want = out(&src).unwrap();
             let exe = tmp.join(p.file_stem().unwrap());
             super::build(&src, &exe).unwrap();
@@ -156,6 +173,29 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    // extern で JavaScript と TypeScript のモジュールを使う例を、Node.js で実行する
+    #[test]
+    fn js_extern() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+        let src = std::fs::read_to_string(dir.join("js_interop.hb")).unwrap();
+        // 出力した JS からの相対経路（./js/util.ts）で読み込めるよう、examples の中に書き出す
+        let js = dir.join(format!("js_interop_{}.mjs", std::process::id()));
+        std::fs::write(&js, super::to_js(&src).unwrap()).unwrap();
+        let r = std::process::Command::new("node")
+            .arg(&js)
+            .output()
+            .unwrap();
+        std::fs::remove_file(&js).unwrap();
+        assert_eq!(
+            String::from_utf8(r.stdout).unwrap(),
+            "hibana.hb\n50\nHIBANA!\n18\n3\n43\n"
+        );
+        let e = out(&src).unwrap_err();
+        assert!(e.contains("JS ターゲット"), "{e}");
+        let e = super::to_c(&src).unwrap_err();
+        assert!(e.contains("JS ターゲット"), "{e}");
     }
 
     #[test]

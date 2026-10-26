@@ -42,6 +42,26 @@ function $slice(s, i, j) {
   if (!(0n <= i && i <= j && j <= BigInt(cs.length))) throw new Error(`slice の範囲 ${i}..${j} が文字列の外`);
   return cs.slice(Number(i), Number(j)).join("");
 }
+// extern の関数の境界で、宣言した型 d に従って値を変換する。$to は hibana から JS へ、$from は JS から hibana へ
+function $to(d, v) {
+  if (d === "int") return Number(v);
+  if (d.vec) return v.map((x) => $to(d.vec, x));
+  if (d.fn) return (...a) => $to(d.ret, v(...a.map((x, i) => $from(d.fn[i], x))));
+  if (d.st) return Object.fromEntries(d.f.map(([n, fd], i) => [n, $to(fd, v.$f[i])]));
+  return v;
+}
+function $from(d, v) {
+  if (d === "int") {
+    if (typeof v === "bigint") return $chk(v);
+    if (!Number.isInteger(v)) throw new Error("JavaScript の値 " + v + " は int でない");
+    return BigInt(v);
+  }
+  if (d === "unit") return undefined;
+  if (d.vec) return Array.from(v, (x) => $from(d.vec, x));
+  if (d.fn) return (...a) => $from(d.ret, v(...a.map((x, i) => $to(d.fn[i], x))));
+  if (d.st) return $d(d.st, d.f.map(([n, fd]) => $from(fd, v[n])));
+  return v;
+}
 "#;
 
 pub fn emit(prog: &Program) -> String {
@@ -68,11 +88,72 @@ pub fn emit(prog: &Program) -> String {
         })
         .collect();
     out += &format!("const $fields = {{ {} }};\n", fields.join(", "));
+    let mut imports = String::new();
     for f in &prog.fns {
-        out += &g.func(f);
+        match &f.js {
+            Some(m) => {
+                let (import, def) = g.extern_fn(prog, f, m);
+                imports += &import;
+                out += &def;
+            }
+            None => out += &g.func(f),
+        }
     }
+    // import は ES モジュールの先頭に置く
+    let mut out = imports + &out;
     out += "try { f_main(); } catch (e) { console.error(\"実行時エラー: \" + e.message); process.exitCode = 1; }\n";
     out
+}
+
+// 型の式を、extern の境界での変換の記述（$to と $from が読む）にする。int・Vec・関数・構造体のほかはそのまま渡す
+fn desc(prog: &Program, t: &Expr, depth: usize) -> String {
+    if depth > 8 {
+        return "\"any\"".into();
+    }
+    match t.peel() {
+        Expr::Var(n) if n == "int" || n == "unit" => lit(n),
+        Expr::Refine(b, ..) => desc(prog, b, depth + 1),
+        Expr::Call(n, args) if n == "Vec" && args.len() == 1 => {
+            format!("{{ vec: {} }}", desc(prog, &args[0], depth + 1))
+        }
+        Expr::Pi(bs, r) => {
+            let ps: Vec<String> = bs.iter().map(|(_, t)| desc(prog, t, depth + 1)).collect();
+            format!(
+                "{{ fn: [{}], ret: {} }}",
+                ps.join(", "),
+                desc(prog, r, depth + 1)
+            )
+        }
+        Expr::Var(n) | Expr::Call(n, _) => {
+            // 構造体はフィールドごとに、引数の無い別名はその中身で変換する
+            if let Some(d) = prog
+                .datas
+                .iter()
+                .find(|d| &d.name == n && d.ctors.len() == 1 && d.ctors[0].name.ends_with("{}"))
+            {
+                let c = &d.ctors[0];
+                let fs: Vec<String> = c
+                    .fields
+                    .iter()
+                    .map(|(f, t)| format!("[{}, {}]", lit(f), desc(prog, t, depth + 1)))
+                    .collect();
+                return format!("{{ st: {}, f: [{}] }}", lit(&c.name), fs.join(", "));
+            }
+            match prog
+                .fns
+                .iter()
+                .find(|f| &f.name == n && f.alias && f.params.is_empty())
+            {
+                Some(f) => f
+                    .body
+                    .tail
+                    .as_ref()
+                    .map_or("\"any\"".into(), |b| desc(prog, b, depth + 1)),
+                None => "\"any\"".into(),
+            }
+        }
+        _ => "\"any\"".into(),
+    }
 }
 
 // JavaScript の文字列リテラル
@@ -142,6 +223,38 @@ impl Gen<'_> {
         self.scopes.pop();
         let lines = std::mem::replace(&mut self.lines, saved);
         format!("function({}) {{\n{}\n}}", ps.join(", "), lines.join("\n"))
+    }
+
+    // extern の関数。(import 文, hibana の値を変換して呼ぶ関数)
+    fn extern_fn(&mut self, prog: &Program, f: &Fn, module: &str) -> (String, String) {
+        let js_name = f.name.rsplit('.').next().unwrap();
+        let imp = ident("$imp_", &f.name);
+        let import = if module.is_empty() {
+            format!(
+                "const {imp} = (...a) => globalThis[{}](...a);\n",
+                lit(js_name)
+            )
+        } else {
+            format!("import {{ {js_name} as {imp} }} from {};\n", lit(module))
+        };
+        let params: Vec<String> = (0..f.params.len()).map(|i| format!("a{i}")).collect();
+        let args: Vec<String> = f
+            .params
+            .iter()
+            .zip(&params)
+            .map(|((_, t), a)| format!("$to({}, {a})", desc(prog, t, 0)))
+            .collect();
+        let ret = f
+            .ret
+            .as_ref()
+            .map_or("\"unit\"".to_string(), |t| desc(prog, t, 0));
+        let def = format!(
+            "const {} = function({}) {{ return $from({ret}, {imp}({})); }};\n",
+            ident("f_", &f.name),
+            params.join(", "),
+            args.join(", ")
+        );
+        (import, def)
     }
 
     fn func(&mut self, f: &Fn) -> String {

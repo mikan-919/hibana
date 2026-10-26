@@ -292,6 +292,11 @@ impl Interp<'_> {
 
     fn call(&mut self, name: &str, args: Vec<Value>) -> R<Value> {
         let f = self.fns[name];
+        if f.js.is_some() {
+            return error(format!(
+                "extern の関数 {name} は JS ターゲット（hibana js）でだけ使える"
+            ));
+        }
         // 型検査で推論したジェネリック引数は実行時には消えている
         // ponytail: 型引数を値として使うと "?" になる。必要なら型検査の結果を構文木に書き戻す
         let args = if args.len() + f.implicit == f.params.len() {

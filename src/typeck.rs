@@ -91,7 +91,8 @@ pub(crate) enum Neu {
     Opaque(usize),
 }
 
-const PRIMS: &[&str] = &["int", "bool", "str", "syn", "unit"];
+// js は JavaScript の値をそのまま持ち回る型（extern で使う）
+const PRIMS: &[&str] = &["int", "bool", "str", "syn", "unit", "js"];
 
 // マクロ本体の中でだけ使える組み込み関数 (名前, 引数, 戻り値)
 const SYN_FNS: &[(&str, &[&str], &str)] = &[
@@ -1007,6 +1008,10 @@ pub fn check(prog: &Program) -> R<()> {
         }
         if f.partial && ck.is_proof_type(&ck.ret) {
             return Err(r("partial fn は証明の型（添字付きの型族）を返せない。止まらない関数で偽の証明が作れてしまうため").into());
+        }
+        // extern の関数は本体が無いので、型の宣言だけを検査する
+        if f.js.is_some() {
+            continue;
         }
         ck.cur_fn = (!f.partial).then(|| f.name.clone());
         ck.cur_params = f

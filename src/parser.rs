@@ -84,6 +84,8 @@ pub struct Fn {
     pub partial: bool,
     // params の先頭の何個がジェネリック引数か
     pub implicit: usize,
+    // extern で宣言した JavaScript の関数。Some(モジュール)、グローバルの関数は Some("")
+    pub js: Option<String>,
 }
 
 pub struct Parser<'s> {
@@ -251,10 +253,12 @@ pub fn parse(src: &str) -> R<Program> {
     let mut g = Grammar::default();
     let mut fn_starts = Vec::new();
     let mut data_starts = Vec::new();
+    let mut extern_starts = Vec::new();
     let mut types: HashSet<String> = ["Vec", "Type"].map(String::from).into();
     let mut generic_fns: HashSet<String> = HashSet::new();
     // 組み込みと利用者のファイルの名前・モジュール名・パターンのリテラル。マクロの衛生性で名前を付け替えない
     let mut globals: HashSet<String> = [
+        "js",
         "print",
         "len",
         "at",
@@ -312,6 +316,18 @@ pub fn parse(src: &str) -> R<Program> {
             }
             Tok::Punct("syntax") => p.syntax_decl(&mut g)?,
             Tok::Punct("macro") => p.macro_decl(&mut g)?,
+            // extern "モジュール" { fn 名前(引数) -> 型 ... }
+            Tok::Punct("extern") => {
+                extern_starts.push(p.pos);
+                let start = p.pos;
+                p.skip_fn()?;
+                for w in p.toks[start..p.pos].windows(2) {
+                    if let (Tok::Punct("fn"), Tok::Ident(n)) = (&w[0].tok, &w[1].tok) {
+                        let n = n.clone();
+                        declare(&cur, &n, &mut globals);
+                    }
+                }
+            }
             Tok::Punct("fn" | "partial") => {
                 let k = if p.peek() == &Tok::Punct("partial") {
                     2
@@ -343,7 +359,7 @@ pub fn parse(src: &str) -> R<Program> {
                     }
                 }
             }
-            _ => return p.err("fn・type・syntax・macro・use のいずれかが必要"),
+            _ => return p.err("fn・type・extern・syntax・macro・use のいずれかが必要"),
         }
     }
     p.types = Rc::new(types.clone());
@@ -383,6 +399,10 @@ pub fn parse(src: &str) -> R<Program> {
     for s in fn_starts {
         p.pos = s;
         prog.fns.push(p.func()?);
+    }
+    for s in extern_starts {
+        p.pos = s;
+        prog.fns.extend(p.extern_block()?);
     }
     crate::resolve::resolve(&mut prog, &p.uses, &p.known);
     Ok(prog)
@@ -617,7 +637,52 @@ impl Parser<'_> {
             module,
             partial,
             implicit,
+            js: None,
         })
+    }
+
+    // extern "モジュール" { fn 名前(引数) -> 型 ... }。本体の無い関数として並べる（JS ターゲットでだけ使える）
+    fn extern_block(&mut self) -> R<Vec<Fn>> {
+        self.expect("extern")?;
+        let js = match self.peek().clone() {
+            Tok::Str(s) => {
+                self.pos += 1;
+                s
+            }
+            _ => String::new(),
+        };
+        self.expect("{")?;
+        let mut fns = Vec::new();
+        while !self.eat("}") {
+            self.expect("fn")?;
+            let module = self.cur_module();
+            let name = qual(&module, &self.ident()?);
+            self.expect("(")?;
+            let params = self.params()?;
+            let ret = if self.eat("->") {
+                Some(self.ty()?)
+            } else {
+                None
+            };
+            let body = Block {
+                stmts: vec![],
+                tail: None,
+            };
+            // 中身が分からないので、停止性は検査せず、型の計算でも展開しない
+            fns.push(Fn {
+                name,
+                params,
+                ret,
+                body,
+                alias: false,
+                module,
+                partial: true,
+                implicit: 0,
+                js: Some(js.clone()),
+            });
+            self.eat(",");
+        }
+        Ok(fns)
     }
 
     // (名前: 型, ...)。"(" は読み終えた状態で呼ぶ
@@ -701,6 +766,7 @@ impl Parser<'_> {
                 alias: true,
                 module,
                 partial: false,
+                js: None,
                 implicit: 0,
             }));
         }
@@ -743,7 +809,9 @@ impl Parser<'_> {
                 Tok::Punct("(" | "[" | "{") => depth += 1,
                 Tok::Punct(")" | "]" | "}") => depth -= 1,
                 Tok::Punct("|") if depth == 0 => return true,
-                Tok::Punct("fn" | "partial" | "type" | "syntax" | "macro" | "use" | "module")
+                Tok::Punct(
+                    "fn" | "partial" | "type" | "syntax" | "macro" | "use" | "module" | "extern",
+                )
                 | Tok::Eof
                     if depth == 0 =>
                 {
@@ -764,9 +832,9 @@ impl Parser<'_> {
                 Tok::Eof => return,
                 Tok::Punct("(" | "[" | "{") => depth += 1,
                 Tok::Punct(")" | "]" | "}") => depth -= 1,
-                Tok::Punct("fn" | "partial" | "type" | "syntax" | "macro" | "use" | "module")
-                    if depth == 0 =>
-                {
+                Tok::Punct(
+                    "fn" | "partial" | "type" | "syntax" | "macro" | "use" | "module" | "extern",
+                ) if depth == 0 => {
                     return;
                 }
                 _ => {}
