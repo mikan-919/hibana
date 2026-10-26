@@ -26,6 +26,7 @@
           nativeBuildInputs = [
             toolchain
             pkgs.z3
+            pkgs.nodejs
           ];
           RUST_SRC_PATH = "${toolchain}/lib/rustlib/src/rust/library";
         };
