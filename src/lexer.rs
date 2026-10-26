@@ -1,3 +1,5 @@
+use crate::error::{Error, R};
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Tok {
     Int(i64),
@@ -89,12 +91,19 @@ impl Lx<'_> {
         }
         Some(c)
     }
-    fn err<T>(&self, msg: &str) -> Result<T, String> {
-        Err(format!("{}行: {msg}", self.line))
+    fn err<T>(&self, msg: &str) -> R<T> {
+        let p = self.pos();
+        Err(Error::from(msg).at(Span {
+            start: p,
+            end: Pos {
+                offset: p.offset + 1,
+                ..p
+            },
+        }))
     }
 
     // 空白とコメントを読み飛ばし、読み飛ばしたかを返す
-    fn skip(&mut self) -> Result<bool, String> {
+    fn skip(&mut self) -> R<bool> {
         let mut gap = false;
         loop {
             if self.peek().is_some_and(|c| c.is_whitespace()) {
@@ -104,11 +113,17 @@ impl Lx<'_> {
                     self.bump();
                 }
             } else if self.rest().starts_with("/*") {
-                let line = self.line;
+                let start = self.pos();
                 self.i += 2;
                 while !self.rest().starts_with("*/") {
                     if self.bump().is_none() {
-                        return Err(format!("{line}行: ブロックコメントが閉じていない"));
+                        return Err(Error::from("ブロックコメントが閉じていない").at(Span {
+                            start,
+                            end: Pos {
+                                offset: start.offset + 2,
+                                ..start
+                            },
+                        }));
                     }
                 }
                 self.i += 2;
@@ -119,7 +134,7 @@ impl Lx<'_> {
         }
     }
 
-    fn number(&mut self) -> Result<Tok, String> {
+    fn number(&mut self) -> R<Tok> {
         let s = self.i;
         if self.rest().starts_with("0x") || self.rest().starts_with("0X") {
             self.i += 2;
@@ -148,7 +163,7 @@ impl Lx<'_> {
     }
 
     // 文字列・文字リテラルの中の1文字（エスケープを解決する）
-    fn quoted_char(&mut self) -> Result<char, String> {
+    fn quoted_char(&mut self) -> R<char> {
         match self.bump() {
             None => self.err("リテラルが閉じていない"),
             Some('\\') => match self.bump() {
@@ -164,7 +179,7 @@ impl Lx<'_> {
     }
 }
 
-pub fn lex(src: &str) -> Result<Vec<Token>, String> {
+pub fn lex(src: &str) -> R<Vec<Token>> {
     let mut lx = Lx {
         src,
         i: 0,

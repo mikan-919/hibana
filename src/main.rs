@@ -1,3 +1,4 @@
+mod error;
 mod eval;
 mod lexer;
 mod meta;
@@ -7,10 +8,21 @@ mod typeck;
 
 use std::io::Write;
 
-fn run(src: &str, out: &mut dyn Write) -> Result<eval::Value, String> {
+fn run(src: &str, out: &mut dyn Write) -> error::R<eval::Value> {
     let fns = parser::parse(src)?;
     typeck::check(&fns)?;
-    eval::run(&fns, out)
+    Ok(eval::run(&fns, out)?)
+}
+
+// ソースの該当箇所に下線を引いて表示するためのエラー
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
+#[error("{msg}")]
+struct Report {
+    msg: String,
+    #[source_code]
+    src: miette::NamedSource<String>,
+    #[label("ここ")]
+    span: Option<miette::SourceSpan>,
 }
 
 fn main() {
@@ -23,14 +35,19 @@ fn main() {
         std::process::exit(2);
     });
     if let Err(e) = run(&src, &mut std::io::stdout()) {
-        eprintln!("エラー: {e}");
+        let report = Report {
+            msg: e.msg,
+            src: miette::NamedSource::new(&path, src.clone()),
+            span: e.span.map(Into::into),
+        };
+        eprintln!("{:?}", miette::Report::new(report));
         std::process::exit(1);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    fn out(src: &str) -> Result<String, String> {
+    fn out(src: &str) -> crate::error::R<String> {
         let mut buf = Vec::new();
         super::run(src, &mut buf)?;
         Ok(String::from_utf8(buf).unwrap())

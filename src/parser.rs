@@ -1,4 +1,4 @@
-use crate::lexer::{Tok, Token, lex};
+use crate::lexer::{Span, Tok, Token, lex};
 use crate::meta::{Grammar, Node, Q};
 use std::rc::Rc;
 
@@ -28,6 +28,18 @@ pub enum Expr {
     Index(Box<Expr>, Box<Expr>),
     // 細分化型 型[変数 -> 条件]
     Refine(Box<Expr>, String, Box<Expr>),
+    // ソース上の位置。エラー表示に使う
+    At(Span, Box<Expr>),
+}
+
+impl Expr {
+    // 位置の包みを外す
+    pub fn peel(&self) -> &Expr {
+        match self {
+            Expr::At(_, e) => e.peel(),
+            e => e,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -65,7 +77,8 @@ pub struct Parser<'s> {
     pub depth: usize,
 }
 
-pub type R<T> = Result<T, String>;
+use crate::error::Error;
+pub use crate::error::R;
 
 pub fn parse(src: &str) -> R<Vec<Fn>> {
     let mut p = Parser {
@@ -128,15 +141,12 @@ impl Parser<'_> {
         }
         t
     }
-    pub fn line(&self) -> usize {
-        self.toks[self.pos].span.start.line
-    }
     pub fn err<T>(&self, msg: &str) -> R<T> {
-        Err(format!(
-            "{}行: {msg}（実際は {:?}）",
-            self.line(),
-            self.peek()
-        ))
+        self.err_at(format!("{msg}（実際は {:?}）", self.peek()))
+    }
+    // 今のトークンの位置でエラーにする
+    pub fn err_at<T>(&self, msg: String) -> R<T> {
+        Err(Error::from(msg).at(self.toks[self.pos].span))
     }
     // 次のトークンが前のトークンと別の行にあるか
     fn at_newline(&self) -> bool {
@@ -293,14 +303,18 @@ impl Parser<'_> {
     pub fn expr(&mut self) -> R<Expr> {
         let after = self.toks.get(self.pos + 1).map(|t| &t.tok);
         if let (Tok::Ident(name), Some(Tok::Punct("="))) = (self.peek().clone(), after) {
+            let start = self.pos;
             self.pos += 2;
-            return Ok(Expr::Assign(name, Box::new(self.expr()?)));
+            let e = Expr::Assign(name, Box::new(self.expr()?));
+            return Ok(self.wrap(start, e));
         }
         self.binary(0)
     }
 
     fn binary(&mut self, min: u8) -> R<Expr> {
-        let mut lhs = self.unary()?;
+        let start = self.pos;
+        let e = self.unary()?;
+        let mut lhs = self.wrap(start, e);
         while let Some((prec, op)) = binop(self.peek()) {
             // 行頭の演算子は前の行に続けない（"-x" を新しい文として読むため）
             if prec < min || self.at_newline() {
@@ -308,9 +322,13 @@ impl Parser<'_> {
             }
             self.pos += 1;
             let rhs = self.binary(prec + 1)?;
-            lhs = Expr::Binary(op, Box::new(lhs), Box::new(rhs));
+            lhs = self.wrap(start, Expr::Binary(op, Box::new(lhs), Box::new(rhs)));
         }
         Ok(lhs)
+    }
+
+    fn wrap(&self, start: usize, e: Expr) -> Expr {
+        Expr::At(self.span_from(start), Box::new(e))
     }
 
     fn unary(&mut self) -> R<Expr> {

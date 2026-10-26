@@ -5,3 +5,5 @@ edition = "2024"
 
 [dependencies]
 easy-smt = "0.3.2"
+miette = { version = "7.6.0", features = ["fancy"] }
+thiserror = "2.0.21"

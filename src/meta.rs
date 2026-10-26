@@ -1,4 +1,5 @@
 // syntax / macro 宣言の解析、パターン照合、マクロ展開
+use crate::error::{Ctx, Error};
 use crate::eval::{self, Value};
 use crate::lexer::{Span, Tok, Token, lex};
 use crate::parser::{Block, Expr, Parser, R, Stmt};
@@ -185,7 +186,7 @@ fn fields(p: &Pattern) -> R<Vec<(String, bool)>> {
             };
             for f in fs {
                 if seen.iter().any(|s| s.0 == f.0) {
-                    return Err(format!("束縛名 {} が重複している", f.0));
+                    return Err(format!("束縛名 {} が重複している", f.0).into());
                 }
                 seen.push(f);
             }
@@ -321,7 +322,7 @@ pub fn splice(
             Q::Var { dollar, path, rest } => {
                 let (v, n) = walk(env, path, false)?;
                 emit(&v, dollar, out).map_err(|e| {
-                    format!("{}行: ${}: {e}", dollar.span.start.line, path.join("."))
+                    Error::from(format!("${}: {e}", path.join("."))).at(dollar.span)
                 })?;
                 // 束縛の中に無い残りの経路は、式のフィールド参照として残す
                 out.extend(rest[2 * (n - 1)..].iter().cloned());
@@ -329,7 +330,7 @@ pub fn splice(
             Q::Splice(dollar, e) => {
                 let v = ev(e, env)?;
                 emit(&v, dollar, out)
-                    .map_err(|e| format!("{}行: ${{ }}: {e}", dollar.span.start.line))?;
+                    .map_err(|e| Error::from(format!("${{ }}: {e}")).at(dollar.span))?;
             }
             Q::Rep(inner, sep) => {
                 let mut paths = Vec::new();
@@ -478,7 +479,7 @@ impl Grammar {
             collect_refs(&m.pat, &mut refs);
         }
         if let Some(n) = refs.iter().find(|n| !self.rules.contains_key(*n)) {
-            return Err(format!("未定義の規則 {n}"));
+            return Err(format!("未定義の規則 {n}").into());
         }
         for (n, r) in &self.rules {
             self.first_pat(&r.pat, &mut vec![n.clone()])?;
@@ -497,7 +498,8 @@ impl Grammar {
                 return Err(format!(
                     "マクロ {} が Expr か Stmt で始まる（左再帰になる）",
                     self.macros[i].name
-                ));
+                )
+                .into());
             }
             let m = &mut self.macros[i];
             m.pat = p;
@@ -545,7 +547,7 @@ impl Grammar {
             Atom::Group(p) => self.first_pat(p, st)?,
             Atom::Rule(n) => {
                 if st.contains(n) {
-                    return Err(format!("規則 {n} が左再帰している"));
+                    return Err(format!("規則 {n} が左再帰している").into());
                 }
                 st.push(n.clone());
                 let r = self.first_pat(&self.rules[n].pat, st);
@@ -606,12 +608,12 @@ impl Parser<'_> {
         self.expect("syntax")?;
         let name = self.ident()?;
         if builtin(&name).is_some() || name == "Text" || g.rules.contains_key(&name) {
-            return Err(format!("{}行: 規則 {name} が重複している", self.line()));
+            return self.err_at(format!("規則 {name} が重複している"));
         }
         self.expect("=")?;
         let pat = self.pattern()?;
         self.expect(";")?;
-        let fields = fields(&pat).map_err(|e| format!("規則 {name}: {e}"))?;
+        let fields = fields(&pat).ctx(|e| format!("規則 {name}: {e}"))?;
         g.rules.insert(name, Rule { pat, fields });
         Ok(())
     }
@@ -623,7 +625,7 @@ impl Parser<'_> {
             name.push('!');
         }
         if g.macros.iter().any(|m| m.name == name) {
-            return Err(format!("{}行: マクロ {name} が重複している", self.line()));
+            return self.err_at(format!("マクロ {name} が重複している"));
         }
         self.expect("(")?;
         let pat = self.pattern()?;
@@ -632,7 +634,7 @@ impl Parser<'_> {
             match self.ident()?.as_str() {
                 "Expr" => false,
                 "Stmt" => true,
-                _ => return Err(format!("{}行: マクロの戻り値は Expr か Stmt", self.line())),
+                _ => return self.err_at("マクロの戻り値は Expr か Stmt".into()),
             }
         } else {
             false
@@ -648,7 +650,7 @@ impl Parser<'_> {
                 _ => {}
             }
         }
-        let fields = fields(&pat).map_err(|e| format!("マクロ {name}: {e}"))?;
+        let fields = fields(&pat).ctx(|e| format!("マクロ {name}: {e}"))?;
         let raw = &self.toks[start..self.pos - 1];
         let body = if raw.is_empty() {
             None
@@ -727,10 +729,7 @@ impl Parser<'_> {
             Tok::Str(s) => {
                 let ts = lex(&s)?;
                 if ts.len() != 2 || ts[0].tok.text() != Some(s.as_str()) {
-                    return Err(format!(
-                        "{}行: リテラル {s:?} は1個のトークンでない",
-                        self.line()
-                    ));
+                    return self.err_at(format!("リテラル {s:?} は1個のトークンでない"));
                 }
                 Atom::Lit(s)
             }
@@ -762,7 +761,7 @@ impl Parser<'_> {
             match self.m_pattern(&m.pat, &mut b) {
                 Ok(_) => hits.push((m, b, self.pos)),
                 Err(Miss::Fail) => {}
-                Err(Miss::Fatal(e)) => return Err(format!("{}行: {e}", self.line())),
+                Err(Miss::Fatal(e)) => return self.err_at(e),
             }
         }
         self.pos = start;
@@ -779,11 +778,7 @@ impl Parser<'_> {
             }
             _ => {
                 let names: Vec<&str> = hits.iter().map(|h| h.0.name.as_str()).collect();
-                Err(format!(
-                    "{}行: Ambiguous macro match（{}）",
-                    self.line(),
-                    names.join(", ")
-                ))
+                self.err_at(format!("Ambiguous macro match（{}）", names.join(", ")))
             }
         }
     }
@@ -814,10 +809,10 @@ impl Parser<'_> {
             g: self.g.clone(),
             depth: self.depth + 1,
         };
-        let wrap = |e: String| format!("マクロ {}: {e}", m.name);
-        let b = p.block().map_err(wrap)?;
+        let wrap = |e: &str| format!("マクロ {}: {e}", m.name);
+        let b = p.block().ctx(wrap)?;
         let names: Vec<String> = m.fields.iter().map(|f| f.0.clone()).collect();
-        typeck::check_macro(&b, &names).map_err(wrap)?;
+        typeck::check_macro(&b, &names).ctx(wrap)?;
         let _ = m.compiled.set(b.clone());
         Ok(b)
     }
@@ -834,7 +829,7 @@ impl Parser<'_> {
     // ponytail: 展開のたびにトークン列全体を複製する。遅ければ Parser.toks を Rc にする
     fn expand(&self, m: &Macro, rec: Node) -> R<Expr> {
         if self.depth >= 64 {
-            return Err(format!("マクロ {} の展開が深すぎる", m.name));
+            return Err(format!("マクロ {} の展開が深すぎる", m.name).into());
         }
         let block = self.macro_block(m)?;
         let Node::Record { fields, .. } = rec else {
@@ -853,11 +848,13 @@ impl Parser<'_> {
                 )
             })
             .collect();
-        let wrap = |e: String| format!("マクロ {} の展開: {e}", m.name);
-        let v = eval::run_macro(&block, vars).map_err(wrap)?;
+        let wrap = |e: &str| format!("マクロ {} の展開: {e}", m.name);
+        let v = eval::run_macro(&block, vars)
+            .map_err(Error::from)
+            .ctx(wrap)?;
         let end = self.toks[self.pos].clone();
         let mut toks = Vec::new();
-        emit(&v, &end, &mut toks).map_err(wrap)?;
+        emit(&v, &end, &mut toks).ctx(wrap)?;
         let eof = Token {
             tok: Tok::Eof,
             ..end.clone()
@@ -879,12 +876,12 @@ impl Parser<'_> {
                 },
                 eof,
             ]);
-            return p.block().map(Expr::Block).map_err(wrap);
+            return p.block().map(Expr::Block).ctx(wrap);
         }
         p.toks.push(eof);
-        let e = p.expr().map_err(wrap)?;
+        let e = p.expr().ctx(wrap)?;
         if p.peek() != &Tok::Eof {
-            return p.err("1個の式でない").map_err(wrap);
+            return p.err("1個の式でない").ctx(wrap);
         }
         Ok(e)
     }
@@ -906,7 +903,7 @@ impl Parser<'_> {
             })
     }
 
-    fn span_from(&self, start: usize) -> Span {
+    pub fn span_from(&self, start: usize) -> Span {
         let s = self.toks[start].span.start;
         let end = if self.pos > start {
             self.toks[self.pos - 1].span.end
@@ -1149,10 +1146,12 @@ mod tests {
         let fns = parse(src).unwrap();
         let main = fns.iter().find(|f| f.name == "main").unwrap();
         match &main.body.stmts[0] {
-            Stmt::Let {
-                init: Expr::Macro(_, n),
-                ..
-            } => (**n).clone(),
+            Stmt::Let { init, .. } if matches!(init.peel(), Expr::Macro(..)) => {
+                let Expr::Macro(_, n) = init.peel() else {
+                    unreachable!()
+                };
+                (**n).clone()
+            }
             s => panic!("{s:?}"),
         }
     }
@@ -1244,7 +1243,9 @@ fn main() {
         let cs = list(f(el, "children"));
         assert_eq!(cs.len(), 4);
         assert!(matches!(f(&cs[0], "text"), Node::Text(s, _) if s == "Hello "));
-        assert!(matches!(f(&cs[1], "expr"), Node::Expr(Expr::Var(s)) if s == "userName"));
+        assert!(
+            matches!(f(&cs[1], "expr"), Node::Expr(e) if matches!(e.peel(), Expr::Var(s) if s == "userName"))
+        );
         assert!(matches!(f(&cs[2], "text"), Node::Text(s, _) if s == "!"));
         assert_eq!(ident(f(f(&cs[3], "el"), "tag")), "Icon");
         assert!(matches!(f(&cs[3], "text"), Node::Null));

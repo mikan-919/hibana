@@ -1,3 +1,4 @@
+use crate::error::Error;
 use crate::meta::{self, Node, Syn};
 use crate::parser::{Block, Expr, Fn, Stmt};
 use std::collections::HashMap;
@@ -183,6 +184,7 @@ impl Interp<'_> {
 
     fn expr(&mut self, e: &Expr, env: &mut Vec<HashMap<String, Value>>) -> R<Value> {
         Ok(match e {
+            Expr::At(_, x) => self.expr(x, env)?,
             Expr::Int(n) => Value::Int(*n),
             Expr::Bool(b) => Value::Bool(*b),
             Expr::Str(s) => Value::Str(s.as_str().into()),
@@ -222,11 +224,11 @@ impl Interp<'_> {
                     let r = self.expr(e, env);
                     env.pop();
                     r.map_err(|f| match f {
-                        Flow::Error(e) => e,
+                        Flow::Error(e) => Error::from(e),
                         Flow::Return(_) => "${ } の中で return した".into(),
                     })
                 };
-                meta::splice(q, &mut flat, &mut out, &mut ev).map_err(Flow::Error)?;
+                meta::splice(q, &mut flat, &mut out, &mut ev).map_err(|e| Flow::Error(e.msg))?;
                 let n = out.len();
                 Value::Syn(Rc::new(Syn {
                     node: Node::At(0..n, Box::new(Node::Raw)),

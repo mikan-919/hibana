@@ -5,7 +5,7 @@ use crate::smt::Smt;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-type R<T> = Result<T, String>;
+use crate::error::{Ctx, Error, R};
 
 // 型検査中の値。型そのものも値として表す
 #[derive(Debug, Clone, PartialEq)]
@@ -152,7 +152,7 @@ fn mentions(v: &V, id: usize) -> bool {
 // 評価が止まる理由。Stuck は値の分からない条件で分岐した時など
 enum Halt {
     Stuck,
-    Err(String),
+    Err(Error),
 }
 
 type H<T> = Result<T, Halt>;
@@ -271,8 +271,8 @@ impl Norm<'_> {
         let Some(f) = self.fns.get(name).copied() else {
             return Ok(neu(Neu::Call(name.into(), args)));
         };
-        if self.fuel == 0 || self.depth >= 200 {
-            return Err(format!("型の計算が終わらない（{name} の展開）"));
+        if self.fuel == 0 || self.depth >= 64 {
+            return Err(format!("型の計算が終わらない（{name} の展開）").into());
         }
         self.fuel -= 1;
         let mut env = vec![
@@ -320,6 +320,7 @@ impl Norm<'_> {
 
     fn eval(&mut self, e: &Expr, env: &mut Env) -> H<V> {
         Ok(match e {
+            Expr::At(_, x) => self.eval(x, env)?,
             Expr::Int(n) => V::Int(*n),
             Expr::Bool(b) => V::Bool(*b),
             Expr::Str(s) => V::Str(s.as_str().into()),
@@ -327,7 +328,7 @@ impl Norm<'_> {
                 Some(v) => v.clone(),
                 None if n == "Type" => V::Univ,
                 None if PRIMS.contains(&n.as_str()) => prim(n),
-                None => return Err(Halt::Err(format!("未定義の変数 {n}"))),
+                None => return Err(Halt::Err(format!("未定義の変数 {n}").into())),
             },
             Expr::Unary(op, x) => Self::un(op, self.eval(x, env)?),
             Expr::Binary(op, l, r) => {
@@ -462,7 +463,7 @@ fn want(e: &V, got: &V, what: &str) -> R<()> {
     if same(e, got) {
         Ok(())
     } else {
-        Err(format!("{what}: {} が必要だが {}", show(e), show(got)))
+        Err(format!("{what}: {} が必要だが {}", show(e), show(got)).into())
     }
 }
 
@@ -480,6 +481,7 @@ fn assigned(e: &Expr, out: &mut Vec<String>) {
         }
     };
     match e {
+        Expr::At(_, x) => assigned(x, out),
         Expr::Assign(n, x) => {
             out.push(n.clone());
             assigned(x, out);
@@ -525,7 +527,7 @@ pub fn check(fns: &[Fn]) -> R<()> {
             || SYN_FNS.iter().any(|s| s.0 == f.name)
             || ck.norm.fns.insert(&f.name, f).is_some()
         {
-            return Err(format!("関数 {} が重複している", f.name));
+            return Err(format!("関数 {} が重複している", f.name).into());
         }
     }
     match ck.norm.fns.get("main") {
@@ -533,25 +535,24 @@ pub fn check(fns: &[Fn]) -> R<()> {
         _ => return Err("引数なしの main 関数が必要".into()),
     }
     for f in fns {
-        let r = |e: String| format!("関数 {}: {e}", f.name);
+        let r = |e: &str| format!("関数 {}: {e}", f.name);
         ck.scopes = vec![Scope::default()];
         for (n, t) in &f.params {
-            let ty = ck.eval_type(t).map_err(|e| r(format!("引数 {n}: {e}")))?;
+            let ty = ck.eval_type(t).ctx(|e| r(&format!("引数 {n}: {e}")))?;
             let id = ck.norm.fresh();
-            ck.bind(n, ty, neu(Neu::Var(id, n.clone())), false)
-                .map_err(r)?;
+            ck.bind(n, ty, neu(Neu::Var(id, n.clone())), false).ctx(r)?;
         }
         ck.ret = match &f.ret {
-            Some(t) => ck.eval_type(t).map_err(|e| r(format!("戻り値: {e}")))?,
+            Some(t) => ck.eval_type(t).ctx(|e| r(&format!("戻り値: {e}")))?,
             None => prim("unit"),
         };
         let ret = ck.ret.clone();
         // 戻り値が unit の関数は最後の式の値を捨てる
         if ret == prim("unit") {
-            ck.block(&f.body).map_err(r)?;
+            ck.block(&f.body).ctx(r)?;
         } else {
             ck.check_block(&f.body, &ret)
-                .map_err(|e| r(format!("戻り値: {e}")))?;
+                .ctx(|e| r(&format!("戻り値: {e}")))?;
         }
     }
     Ok(())
@@ -682,7 +683,7 @@ impl Ck<'_> {
         let (eb, eps) = split(expected);
         let (gb, gps) = split(got);
         if !same(&eb, &gb) {
-            return Err(format!("{} が必要だが {}", show(expected), show(got)));
+            return Err(format!("{} が必要だが {}", show(expected), show(got)).into());
         }
         if eps.is_empty() || gb == prim("never") {
             return Ok(());
@@ -697,7 +698,7 @@ impl Ck<'_> {
         for ep in eps.iter().filter(|p| !gps.contains(p)) {
             let goal = self.norm.subst(ep, 0, &v)?;
             if !self.prove(&goal) {
-                r = Err(format!("条件 {} を証明できない", show(&goal)));
+                r = Err(format!("条件 {} を証明できない", show(&goal)).into());
                 break;
             }
         }
@@ -755,8 +756,7 @@ impl Ck<'_> {
                     let t = match ty {
                         Some(ty) => {
                             let t = self.eval_type(ty)?;
-                            self.check(init, &t)
-                                .map_err(|e| format!("変数 {name}: {e}"))?;
+                            self.check(init, &t).ctx(|e| format!("変数 {name}: {e}"))?;
                             t
                         }
                         None => self.expr(init)?,
@@ -802,12 +802,15 @@ impl Ck<'_> {
 
     // 期待する型に対して検査する。if は条件の値で期待する型を絞り込む
     fn check(&mut self, e: &Expr, expected: &V) -> R<()> {
+        if let Expr::At(sp, inner) = e {
+            return self.check(inner, expected).map_err(|err| err.at(*sp));
+        }
         match e {
             Expr::If(c, then, Some(els)) => {
                 want(&prim("bool"), &self.expr(c)?, "if の条件")?;
                 let cv = self.eval_value(c)?;
                 // 条件が値の分からない変数なら、各分岐ではその値が分かっているものとして扱う
-                let var = match (&**c, &cv) {
+                let var = match (c.peel(), &cv) {
                     (Expr::Var(n), V::Neu(nu)) => match &**nu {
                         Neu::Var(id, _) => {
                             Some((n.clone(), *id, self.lookup(n).unwrap().ty.clone()))
@@ -849,23 +852,27 @@ impl Ck<'_> {
     }
 
     fn expr(&mut self, e: &Expr) -> R<V> {
+        if let Expr::At(sp, inner) = e {
+            return self.expr(inner).map_err(|err| err.at(*sp));
+        }
         let int = prim("int");
         let boolean = prim("bool");
         Ok(match e {
+            Expr::At(..) => unreachable!("先頭で外している"),
             Expr::Int(_) => int,
             Expr::Bool(_) => boolean,
             Expr::Str(_) => prim("str"),
             Expr::Var(n) => match self.lookup(n) {
                 Some(en) => en.ty.clone(),
                 None if n == "Type" || PRIMS.contains(&n.as_str()) => V::Univ,
-                None => return Err(format!("未定義の変数 {n}")),
+                None => return Err(format!("未定義の変数 {n}").into()),
             },
             Expr::Field(x, _) => {
                 want(&prim("syn"), &self.expr(x)?, "フィールド参照")?;
                 prim("syn")
             }
             Expr::Method(..) => return Err("メソッドは未対応".into()),
-            Expr::Macro(n, _) => return Err(format!("マクロ {n} に展開コードが無い")),
+            Expr::Macro(n, _) => return Err(format!("マクロ {n} に展開コードが無い").into()),
             Expr::Quote(q) => {
                 if !self.in_macro {
                     return Err("quote はマクロ本体の中でだけ使える".into());
@@ -896,7 +903,7 @@ impl Ck<'_> {
                     Norm::bin("<", iv, len),
                 );
                 if !self.prove(&goal) {
-                    return Err(format!("添字の範囲 {} を証明できない", show(&goal)));
+                    return Err(format!("添字の範囲 {} を証明できない", show(&goal)).into());
                 }
                 (*a).clone()
             }
@@ -953,7 +960,7 @@ impl Ck<'_> {
             }
             Expr::Call(name, args) if name == "len" || name == "Vec" => {
                 if args.len() != 1 {
-                    return Err(format!("{name} の引数は1個"));
+                    return Err(format!("{name} の引数は1個").into());
                 }
                 if name == "Vec" {
                     want(&V::Univ, &self.expr(&args[0])?, "Vec の引数")?;
@@ -962,13 +969,13 @@ impl Ck<'_> {
                 match base(&self.expr(&args[0])?) {
                     V::VecT(_) => int,
                     t if self.in_macro && t == prim("syn") => int,
-                    t => return Err(format!("len は Vec に使う（実際は {}）", show(&t))),
+                    t => return Err(format!("len は Vec に使う（実際は {}）", show(&t)).into()),
                 }
             }
             Expr::Call(name, args) if self.in_macro && SYN_FNS.iter().any(|s| s.0 == name) => {
                 let (_, params, ret) = SYN_FNS.iter().find(|s| s.0 == name).unwrap();
                 if params.len() != args.len() {
-                    return Err(format!("{name} の引数は{}個", params.len()));
+                    return Err(format!("{name} の引数は{}個", params.len()).into());
                 }
                 for (p, a) in params.iter().zip(args) {
                     self.check(a, &prim(p))?;
@@ -982,14 +989,14 @@ impl Ck<'_> {
                     .get(name.as_str())
                     .ok_or(format!("未定義の関数 {name}"))?;
                 if f.params.len() != args.len() {
-                    return Err(format!("関数 {name} の引数は{}個", f.params.len()));
+                    return Err(format!("関数 {name} の引数は{}個", f.params.len()).into());
                 }
                 // 引数の型は前の引数の値に依存しうるので、値を順に積みながら計算する
                 let mut fenv: Env = vec![HashMap::new()];
                 for ((pn, pt), a) in f.params.iter().zip(args) {
                     let t = self.norm.eval_or_opaque(pt, &mut fenv)?;
                     self.check(a, &t)
-                        .map_err(|e| format!("関数 {name} の引数 {pn}: {e}"))?;
+                        .ctx(|e| format!("関数 {name} の引数 {pn}: {e}"))?;
                     let v = self.eval_value(a)?;
                     fenv[0].insert(pn.clone(), v);
                 }
@@ -1001,10 +1008,10 @@ impl Ck<'_> {
             Expr::Assign(name, x) => {
                 let en = self.lookup(name).ok_or(format!("未定義の変数 {name}"))?;
                 if !en.mutable {
-                    return Err(format!("変数 {name} は mut でない"));
+                    return Err(format!("変数 {name} は mut でない").into());
                 }
                 let t = en.ty.clone();
-                self.check(x, &t).map_err(|e| format!("変数 {name}: {e}"))?;
+                self.check(x, &t).ctx(|e| format!("変数 {name}: {e}"))?;
                 self.forget(name)?;
                 prim("unit")
             }
@@ -1094,7 +1101,7 @@ impl Ck<'_> {
 mod tests {
     use crate::parser::parse;
 
-    fn check(src: &str) -> Result<(), String> {
+    fn check(src: &str) -> crate::error::R<()> {
         super::check(&parse(src)?)
     }
 
