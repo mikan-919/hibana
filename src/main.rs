@@ -54,7 +54,7 @@ mod tests {
     fn errors() {
         for (src, msg) in [
             ("fn main() { let x = 1; x = 2; }", "mut でない"),
-            ("fn main() { let x: int = true; }", "Int が必要"),
+            ("fn main() { let x: int = true; }", "int が必要"),
             ("fn f() -> int { true } fn main() {}", "戻り値"),
             ("fn main() { if 1 { } }", "if の条件"),
             ("fn main() { print(1 / 0); }", "0 で除算"),

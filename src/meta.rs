@@ -1,7 +1,7 @@
 // syntax / macro 宣言の解析、パターン照合、マクロ展開
 use crate::eval::{self, Value};
 use crate::lexer::{Span, Tok, Token, lex};
-use crate::parser::{Block, Expr, Parser, R, Stmt, Type};
+use crate::parser::{Block, Expr, Parser, R, Stmt};
 use crate::typeck;
 use std::cell::OnceCell;
 use std::collections::HashMap;
@@ -22,7 +22,7 @@ pub enum Node {
     Expr(Expr),
     Block(Block),
     Stmt(Stmt),
-    Type(Type),
+    Type(Expr),
     // syntax 規則・マクロ・名前付きグループの束縛。rule は規則名
     Record {
         rule: Option<String>,
@@ -404,6 +404,7 @@ fn emit(v: &Value, dollar: &Token, out: &mut Vec<Token>) -> R<()> {
         Value::Int(n) => Tok::Int(*n),
         Value::Bool(b) => Tok::Punct(if *b { "true" } else { "false" }),
         Value::Str(s) => Tok::Str(s.to_string()),
+        Value::Ty(t) => Tok::Ident(t.to_string()),
         Value::Unit => return Err("() は差し込めない".into()),
         Value::Syn(s) => return emit_syn(s, dollar, out),
     };

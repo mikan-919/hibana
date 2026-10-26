@@ -12,6 +12,8 @@ pub enum Value {
     Str(Rc<str>),
     // コード片。マクロ本体の中でだけ現れる
     Syn(Rc<Syn>),
+    // 型。実行時には名前だけを持つ
+    Ty(Rc<str>),
 }
 
 // 通常の値以外で評価を抜ける理由
@@ -198,7 +200,11 @@ impl Interp<'_> {
                     toks: Rc::new(out),
                 }))
             }
-            Expr::Var(n) => env.iter().rev().find_map(|s| s.get(n)).unwrap().clone(),
+            Expr::Var(n) => match env.iter().rev().find_map(|s| s.get(n)) {
+                Some(v) => v.clone(),
+                // 型検査を通っているので、残りは int などの型名
+                None => Value::Ty(n.as_str().into()),
+            },
             Expr::Unary("-", x) => {
                 let n = int(self.expr(x, env)?);
                 Value::Int(
@@ -244,6 +250,7 @@ impl Interp<'_> {
                         Value::Bool(b) => b.to_string(),
                         Value::Unit => "()".into(),
                         Value::Str(s) => s.to_string(),
+                        Value::Ty(t) => t.to_string(),
                         Value::Syn(s) => format!("{:?}", s.node.strip()),
                     };
                     writeln!(self.out, "{s}").map_err(|e| Flow::Error(e.to_string()))?;

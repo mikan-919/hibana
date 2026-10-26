@@ -2,18 +2,6 @@ use crate::lexer::{Tok, Token, lex};
 use crate::meta::{Grammar, Node, Q};
 use std::rc::Rc;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Type {
-    Int,
-    Bool,
-    Str,
-    // コード片（マクロ本体の中で使う）
-    Syn,
-    Unit,
-    // return の型。どの型とも一致する
-    Never,
-}
-
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Field と Method の中身は型検査が対応するまで読まれない
 pub enum Expr {
@@ -43,7 +31,7 @@ pub enum Stmt {
     Let {
         name: String,
         mutable: bool,
-        ty: Option<Type>,
+        ty: Option<Expr>,
         init: Expr,
     },
     Expr(Expr),
@@ -58,8 +46,9 @@ pub struct Block {
 #[derive(Debug)]
 pub struct Fn {
     pub name: String,
-    pub params: Vec<(String, Type)>,
-    pub ret: Type,
+    pub params: Vec<(String, Expr)>,
+    // None は unit
+    pub ret: Option<Expr>,
     pub body: Block,
 }
 
@@ -181,17 +170,9 @@ impl Parser<'_> {
             _ => self.err("識別子が必要"),
         }
     }
-    pub fn ty(&mut self) -> R<Type> {
-        match self.ident()?.as_str() {
-            "int" => Ok(Type::Int),
-            "bool" => Ok(Type::Bool),
-            "str" => Ok(Type::Str),
-            "syn" => Ok(Type::Syn),
-            _ => {
-                self.pos -= 1;
-                self.err("不明な型")
-            }
-        }
+    // 型は式として読む。"=" を代入と取り違えないよう二項演算から読む
+    pub fn ty(&mut self) -> R<Expr> {
+        self.binary(0)
     }
 
     fn skip_fn(&mut self) -> R<()> {
@@ -227,9 +208,9 @@ impl Parser<'_> {
             }
         }
         let ret = if self.eat("->") {
-            self.ty()?
+            Some(self.ty()?)
         } else {
-            Type::Unit
+            None
         };
         self.expect("{")?;
         Ok(Fn {
