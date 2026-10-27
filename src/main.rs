@@ -2,6 +2,7 @@ mod c;
 mod error;
 mod eval;
 mod fmt;
+mod index;
 mod js;
 mod lexer;
 mod lsp;
