@@ -7,6 +7,10 @@ pub struct Error {
     pub msg: String,
     // (先頭のバイト位置, 長さ)
     pub span: Option<(usize, usize)>,
+    // 直し方の提案
+    pub help: Option<String>,
+    // 関係する別の位置（効果を起こした操作など）
+    pub origin: Option<(usize, usize)>,
 }
 
 pub type R<T> = Result<T, Error>;
@@ -20,6 +24,14 @@ impl Error {
         self
     }
 
+    // 提案がまだ無ければ付ける
+    pub fn help(mut self, h: String) -> Self {
+        if self.help.is_none() {
+            self.help = Some(h);
+        }
+        self
+    }
+
     #[cfg(test)]
     pub fn contains(&self, s: &str) -> bool {
         self.msg.contains(s)
@@ -28,7 +40,12 @@ impl Error {
 
 impl From<String> for Error {
     fn from(msg: String) -> Self {
-        Error { msg, span: None }
+        Error {
+            msg,
+            span: None,
+            help: None,
+            origin: None,
+        }
     }
 }
 
@@ -54,6 +71,8 @@ impl<T> Ctx<T> for R<T> {
         self.map_err(|e| Error {
             msg: f(&e.msg),
             span: e.span,
+            help: e.help,
+            origin: e.origin,
         })
     }
 }

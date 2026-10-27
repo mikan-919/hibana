@@ -72,6 +72,10 @@ struct Report {
     #[label("{label}")]
     span: Option<miette::SourceSpan>,
     label: String,
+    #[help]
+    help: Option<String>,
+    #[label("ここで起こしている")]
+    origin: Option<miette::SourceSpan>,
 }
 
 fn main() {
@@ -104,7 +108,14 @@ fn main() {
     };
     if let Err(e) = r {
         let label = e.msg.rsplit(": ").next().unwrap_or("ここ").to_string();
+        // 文字列が必要な所の数値・真偽値には to_str を提案する
+        let to_str = ["str が必要だが int", "str が必要だが bool"]
+            .iter()
+            .any(|s| e.msg.contains(s))
+            .then(|| "to_str(値) で文字列にする".to_string());
         let report = Report {
+            help: e.help.clone().or(to_str),
+            origin: e.origin.map(Into::into),
             label,
             msg: e.msg,
             // 読み込んだライブラリの中のエラーも指せるよう、ライブラリを足したソースを渡す
@@ -485,6 +496,20 @@ fn main() {
             "{p}fn main() {{\n let x = handle {{ handle {{ fail(\"in\")\n 1 }} {{ fail(m) => {{ log(m)\n 2 }} }} }} {{ log(m) => {{ print(\"log \" + m)\n resume() }} }}\n print(x) }}"
         );
         assert_eq!(out(&src).unwrap(), "log in\n2\n");
+    }
+
+    // 型エラーの提案と、効果を起こした操作の位置
+    #[test]
+    fn error_hints() {
+        let e = out("fn main() {\n let count = 1\n print(cuont)\n}").unwrap_err();
+        assert_eq!(e.help.as_deref(), Some("count のことか"));
+        let e = out("fn main() { prnt(1) }").unwrap_err();
+        assert_eq!(e.help.as_deref(), Some("print のことか"));
+        let src = "effect Log {\n fn log(m: str)\n}\nfn n() ! Log { log(\"a\") }\nfn main() { n() }";
+        let e = out(src).unwrap_err();
+        assert_eq!(e.help.as_deref(), Some("関数 n の型が ! Log を持つ"));
+        let (at, n) = e.origin.unwrap();
+        assert_eq!(&src[at..at + n], "log(\"a\")");
     }
 
     // 実行時エラーの位置。インタプリタはエラーに位置を付け、JS と C はメッセージに行と列を足す

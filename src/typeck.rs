@@ -910,6 +910,37 @@ fn want(e: &V, got: &V, what: &str) -> R<()> {
     }
 }
 
+// 関数 f の本体で、効果 eff の操作を呼んでいる最初の位置
+fn op_site(fns: &HashMap<&str, &Fn>, f: &Fn, eff: &str) -> Option<(usize, usize)> {
+    let mut found = None;
+    walk(&Expr::Block(f.body.clone()), &mut |x| {
+        if let Expr::At(sp, inner) = x
+            && let Expr::Call(n, _) = inner.peel()
+            && found.is_none()
+            && fns.get(n.as_str()).is_some_and(|g| g.op.as_deref() == Some(eff))
+        {
+            found = Some((sp.start.offset, sp.end.offset - sp.start.offset));
+        }
+    });
+    found
+}
+
+// 文字の挿入・削除・置換の最小回数
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, x) in a.chars().enumerate() {
+        let mut prev = row[0];
+        row[0] = i + 1;
+        for j in 0..b.len() {
+            let cur = row[j + 1];
+            row[j + 1] = (prev + (x != b[j]) as usize).min(row[j] + 1).min(cur + 1);
+            prev = cur;
+        }
+    }
+    row[b.len()]
+}
+
 // 式とその部分式をすべて f に渡す
 fn walk(e: &Expr, f: &mut dyn FnMut(&Expr)) {
     f(e);
@@ -1702,7 +1733,10 @@ impl Ck<'_> {
                     let f = self.norm.fns[n.as_str()];
                     return self.fn_type(f);
                 }
-                None => return Err(format!("未定義の変数 {n}").into()),
+                None => {
+                    let e: Error = format!("未定義の変数 {n}").into();
+                    return Err(self.suggest(e, n));
+                }
             },
             Expr::Field(x, f) => {
                 let t = self.expr(x)?;
@@ -1995,7 +2029,8 @@ impl Ck<'_> {
             }
             Expr::Call(name, args) if name != "to_str" && !STR_FNS.iter().any(|s| s.0 == name) => {
                 if !self.norm.fns.contains_key(name.as_str()) {
-                    return Err(format!("未定義の関数 {name}").into());
+                    let e: Error = format!("未定義の関数 {name}").into();
+                    return Err(self.suggest(e, name));
                 }
                 return self.call_fn(name, args, None, e);
             }
@@ -2285,7 +2320,8 @@ impl Ck<'_> {
                 .iter()
                 .map(|(p, _)| fenv[0][p].clone())
                 .collect();
-            self.use_effect(V::DataT(Rc::new((eff.clone(), args))))?;
+            self.use_effect(V::DataT(Rc::new((eff.clone(), args))))
+                .map_err(|er| er.help(format!("{name} は効果 {eff} の操作")))?;
         }
         // 効果の変数に Async が入れば、JavaScript では多相な関数の async 版を呼んで待つ
         let poly = f.params[..f.implicit]
@@ -2302,7 +2338,14 @@ impl Ck<'_> {
                 if k.contains('#') {
                     self.var_awaits.insert(addr);
                 }
-                self.use_effect(v)?;
+                let s = show(&v);
+                let origin = op_site(&self.norm.fns, f, &k);
+                self.use_effect(v).map_err(|mut er| {
+                    if er.origin.is_none() {
+                        er.origin = origin;
+                    }
+                    er.help(format!("関数 {name} の型が ! {s} を持つ"))
+                })?;
             }
         }
         let ret = match &f.ret {
@@ -2331,6 +2374,28 @@ impl Ck<'_> {
             }
         }
         Ok(out)
+    }
+
+    // 未定義の名前のエラーに、綴りの近い名前を提案する
+    fn suggest(&self, e: Error, n: &str) -> Error {
+        let names = self
+            .scopes
+            .iter()
+            .flat_map(|s| s.vars.keys().map(|k| k.as_str()))
+            .chain(self.norm.fns.keys().copied())
+            .chain(STR_FNS.iter().map(|s| s.0))
+            .chain([
+                "print", "len", "push", "to_str", "new_ref", "read", "write", "all", "resume",
+            ])
+            .map(|k| k.to_string());
+        let best = names
+            .map(|k| (edit_distance(n, &k), k))
+            .filter(|(d, _)| *d <= 2 && *d < n.chars().count())
+            .min();
+        match best {
+            Some((_, k)) => e.help(format!("{k} のことか")),
+            None => e,
+        }
     }
 
     // 効果 inst を起こしてよいか確かめる。handle の本体の効果の型がまだ決まっていなければ、ここで決める
@@ -2501,7 +2566,9 @@ impl Ck<'_> {
                 if eff_key(&eff).contains('#') {
                     self.var_awaits.insert(e as *const Expr as usize);
                 }
-                self.use_effect(eff)?;
+                let s = show(&eff);
+                self.use_effect(eff)
+                    .map_err(|er| er.help(format!("呼んだ関数型の値が ! {s} を持つ")))?;
             }
         }
         Ok(c)
