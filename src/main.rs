@@ -611,12 +611,23 @@ fn main() {
             "int 1\nint 2!\n(1, 2)\nPOINT\n[int 1;int 2;]\n[(3, 4);] [(3, 4);]\ntrue\ntrue\nP5,0\n7\nto_str: P1,2\ntrue\n"
         );
         // == は Eq の実装を使う（x だけ比べる実装なら y が違っても等しい）
-        let src = "use std.*\ntype P = { x: int, y: int }\nimpl Eq<P> {\n fn eq(a: P, b: P) -> bool { a.x == b.x }\n}\nfn main() { print(P { x: 1, y: 2 } == P { x: 1, y: 3 }) }";
+        let src = "use std.*\nstruct P { x: int, y: int }\nimpl Eq<P> {\n fn eq(a: P, b: P) -> bool { a.x == b.x }\n}\nfn main() { print(P { x: 1, y: 2 } == P { x: 1, y: 3 }) }";
         assert_eq!(out(src).unwrap(), "true\n");
         let e = out("use std.*\nfn main() { print(max(\"a\", \"b\")) }").unwrap_err();
         assert!(e.msg.contains("Ord<str> の実装が無い"), "{}", e.msg);
         let e = out("use std.*\nimpl Show<int> {\n fn shw(x: int) -> str { \"\" }\n}\nfn main() {}").unwrap_err();
         assert!(e.msg.contains("メソッド shw は無い"), "{}", e.msg);
+    }
+
+    // struct と enum が実行時の値の形、type は別名と型の計算（実行時に消える）
+    #[test]
+    fn struct_enum_type() {
+        let e = out("type P = { x: int }\nfn main() {}").unwrap_err();
+        assert!(e.msg.contains("構造体は struct"), "{}", e.msg);
+        let e = out("type S = A | B\nfn main() {}").unwrap_err();
+        assert!(e.msg.contains("直和型は enum"), "{}", e.msg);
+        let src = "enum S {\n    A\n    B(n: int) -> S\n}\nstruct W(int, str)\nfn main() {\n print(B(1))\n let w = W(1, \"a\")\n print(w.1)\n print(w)\n}";
+        assert_eq!(out(src).unwrap(), "B(1)\na\nW(1, \"a\")\n");
     }
 
     // 宣言のマクロ derive。生成した Eq・Show の impl を == と to_str が使う
@@ -627,7 +638,7 @@ fn main() {
             o,
             "Point { x: 1, y: 2 }\ntrue\ntrue\nRect(3, 4)\ntrue\nfalse\nDot / Pair { fst: 1, snd: Point { x: 1, y: 2 } }\ntrue\n"
         );
-        let e = out("use std.*\nderive(Ord)\ntype P = { x: int }\nfn main() {}").unwrap_err();
+        let e = out("use std.*\nderive(Ord)\nstruct P { x: int }\nfn main() {}").unwrap_err();
         assert!(e.msg.contains("derive できるのは Eq と Show"), "{}", e.msg);
     }
 

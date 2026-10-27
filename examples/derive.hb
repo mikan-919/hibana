@@ -2,13 +2,13 @@
 use std.*
 
 derive(Eq, Show)
-type Point = { x: int, y: int }
+struct Point { x: int, y: int }
 
 derive(Eq, Show)
-type Shape = Circle(r: int) | Rect(w: int, h: int) | Dot
+enum Shape { Circle(r: int), Rect(w: int, h: int), Dot }
 
 derive(Show)
-type Pair<A, B> = { fst: A, snd: B }
+struct Pair<A, B> { fst: A, snd: B }
 
 fn main() {
     let p = Point { x: 1, y: 2 }

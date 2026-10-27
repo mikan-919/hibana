@@ -1,4 +1,4 @@
-type List<A> = Nil | Cons(x: A, xs: List<A>)
+enum List<A> { Nil, Cons(x: A, xs: List<A>) }
 
 // 関数を受け取る関数。f の型は (A) -> B。A と B はジェネリック引数で、呼ぶ側では省ける
 fn map<A, B>(f: (A) -> B, l: List<A>) -> List<B> {

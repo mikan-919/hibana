@@ -36,6 +36,7 @@ function $show(v) {
   if (typeof v === "function") return "<fn>";
   if (v instanceof $Ref) return "<ref>";
   if (Array.isArray(v)) return "[" + v.map($show).join(", ") + "]";
+  if (v.$c.endsWith("{}") && $fields[v.$c][0] === "0") return v.$c.slice(0, -2) + "(" + v.$f.map($show).join(", ") + ")";
   if (v.$c.endsWith("{}")) return v.$c.slice(0, -2) + " { " + $fields[v.$c].map((f, i) => f + ": " + $show(v.$f[i])).join(", ") + " }";
   return v.$f.length === 0 ? v.$c : v.$c + "(" + v.$f.map($show).join(", ") + ")";
 }

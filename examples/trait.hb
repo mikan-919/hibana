@@ -1,7 +1,7 @@
 // トレイト: 型ごとに実装を書ける関数の組
 use std.*
 
-type Point = { x: int, y: int }
+struct Point { x: int, y: int }
 
 trait Describe<A> {
     fn describe(x: A) -> str

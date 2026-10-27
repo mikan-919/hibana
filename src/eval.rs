@@ -285,12 +285,18 @@ impl Interp<'_> {
             ),
             Value::Data(d) if d.0.ends_with("{}") => {
                 let fs = &self.ctors[d.0.as_str()];
+                let name = &d.0[..d.0.len() - 2];
+                // struct Name(型, ...) は Name(1, 2)
+                if fs.first() == Some(&"0") {
+                    let body: Vec<String> = d.1.iter().map(|x| self.show(x)).collect();
+                    return format!("{name}({})", body.join(", "));
+                }
                 let body: Vec<String> = fs
                     .iter()
                     .zip(&d.1)
                     .map(|(f, x)| format!("{f}: {}", self.show(x)))
                     .collect();
-                format!("{} {{ {} }}", &d.0[..d.0.len() - 2], body.join(", "))
+                format!("{name} {{ {} }}", body.join(", "))
             }
             Value::Data(d) if !d.1.is_empty() => {
                 format!(

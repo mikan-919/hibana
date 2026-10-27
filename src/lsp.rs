@@ -129,7 +129,8 @@ fn name_at(toks: &[Token], ix: &Index, off: usize) -> Option<(String, usize, usi
 
 const KEYWORDS: &[&str] = &[
     "fn", "let", "mut", "if", "else", "while", "for", "in", "return", "match", "type", "effect",
-    "handle", "resume", "use", "macro", "syntax", "quote", "partial", "extern", "trait", "impl", "true",
+    "handle", "resume", "use", "macro", "syntax", "quote", "partial", "extern", "trait", "impl", "struct",
+    "enum", "true",
     "false",
 ];
 
@@ -278,7 +279,7 @@ fn semantic_tokens(src: &str, ix: &Index) -> Value {
             }
         };
         let Some(ty) = ty else { continue };
-        let decl = matches!(prev(1), Some(Tok::Punct("fn" | "type" | "effect" | "macro" | "trait")));
+        let decl = matches!(prev(1), Some(Tok::Punct("fn" | "type" | "struct" | "enum" | "effect" | "macro" | "trait")));
         let pos = position(src, t.span.start.offset);
         let (line, col) = (pos["line"].as_u64().unwrap() as u32, pos["character"].as_u64().unwrap() as u32);
         let dcol = if line == last_line { col - last_col } else { col };
@@ -330,7 +331,7 @@ fn definition(src: &str, off: usize) -> Option<(usize, usize)> {
     let mut found = None;
     for (k, w) in toks.windows(2).enumerate() {
         let decl = match &w[0].tok {
-            Tok::Punct("fn" | "type" | "effect" | "macro" | "syntax") => true,
+            Tok::Punct("fn" | "type" | "struct" | "enum" | "effect" | "macro" | "syntax") => true,
             Tok::Punct("let" | "mut" | "for") => w[1].span.start.offset <= off,
             // 引数（( か , の後の 名前 :）
             Tok::Punct("(" | ",") => {
@@ -341,7 +342,7 @@ fn definition(src: &str, off: usize) -> Option<(usize, usize)> {
         };
         if decl && w[1].tok == Tok::Ident(name.clone()) {
             let sp = (w[1].span.start.offset, w[1].span.end.offset);
-            if matches!(w[0].tok, Tok::Punct("fn" | "type" | "effect" | "macro" | "syntax")) {
+            if matches!(w[0].tok, Tok::Punct("fn" | "type" | "struct" | "enum" | "effect" | "macro" | "syntax")) {
                 return Some(sp);
             }
             found = Some(sp);
@@ -515,7 +516,7 @@ mod completion_tests {
 
     #[test]
     fn completes_modules_fields_and_names() {
-        let src = "use web\ntype P = { x: int, y: int }\nfn main() {\n let p = P { x: 1, y: 2 }\n print(p.x)\n}\n";
+        let src = "use web\nstruct P { x: int, y: int }\nfn main() {\n let p = P { x: 1, y: 2 }\n print(p.x)\n}\n";
         let (err, ts, ix) = analyze("file:///tmp/a.hb", src);
         assert!(err.is_none());
         let ix = ix.unwrap();
@@ -533,6 +534,6 @@ mod completion_tests {
         assert!(all.contains(&"p".to_string()) && all.contains(&"web".to_string()));
         // P は型の宣言（種類 1、宣言の印 1）
         let data = semantic_tokens(src, &ix)["data"].clone();
-        assert_eq!(data.as_array().unwrap()[..5], [json!(1), json!(5), json!(1), json!(1), json!(1)]);
+        assert_eq!(data.as_array().unwrap()[..5], [json!(1), json!(7), json!(1), json!(1), json!(1)]);
     }
 }

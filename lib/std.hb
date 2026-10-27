@@ -2,8 +2,8 @@
 
 // ---- Option と Result ----
 
-type Option<A> = None | Some(value: A)
-type Result<A, E> = Ok(value: A) | Err(error: E)
+enum Option<A> { None, Some(value: A) }
+enum Result<A, E> { Ok(value: A), Err(error: E) }
 
 // ---- トレイト ----
 
@@ -67,23 +67,25 @@ fn contains<A: Eq>(xs: Vec<A>, x: A) -> bool {
 
 // ---- derive ----
 
-// derive(Eq, Show) type ... は、型の宣言と、その型の Eq・Show の impl にする
+// derive(Eq, Show) struct ...（か enum ...）は、型の宣言と、その型の Eq・Show の impl にする
 // == は各フィールドの ==、to_str は各フィールドの to_str を使う（フィールドの型に実装があればその実装）
-syntax DeriveField = name:Ident ":" ty:Type
-syntax DeriveCtor = name:Ident ("(" fields:(DeriveField % ",") ")")?
-syntax DeriveBody = "{" fields:(DeriveField % ",") "}" | "|"? ctors:(DeriveCtor % "|")
-syntax DeriveType = "type" name:Ident ("<" params:(Ident % ",") ">")? "=" body:DeriveBody
+syntax DeriveField = name:Ident ":" ty:Type ","?
+syntax DeriveCtor = name:Ident ("(" fields:DeriveField* ")")? ","?
+syntax DeriveParams = "<" names:(Ident % ",") ">"
+syntax DeriveType =
+    | "struct" name:Ident params:DeriveParams? "{" fields:DeriveField* "}"
+    | "enum" name:Ident params:DeriveParams? "{" ctors:DeriveCtor* "}"
 
 macro derive ("derive" "(" traits:(Ident % ",") ")" t:DeriveType) -> Decl {
     // 型引数があれば impl<A, B> ... Name<A, B>
     let mut ty = quote { ${t.name} }
     let mut gen = quote {}
     if !is_null(t.params) {
-        ty = quote { ${t.name}<$( $t.params ),*> }
-        gen = quote { <$( $t.params ),*> }
+        ty = quote { ${t.name}<$( $t.params.names ),*> }
+        gen = quote { <$( $t.params.names ),*> }
     }
-    let fs = t.body.fields
-    let cs = t.body.ctors
+    let fs = t.fields
+    let cs = t.ctors
     let mut eq = quote { true }
     let mut show = quote { "" }
     if !is_null(fs) {
@@ -197,8 +199,8 @@ fn fold<A, B, E: Effect>(xs: Vec<A>, init: B, f: (B, A) -> B ! E) -> B ! E {
 // ---- Map（文字列のキーから値へ） ----
 
 // ponytail: 線形探索。大きくなるならハッシュ表にする
-type Entry<V> = { key: str, value: V }
-type Map<V> = { entries: Vec<Entry<V>> }
+struct Entry<V> { key: str, value: V }
+struct Map<V> { entries: Vec<Entry<V>> }
 
 fn empty<V>() -> Map<V> {
     let es: Vec<Entry<V>> = []
@@ -230,8 +232,8 @@ fn keys<V>(m: Map<V>) -> Vec<str> {
 
 // ---- JSON ----
 
-type Json = JNull | JBool(b: bool) | JInt(n: int) | JStr(s: str) | JArr(items: Vec<Json>) | JObj(fields: Vec<Field>)
-type Field = { key: str, value: Json }
+enum Json { JNull, JBool(b: bool), JInt(n: int), JStr(s: str), JArr(items: Vec<Json>), JObj(fields: Vec<Field>) }
+struct Field { key: str, value: Json }
 
 // JSON の文字列リテラル
 fn quote_str(s: str) -> str {
@@ -284,7 +286,7 @@ partial fn stringify(j: Json) -> str {
 // ---- JSON を読む ----
 
 // 読んだ値と、続きの位置。ok が false なら読めなかった
-type Parsed = { ok: bool, value: Json, pos: int }
+struct Parsed { ok: bool, value: Json, pos: int }
 
 fn no_parse() -> Parsed {
     Parsed { ok: false, value: JNull, pos: 0 }

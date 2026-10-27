@@ -9,7 +9,7 @@ hibana は、依存型（型の中に値を書ける型）と、構文を拡張�
 - 識別子は英字か `_` で始まり、英数字と `_` が続きます。
 - 整数（`42`、`0xFF`）と文字列（`"a\n"`）を書けます。浮動小数（`3.14`）と文字（`'a'`）は字句解析だけ対応していて、式には書けません（マクロのパターンの `Float` `Char` で使えます）。文字列のエスケープは `\n \t \r \0 \\ \" \'` です。
 - コメントは `// 行末まで` と `/* ... */` です。
-- キーワード: `fn partial let mut if else while for in return match type syntax macro quote use module extern effect handle true false`
+- キーワード: `fn partial let mut if else while for in return match type struct enum trait impl syntax macro quote use module extern effect handle true false`
 - 各トークンは、直前に空白があるか（`gap_before`）と改行があるか（`nl_before`）を持ちます。前者はマクロのパターンの `~`（空白なしで続く）に、後者は文の区切りに使います。
 
 ## 2. 文の区切り
@@ -36,29 +36,33 @@ partial fn spin(n: int) -> int { spin(n) }
 
 ### 3.2 型
 
-`type` は、右辺の形で3種類に分かれます。
+型の宣言は3種類です。`struct` と `enum` は実行時に値として残る形を、`type` は型検査のためだけの型（別名と型の計算）を宣言します。
 
 ```
-// 構築子の並び（| で区切る）は新しい型
-type Nat = Zero | Succ(n: Nat)
-type Option<T> = None | Some(x: T)
+// 構造体。値は Point { x: 1, y: 2 } で作り、p.x で取り出す
+struct Point { x: int, y: int }
 
-// 構築子が1つなら先頭に | を書く。-> で構築子が作る値の型を指定できる（添字付きの型族）
-type Eq<A: Type, a: A, b: A> = | Refl -> Eq<A, a, a>
+// フィールドに名前の無い構造体。int とは別の型になる。値は UserId(42) で作り、id.0 で取り出す
+struct UserId(int)
 
-// { フィールド: 型, ... } は構造体
-type Point = { x: int, y: int }
+// 直和型。構築子は , か改行で区切る
+enum Nat { Zero, Succ(n: Nat) }
+enum Option<T> { None, Some(x: T) }
 
-// それ以外は別名。型を計算してもよい
+// -> で構築子が作る値の型を指定できる（添字付きの型族）
+enum Eq<A: Type, a: A, b: A> { Refl -> Eq<A, a, a> }
+
+// 別名と、型を計算する関数。実行時には消える
 type Pos = int[x -> x > 0]
 type T<b: bool> = if b { int } else { str }
 ```
 
-- 型の引数は `<>` で宣言し、`<>` で渡します（`Option<int>`、`Eq<Nat, add(n, Zero), n>`）。値の引数は `()` で渡します（`Some(3)`）。型の名前に `()` で引数を渡すとエラーです。
+- 型の引数は `<>` で宣言し、`<>` で渡します（`Option<int>`、`Eq<Nat, add(n, Zero), n>`）。値の引数は `()` で渡します（`Some(3)`）。型の名前に `()` で引数を渡すとエラーです（`struct Name(型)` の構造体の値を作る時を除く）。
 - `<>` の中では比較演算子を直接書けません。閉じの `>` と区別するためで、`T<(1 < 2)>` のように括弧で囲みます。
 - 構築子の型引数は推論します。`let o: Option<int> = None` のように期待する型から、`Some(3)` のように引数の型から求めます。
-- 構造体の値は `Point { x: 1, y: 2 }` で作り（フィールドの順序は自由）、`p.x` で取り出します。構造体は、構築子を1つ持つ型として扱います。
-- 自分自身を関数型の引数の側に持つ定義（`type Bad = | MkBad(f: (Bad) -> int)`）は禁止です（正値性の検査）。
+- 構造体の値のフィールドの順序は自由です。構造体は、構築子を1つ持つ型として扱います。`struct Name(型, ...)` のフィールドの名前は `0`、`1`、... で、`Name(1, 2)` と表示します。
+- `type Name = { ... }` と `type Name = A | B` はエラーで、`struct` と `enum` を使うよう伝えます。
+- 自分自身を関数型の引数の側に持つ定義（`enum Bad { MkBad(f: (Bad) -> int) }`）は禁止です（正値性の検査）。
 - 名前の決まり: 組み込みのプリミティブ型は小文字（`int bool str syn unit`）、それ以外の型は大文字で始めます。
 
 ### 3.3 モジュール
@@ -382,7 +386,9 @@ macro pow ("pow" "(" x:Expr "," n:Int ")") {
 `-> Decl` のマクロは、トップレベルの宣言の位置で呼び、展開結果を宣言の並びとして読みます。`syntax` と `macro` の宣言はほかの宣言より先に読むので、宣言のマクロは後で（`use` したライブラリの中で）宣言したものでも使えます。
 
 ```
-syntax DeriveType = "type" name:Ident ("<" params:(Ident % ",") ">")? "=" body:DeriveBody
+syntax DeriveType =
+    | "struct" name:Ident params:DeriveParams? "{" fields:DeriveField* "}"
+    | "enum" name:Ident params:DeriveParams? "{" ctors:DeriveCtor* "}"
 macro derive ("derive" "(" traits:(Ident % ",") ")" t:DeriveType) -> Decl {
     ...
     quote { $t impl Eq<${t.name}> { fn eq(a: ${t.name}, b: ${t.name}) -> bool { ... } } }
@@ -397,12 +403,12 @@ std の `derive` は、型の宣言と、その型の `Eq`・`Show` の `impl` �
 
 ```
 derive(Eq, Show)
-type Shape = Circle(r: int) | Rect(w: int, h: int) | Dot
+enum Shape { Circle(r: int), Rect(w: int, h: int), Dot }
 ```
 
 - `Eq` は、同じ構築子でフィールドがすべて `==` なら等しいとします。`Show` は組み込みの文字列化と同じ形（`Point { x: 1, y: 2 }`、`Rect(3, 4)`）で、フィールドは `to_str` で文字列にします。どちらも、フィールドの型に実装があればその実装を使います。
 - 型引数を持つ型では `impl<A, B> Eq<Pair<A, B>>` を作ります。型引数に制約は付けないので、型引数の型の値は組み込みの比較と文字列化になります。
-- 添字付きの型族（構築子に `: 型` を書く型）と、`Ord` の derive はできません。
+- 添字付きの型族（構築子に `-> 型` を書く型）、`struct Name(型)` の構造体、`Ord` の derive はできません。
 
 ## 9. 組み込み関数
 
@@ -433,7 +439,7 @@ type Shape = Circle(r: int) | Rect(w: int, h: int) | Dot
 | `Eq<A>`（`eq`）、`Ord<A>: Eq<A>`（`lt`）、`Show<A>`（`show`） | トレイト（3.7 節）。`int` `str` `bool` の `Eq` と `Show`、`int` の `Ord` の実装がある |
 | `max(a, b)` `min(a, b)` `contains(xs, x)` | `Ord` と `Eq` を使う関数 |
 | `assert(ok)` `assert_eq(got, want)` | テスト（3.8 節）。偽か等しくなければ実行時エラー |
-| `derive(Eq, Show) type ...` | 型の `Eq`・`Show` の `impl` を作る宣言のマクロ（8.4 節） |
+| `derive(Eq, Show) struct ...`（`enum` も） | 型の `Eq`・`Show` の `impl` を作る宣言のマクロ（8.4 節） |
 | `map(xs, f)` `filter(xs, f)` `fold(xs, init, f)` | `Vec` の高階関数。`f` の効果をそのまま起こす（効果の多相） |
 | `Map<V>`、`empty()` `get(m, k)` `set(m, k, v)` `keys(m)` | 文字列のキーから値への表。`set` は新しい `Map` を返す。線形探索 |
 | `Json` = `JNull` \| `JBool` \| `JInt` \| `JStr` \| `JArr(Vec<Json>)` \| `JObj(Vec<Field>)`、`Field { key, value }` | JSON の値 |

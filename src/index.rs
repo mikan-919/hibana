@@ -115,7 +115,7 @@ pub fn build(src: &str, combined: &str, prog: &Program) -> Index {
         let mut module = String::new();
         for i in 0..toks.len().saturating_sub(1) {
             let kw = match &toks[i].tok {
-                Tok::Punct(p @ ("fn" | "type" | "effect" | "macro" | "syntax" | "trait")) => *p,
+                Tok::Punct(p @ ("fn" | "type" | "struct" | "enum" | "effect" | "macro" | "syntax" | "trait")) => *p,
                 Tok::Punct("module") => {
                     if let Tok::Ident(m) = &toks[i + 1].tok {
                         module = m.clone();
@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn symbols() {
-        let src = "use std.*\nuse web\n// 2 倍にする\nfn double(x: int) -> int { x * 2 }\ntype P = { x: int, y: int }\nfn main() { print(double(1)) }\n";
+        let src = "use std.*\nuse web\n// 2 倍にする\nfn double(x: int) -> int { x * 2 }\nstruct P { x: int, y: int }\nfn main() { print(double(1)) }\n";
         let combined = crate::parser::with_uses(src).unwrap();
         let prog = crate::parser::parse(&combined).unwrap();
         let ix = build(src, &combined, &prog);

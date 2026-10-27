@@ -3653,7 +3653,7 @@ fn main() {
         assert!(e.contains("関数は型を返せない"), "{e}");
         // 型には <> で引数を渡す
         let e =
-            check("type Box<A: Type> = | MkBox(x: A)\nfn main() { let b: Box(int) = MkBox(1) }")
+            check("enum Box<A: Type> { MkBox(x: A) }\nfn main() { let b: Box(int) = MkBox(1) }")
                 .unwrap_err();
         assert!(e.contains("<> で引数を渡す"), "{e}");
     }
@@ -3662,7 +3662,7 @@ fn main() {
     fn inductive() {
         let src = include_str!("../examples/inductive.hb");
         check(src).unwrap();
-        let extra = "type TBox = | MkT(t: Type)\nfn id(A: Type, x: A) -> A { x }\nfn two() -> Eq<int, 1 + 1, 2> { Refl }\n";
+        let extra = "enum TBox { MkT(t: Type) }\nfn id(A: Type, x: A) -> A { x }\nfn two() -> Eq<int, 1 + 1, 2> { Refl }\n";
         check(&format!("{src}{extra}")).unwrap();
         for (from, to, msg) in [
             ("Succ(k) => Succ(add(k, n))", "Succ(k) => n", "が必要だが"),
@@ -3743,7 +3743,7 @@ fn main() {
             assert!(e.contains(msg), "{to} => {e}");
         }
         // ジェネリック引数: 推論できなければ明示を求める。期待する型からも推論する
-        let g = "type Opt<A> = Non | Som(x: A)\nfn non<A>() -> Opt<A> { Non }\nfn id<A>(x: A) -> A { x }\n";
+        let g = "enum Opt<A> { Non, Som(x: A) }\nfn non<A>() -> Opt<A> { Non }\nfn id<A>(x: A) -> A { x }\n";
         check(&format!(
             "{g}fn main() {{ let x: Opt<int> = non()\n let y = non<int>()\n let z: int = id(3) }}"
         ))
@@ -3758,9 +3758,9 @@ fn main() {
             assert!(e.contains(msg), "{body} => {e}");
         }
         // 正値性: 自分を関数型の引数に持つ型は矛盾を導ける
-        let e = check("type Bad = | MkBad(f: (Bad) -> int)\nfn main() {}").unwrap_err();
+        let e = check("enum Bad { MkBad(f: (Bad) -> int) }\nfn main() {}").unwrap_err();
         assert!(e.contains("正値でない"), "{e}");
-        check("type Ok = | MkOk(f: (int) -> Ok)\nfn main() {}").unwrap();
+        check("enum Ok { MkOk(f: (int) -> Ok) }\nfn main() {}").unwrap();
         // 再帰する関数を値にすると、減る引数の検査をすり抜けられる
         let e = check(&format!(
             "{src}fn bad(n: int) -> int {{ let g = bad\n g(n) }}"

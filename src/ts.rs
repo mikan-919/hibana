@@ -294,7 +294,7 @@ impl P {
             .map(|(n, t)| format!("{n}: {}", self.hib(t)))
             .collect();
         self.structs
-            .push(format!("type {name} = {{ {} }}\n", fs.join(", ")));
+            .push(format!("struct {name} {{ {} }}\n", fs.join(", ")));
     }
 
     fn function(&mut self) {

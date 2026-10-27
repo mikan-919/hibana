@@ -527,7 +527,8 @@ fn parse_toks(src: &str, toks: Vec<Token>, round: usize) -> R<Program> {
                 fn_starts.push(p.pos);
                 p.skip_fn()?;
             }
-            Tok::Punct("type") => {
+            Tok::Punct(kw @ ("type" | "struct" | "enum")) => {
+                let kw = *kw;
                 if let Some(Tok::Ident(n)) = p.toks.get(p.pos + 1).map(|t| t.tok.clone()) {
                     types.insert(qual(&cur, &n));
                     declare(&cur, &n, &mut globals);
@@ -535,10 +536,8 @@ fn parse_toks(src: &str, toks: Vec<Token>, round: usize) -> R<Program> {
                 data_starts.push(p.pos);
                 let start = p.pos;
                 p.skip_decl();
-                // = や | の直後の名前は構築子（別名なら型の式の先頭だが、どちらも大域の名前なので構わない）
-                for w in p.toks[start..p.pos].windows(2) {
-                    if let (Tok::Punct("=" | "|"), Tok::Ident(n)) = (&w[0].tok, &w[1].tok) {
-                        let n = n.clone();
+                if kw == "enum" {
+                    for n in enum_ctors(&p.toks[start..p.pos]) {
                         declare(&cur, &n, &mut globals);
                     }
                 }
@@ -670,6 +669,36 @@ fn parse_toks(src: &str, toks: Vec<Token>, round: usize) -> R<Program> {
     }
     crate::resolve::resolve(&mut prog, &p.uses, &p.known);
     Ok(prog)
+}
+
+// enum の宣言のトークン列から、構築子の名前。{ の中の深さ 1 で、{ か , か行頭の直後の名前（-> の戻り値の型の中は除く）
+fn enum_ctors(toks: &[Token]) -> Vec<String> {
+    let (mut depth, mut start, mut in_ret) = (0, false, false);
+    let mut out = Vec::new();
+    for t in toks {
+        if depth == 1 && (t.nl_before || matches!(t.tok, Tok::Punct("}"))) {
+            in_ret = false;
+            start = true;
+        }
+        match &t.tok {
+            Tok::Punct("(" | "[" | "{") => {
+                depth += 1;
+                start = depth == 1;
+                continue;
+            }
+            Tok::Punct(")" | "]" | "}") => depth -= 1,
+            Tok::Punct(",") if depth == 1 => {
+                in_ret = false;
+                start = true;
+                continue;
+            }
+            Tok::Punct("->") if depth == 1 => in_ret = true,
+            Tok::Ident(n) if depth == 1 && start && !in_ret => out.push(n.clone()),
+            _ => {}
+        }
+        start = false;
+    }
+    out
 }
 
 // a + b + c の項
@@ -1265,8 +1294,11 @@ impl Parser<'_> {
         }
     }
 
+    // struct Name<引数> { フィールド: 型, ... } と struct Name<引数>(型, ...) は構造体（構築子 Name{} を1つ持つ型）。
+    // enum Name<引数> { 構築子(フィールド: 型, ...) -> 戻り値の型, ... } は直和型。
+    // type Name<引数> = 式 は別名か型を計算する関数で、実行時には消える
     fn type_decl(&mut self) -> R<TypeDecl> {
-        self.expect("type")?;
+        let kw = self.next();
         let module = self.cur_module();
         let name = qual(&module, &self.ident()?);
         let params = if self.eat("<") {
@@ -1274,14 +1306,39 @@ impl Parser<'_> {
         } else {
             vec![]
         };
-        self.expect("=")?;
-        // type Name = { フィールド: 型, ... } は構造体。構築子 Name{} を1つ持つ型として扱う
-        if self.eat("{") {
-            let mut fields = Vec::new();
+        if kw == Tok::Punct("enum") {
+            self.expect("{")?;
+            let mut ctors = Vec::new();
             while !self.eat("}") {
-                let n = self.ident()?;
-                self.expect(":")?;
-                fields.push((n, self.ty()?));
+                let c = self.ident()?;
+                let fields = if self.eat("(") { self.params()? } else { vec![] };
+                let ret = if self.eat("->") { Some(self.ty()?) } else { None };
+                ctors.push(Ctor { name: qual(&module, &c), fields, ret });
+                self.eat(",");
+            }
+            return Ok(TypeDecl::Data(Data { name, module, params, ctors }));
+        }
+        let tuple = kw == Tok::Punct("struct") && self.eat("(");
+        if kw == Tok::Punct("struct") && !tuple {
+            self.expect("{")?;
+        }
+        if kw == Tok::Punct("type") {
+            self.expect("=")?;
+            if self.peek() == &Tok::Punct("{") || self.has_bar() {
+                return self.err("構造体は struct Name { ... }、直和型は enum Name { ... } で書く");
+            }
+        }
+        if kw == Tok::Punct("struct") {
+            let mut fields = Vec::new();
+            // struct Name(型, ...) のフィールドは 0, 1, ... で、x.0 で取り出す
+            while !self.eat(if tuple { ")" } else { "}" }) {
+                if tuple {
+                    fields.push((fields.len().to_string(), self.ty()?));
+                } else {
+                    let n = self.ident()?;
+                    self.expect(":")?;
+                    fields.push((n, self.ty()?));
+                }
                 self.eat(",");
             }
             let ctor = Ctor {
@@ -1296,7 +1353,7 @@ impl Parser<'_> {
                 ctors: vec![ctor],
             }));
         }
-        if !self.has_bar() {
+        {
             let e = self.ty()?;
             let body = Block {
                 stmts: vec![],
@@ -1316,37 +1373,8 @@ impl Parser<'_> {
                 effects: vec![],
                 op: None,
                 insts: 0,
-            }));
+            }))
         }
-        self.eat("|");
-        let mut ctors = Vec::new();
-        loop {
-            let name = self.ident()?;
-            let fields = if self.eat("(") {
-                self.params()?
-            } else {
-                vec![]
-            };
-            let ret = if self.eat("->") {
-                Some(self.ty()?)
-            } else {
-                None
-            };
-            ctors.push(Ctor {
-                name: qual(&module, &name),
-                fields,
-                ret,
-            });
-            if !self.eat("|") {
-                break;
-            }
-        }
-        Ok(TypeDecl::Data(Data {
-            name,
-            module,
-            params,
-            ctors,
-        }))
     }
 
     // 宣言の終わり（次の宣言の始まり）までに、括弧の外の | があるか
@@ -1359,7 +1387,7 @@ impl Parser<'_> {
                 Tok::Punct("|") if depth == 0 => return true,
                 Tok::Punct(
                     "fn" | "partial" | "type" | "syntax" | "macro" | "use" | "module" | "extern"
-                    | "effect" | "trait" | "impl",
+                    | "effect" | "trait" | "impl" | "struct" | "enum",
                 )
                 | Tok::Eof
                     if depth == 0 =>
@@ -1383,7 +1411,7 @@ impl Parser<'_> {
                 Tok::Punct(")" | "]" | "}") => depth -= 1,
                 Tok::Punct(
                     "fn" | "partial" | "type" | "syntax" | "macro" | "use" | "module" | "extern"
-                    | "effect" | "trait" | "impl",
+                    | "effect" | "trait" | "impl" | "struct" | "enum",
                 ) if depth == 0 => {
                     return;
                 }
@@ -1522,6 +1550,14 @@ impl Parser<'_> {
             Tok::Str(s) => Expr::Str(s),
             Tok::Punct("true") => Expr::Bool(true),
             Tok::Punct("false") => Expr::Bool(false),
+            // struct Name(型, ...) の値 Name(式, ...)。構築子 Name{} の呼び出しにする
+            Tok::Ident(name)
+                if self.structs.get(&name).is_some_and(|fs| fs.first().is_some_and(|f| f == "0"))
+                    && !self.at_newline()
+                    && self.eat("(") =>
+            {
+                Expr::Call(format!("{name}{{}}"), self.args()?)
+            }
             // 型の名前に続く < は型引数。比較の < と区別する
             Tok::Ident(name)
                 if self.types.contains(&name)
@@ -1747,7 +1783,14 @@ impl Parser<'_> {
         };
         while !self.at_newline() {
             if self.eat(".") {
-                let name = self.ident()?;
+                // struct Name(型, ...) のフィールドは x.0
+                let name = match self.peek().clone() {
+                    Tok::Int(k) => {
+                        self.pos += 1;
+                        k.to_string()
+                    }
+                    _ => self.ident()?,
+                };
                 e = if !self.at_newline() && self.eat("(") {
                     Expr::Method(Box::new(e), name, self.args()?)
                 } else {

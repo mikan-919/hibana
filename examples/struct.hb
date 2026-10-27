@@ -1,10 +1,14 @@
 // 構造体: 名前付きフィールドを持つ型
-type Point = { x: int, y: int }
+struct Point { x: int, y: int }
 
 // 型引数を持つ構造体。フィールドの型は細分化型にもできる
-type Pair<A, B> = { fst: A, snd: B }
+struct Pair<A, B> { fst: A, snd: B }
 type Pos = int[n -> n > 0]
-type Size = { w: Pos, h: Pos }
+struct Size { w: Pos, h: Pos }
+
+// フィールドに名前の無い構造体。int とは別の型になり、x.0 で取り出す
+struct UserId(int)
+struct Rgb(int, int, int)
 
 fn add(p: Point, q: Point) -> Point {
     Point { x: p.x + q.x, y: p.y + q.y }
@@ -20,4 +24,8 @@ fn main() {
     let pr = Pair { fst: 1, snd: "one" }
     print(pr.snd)
     print(area(Size { w: 3, h: 4 }))
+    let id = UserId(42)
+    let c = Rgb(255, 128, 0)
+    print(id.0 + c.1)
+    print(c)
 }

@@ -123,7 +123,11 @@ static void show(Buf* b, V v) {
     default: {
       const char* name = CTOR_NAMES[v.d->ctor];
       size_t len = strlen(name);
-      if (len >= 2 && strcmp(name + len - 2, "{}") == 0) {
+      if (len >= 2 && strcmp(name + len - 2, "{}") == 0 && v.d->n > 0 && strcmp(CTOR_FIELDS[v.d->ctor][0], "0") == 0) {
+        put(b, name, len - 2); puts_(b, "(");
+        for (int k = 0; k < v.d->n; k++) { if (k) puts_(b, ", "); show(b, v.d->f[k]); }
+        puts_(b, ")");
+      } else if (len >= 2 && strcmp(name + len - 2, "{}") == 0) {
         put(b, name, len - 2); puts_(b, " { ");
         for (int k = 0; k < v.d->n; k++) { if (k) puts_(b, ", "); puts_(b, CTOR_FIELDS[v.d->ctor][k]); puts_(b, ": "); show(b, v.d->f[k]); }
         puts_(b, " }");

@@ -153,6 +153,14 @@
         {
           "type": "STRING",
           "value": "impl"
+        },
+        {
+          "type": "STRING",
+          "value": "struct"
+        },
+        {
+          "type": "STRING",
+          "value": "enum"
         }
       ]
     },

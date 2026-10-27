@@ -1,8 +1,8 @@
 // 右辺が | で区切った構築子の並びなら新しい型
-type Nat = Zero | Succ(n: Nat)
-type Option<T> = None | Some(x: T)
+enum Nat { Zero, Succ(n: Nat) }
+enum Option<T> { None, Some(x: T) }
 // 添字付きの型族。Refl は a と a が等しいことの証明。構築子が1つなら先頭に | を書く
-type Eq<A: Type, a: A, b: A> = | Refl -> Eq<A, a, a>
+enum Eq<A: Type, a: A, b: A> { Refl -> Eq<A, a, a> }
 
 fn add(m: Nat, n: Nat) -> Nat {
     match m {

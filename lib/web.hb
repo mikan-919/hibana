@@ -14,10 +14,10 @@
 
 // ---- リクエストと応答 ----
 
-type Header = { name: str, value: str }
+struct Header { name: str, value: str }
 // query は ? の後ろ（? は含まない）。ヘッダーの名前は小文字
-type Request = { method: str, path: str, query: str, headers: Vec<Header>, body: str }
-type Response = { status: int, content_type: str, body: str }
+struct Request { method: str, path: str, query: str, headers: Vec<Header>, body: str }
+struct Response { status: int, content_type: str, body: str }
 
 fn ok(body: str) -> Response {
     Response { status: 200, content_type: "text/plain", body: body }

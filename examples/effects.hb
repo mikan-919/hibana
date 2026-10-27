@@ -1,7 +1,7 @@
 // 代数的エフェクト。効果は effect で宣言し、関数の型の ! の後ろに書く。handle で処理すると型から消える
 
-type NotFound = { id: str }
-type User = { name: str, age: int }
+struct NotFound { id: str }
+struct User { name: str, age: int }
 
 // 失敗。resume しない腕は handle 全体の値になる
 effect Fail<E> {
@@ -17,7 +17,7 @@ effect Log {
     fn log(msg: str)
 }
 
-type Db = { prefix: str }
+struct Db { prefix: str }
 
 fn find(id: str) -> User ! Fail<NotFound>, Need<Db>, Log {
     let db = need()

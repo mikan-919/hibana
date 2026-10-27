@@ -223,6 +223,10 @@
     "named": false
   },
   {
+    "type": "enum",
+    "named": false
+  },
+  {
     "type": "extern",
     "named": false
   },
@@ -322,6 +326,10 @@
   {
     "type": "string",
     "named": true
+  },
+  {
+    "type": "struct",
+    "named": false
   },
   {
     "type": "syntax",

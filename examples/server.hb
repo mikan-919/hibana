@@ -8,7 +8,7 @@ effect Need<T> {
     fn need() -> T
 }
 
-type Db = { users: Ref<Vec<str>> }
+struct Db { users: Ref<Vec<str>> }
 
 fn exists(name: str) -> bool ! Need<Db> {
     let db: Db = need()
