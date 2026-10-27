@@ -176,6 +176,8 @@ enum TypeDecl {
 pub struct Program {
     pub fns: Vec<Fn>,
     pub datas: Vec<Data>,
+    // test "名前" { 本体 } の (名前, 本体の関数名)。hibana test で実行する
+    pub tests: Vec<(String, String)>,
 }
 
 // 組み込みのライブラリ。実行ファイルに埋め込むので、どこからでも use できる
@@ -366,6 +368,7 @@ pub fn parse(src: &str) -> R<Program> {
     let mut extern_starts = Vec::new();
     let mut effect_starts = Vec::new();
     let mut trait_starts = Vec::new();
+    let mut test_starts = Vec::new();
     let mut impl_starts = Vec::new();
     let mut types: HashSet<String> = ["Vec", "Ref", "Type"].map(String::from).into();
     let mut generic_fns: HashSet<String> = HashSet::new();
@@ -389,6 +392,7 @@ pub fn parse(src: &str) -> R<Program> {
         "split",
         "starts_with",
         "slice",
+        "panic",
         "resume",
         "all",
         "push",
@@ -514,6 +518,11 @@ pub fn parse(src: &str) -> R<Program> {
                 impl_starts.push(p.pos);
                 p.skip_fn()?;
             }
+            // test は宣言の先頭でだけ特別な名前（変数名にも使える）
+            Tok::Ident(t) if t == "test" && matches!(p.toks.get(p.pos + 1).map(|t| &t.tok), Some(Tok::Str(_))) => {
+                test_starts.push(p.pos);
+                p.skip_fn()?;
+            }
             _ => return p.err("fn・type・effect・trait・impl・extern・syntax・macro・use のいずれかが必要"),
         }
     }
@@ -577,6 +586,29 @@ pub fn parse(src: &str) -> R<Program> {
     for (k, s) in impl_starts.into_iter().enumerate() {
         p.pos = s;
         prog.fns.extend(p.impl_decl(k)?);
+    }
+    // test "名前" { 本体 } は引数の無い関数 test#k にする
+    for (k, s) in test_starts.into_iter().enumerate() {
+        p.pos = s + 1;
+        let Tok::Str(label) = p.next() else { unreachable!() };
+        let module = p.cur_module();
+        p.expect("{")?;
+        let name = qual(&module, &format!("test#{k}"));
+        prog.tests.push((label, name.clone()));
+        prog.fns.push(Fn {
+            name,
+            params: vec![],
+            ret: None,
+            body: p.block()?,
+            alias: false,
+            module,
+            partial: true,
+            implicit: 0,
+            js: None,
+            effects: vec![],
+            op: None,
+            insts: 0,
+        });
     }
     crate::resolve::resolve(&mut prog, &p.uses, &p.known);
     Ok(prog)

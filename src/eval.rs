@@ -65,10 +65,17 @@ struct Interp<'a> {
     next_h: usize,
     // 実行時エラーが起きた一番内側の式の位置
     err_at: Option<Span>,
+    // ソースのこの位置より後（読み込んだライブラリ）で起きたエラーは、ここより前の、呼び出した側の位置にする
+    user_end: usize,
 }
 
 // 型検査を通ったプログラムを前提とする
 pub fn run(prog: &Program, out: &mut dyn Write) -> Result<Value, Error> {
+    run_fn(prog, "main", usize::MAX, out)
+}
+
+// 引数の無い関数 entry を実行する（main と hibana test のテスト）
+pub fn run_fn(prog: &Program, entry: &str, user_end: usize, out: &mut dyn Write) -> Result<Value, Error> {
     let mut it = Interp {
         fns: prog.fns.iter().map(|f| (f.name.as_str(), f)).collect(),
         ctors: prog
@@ -86,8 +93,9 @@ pub fn run(prog: &Program, out: &mut dyn Write) -> Result<Value, Error> {
         handlers: Vec::new(),
         next_h: 0,
         err_at: None,
+        user_end,
     };
-    match it.call("main", vec![]) {
+    match it.call(entry, vec![]) {
         Ok(v) | Err(Flow::Return(v)) => Ok(v),
         Err(Flow::Error(e)) => {
             let e = Error::from(format!("実行時エラー: {e}"));
@@ -110,6 +118,7 @@ pub fn run_macro(b: &Block, vars: Vec<(String, Value)>) -> Result<Value, String>
         handlers: Vec::new(),
         next_h: 0,
         err_at: None,
+        user_end: usize::MAX,
     };
     match it.block(b, &mut vec![vars.into_iter().collect()]) {
         Ok(v) | Err(Flow::Return(v)) => Ok(v),
@@ -196,6 +205,7 @@ impl Interp<'_> {
                 | "split"
                 | "starts_with"
                 | "slice"
+                | "panic"
                 | "ident"
         ) || self.fns.contains_key(name)
         {
@@ -203,7 +213,7 @@ impl Interp<'_> {
         }
         let a = vs.remove(0);
         match (name, &a) {
-            ("error", _) => return error(str_val(a).to_string()),
+            ("error" | "panic", _) => return error(str_val(a).to_string()),
             ("Vec", _) => return Ok(Some(Value::Ty("Vec".into()))),
             ("len", Value::Arr(xs)) => return Ok(Some(Value::Int(xs.len() as i64))),
             ("len", Value::Str(s)) => return Ok(Some(Value::Int(s.chars().count() as i64))),
@@ -385,7 +395,10 @@ impl Interp<'_> {
         Ok(match e {
             Expr::At(sp, x) => {
                 let r = self.expr(x, env);
-                if matches!(r, Err(Flow::Error(_))) && self.err_at.is_none() {
+                let lib = |s: &Span| s.start.offset >= self.user_end;
+                if matches!(r, Err(Flow::Error(_)))
+                    && (self.err_at.is_none() || self.err_at.as_ref().is_some_and(lib) && !lib(sp))
+                {
                     self.err_at = Some(*sp);
                 }
                 r?

@@ -65,6 +65,17 @@ fn contains<A: Eq>(xs: Vec<A>, x: A) -> bool {
     false
 }
 
+// ---- テスト ----
+
+// 条件が偽なら実行時エラーにする（hibana test では、そのテストが失敗する）
+fn assert(ok: bool) {
+    if !ok { panic("assert が失敗した") }
+}
+
+fn assert_eq<A: Eq + Show>(got: A, want: A) {
+    if got != want { panic("assert_eq が失敗した: " + to_str(got) + " と " + to_str(want)) }
+}
+
 fn unwrap_or<A>(o: Option<A>, d: A) -> A {
     match o {
         Some(x) => x

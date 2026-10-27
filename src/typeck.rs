@@ -131,6 +131,7 @@ const BUILTINS: &[&str] = &[
     "split",
     "starts_with",
     "slice",
+    "panic",
     "resume",
     "all",
     "push",
@@ -146,6 +147,8 @@ const STR_FNS: &[(&str, &[&str], &str)] = &[
     ("split", &["str", "str"], "Vec<str>"),
     ("starts_with", &["str", "str"], "bool"),
     ("slice", &["str", "int", "int"], "str"),
+    // 実行時エラーにする
+    ("panic", &["str"], "never"),
 ];
 
 fn prim(name: &str) -> V {

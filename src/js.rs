@@ -101,6 +101,7 @@ function $print(v) { console.log($str(v)); }
 function $len(v) { return BigInt(typeof v === "string" ? [...v].length : v.length); }
 function $split(s, sep) { return s.split(sep); }
 function $starts_with(s, p) { return s.startsWith(p); }
+function $panic(m) { throw new Error(m); }
 function $slice(s, i, j) {
   const cs = [...s];
   if (!(0n <= i && i <= j && j <= BigInt(cs.length))) throw new Error(`slice の範囲 ${i}..${j} が文字列の外`);
@@ -327,6 +328,7 @@ impl Gen<'_> {
             Expr::Unary(op, _) => *op == "-",
             Expr::Call(n, _) => {
                 n == "slice"
+                    || n == "panic"
                     || self
                         .fns
                         .get(n.as_str())
@@ -554,7 +556,7 @@ impl Gen<'_> {
                     "all" => wait(true, format!("$all({})", vs[0])),
                     "print" => format!("$print({})", vs[0]),
                     "to_str" => format!("$str({})", vs[0]),
-                    "len" | "split" | "starts_with" | "slice" => {
+                    "len" | "split" | "starts_with" | "slice" | "panic" => {
                         format!("${name}({})", vs.join(", "))
                     }
                     n if self.ctors.contains(n) => format!("$d({}, [{}])", lit(n), vs.join(", ")),

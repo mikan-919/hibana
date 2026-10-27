@@ -93,6 +93,7 @@ fn main() {
     let r = match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["new", name] => Some(pkg::new(name)),
         ["fetch"] => Some(here().and_then(|r| pkg::fetch(&r))),
+        ["test", files @ ..] => Some(test_cmd(files).and_then(|ok| if ok { Ok(()) } else { Err(String::new()) })),
         ["add", url, tag @ ..] if tag.len() <= 1 => {
             Some(here().and_then(|r| pkg::add(&r, url, tag.first().copied())).map(|n| eprintln!("追加: use {n}")))
         }
@@ -100,7 +101,9 @@ fn main() {
     };
     if let Some(r) = r {
         if let Err(e) = r {
-            eprintln!("{e}");
+            if !e.is_empty() {
+                eprintln!("{e}");
+            }
             std::process::exit(1);
         }
         return;
@@ -110,7 +113,7 @@ fn main() {
         [cmd, p] if cmd == "js" || cmd == "c" || cmd == "build" || cmd == "fmt" => (cmd.as_str(), p.clone()),
         _ => {
             eprintln!(
-                "使い方: hibana <ファイル>（実行） | hibana js <ファイル>（JavaScript を出力） | hibana c <ファイル>（C を出力） | hibana build <ファイル>（ネイティブの実行ファイルを作る） | hibana fmt <ファイル>（整形して書き戻す） | hibana lsp（Language Server を標準入出力で動かす） | hibana new <名前> | hibana add <git の URL> [tag] | hibana fetch（依存を取ってくる）"
+                "使い方: hibana <ファイル>（実行） | hibana js <ファイル>（JavaScript を出力） | hibana c <ファイル>（C を出力） | hibana build <ファイル>（ネイティブの実行ファイルを作る） | hibana fmt <ファイル>（整形して書き戻す） | hibana lsp（Language Server を標準入出力で動かす） | hibana new <名前> | hibana add <git の URL> [tag] | hibana fetch（依存を取ってくる） | hibana test [ファイル]（test を実行する）"
             );
             std::process::exit(2);
         }
@@ -148,6 +151,14 @@ fn main() {
         _ => run(&src, &mut std::io::stdout()).map(|_| ()),
     };
     if let Err(e) = r {
+        eprintln!("{:?}", report(&path, &src, e));
+        std::process::exit(1);
+    }
+}
+
+// エラーを、ソースの位置に下線を引いて表示する形にする
+fn report(path: &str, src: &str, e: error::Error) -> miette::Report {
+    {
         let label = e.msg.rsplit(": ").next().unwrap_or("ここ").to_string();
         // 文字列が必要な所の数値・真偽値には to_str を提案する
         let to_str = ["str が必要だが int", "str が必要だが bool"]
@@ -160,12 +171,64 @@ fn main() {
             label,
             msg: e.msg,
             // 読み込んだライブラリの中のエラーも指せるよう、ライブラリを足したソースを渡す
-            src: miette::NamedSource::new(&path, parser::with_uses(&src).unwrap_or(src.clone())),
+            src: miette::NamedSource::new(path, parser::with_uses(src).unwrap_or(src.to_string())),
             span: e.span.map(Into::into),
         };
-        eprintln!("{:?}", miette::Report::new(report));
-        std::process::exit(1);
+        miette::Report::new(report)
     }
+}
+
+// hibana test [ファイル...]: test "名前" { } をインタプリタで実行する。
+// ファイルを省くと、hibana.toml のあるディレクトリの src と tests の .hb すべて
+fn test_cmd(files: &[&str]) -> Result<bool, String> {
+    let mut paths: Vec<std::path::PathBuf> = files.iter().map(Into::into).collect();
+    if paths.is_empty() {
+        let root = pkg::root(std::path::Path::new(".")).ok_or(format!("{} が無い（ファイルを指定する）", pkg::MANIFEST))?;
+        pkg::fetch(&root)?;
+        for d in ["src", "tests"] {
+            for e in std::fs::read_dir(root.join(d)).into_iter().flatten().flatten() {
+                if e.path().extension().is_some_and(|x| x == "hb") {
+                    paths.push(e.path());
+                }
+            }
+        }
+        paths.sort();
+    }
+    let (mut pass, mut total) = (0, 0);
+    for p in &paths {
+        let path = p.display().to_string();
+        let src = std::fs::read_to_string(p).map_err(|e| format!("{path}: {e}"))?;
+        parser::set_base_dir(p.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new(".")));
+        // ponytail: main の無いファイルには空の main を足す（型検査が main を要るため）。main を要らなくするなら型検査に入口を渡す
+        let full = if src.contains("fn main(") { src.clone() } else { format!("{src}\nfn main() {{}}\n") };
+        let prog = parser::with_uses(&full).and_then(|s| parser::parse(&s)).and_then(|mut prog| {
+            typeck::elaborate(&mut prog)?;
+            Ok(prog)
+        });
+        let prog = match prog {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("{:?}", report(&path, &full, e));
+                total += 1;
+                continue;
+            }
+        };
+        for (label, f) in prog.tests.iter().filter(|t| !t.1.contains('.')) {
+            total += 1;
+            match eval::run_fn(&prog, f, full.len(), &mut std::io::stdout()) {
+                Ok(_) => {
+                    pass += 1;
+                    println!("ok   {label}");
+                }
+                Err(e) => {
+                    println!("失敗 {label}");
+                    eprintln!("{:?}", report(&path, &full, e));
+                }
+            }
+        }
+    }
+    println!("{total} 件中 {pass} 件が成功");
+    Ok(pass == total)
 }
 
 #[cfg(test)]
@@ -554,6 +617,19 @@ fn main() {
         assert!(e.msg.contains("Ord<str> の実装が無い"), "{}", e.msg);
         let e = out("use std.*\nimpl Show<int> {\n fn shw(x: int) -> str { \"\" }\n}\nfn main() {}").unwrap_err();
         assert!(e.msg.contains("メソッド shw は無い"), "{}", e.msg);
+    }
+
+    // hibana test: 失敗したテストがあれば false。test は変数名にも使える
+    #[test]
+    fn test_command() {
+        let dir = std::env::temp_dir().join(format!("hibana-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (ok, ng) = (dir.join("ok.hb"), dir.join("ng.hb"));
+        std::fs::write(&ok, "use std.*\ntest \"a\" {\n let test = 1\n assert_eq(test + 1, 2)\n}\n").unwrap();
+        std::fs::write(&ng, "use std.*\ntest \"b\" { assert(false) }\nfn main() { print(1) }\n").unwrap();
+        assert_eq!(super::test_cmd(&[ok.to_str().unwrap()]), Ok(true));
+        assert_eq!(super::test_cmd(&[ok.to_str().unwrap(), ng.to_str().unwrap()]), Ok(false));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // 型エラーの提案と、効果を起こした操作の位置

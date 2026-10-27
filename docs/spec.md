@@ -229,6 +229,21 @@ trait Ord<A>: Eq<A> {                        // 親のトレイト。Ord の実�
 
 `std` の `Eq` と `Show` は演算子と組み込み関数に結びついています。`Eq` の実装がある型では `==` と `!=` がその実装の `eq` を、`Show` の実装がある型では `to_str` と `print` がその実装の `show` を使います。実装が無い型では、組み込みの比較と文字列化のままです。`int` `str` `bool` は、細分化型の検査が `==` を直接扱うので、いつも組み込みです。
 
+### 3.8 テスト
+
+```
+use std.*
+
+test "足し算" {
+    assert_eq(add(1, 2), 3)
+    assert(add(0, 0) == 0)
+}
+```
+
+- `test "名前" { 本体 }` は、引数の無い関数として型検査します。`hibana test` でだけ実行し、ほかの実行方式では呼びません。`test` は宣言の先頭で文字列が続く時だけ特別で、変数名にも使えます。
+- 本体で実行時エラーが起きると、そのテストは失敗です。std の `assert(ok)` と `assert_eq(got, want)`（`Eq` と `Show` の実装が要る）は、組み込みの `panic` で実行時エラーにします。失敗の位置は、ライブラリの中で起きたエラーでも、テストのファイルの中の呼び出しにします。
+- `main` の無いファイルには、空の `main` を足して検査します。
+
 ## 4. 式
 
 | 式 | 例 |
@@ -372,6 +387,7 @@ macro pow ("pow" "(" x:Expr "," n:Int ")") {
 | `split(s, sep)` | `(str, str) -> Vec<str>` |
 | `starts_with(s, p)` | `(str, str) -> bool` |
 | `slice(s, i, j)` | `(str, int, int) -> str`。範囲外は実行時エラー |
+| `panic(msg)` | `str -> never`。実行時エラーにする |
 | `new_ref(x)` `read(r)` `write(r, x)` | `T -> Ref<T>`、`Ref<T> -> T`、`(Ref<T>, T) -> unit` |
 | `push(v, x)` | `(Vec<T>, T) -> Vec<T>`。`v` の後ろに `x` を足した新しい `Vec`（`v` は変わらない） |
 | `all(fs)` | `(Vec<() -> T ! Async>) -> Vec<T> ! Async`（3.5 節） |
@@ -389,6 +405,7 @@ macro pow ("pow" "(" x:Expr "," n:Int ")") {
 | `Result<A, E>` = `Ok(value)` \| `Err(error)` | 成功か失敗 |
 | `Eq<A>`（`eq`）、`Ord<A>: Eq<A>`（`lt`）、`Show<A>`（`show`） | トレイト（3.7 節）。`int` `str` `bool` の `Eq` と `Show`、`int` の `Ord` の実装がある |
 | `max(a, b)` `min(a, b)` `contains(xs, x)` | `Ord` と `Eq` を使う関数 |
+| `assert(ok)` `assert_eq(got, want)` | テスト（3.8 節）。偽か等しくなければ実行時エラー |
 | `map(xs, f)` `filter(xs, f)` `fold(xs, init, f)` | `Vec` の高階関数。`f` の効果をそのまま起こす（効果の多相） |
 | `Map<V>`、`empty()` `get(m, k)` `set(m, k, v)` `keys(m)` | 文字列のキーから値への表。`set` は新しい `Map` を返す。線形探索 |
 | `Json` = `JNull` \| `JBool` \| `JInt` \| `JStr` \| `JArr(Vec<Json>)` \| `JObj(Vec<Field>)`、`Field { key, value }` | JSON の値 |
@@ -455,6 +472,7 @@ web.serve(8080, app)    // hibana js examples/server.hb > server.mjs && node ser
 | `hibana new <名前>` | `hibana.toml` と `src/main.hb` のディレクトリを作る | パッケージ（3.6 節） |
 | `hibana add <git の URL> [tag]` | `hibana.toml` に依存を足して取ってくる。名前は URL の最後の部分（`hibana-` は除く） | パッケージ（3.6 節） |
 | `hibana fetch` | 依存を取ってきて `hibana.lock` を書く | パッケージ（3.6 節） |
+| `hibana test [ファイル...]` | `test` をインタプリタで実行し、成功した数を表示する。失敗があれば終了コード 1。ファイルを省くと、`hibana.toml` のあるディレクトリの `src` と `tests` の `.hb` すべて | テスト（3.8 節） |
 | `hibana lsp` | Language Server を標準入出力で動かす | エディタ（エラーの表示・整形・hover・定義へのジャンプ・補完・色付け）。VS Code と Zed の拡張機能は `editors/`（`editors/README.md`） |
 
 値の表し方:

@@ -161,6 +161,9 @@ static V h_split(V s, V sep) {
   }
   return mk_arr(n, parts);
 }
+static V h_panic(V m) {
+  char b[512]; snprintf(b, sizeof b, "%.*s", (int)m.s->len, m.s->s); die(b); return m;
+}
 static V h_slice(V s, V i, V j) {
   int64_t len = utf8_len(s.s->s, s.s->len);
   if (!(0 <= i.i && i.i <= j.i && j.i <= len)) {
@@ -324,6 +327,7 @@ impl Gen<'_> {
             Expr::Unary(op, _) => *op == "-",
             Expr::Call(n, _) => {
                 n == "slice"
+                    || n == "panic"
                     || self
                         .fns
                         .get(n.as_str())
@@ -526,7 +530,7 @@ impl Gen<'_> {
                     }
                     "print" => format!("h_print({})", vs[0]),
                     "to_str" => format!("h_str({})", vs[0]),
-                    "len" | "split" | "starts_with" | "slice" => {
+                    "len" | "split" | "starts_with" | "slice" | "panic" => {
                         format!("h_{name}({})", vs.join(", "))
                     }
                     n => match (self.ctors.get(n), self.fns.get(n)) {
