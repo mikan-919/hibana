@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+serde_json = "1"
 miette = { version = "7.6.0", features = ["fancy"] }
 thiserror = "2.0.21"
 z3 = "0.21.1"

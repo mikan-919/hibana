@@ -5,6 +5,19 @@ use crate::smt::Smt;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+thread_local! {
+    // LSP の hover のため、式の位置 (先頭, 終わり) ごとの型を記録する。None なら記録しない
+    pub static TYPES: std::cell::RefCell<Option<Vec<(usize, usize, String)>>> = const { std::cell::RefCell::new(None) };
+}
+
+fn record(sp: &crate::lexer::Span, t: &V) {
+    TYPES.with(|ts| {
+        if let Some(ts) = ts.borrow_mut().as_mut() {
+            ts.push((sp.start.offset, sp.end.offset, show(t)));
+        }
+    });
+}
+
 use crate::error::{Ctx, Error, R};
 
 // 型検査中の値。型そのものも値として表す
@@ -1603,7 +1616,11 @@ impl Ck<'_> {
     // 期待する型に対して検査する。if は条件の値で期待する型を絞り込む
     fn check(&mut self, e: &Expr, expected: &V) -> R<()> {
         if let Expr::At(sp, inner) = e {
-            return self.check(inner, expected).map_err(|err| err.at(*sp));
+            let r = self.check(inner, expected).map_err(|err| err.at(*sp));
+            if r.is_ok() {
+                record(sp, expected);
+            }
+            return r;
         }
         match e {
             Expr::If(c, then, Some(els)) => {
@@ -1704,7 +1721,11 @@ impl Ck<'_> {
 
     fn expr(&mut self, e: &Expr) -> R<V> {
         if let Expr::At(sp, inner) = e {
-            return self.expr(inner).map_err(|err| err.at(*sp));
+            let r = self.expr(inner).map_err(|err| err.at(*sp));
+            if let Ok(t) = &r {
+                record(sp, t);
+            }
+            return r;
         }
         let int = prim("int");
         let boolean = prim("bool");

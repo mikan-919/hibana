@@ -4,6 +4,7 @@ mod eval;
 mod fmt;
 mod js;
 mod lexer;
+mod lsp;
 mod meta;
 mod parser;
 mod resolve;
@@ -81,12 +82,16 @@ struct Report {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args == ["lsp"] {
+        lsp::serve();
+        return;
+    }
     let (cmd, path) = match args.as_slice() {
         [p] => ("run", p.clone()),
         [cmd, p] if cmd == "js" || cmd == "c" || cmd == "build" || cmd == "fmt" => (cmd.as_str(), p.clone()),
         _ => {
             eprintln!(
-                "使い方: hibana <ファイル>（実行） | hibana js <ファイル>（JavaScript を出力） | hibana c <ファイル>（C を出力） | hibana build <ファイル>（ネイティブの実行ファイルを作る） | hibana fmt <ファイル>（整形して書き戻す）"
+                "使い方: hibana <ファイル>（実行） | hibana js <ファイル>（JavaScript を出力） | hibana c <ファイル>（C を出力） | hibana build <ファイル>（ネイティブの実行ファイルを作る） | hibana fmt <ファイル>（整形して書き戻す） | hibana lsp（Language Server を標準入出力で動かす）"
             );
             std::process::exit(2);
         }
