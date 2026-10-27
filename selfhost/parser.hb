@@ -1,5 +1,5 @@
 // 構文解析器。src/parser.rs と同じ構文木を作る（S 式にして比べる）
-// ponytail: 中核の構文だけ。マクロ・トレイト・効果・use・extern・test は後で足す。エラーは panic で止める
+// ponytail: マクロは derive(Eq, Show) だけを組み込みで展開し、syntax・macro・test の宣言は読み飛ばす。extern は無い。エラーは panic で止める
 use "./lexer.hb".*
 use std.*
 
@@ -35,8 +35,12 @@ enum Expr {
 
 struct Ctor { name: str, fields: Vec<Expr>, ret: Option<Expr> }
 struct Data { name: str, params: Vec<Expr>, ctors: Vec<Ctor> }
-struct Func { name: str, implicit: int, is_partial: bool, params: Vec<Expr>, ret: Option<Expr>, effs: Vec<Expr>, body: Expr }
+// kind: "" は普通の関数、"trait" はトレイトのメソッド（本体が無い）、"impl" は実装のメソッド（名前は メソッド#型）、
+// "js:パス" は JS のモジュールの関数（名前は 別名.関数）
+struct Func { name: str, implicit: int, is_partial: bool, params: Vec<Expr>, ret: Option<Expr>, effs: Vec<Expr>, body: Expr, kind: str }
 struct StructInfo { name: str, fields: Vec<str> }
+// モジュールが宣言した名前。use したモジュールを読む時に使う
+struct Ext { types: Vec<str>, generics: Vec<str>, structs: Vec<StructInfo> }
 
 // 読んでいる位置と、前もって集めた名前
 struct P {
@@ -458,7 +462,7 @@ partial fn func(p: P) -> Func {
     let ret = if eat(p, "->") { Some(ret_ty(p)) } else { None }
     let effs = effects(p)
     expect(p, "{")
-    Func { name: name, implicit: len(tps), is_partial: part, params: ps, ret: ret, effs: effs, body: block(p) }
+    Func { name: name, implicit: len(tps), is_partial: part, params: ps, ret: ret, effs: effs, body: block(p), kind: "" }
 }
 
 // struct・enum は Data、type は別名の関数
@@ -497,7 +501,7 @@ partial fn type_decl(p: P) -> Result<Data, Func> {
     } else {
         expect(p, "=")
         let e = ty(p)
-        Err(Func { name: name, implicit: 0, is_partial: false, params: ps, ret: Some(EVar("Type")), effs: [], body: EBlock([], Some(e)) })
+        Err(Func { name: name, implicit: 0, is_partial: false, params: ps, ret: Some(EVar("Type")), effs: [], body: EBlock([], Some(e)), kind: "" })
     }
 }
 
@@ -517,55 +521,228 @@ fn skip_fn(p: P) {
 
 fn is_type_kw(t: Tok) -> bool { is_p(t, "struct") || is_p(t, "enum") || is_p(t, "type") }
 
-struct Program { datas: Vec<Data>, fns: Vec<Func> }
+// 宣言の頭の語（derive・test は識別子）
+fn head(p: P) -> str { match peek(p) { TPunct(k) => k, TIdent(n) => n, _ => "" } }
 
-partial fn parse(src: str) -> Program {
-    let ts = match lex(src) { Ok(ts) => ts, Err(e) => panic(e.msg) }
-    // 型の名前とジェネリックな関数の名前を前もって集める（括弧の外の宣言の頭だけを見る）
-    let mut types: Vec<str> = ["Vec", "Ref", "Type"]
-    let mut generics: Vec<str> = []
+// 次の行の頭まで読み飛ばす（use）。cont で始まる行は続きとみなす（syntax の | の行）
+fn skip_line(p: P, cont: str) {
+    advance(p)
+    while peek(p) != TEof && !(nl(p) && !is_p(peek(p), cont)) { advance(p) }
+}
+
+// use の対象。use "./x.hb".* なら "./x.hb"、use std.* なら "std"
+fn uses_of(ts: Vec<Token>) -> Vec<str> {
+    let mut r: Vec<str> = []
     let mut depth = 0
     for i in 0..len(ts) {
         let t = ts[i].tok
         if is_p(t, "{") || is_p(t, "(") || is_p(t, "[") { depth = depth + 1 }
         if is_p(t, "}") || is_p(t, ")") || is_p(t, "]") { depth = depth - 1 }
-        if depth == 0 && i + 2 < len(ts) {
-            match ts[i + 1].tok {
+        if depth == 0 && is_p(t, "use") && i + 1 < len(ts) {
+            match ts[i + 1].tok { TStr(s) => { r = push(r, s) }, TIdent(n) => { r = push(r, n) }, _ => {} }
+        }
+    }
+    r
+}
+
+fn concat_f(a: Vec<Func>, b: Vec<Func>) -> Vec<Func> {
+    let mut r = a
+    for x in b { r = push(r, x) }
+    r
+}
+
+// trait Name<A>: 親<A> { fn メソッド(引数) -> 型 ... }。メソッドはトレイトの型引数をジェネリック引数に持つ関数にする
+// ponytail: 既定の実装と、親のトレイトの検査は無い
+partial fn trait_decl(p: P) -> Vec<Func> {
+    expect(p, "trait")
+    take_ident(p)
+    let tps = type_params(p)
+    while !eat(p, "{") { advance(p) }
+    let mut fs: Vec<Func> = []
+    while !eat(p, "}") {
+        expect(p, "fn")
+        let m = take_ident(p)
+        expect(p, "(")
+        let ps = params(p)
+        let ret = if eat(p, "->") { Some(ret_ty(p)) } else { None }
+        let effs = effects(p)
+        if is_p(peek(p), "{") { fail(p, "トレイトの既定の実装は未対応") }
+        fs = push(fs, Func { name: m, implicit: len(tps), is_partial: false, params: concat(tps, ps), ret: ret, effs: effs, body: EBlock([], None), kind: "trait" })
+        eat(p, ",")
+    }
+    fs
+}
+
+// 型の式の頭の名前。Vec<A> なら Vec
+fn type_key(e: Expr) -> str { match e { EVar(n) => n, ECall(n, xs) => n, _ => "" } }
+
+// impl<G> Trait<型> { fn メソッド(...) { ... } }。メソッドを メソッド#型 という名前の関数にする
+partial fn impl_decl(p: P) -> Vec<Func> {
+    expect(p, "impl")
+    let tps = type_params(p)
+    let key = match ret_ty(p) { ECall(t, xs) => if len(xs) == 1 { type_key(xs[0]) } else { "" }, _ => "" }
+    if key == "" { fail(p, "impl の後には トレイト<型> が必要") }
+    expect(p, "{")
+    let mut fs: Vec<Func> = []
+    while !eat(p, "}") {
+        let f = func(p)
+        fs = push(fs, Func { name: f.name + "#" + key, implicit: len(tps) + f.implicit, is_partial: f.is_partial, params: concat(tps, f.params), ret: f.ret, effs: f.effs, body: f.body, kind: "impl" })
+    }
+    fs
+}
+
+// derive(Eq, Show) の型の impl の hibana のコード（lib/std.hb の macro derive と同じ形）
+fn derive_src(d: Data, traits: Vec<str>) -> str {
+    let names = map(d.params, fn(e: Expr) -> str { match e { EParam(n, t) => n, _ => "" } })
+    let gen = if len(names) == 0 { "" } else { "<" + join_s(names, ", ") + ">" }
+    let ty = d.name + gen
+    let mut eq = "true"
+    let mut show = ""
+    if len(d.ctors) == 1 && d.ctors[0].name == d.name + "{}" {
+        show = "\"" + d.name + " {\""
+        let fs = d.ctors[0].fields
+        for k in 0..len(fs) {
+            let f = match fs[k] { EParam(n, t) => n, _ => "" }
+            eq = eq + " && a." + f + " == b." + f
+            show = show + " + \"" + (if k == 0 { " " } else { ", " }) + f + ": \" + to_str(a." + f + ")"
+        }
+        show = show + " + \" }\""
+    } else {
+        let mut eq_arms = ""
+        let mut show_arms = ""
+        for c in d.ctors {
+            if len(c.fields) == 0 {
+                eq_arms = eq_arms + c.name + " => match b { " + c.name + " => true, _ => false }, "
+                show_arms = show_arms + c.name + " => \"" + c.name + "\", "
+            } else {
+                let mut xs: Vec<str> = []
+                let mut ys: Vec<str> = []
+                let mut cond = "true"
+                let mut s = "\"" + c.name + "(\""
+                for j in 0..len(c.fields) {
+                    let x = "x" + to_str(j)
+                    let y = "y" + to_str(j)
+                    xs = push(xs, x)
+                    ys = push(ys, y)
+                    cond = cond + " && " + x + " == " + y
+                    s = s + (if j == 0 { "" } else { " + \", \"" }) + " + to_str(" + x + ")"
+                }
+                eq_arms = eq_arms + c.name + "(" + join_s(xs, ", ") + ") => match b { " + c.name + "(" + join_s(ys, ", ") + ") => " + cond + ", _ => false }, "
+                show_arms = show_arms + c.name + "(" + join_s(xs, ", ") + ") => " + s + " + \")\", "
+            }
+        }
+        eq = "match a { " + eq_arms + "}"
+        show = "match a { " + show_arms + "}"
+    }
+    let mut out = ""
+    for tr in traits {
+        if tr == "Eq" { out = out + "impl" + gen + " Eq<" + ty + "> { fn eq(a: " + ty + ", b: " + ty + ") -> bool { " + eq + " } }\n" }
+        else if tr == "Show" { out = out + "impl" + gen + " Show<" + ty + "> { fn show(a: " + ty + ") -> str { " + show + " } }\n" }
+        else { panic("derive できるのは Eq と Show（" + tr + " は無い）") }
+    }
+    out
+}
+
+fn join_s(xs: Vec<str>, sep: str) -> str {
+    let mut s = ""
+    for i in 0..len(xs) { s = s + (if i > 0 { sep } else { "" }) + xs[i] }
+    s
+}
+
+// derive(名前, ...) を読み、名前の並びを返す
+fn derive_head(p: P) -> Vec<str> {
+    advance(p)
+    expect(p, "(")
+    let mut r: Vec<str> = []
+    while !eat(p, ")") { r = push(r, take_ident(p)); eat(p, ",") }
+    r
+}
+
+struct Program { datas: Vec<Data>, fns: Vec<Func>, uses: Vec<str>, info: Ext }
+
+fn no_ext() -> Ext { Ext { types: [], generics: [], structs: [] } }
+
+partial fn parse(src: str) -> Program { parse_with(src, no_ext()) }
+
+fn concat_str(a: Vec<str>, b: Vec<str>) -> Vec<str> {
+    let mut r = a
+    for x in b { r = push(r, x) }
+    r
+}
+
+// ext は use したモジュールが宣言した名前
+partial fn parse_with(src: str, ext: Ext) -> Program {
+    let ts0 = match lex(src) { Ok(ts) => ts, Err(e) => panic(e.msg) }
+    // 型の名前とジェネリックな関数の名前を前もって集める（括弧の外の宣言の頭だけを見る）
+    let mut types: Vec<str> = []
+    let mut generics: Vec<str> = []
+    let mut depth = 0
+    for i in 0..len(ts0) {
+        let t = ts0[i].tok
+        if is_p(t, "{") || is_p(t, "(") || is_p(t, "[") { depth = depth + 1 }
+        if is_p(t, "}") || is_p(t, ")") || is_p(t, "]") { depth = depth - 1 }
+        if depth == 0 && i + 2 < len(ts0) {
+            match ts0[i + 1].tok {
                 TIdent(n) => {
-                    if is_type_kw(t) { types = push(types, n) }
-                    if is_p(t, "fn") && is_p(ts[i + 2].tok, "<") { generics = push(generics, n) }
+                    if is_type_kw(t) || is_p(t, "trait") { types = push(types, n) }
+                    if is_p(t, "fn") && is_p(ts0[i + 2].tok, "<") { generics = push(generics, n) }
                 }
                 _ => {}
             }
         }
     }
+    let all_types = concat_str(concat_str(["Vec", "Ref", "Type"], types), ext.types)
+    let all_generics = concat_str(generics, ext.generics)
     // 型の宣言を先に読み、構造体のフィールドの順をそろえてから関数を読む
-    let p0 = P { ts: ts, pos: new_ref(0), types: types, generics: generics, structs: [], no_struct: new_ref(false) }
+    let p0 = P { ts: ts0, pos: new_ref(0), types: all_types, generics: all_generics, structs: [], no_struct: new_ref(false) }
     let mut datas: Vec<Data> = []
     let mut aliases: Vec<Func> = []
+    let mut derived = ""
     while peek(p0) != TEof {
+        let h = head(p0)
+        let traits = if h == "derive" { derive_head(p0) } else { [] }
         if is_type_kw(peek(p0)) {
-            match type_decl(p0) { Ok(d) => { datas = push(datas, d) }, Err(f) => { aliases = push(aliases, f) } }
-        } else if is_p(peek(p0), "fn") || is_p(peek(p0), "partial") {
+            match type_decl(p0) {
+                Ok(d) => { datas = push(datas, d); if len(traits) > 0 { derived = derived + derive_src(d, traits) } }
+                Err(f) => { aliases = push(aliases, f) }
+            }
+        } else if h == "fn" || h == "partial" || h == "trait" || h == "impl" || h == "macro" || h == "test" {
             skip_fn(p0)
+        } else if h == "use" {
+            skip_line(p0, "")
+        } else if h == "syntax" {
+            skip_line(p0, "|")
         } else {
-            fail(p0, "fn・struct・enum・type のいずれかが必要")
+            fail(p0, "宣言が必要")
         }
     }
-    let mut structs: Vec<StructInfo> = []
+    // derive の impl はトークンにして末尾に足す
+    let mut ts = filter(ts0, fn(t: Token) -> bool { t.tok != TEof })
+    match lex(derived) { Ok(xs) => { for t in xs { ts = push(ts, t) } }, Err(e) => panic(e.msg) }
+    let mut own: Vec<StructInfo> = []
     for d in datas {
         for c in d.ctors {
             if c.name == d.name + "{}" {
-                structs = push(structs, StructInfo { name: d.name, fields: map(c.fields, fn(f: Expr) -> str { match f { EParam(n, t) => n, _ => "" } }) })
+                own = push(own, StructInfo { name: d.name, fields: map(c.fields, fn(f: Expr) -> str { match f { EParam(n, t) => n, _ => "" } }) })
             }
         }
     }
-    let p = P { ts: ts, pos: new_ref(0), types: types, generics: generics, structs: structs, no_struct: new_ref(false) }
+    let mut structs = own
+    for s in ext.structs { structs = push(structs, s) }
+    let p = P { ts: ts, pos: new_ref(0), types: all_types, generics: all_generics, structs: structs, no_struct: new_ref(false) }
     let mut fns = aliases
     while peek(p) != TEof {
-        if is_type_kw(peek(p)) { type_decl(p); } else { fns = push(fns, func(p)) }
+        let h = head(p)
+        if h == "derive" { derive_head(p); }
+        else if is_type_kw(peek(p)) { type_decl(p); }
+        else if h == "fn" || h == "partial" { fns = push(fns, func(p)) }
+        else if h == "trait" { fns = concat_f(fns, trait_decl(p)) }
+        else if h == "impl" { fns = concat_f(fns, impl_decl(p)) }
+        else if h == "use" { skip_line(p, "") }
+        else if h == "syntax" { skip_line(p, "|") }
+        else { skip_fn(p) }
     }
-    Program { datas: datas, fns: fns }
+    Program { datas: datas, fns: fns, uses: uses_of(ts0), info: Ext { types: types, generics: generics, structs: own } }
 }
 
 // ---- S 式（src/parser.rs の sexp と同じ形） ----

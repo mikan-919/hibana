@@ -1,5 +1,6 @@
 // コード生成。selfhost/parser.hb の構文木から JavaScript を作る（src/js.rs と同じ値の表し方）
-// ponytail: 中核の構文だけ。push は毎回写す（その場で足す最適化は無い）。効果・JS の import は後で足す
+// ponytail: push は毎回写す（その場で足す最適化は無い）。効果は無い
+// トレイトのメソッドは、最初の引数の実行時の型で実装を選ぶ（型引数が戻り値にだけ現れるメソッドは呼べない）
 use "./parser.hb".*
 use std.*
 
@@ -78,11 +79,11 @@ partial fn call(g: G, env: Vec<Var>, name: str, xs: Vec<Expr>) -> Code {
                 let mut rest: Vec<Expr> = []
                 for i in 0..len(xs) { if !(f.implicit > 0 && len(xs) == len(f.params) && i < f.implicit) { rest = push(rest, xs[i]) } }
                 let a = args(g, env, rest)
-                spill(g, Code { pre: a.pre, val: "f_" + name + "(" + a.val + ")" })
+                spill(g, Code { pre: a.pre, val: fname(name) + "(" + a.val + ")" })
             }
             None => {
                 let a = args(g, env, xs)
-                if is_ctor(g, name) { spill(g, Code { pre: a.pre, val: "{ $c: " + quote_str(name) + ", $f: [" + a.val + "] }" }) }
+                if is_ctor(g, name) { spill(g, Code { pre: a.pre, val: "{ $c: " + dquote(name) + ", $f: [" + a.val + "] }" }) }
                 else { spill(g, Code { pre: a.pre, val: builtin(name, a.val) }) }
             }
         },
@@ -103,10 +104,10 @@ partial fn gen(g: G, env: Vec<Var>, e: Expr) -> Code {
     match e {
         EInt(n) => pure(to_str(n) + "n"),
         EBool(b) => pure(to_str(b)),
-        EStr(s) => pure(quote_str(s)),
+        EStr(s) => pure(dquote(s)),
         EVar(n) => match lookup_var(env, n) {
             Some(v) => pure(v.js),
-            None => if is_ctor(g, n) { pure("{ $c: " + quote_str(n) + ", $f: [] }") } else { pure("f_" + n) },
+            None => if is_ctor(g, n) { pure("{ $c: " + dquote(n) + ", $f: [] }") } else { pure(fname(n)) },
         },
         EUnary(op, x) => { let c = gen(g, env, x); Code { pre: c.pre, val: "(" + op + c.val + ")" } }
         EBinary(op, a, b) => binary(g, env, op, a, b),
@@ -116,7 +117,7 @@ partial fn gen(g: G, env: Vec<Var>, e: Expr) -> Code {
             let a = args(g, env, xs)
             spill(g, Code { pre: fc.pre + a.pre, val: fc.val + "(" + a.val + ")" })
         }
-        EField(x, f) => { let c = gen(g, env, x); Code { pre: c.pre, val: "$get(" + c.val + ", " + quote_str(f) + ")" } }
+        EField(x, f) => { let c = gen(g, env, x); Code { pre: c.pre, val: "$get(" + c.val + ", " + dquote(f) + ")" } }
         EAssign(n, x) => {
             let c = gen(g, env, x)
             let js = match lookup_var(env, n) { Some(v) => v.js, None => n }
@@ -180,6 +181,13 @@ partial fn gen(g: G, env: Vec<Var>, e: Expr) -> Code {
     }
 }
 
+// JavaScript の関数名。修飾した名前の . や # を $ にする
+fn fname(n: str) -> str {
+    let mut s = "f_"
+    for c in chars(n) { s = s + (if c == "." || c == "#" || c == "{" || c == "}" { "$" } else { c }) }
+    s
+}
+
 fn param_name(e: Expr) -> str { match e { EParam(n, t) => n, _ => "" } }
 
 partial fn binary(g: G, env: Vec<Var>, op: str, a: Expr, b: Expr) -> Code {
@@ -217,7 +225,7 @@ partial fn match_code(g: G, env: Vec<Var>, x: Expr, arms: Vec<Expr>) -> Code {
                     env2 = push(env2, Var { name: binds[i], js: js, mutable: false })
                 }
                 let b = gen(g, env2, body)
-                let test = if ctor == "_" { "true" } else { s.val + ".$c === " + quote_str(ctor) }
+                let test = if ctor == "_" { "true" } else { s.val + ".$c === " + dquote(ctor) }
                 out = out + (if first { "if (" } else { "else if (" }) + test + ") {\n" + bind_pre + b.pre + r + " = " + b.val + ";\n}\n"
                 first = false
             }
@@ -266,7 +274,23 @@ fn runtime() -> str {
     "  if (v.$c.endsWith(\"{}\") && $fields[v.$c][0] === \"0\") return v.$c.slice(0, -2) + \"(\" + v.$f.map($show).join(\", \") + \")\";\n" +
     "  if (v.$c.endsWith(\"{}\")) return v.$c.slice(0, -2) + \" { \" + $fields[v.$c].map((f, i) => f + \": \" + $show(v.$f[i])).join(\", \") + \" }\";\n" +
     "  return v.$f.length === 0 ? v.$c : v.$c + \"(\" + v.$f.map($show).join(\", \") + \")\";\n}\n" +
-    "function $str(v) { return typeof v === \"string\" ? v : $show(v); }\n" +
+    "function $key(v) {\n" +
+    "  if (typeof v === \"bigint\") return \"int\";\n" +
+    "  if (typeof v === \"string\") return \"str\";\n" +
+    "  if (typeof v === \"boolean\") return \"bool\";\n" +
+    "  if (Array.isArray(v)) return \"Vec\";\n" +
+    "  return v && v.$c !== undefined ? $types[v.$c] : \"\";\n}\n" +
+    "const $impls = {};\n" +
+    "function $impl(m, k, f) { ($impls[m] ??= {})[k] = f; }\n" +
+    "function $call(m, a) {\n" +
+    "  const f = $impls[m]?.[$key(a[0])];\n" +
+    "  if (!f) throw new Error(m + \" の \" + $key(a[0]) + \" の実装が無い\");\n" +
+    "  return f(...a);\n}\n" +
+    "// Show の実装がある型は to_str と print でそれを使う（Vec は組み込みの表示）\n" +
+    "function $str(v) {\n" +
+    "  if (typeof v === \"string\") return v;\n" +
+    "  const f = v && v.$c !== undefined && $impls[\"std.show\"]?.[$types[v.$c]];\n" +
+    "  return f ? f(v) : $show(v);\n}\n" +
     "function $print(v) { console.log($str(v)); }\n" +
     "function $len(v) { return BigInt(typeof v === \"string\" ? [...v].length : v.length); }\n" +
     "function $push(v, x) { return [...v, x]; }\n" +
@@ -288,14 +312,33 @@ partial fn compile(prog: Program) -> str {
     let g = G { prog: prog, n: new_ref(0) }
     let mut out = runtime()
     let mut fields: Vec<str> = []
+    let mut types: Vec<str> = []
     for d in prog.datas {
         for c in d.ctors {
-            fields = push(fields, quote_str(c.name) + ": [" + join(map(c.fields, fn(p: Expr) -> str { quote_str(param_name(p)) }), ", ") + "]")
+            fields = push(fields, dquote(c.name) + ": [" + join(map(c.fields, fn(p: Expr) -> str { dquote(param_name(p)) }), ", ") + "]")
+            types = push(types, dquote(c.name) + ": " + dquote(d.name))
         }
     }
     out = out + "const $fields = {" + join(fields, ", ") + "};\n"
+    out = out + "const $types = {" + join(types, ", ") + "};\n"
+    let mut imports = ""
+    let mut paths: Vec<str> = []
     for f in prog.fns {
-        if !is_alias(f) {
+        if f.kind == "trait" {
+            out = out + "function " + fname(f.name) + "(...a) { return $call(" + dquote(f.name) + ", a); }\n"
+        } else if starts_with(f.kind, "js:") {
+            // JS のモジュールは import * as $jsK で読む
+            let path = slice(f.kind, 3, len(f.kind))
+            if !contains(paths, path) {
+                imports = imports + "import * as $js" + to_str(len(paths)) + " from " + dquote(path) + ";\n"
+                paths = push(paths, path)
+            }
+            let mut k = 0
+            for i in 0..len(paths) { if paths[i] == path { k = i } }
+            let mut js = ""
+            for x in split(f.name, ".") { js = x }
+            out = out + "function " + fname(f.name) + "(...a) { return $js" + to_str(k) + "." + js + "(...a); }\n"
+        } else if !is_alias(f) {
             let mut env: Vec<Var> = []
             let mut names: Vec<str> = []
             for i in 0..len(f.params) {
@@ -306,8 +349,12 @@ partial fn compile(prog: Program) -> str {
                 }
             }
             let b = gen(g, env, f.body)
-            out = out + "function f_" + f.name + "(" + join(names, ", ") + ") {\n" + b.pre + "return " + b.val + ";\n}\n"
+            out = out + "function " + fname(f.name) + "(" + join(names, ", ") + ") {\n" + b.pre + "return " + b.val + ";\n}\n"
+            if f.kind == "impl" {
+                let parts = split(f.name, "#")
+                if len(parts) == 2 { out = out + "$impl(" + dquote(parts[0]) + ", " + dquote(parts[1]) + ", " + fname(f.name) + ");\n" }
+            }
         }
     }
-    out + "f_main();\n"
+    imports + out + "f_main();\n"
 }

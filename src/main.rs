@@ -834,6 +834,17 @@ fn main() {
             let want = out(&std::fs::read_to_string(&p).unwrap()).unwrap();
             assert_eq!(String::from_utf8(run.stdout).unwrap(), want, "{n}: {}", String::from_utf8_lossy(&run.stderr));
         }
+        // 自分自身をコンパイルする。そうして作ったコンパイラーが、自分自身から同じ JavaScript を作るか
+        let me = dir.join("compile.hb");
+        let stage = |compiler: &std::path::Path, out: &std::path::Path| {
+            let r = std::process::Command::new("node").arg(compiler).arg(&me).output().unwrap();
+            assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+            std::fs::write(out, &r.stdout).unwrap();
+        };
+        let (c2, c3) = (tmp.join("c2.mjs"), tmp.join("c3.mjs"));
+        stage(&js, &c2);
+        stage(&c2, &c3);
+        assert!(std::fs::read(&c2).unwrap() == std::fs::read(&c3).unwrap(), "2 段目と 3 段目の出力が違う");
         std::fs::remove_file(&js).unwrap();
         std::fs::remove_dir_all(&tmp).unwrap();
     }

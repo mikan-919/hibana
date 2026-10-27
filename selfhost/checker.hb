@@ -490,7 +490,8 @@ partial fn check_fn(c: C, f: Func) {
 // 型エラーの並び（無ければ空）
 partial fn check(prog: Program) -> Vec<str> {
     let c = C { prog: prog, subst: new_ref([]), errs: new_ref([]), fname: new_ref(""), ret: new_ref(YUnit), tparams: new_ref([]) }
-    for f in prog.fns { if !is_alias(f) { check_fn(c, f) } }
+    // トレイトのメソッドと JS の関数は本体が無い
+    for f in prog.fns { if !is_alias(f) && f.kind != "trait" && !starts_with(f.kind, "js:") { check_fn(c, f) } }
     read(c.errs)
 }
 
