@@ -82,7 +82,17 @@ struct Report {
     origin: Option<miette::SourceSpan>,
 }
 
+// 型検査と変換は構文木を再帰でたどるので、深く入れ子になったコードのために大きなスタックで動かす
 fn main() {
+    let t = std::thread::Builder::new().stack_size(STACK).spawn(run_cli).unwrap();
+    if t.join().is_err() {
+        std::process::exit(101);
+    }
+}
+
+const STACK: usize = 256 << 20;
+
+fn run_cli() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args == ["lsp"] {
         lsp::serve();
@@ -802,6 +812,30 @@ fn main() {
         // エラーの文言は比べず、通るか止まるかだけを比べる
         let got: String = out.lines().map(|l| if l == "ok" { "ok\n" } else { "error\n" }).collect();
         assert_eq!(got, want, "{out}{}", String::from_utf8_lossy(&r.stderr));
+    }
+
+    // hibana で書いたコンパイラー（selfhost/compile.hb）で例を JavaScript にし、Node.js での出力がインタプリタと同じか
+    #[test]
+    fn selfhost_codegen_matches() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let dir = root.join("selfhost");
+        let src = std::fs::read_to_string(dir.join("compile.hb")).unwrap();
+        crate::parser::set_base_dir(&dir);
+        let js = dir.join(format!("compile-{}.mjs", std::process::id()));
+        std::fs::write(&js, super::to_js(&src).unwrap()).unwrap();
+        let tmp = std::env::temp_dir().join(format!("hibana-cg-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        for n in ["capture", "fib", "push", "refine", "smt", "strings", "struct"] {
+            let p = root.join(format!("examples/{n}.hb"));
+            let r = std::process::Command::new("node").arg(&js).arg(&p).output().unwrap();
+            let mjs = tmp.join(format!("{n}.mjs"));
+            std::fs::write(&mjs, &r.stdout).unwrap();
+            let run = std::process::Command::new("node").arg(&mjs).output().unwrap();
+            let want = out(&std::fs::read_to_string(&p).unwrap()).unwrap();
+            assert_eq!(String::from_utf8(run.stdout).unwrap(), want, "{n}: {}", String::from_utf8_lossy(&run.stderr));
+        }
+        std::fs::remove_file(&js).unwrap();
+        std::fs::remove_dir_all(&tmp).unwrap();
     }
 
     // よくある条件（routes の添字、fib の停止性など）は Z3 なしで証明できる

@@ -1,0 +1,3 @@
+# テストのスレッドも、main と同じく大きなスタックで動かす（src/main.rs の STACK）
+[env]
+RUST_MIN_STACK = "268435456"
