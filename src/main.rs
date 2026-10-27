@@ -619,6 +619,18 @@ fn main() {
         assert!(e.msg.contains("メソッド shw は無い"), "{}", e.msg);
     }
 
+    // 宣言のマクロ derive。生成した Eq・Show の impl を == と to_str が使う
+    #[test]
+    fn derive() {
+        let o = out(include_str!("../examples/derive.hb")).unwrap();
+        assert_eq!(
+            o,
+            "Point { x: 1, y: 2 }\ntrue\ntrue\nRect(3, 4)\ntrue\nfalse\nDot / Pair { fst: 1, snd: Point { x: 1, y: 2 } }\ntrue\n"
+        );
+        let e = out("use std.*\nderive(Ord)\ntype P = { x: int }\nfn main() {}").unwrap_err();
+        assert!(e.msg.contains("derive できるのは Eq と Show"), "{}", e.msg);
+    }
+
     // hibana test: 失敗したテストがあれば false。test は変数名にも使える
     #[test]
     fn test_command() {

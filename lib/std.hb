@@ -65,6 +65,94 @@ fn contains<A: Eq>(xs: Vec<A>, x: A) -> bool {
     false
 }
 
+// ---- derive ----
+
+// derive(Eq, Show) type ... は、型の宣言と、その型の Eq・Show の impl にする
+// == は各フィールドの ==、to_str は各フィールドの to_str を使う（フィールドの型に実装があればその実装）
+syntax DeriveField = name:Ident ":" ty:Type
+syntax DeriveCtor = name:Ident ("(" fields:(DeriveField % ",") ")")?
+syntax DeriveBody = "{" fields:(DeriveField % ",") "}" | "|"? ctors:(DeriveCtor % "|")
+syntax DeriveType = "type" name:Ident ("<" params:(Ident % ",") ">")? "=" body:DeriveBody
+
+macro derive ("derive" "(" traits:(Ident % ",") ")" t:DeriveType) -> Decl {
+    // 型引数があれば impl<A, B> ... Name<A, B>
+    let mut ty = quote { ${t.name} }
+    let mut gen = quote {}
+    if !is_null(t.params) {
+        ty = quote { ${t.name}<$( $t.params ),*> }
+        gen = quote { <$( $t.params ),*> }
+    }
+    let fs = t.body.fields
+    let cs = t.body.ctors
+    let mut eq = quote { true }
+    let mut show = quote { "" }
+    if !is_null(fs) {
+        // 構造体: a.x == b.x && ...、"Name { x: 1, y: 2 }"
+        show = quote { ${str_of(t.name) + " {"} }
+        let mut k = 0
+        while k < len(fs) {
+            let f = at(fs, k)
+            eq = quote { $eq && a.${f.name} == b.${f.name} }
+            let sep = if k == 0 { " " } else { ", " }
+            show = quote { $show + ${sep + str_of(f.name) + ": "} + to_str(a.${f.name}) }
+            k = k + 1
+        }
+        show = quote { $show + " }" }
+    } else {
+        // 構築子ごとの腕。"Name(1, 2)"、引数の無い構築子は "Name"
+        let mut eq_arms = quote {}
+        let mut show_arms = quote {}
+        let mut k = 0
+        while k < len(cs) {
+            let c = at(cs, k)
+            if is_null(c.fields) {
+                eq_arms = quote { $eq_arms ${c.name} => match b { ${c.name} => true, _ => false }, }
+                show_arms = quote { $show_arms ${c.name} => ${str_of(c.name)}, }
+            } else {
+                let mut xs = quote {}
+                let mut ys = quote {}
+                let mut cond = quote { true }
+                let mut s = quote { ${str_of(c.name) + "("} }
+                let mut j = 0
+                while j < len(c.fields) {
+                    let x = ident("x" + to_str(j))
+                    let y = ident("y" + to_str(j))
+                    if j == 0 {
+                        xs = quote { $x }
+                        ys = quote { $y }
+                        s = quote { $s + to_str($x) }
+                    } else {
+                        xs = quote { $xs, $x }
+                        ys = quote { $ys, $y }
+                        s = quote { $s + ", " + to_str($x) }
+                    }
+                    cond = quote { $cond && $x == $y }
+                    j = j + 1
+                }
+                eq_arms = quote { $eq_arms ${c.name}($xs) => match b { ${c.name}($ys) => $cond, _ => false }, }
+                show_arms = quote { $show_arms ${c.name}($xs) => $s + ")", }
+            }
+            k = k + 1
+        }
+        eq = quote { match a { $eq_arms } }
+        show = quote { match a { $show_arms } }
+    }
+    let mut out = quote { $t }
+    let mut i = 0
+    while i < len(traits) {
+        let tr = str_of(at(traits, i))
+        if tr == "Eq" {
+            out = quote { $out impl $gen Eq<$ty> { fn eq(a: $ty, b: $ty) -> bool { $eq } } }
+        } else if tr == "Show" {
+            out = quote { $out impl $gen Show<$ty> { fn show(a: $ty) -> str { $show } } }
+        } else {
+            error("derive できるのは Eq と Show（" + tr + " は無い）")
+        }
+        i = i + 1
+    }
+    out
+}
+
 // ---- テスト ----
 
 // 条件が偽なら実行時エラーにする（hibana test では、そのテストが失敗する）

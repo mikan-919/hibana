@@ -344,8 +344,16 @@ pub fn with_uses(src: &str) -> R<String> {
 }
 
 pub fn parse(src: &str) -> R<Program> {
+    parse_toks(src, lex(src)?, 0)
+}
+
+// round は宣言のマクロを展開して読み直した回数
+fn parse_toks(src: &str, toks: Vec<Token>, round: usize) -> R<Program> {
+    if round > 16 {
+        return Err("宣言のマクロの展開が終わらない".into());
+    }
     let mut p = Parser {
-        toks: lex(src)?,
+        toks,
         pos: 0,
         src,
         g: Rc::default(),
@@ -422,7 +430,44 @@ pub fn parse(src: &str) -> R<Program> {
             globals.insert(n.to_string());
         }
     };
-    // 1周目は syntax と macro だけを読む（宣言より前の関数でもマクロを使えるようにする）
+    // 先に syntax と macro だけを読む（宣言より前の関数や宣言の位置でも、後で宣言したマクロを使えるようにする）
+    let mut decl_end: HashMap<usize, usize> = HashMap::new();
+    {
+        let (mut depth, mut i) = (0, 0);
+        let mut mods = vec![(0, String::new())];
+        while i < p.toks.len() {
+            match &p.toks[i].tok {
+                Tok::Punct("(" | "[" | "{") => depth += 1,
+                Tok::Punct(")" | "]" | "}") => depth -= 1,
+                Tok::Punct("module") if depth == 0 => {
+                    if let Some(Tok::Ident(m)) = p.toks.get(i + 1).map(|t| &t.tok) {
+                        mods.push((i + 2, m.clone()));
+                        p.module_at = Rc::new(mods.clone());
+                    }
+                }
+                Tok::Punct(k @ ("syntax" | "macro")) if depth == 0 => {
+                    let k = *k;
+                    p.pos = i;
+                    if k == "syntax" {
+                        p.syntax_decl(&mut g)?;
+                    } else {
+                        p.macro_decl(&mut g)?;
+                    }
+                    decl_end.insert(i, p.pos);
+                    i = p.pos;
+                    continue;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        p.pos = 0;
+    }
+    g.validate()?;
+    p.g = Rc::new(g);
+    // 宣言の位置で照合した宣言のマクロ (始まり, 終わり, マクロの番号, 照合結果)
+    let mut decl_macros = Vec::new();
+    // 1周目は宣言の名前を集める
     loop {
         let cur = module_at.last().unwrap().1.clone();
         match p.peek() {
@@ -439,8 +484,7 @@ pub fn parse(src: &str) -> R<Program> {
                 modules.insert(u.module.clone());
                 uses.entry(cur).or_default().push(u);
             }
-            Tok::Punct("syntax") => p.syntax_decl(&mut g)?,
-            Tok::Punct("macro") => p.macro_decl(&mut g)?,
+            Tok::Punct("syntax" | "macro") => p.pos = decl_end[&p.pos],
             // extern "モジュール" { fn 名前(引数) -> 型 ... }
             Tok::Punct("extern") => {
                 extern_starts.push(p.pos);
@@ -523,13 +567,18 @@ pub fn parse(src: &str) -> R<Program> {
                 test_starts.push(p.pos);
                 p.skip_fn()?;
             }
-            _ => return p.err("fn・type・effect・trait・impl・extern・syntax・macro・use のいずれかが必要"),
+            _ => {
+                let start = p.pos;
+                match p.match_decl()? {
+                    Some((k, rec)) => decl_macros.push((start, p.pos, k, rec)),
+                    None => return p.err("fn・type・effect・trait・impl・extern・syntax・macro・use のいずれか（か宣言のマクロ）が必要"),
+                }
+            }
         }
     }
     p.types = Rc::new(types.clone());
     p.generic_fns = Rc::new(generic_fns);
-    g.validate()?;
-    globals.extend(g.literals());
+    globals.extend(p.g.literals());
     globals.extend(modules.iter().cloned());
     p.globals = Rc::new(globals);
     p.mod_names = Rc::new(mod_names);
@@ -537,7 +586,16 @@ pub fn parse(src: &str) -> R<Program> {
     p.uses = Rc::new(uses);
     p.modules = Rc::new(modules);
     p.module_at = Rc::new(module_at);
-    p.g = Rc::new(g);
+    // 宣言のマクロは、名前がそろってから（衛生性のため）展開し、展開した宣言を含めて最初から読み直す
+    if !decl_macros.is_empty() {
+        let mut toks = p.toks.clone();
+        for (s, e, k, rec) in decl_macros.into_iter().rev() {
+            p.pos = e;
+            let out = p.expand_decl(k, rec)?;
+            toks.splice(s..e, out);
+        }
+        return parse_toks(src, toks, round + 1);
+    }
     p.check_macros()?;
     let mut prog = Program::default();
     for s in effect_starts {

@@ -141,6 +141,8 @@ struct Macro {
     fields: Vec<(String, bool)>,
     // -> Stmt なら文の位置、-> Expr なら式の位置で試す
     stmt: bool,
+    // -> Decl なら宣言の位置で試す。展開結果は宣言の並びとして読み直す
+    decl: bool,
     // 本体のトークン列（コンパイル時に実行するコード）。空なら照合結果を Expr::Macro として残す
     body: Option<Vec<Token>>,
     compiled: OnceCell<Block>,
@@ -297,7 +299,8 @@ static NEXT_EXPANSION: AtomicUsize = AtomicUsize::new(1);
 // 大域の名前と、. の後のフィールド名はそのまま。$x で差し込んだ呼び出し側のトークンはここを通らない
 fn hygienic(t: &Token, prev: Option<&Token>) -> Token {
     HYGIENE.with(|h| match (&*h.borrow(), &t.tok) {
-        _ if matches!(prev.map(|p| &p.tok), Some(Tok::Punct("."))) => t.clone(),
+        _ if matches!(prev.map(|p| &p.tok), Some(Tok::Punct(".")))
+            || t.tok == Tok::Ident("_".into()) => t.clone(),
         // ライブラリのマクロが自分のモジュールの名前を使うなら、使う側でもその名前を指すよう修飾する
         (Some((_, _, m, names)), Tok::Ident(n)) if !m.is_empty() && names.contains(n) => Token {
             tok: Tok::Ident(format!("{m}.{n}")),
@@ -748,14 +751,15 @@ impl Parser<'_> {
         self.expect("(")?;
         let pat = self.pattern()?;
         self.expect(")")?;
-        let stmt = if self.eat("->") {
+        let (stmt, decl) = if self.eat("->") {
             match self.ident()?.as_str() {
-                "Expr" => false,
-                "Stmt" => true,
-                _ => return self.err_at("マクロの戻り値は Expr か Stmt".into()),
+                "Expr" => (false, false),
+                "Stmt" => (true, false),
+                "Decl" => (false, true),
+                _ => return self.err_at("マクロの戻り値は Expr か Stmt か Decl".into()),
             }
         } else {
-            false
+            (false, false)
         };
         self.expect("{")?;
         let start = self.pos;
@@ -780,6 +784,7 @@ impl Parser<'_> {
             pat,
             fields,
             stmt,
+            decl,
             body,
             first: (vec![], true),
             compiled: OnceCell::new(),
@@ -869,16 +874,44 @@ impl Parser<'_> {
     // 文の位置（stmt）か式の位置で、全マクロを照合する
     pub fn try_macros(&mut self, stmt: bool) -> R<Option<Expr>> {
         let g = self.g.clone();
+        let Some((k, rec)) = self.find_macro(|m| m.stmt == stmt && !m.decl)? else {
+            return Ok(None);
+        };
+        let m = &g.macros[k];
+        match &m.body {
+            None => Ok(Some(Expr::Macro(m.name.clone(), Box::new(rec)))),
+            Some(_) => self.expand(m, rec).map(Some),
+        }
+    }
+
+    // 宣言の位置で、宣言のマクロを照合する。(マクロの番号, 照合結果)。展開は名前がそろってから expand_decl でする
+    pub fn match_decl(&mut self) -> R<Option<(usize, Node)>> {
+        self.find_macro(|m| m.decl)
+    }
+
+    // 宣言のマクロを展開したトークン列。self.pos は呼び出しの直後
+    pub fn expand_decl(&self, k: usize, rec: Node) -> R<Vec<Token>> {
+        let g = self.g.clone();
+        let m = &g.macros[k];
+        if m.body.is_none() {
+            return Err(format!("マクロ {} の展開コードが無い", m.name).into());
+        }
+        self.expand_toks(m, rec)
+    }
+
+    // pred に合うマクロを照合する。一つだけ合えば、その番号と照合結果を返し、self.pos を直後に進める
+    fn find_macro(&mut self, pred: impl Fn(&Macro) -> bool) -> R<Option<(usize, Node)>> {
+        let g = self.g.clone();
         let start = self.pos;
         let mut hits = Vec::new();
-        for m in g.macros.iter().filter(|m| m.stmt == stmt) {
+        for (k, m) in g.macros.iter().enumerate().filter(|(_, m)| pred(m)) {
             self.pos = start;
             if !self.could_start(&m.first) {
                 continue;
             }
             let mut b = Vec::new();
             match self.m_pattern(&m.pat, &mut b) {
-                Ok(_) => hits.push((m, b, self.pos)),
+                Ok(_) => hits.push((k, m, b, self.pos)),
                 Err(Miss::Fail) => {}
                 Err(Miss::Fatal(e)) => return self.err_at(e),
             }
@@ -887,16 +920,12 @@ impl Parser<'_> {
         match hits.len() {
             0 => Ok(None),
             1 => {
-                let (m, b, end) = hits.pop().unwrap();
+                let (k, m, b, end) = hits.pop().unwrap();
                 self.pos = end;
-                let rec = record(Some(&m.name), self.span_from(start), &m.fields, b);
-                match &m.body {
-                    None => Ok(Some(Expr::Macro(m.name.clone(), Box::new(rec)))),
-                    Some(_) => self.expand(m, rec).map(Some),
-                }
+                Ok(Some((k, record(Some(&m.name), self.span_from(start), &m.fields, b))))
             }
             _ => {
-                let names: Vec<&str> = hits.iter().map(|h| h.0.name.as_str()).collect();
+                let names: Vec<&str> = hits.iter().map(|h| h.1.name.as_str()).collect();
                 self.err_at(format!("Ambiguous macro match（{}）", names.join(", ")))
             }
         }
@@ -963,38 +992,9 @@ impl Parser<'_> {
     // ponytail: 衛生的でない。展開コード内の let は呼び出し側の変数と衝突しうる
     // ponytail: 展開のたびにトークン列全体を複製する。遅ければ Parser.toks を Rc にする
     fn expand(&self, m: &Macro, rec: Node) -> R<Expr> {
-        if self.depth >= 64 {
-            return Err(format!("マクロ {} の展開が深すぎる", m.name).into());
-        }
-        let block = self.macro_block(m)?;
-        let Node::Record { fields, .. } = rec else {
-            unreachable!()
-        };
-        let src_toks = Rc::new(self.toks.clone());
-        let vars = fields
-            .into_iter()
-            .map(|(n, node)| {
-                (
-                    n,
-                    Value::Syn(Rc::new(Syn {
-                        node,
-                        toks: src_toks.clone(),
-                    })),
-                )
-            })
-            .collect();
         let wrap = |e: &str| format!("マクロ {} の展開: {e}", m.name);
-        // 展開ごとに番号を振り、quote に書いた名前をその番号で付け替える
-        let id = NEXT_EXPANSION.fetch_add(1, Ordering::Relaxed);
-        let names = self.mod_names.get(&m.module).cloned().unwrap_or_default();
-        let prev =
-            HYGIENE.with(|h| h.replace(Some((id, self.globals.clone(), m.module.clone(), names))));
-        let v = eval::run_macro(&block, vars);
-        HYGIENE.with(|h| h.replace(prev));
-        let v = v.map_err(Error::from).ctx(wrap)?;
+        let toks = self.expand_toks(m, rec)?;
         let end = self.toks[self.pos].clone();
-        let mut toks = Vec::new();
-        emit(&v, &end, &mut toks).ctx(wrap)?;
         let eof = Token {
             tok: Tok::Eof,
             ..end.clone()
@@ -1035,6 +1035,43 @@ impl Parser<'_> {
             return p.err("1個の式でない").ctx(wrap);
         }
         Ok(e)
+    }
+
+    // マクロ本体を実行し、展開結果をトークン列にする
+    fn expand_toks(&self, m: &Macro, rec: Node) -> R<Vec<Token>> {
+        if self.depth >= 64 {
+            return Err(format!("マクロ {} の展開が深すぎる", m.name).into());
+        }
+        let block = self.macro_block(m)?;
+        let Node::Record { fields, .. } = rec else {
+            unreachable!()
+        };
+        let src_toks = Rc::new(self.toks.clone());
+        let vars = fields
+            .into_iter()
+            .map(|(n, node)| {
+                (
+                    n,
+                    Value::Syn(Rc::new(Syn {
+                        node,
+                        toks: src_toks.clone(),
+                    })),
+                )
+            })
+            .collect();
+        let wrap = |e: &str| format!("マクロ {} の展開: {e}", m.name);
+        // 展開ごとに番号を振り、quote に書いた名前をその番号で付け替える
+        let id = NEXT_EXPANSION.fetch_add(1, Ordering::Relaxed);
+        let names = self.mod_names.get(&m.module).cloned().unwrap_or_default();
+        let prev =
+            HYGIENE.with(|h| h.replace(Some((id, self.globals.clone(), m.module.clone(), names))));
+        let v = eval::run_macro(&block, vars);
+        HYGIENE.with(|h| h.replace(prev));
+        let v = v.map_err(Error::from).ctx(wrap)?;
+        let end = self.toks[self.pos].clone();
+        let mut toks = Vec::new();
+        emit(&v, &end, &mut toks).ctx(wrap)?;
+        Ok(toks)
     }
 
     fn could_start(&self, (f, nullable): &Firsts) -> bool {

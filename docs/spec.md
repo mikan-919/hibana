@@ -347,7 +347,7 @@ macro routes ("routes" "{" rs:Route* "}") -> Expr { ...本体... }
 | `A \| B` | 順序付きの選択（先に一致した方を採る） |
 | `( P )` | グループ |
 
-- マクロは、式の位置（`-> Expr`、省略時）か文の位置（`-> Stmt`）で、組み込みの構文より先に試します。一致しなければ組み込みの構文として読みます。複数のマクロが一致すると「Ambiguous macro match」エラーです。
+- マクロは、式の位置（`-> Expr`、省略時）か文の位置（`-> Stmt`）で、組み込みの構文より先に試します。宣言の位置（`-> Decl`）のマクロは、`fn` や `type` などで始まらない宣言の位置で試します（8.4 節）。一致しなければ組み込みの構文として読みます。複数のマクロが一致すると「Ambiguous macro match」エラーです。
 - 左再帰（`syntax E = E "+" Int`）と、`Expr` / `Stmt` で始まるマクロは禁止です。
 - `syntax` 宣言の末尾の `;` は省けます。
 
@@ -376,6 +376,33 @@ macro pow ("pow" "(" x:Expr "," n:Int ")") {
 ### 8.3 衛生性
 
 `quote` に直接書いた識別子は、展開ごとに固有の名前（`tmp#3`）に付け替えます。展開したコードの変数が、呼び出し側の変数と衝突しません。関数名・型名・構築子名・組み込み関数・パターンのリテラル・`.` の後のフィールド名は付け替えません。`$x` で差し込んだ呼び出し側のトークンと、`ident(s)` で作った識別子も付け替えないので、呼び出し側から見える名前を導入できます。
+
+### 8.4 宣言のマクロ
+
+`-> Decl` のマクロは、トップレベルの宣言の位置で呼び、展開結果を宣言の並びとして読みます。`syntax` と `macro` の宣言はほかの宣言より先に読むので、宣言のマクロは後で（`use` したライブラリの中で）宣言したものでも使えます。
+
+```
+syntax DeriveType = "type" name:Ident ("<" params:(Ident % ",") ">")? "=" body:DeriveBody
+macro derive ("derive" "(" traits:(Ident % ",") ")" t:DeriveType) -> Decl {
+    ...
+    quote { $t impl Eq<${t.name}> { fn eq(a: ${t.name}, b: ${t.name}) -> bool { ... } } }
+}
+```
+
+- 展開は、すべての宣言の名前を集めた後にします（衛生性で、後で宣言した名前も大域の名前として扱うため）。展開した宣言を含めて、ソースを最初から読み直します。展開結果がまた宣言のマクロを含めば、16回まで繰り返します。
+- 型の宣言を受け取る組み込みの項はありません。型の宣言の形は `syntax` で書きます（std の `DeriveType` など）。
+- `quote` の中の `_`（`match` のどれにも合わない腕）は付け替えません。
+
+std の `derive` は、型の宣言と、その型の `Eq`・`Show` の `impl` を作ります（例は `examples/derive.hb`）。
+
+```
+derive(Eq, Show)
+type Shape = Circle(r: int) | Rect(w: int, h: int) | Dot
+```
+
+- `Eq` は、同じ構築子でフィールドがすべて `==` なら等しいとします。`Show` は組み込みの文字列化と同じ形（`Point { x: 1, y: 2 }`、`Rect(3, 4)`）で、フィールドは `to_str` で文字列にします。どちらも、フィールドの型に実装があればその実装を使います。
+- 型引数を持つ型では `impl<A, B> Eq<Pair<A, B>>` を作ります。型引数に制約は付けないので、型引数の型の値は組み込みの比較と文字列化になります。
+- 添字付きの型族（構築子に `: 型` を書く型）と、`Ord` の derive はできません。
 
 ## 9. 組み込み関数
 
@@ -406,6 +433,7 @@ macro pow ("pow" "(" x:Expr "," n:Int ")") {
 | `Eq<A>`（`eq`）、`Ord<A>: Eq<A>`（`lt`）、`Show<A>`（`show`） | トレイト（3.7 節）。`int` `str` `bool` の `Eq` と `Show`、`int` の `Ord` の実装がある |
 | `max(a, b)` `min(a, b)` `contains(xs, x)` | `Ord` と `Eq` を使う関数 |
 | `assert(ok)` `assert_eq(got, want)` | テスト（3.8 節）。偽か等しくなければ実行時エラー |
+| `derive(Eq, Show) type ...` | 型の `Eq`・`Show` の `impl` を作る宣言のマクロ（8.4 節） |
 | `map(xs, f)` `filter(xs, f)` `fold(xs, init, f)` | `Vec` の高階関数。`f` の効果をそのまま起こす（効果の多相） |
 | `Map<V>`、`empty()` `get(m, k)` `set(m, k, v)` `keys(m)` | 文字列のキーから値への表。`set` は新しい `Map` を返す。線形探索 |
 | `Json` = `JNull` \| `JBool` \| `JInt` \| `JStr` \| `JArr(Vec<Json>)` \| `JObj(Vec<Field>)`、`Field { key, value }` | JSON の値 |
