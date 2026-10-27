@@ -665,6 +665,14 @@ impl Interp<'_> {
                 env.pop();
                 r?
             }
+            // x = push(x, e): 他から指されていなければ（Rc が一つなら）写さずに足す
+            Expr::Assign(name, x) if x.self_push(name).is_some() && !self.fns.contains_key("push") => {
+                let v = self.expr(x.self_push(name).unwrap(), env)?;
+                let slot = env.iter_mut().rev().find_map(|s| s.get_mut(name)).unwrap();
+                let Value::Arr(xs) = slot else { unreachable!("型検査済み") };
+                Rc::make_mut(xs).push(v);
+                Value::Unit
+            }
             Expr::Assign(name, x) => {
                 let v = self.expr(x, env)?;
                 *env.iter_mut().rev().find_map(|s| s.get_mut(name)).unwrap() = v;

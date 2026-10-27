@@ -102,6 +102,12 @@ function $print(v) { console.log($str(v)); }
 function $len(v) { return BigInt(typeof v === "string" ? [...v].length : v.length); }
 function $split(s, sep) { return s.split(sep); }
 function $starts_with(s, p) { return s.startsWith(p); }
+// x = push(x, e)。$o は x の変数だけが指している配列の印で、x を他で読むと $sh が消す
+function $sh(v) { if (v !== null && v !== undefined && v.$o) v.$o = false; return v; }
+function $opush(v, x) {
+  if (v.$o) { v.push(x); return v; }
+  const c = [...v, x]; c.$o = true; return c;
+}
 function $chars(s) { return [...s]; }
 function $code(s) { return s.length ? BigInt(s.codePointAt(0)) : -1n; }
 function $panic(m) { throw new Error(m); }
@@ -476,6 +482,14 @@ impl Gen<'_> {
         t
     }
 
+    // 読むだけで他に渡さない所（len と添字）。変数なら $sh で包まない
+    fn look(&mut self, e: &Expr) -> String {
+        match e.peel() {
+            Expr::Var(n) if self.lookup(n).is_some() => self.lookup(n).unwrap().0.clone(),
+            _ => self.expr(e),
+        }
+    }
+
     fn args(&mut self, args: &[Expr]) -> Vec<String> {
         args.iter().map(|a| self.expr(a)).collect()
     }
@@ -493,6 +507,7 @@ impl Gen<'_> {
             Expr::Bool(b) => b.to_string(),
             Expr::Str(s) => lit(s),
             Expr::Var(n) => match self.lookup(n) {
+                Some((js, true)) => format!("$sh({js})"),
                 Some((js, _)) => js.clone(),
                 None if self.ctors.contains(n.as_str()) => self.let_(format!("$d({}, [])", lit(n))),
                 None => match self.fns.get(n.as_str()) {
@@ -540,7 +555,7 @@ impl Gen<'_> {
                     let v = self.await_(e, format!("{js}({})", vs.join(", ")));
                     return self.let_(v);
                 }
-                let mut vs = self.args(args);
+                let mut vs = if name == "len" { vec![self.look(&args[0])] } else { self.args(args) };
                 let v = match name.as_str() {
                     // 腕の値として返し、$op が操作の戻り値にする
                     "resume" => format!(
@@ -600,7 +615,7 @@ impl Gen<'_> {
                 self.let_(format!("$field({a}, {})", lit(f)))
             }
             Expr::Index(v, i) => {
-                let (a, b) = (self.expr(v), self.expr(i));
+                let (a, b) = (self.look(v), self.expr(i));
                 self.let_(format!("{a}[Number({b})]"))
             }
             Expr::Array(items) => {
@@ -608,8 +623,11 @@ impl Gen<'_> {
                 self.let_(format!("[{}]", vs.join(", ")))
             }
             Expr::Assign(n, x) => {
-                let v = self.expr(x);
                 let js = self.lookup(n).expect("型検査済み").0.clone();
+                let v = match x.self_push(n) {
+                    Some(e) if !self.fns.contains_key("push") => format!("$opush({js}, {})", self.expr(e)),
+                    _ => self.expr(x),
+                };
                 self.push(format!("{js} = {v};"));
                 "undefined".into()
             }
@@ -682,7 +700,8 @@ impl Gen<'_> {
                 let params: Vec<String> = params.iter().map(|p| p.0.clone()).collect();
                 let a = self.waits(body as *const Block as usize);
                 let f = self.function(&params, body, a);
-                self.let_(format!("(({0}) => {f})({0})", muts.join(", ")))
+                let shared: Vec<String> = muts.iter().map(|m| format!("$sh({m})")).collect();
+                self.let_(format!("(({}) => {f})({})", muts.join(", "), shared.join(", ")))
             }
             Expr::Handle(body, arms) => {
                 // 腕は無名関数にする。本体はその場に書き、resume しなかった腕の値を例外で受け取る

@@ -51,6 +51,16 @@ pub enum Expr {
 
 impl Expr {
     // 位置の包みを外す
+    // x = push(x, e) の形なら e。値を写さずにその場で足せる
+    pub fn self_push(&self, x: &str) -> Option<&Expr> {
+        match self.peel() {
+            Expr::Call(n, a) if n == "push" && a.len() == 2 && matches!(a[0].peel(), Expr::Var(v) if v == x) => {
+                Some(&a[1])
+            }
+            _ => None,
+        }
+    }
+
     pub fn peel(&self) -> &Expr {
         match self {
             Expr::At(_, e) => e.peel(),

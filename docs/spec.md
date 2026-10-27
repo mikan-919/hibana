@@ -423,7 +423,7 @@ enum Shape { Circle(r: int), Rect(w: int, h: int), Dot }
 | `chars(s)` `code(c)` | `str -> Vec<str>`（1 文字ずつ）、`str -> int`（先頭の文字の番号。空なら -1） |
 | `panic(msg)` | `str -> never`。実行時エラーにする |
 | `new_ref(x)` `read(r)` `write(r, x)` | `T -> Ref<T>`、`Ref<T> -> T`、`(Ref<T>, T) -> unit` |
-| `push(v, x)` | `(Vec<T>, T) -> Vec<T>`。`v` の後ろに `x` を足した新しい `Vec`（`v` は変わらない） |
+| `push(v, x)` | `(Vec<T>, T) -> Vec<T>`。`v` の後ろに `x` を足した新しい `Vec`（`v` は変わらない）。`xs = push(xs, x)` の形で、`xs` の配列を他から指していなければ、写さずにその場で足す（平均 O(1)） |
 | `all(fs)` | `(Vec<() -> T ! Async>) -> Vec<T> ! Async`（3.5 節） |
 | `resume(x)` | `handle` の腕の中で、続きを再開する（3.5 節） |
 

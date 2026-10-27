@@ -17,7 +17,8 @@ enum { T_UNIT, T_INT, T_BOOL, T_STR, T_ARR, T_DATA, T_FN, T_TY, T_REF };
 typedef struct V V;
 struct V { int tag; union { int64_t i; bool b; struct Str* s; struct Arr* a; struct Data* d; struct Fn* f; const char* ty; V* r; }; };
 typedef struct Str { int64_t len; char s[]; } Str;
-typedef struct Arr { int64_t n; V items[]; } Arr;
+// own: x = push(x, e) で作り、変数 x だけが指している配列。x を他で読むと h_sh が消す
+typedef struct Arr { int64_t n, cap; int own; V items[]; } Arr;
 typedef struct Data { int ctor; int n; V f[]; } Data;
 typedef V (*Code)(V* env, V* args);
 typedef struct Fn { Code code; int n; V env[]; } Fn;
@@ -41,7 +42,7 @@ static V mk_str(const char* s, int64_t len) {
   V v = { .tag = T_STR }; v.s = p; return v;
 }
 static V mk_arr(int64_t n, const V* items) {
-  Arr* p = alloc(sizeof(Arr) + n * sizeof(V)); p->n = n; if (n) memcpy(p->items, items, n * sizeof(V));
+  Arr* p = alloc(sizeof(Arr) + n * sizeof(V)); p->n = p->cap = n; p->own = 0; if (n) memcpy(p->items, items, n * sizeof(V));
   V v = { .tag = T_ARR }; v.a = p; return v;
 }
 static V mk_data(int ctor, int n, const V* fs) {
@@ -220,6 +221,15 @@ static V h_vpush(V v, V x) {
   if (v.a->n) memcpy(items, v.a->items, v.a->n * sizeof(V));
   items[v.a->n] = x;
   return mk_arr(v.a->n + 1, items);
+}
+static inline V h_sh(V v) { if (v.tag == T_ARR) v.a->own = 0; return v; }
+static V h_opush(V v, V x) {
+  if (v.a->own && v.a->n < v.a->cap) { v.a->items[v.a->n++] = x; return v; }
+  int64_t cap = v.a->n * 2 + 4;
+  Arr* p = alloc(sizeof(Arr) + cap * sizeof(V)); p->n = v.a->n; p->cap = cap; p->own = 1;
+  if (p->n) memcpy(p->items, v.a->items, p->n * sizeof(V));
+  p->items[p->n++] = x;
+  V r = { .tag = T_ARR }; r.a = p; return r;
 }
 // all。並行の処理が無いので順に実行する
 static V h_all(V fs) {
@@ -461,6 +471,14 @@ impl Gen<'_> {
         self.push("}".into());
     }
 
+    // 読むだけで他に渡さない所（len と添字）。変数なら h_sh で包まない
+    fn look(&mut self, e: &Expr) -> String {
+        match e.peel() {
+            Expr::Var(n) if self.lookup(n).is_some() => self.lookup(n).unwrap().clone(),
+            _ => self.expr(e),
+        }
+    }
+
     fn args(&mut self, args: &[Expr]) -> Vec<String> {
         args.iter().map(|a| self.expr(a)).collect()
     }
@@ -486,7 +504,7 @@ impl Gen<'_> {
             Expr::Bool(b) => format!("mk_bool({})", *b as u8),
             Expr::Str(s) => self.let_(str_lit(s)),
             Expr::Var(n) => match self.lookup(n) {
-                Some(c) => c.clone(),
+                Some(c) => format!("h_sh({c})"),
                 None => match (self.ctors.get(n.as_str()), self.fns.get(n.as_str())) {
                     (Some(i), _) => self.let_(format!("mk_data({i}, 0, NULL)")),
                     (_, Some(f)) if f.alias && f.params.is_empty() => {
@@ -532,7 +550,7 @@ impl Gen<'_> {
                     let vs = self.args(args);
                     return self.let_(format!("h_call({c}, {})", Self::array(&vs)));
                 }
-                let mut vs = self.args(args);
+                let mut vs = if name == "len" { vec![self.look(&args[0])] } else { self.args(args) };
                 let v = match name.as_str() {
                     "all" => format!("h_all({})", vs[0]),
                     "push" => format!("h_vpush({}, {})", vs[0], vs[1]),
@@ -577,7 +595,7 @@ impl Gen<'_> {
                 self.let_(format!("h_field({a}, {})", lit(f)))
             }
             Expr::Index(v, i) => {
-                let (a, b) = (self.expr(v), self.expr(i));
+                let (a, b) = (self.look(v), self.expr(i));
                 // 範囲は型検査で証明済み
                 self.let_(format!("{a}.a->items[{b}.i]"))
             }
@@ -586,8 +604,11 @@ impl Gen<'_> {
                 self.let_(format!("mk_arr({}, {})", vs.len(), Self::array(&vs)))
             }
             Expr::Assign(n, x) => {
-                let v = self.expr(x);
                 let c = self.lookup(n).expect("型検査済み").clone();
+                let v = match x.self_push(n) {
+                    Some(e) if !self.fns.contains_key("push") => format!("h_opush({c}, {})", self.expr(e)),
+                    _ => self.expr(x),
+                };
                 self.push(format!("{c} = {v};"));
                 "U".into()
             }
@@ -722,7 +743,7 @@ impl Gen<'_> {
             "static V {name}(V* env, V* a) {{\n(void)env; (void)a;\n{}\n}}\n",
             lines.join("\n")
         ));
-        let env: Vec<String> = caps.into_iter().map(|(_, c)| c).collect();
+        let env: Vec<String> = caps.into_iter().map(|(_, c)| format!("h_sh({c})")).collect();
         self.let_(format!(
             "mk_fn({name}, {}, {})",
             env.len(),
