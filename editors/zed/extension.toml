@@ -10,7 +10,7 @@ repository = "https://github.com/mikan-919/hibana"
 # 手元で試すなら repository = "file:///<このリポジトリの絶対パス>" にして、手元のコミットを rev に書く
 [grammars.hibana]
 repository = "https://github.com/mikan-919/hibana"
-rev = "c58daa6f08ba703215868a976b9f54fc62056017"
+rev = "543c43c36cc694f9898e057dbed1323f5676c910"
 path = "editors/tree-sitter-hibana"
 
 [language_servers.hibana]
