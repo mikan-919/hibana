@@ -1,0 +1,18 @@
+{
+  "grammars": [
+    {
+      "name": "hibana",
+      "camelcase": "Hibana",
+      "scope": "source.hibana",
+      "path": ".",
+      "file-types": ["hb"],
+      "highlights": "queries/highlights.scm"
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "hibana の tree-sitter 文法（色付け用）"
+  },
+  "bindings": { "c": false, "go": false, "node": false, "python": false, "rust": false, "swift": false }
+}

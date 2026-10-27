@@ -1,0 +1,37 @@
+{
+  "name": "hibana",
+  "displayName": "hibana",
+  "description": "hibana 言語（色付けと hibana lsp）",
+  "version": "0.1.0",
+  "publisher": "mikan-919",
+  "license": "MIT",
+  "repository": "https://github.com/mikan-919/hibana",
+  "engines": { "vscode": "^1.82.0" },
+  "categories": ["Programming Languages"],
+  "main": "./extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "languages": [
+      {
+        "id": "hibana",
+        "aliases": ["hibana"],
+        "extensions": [".hb"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      { "language": "hibana", "scopeName": "source.hibana", "path": "./syntaxes/hibana.tmLanguage.json" }
+    ],
+    "configuration": {
+      "title": "hibana",
+      "properties": {
+        "hibana.path": {
+          "type": "string",
+          "default": "hibana",
+          "description": "hibana の実行ファイルのパス（hibana lsp として起動する）"
+        }
+      }
+    }
+  },
+  "dependencies": { "vscode-languageclient": "9.0.1" }
+}

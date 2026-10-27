@@ -1,0 +1,18 @@
+id = "hibana"
+name = "hibana"
+version = "0.1.0"
+schema_version = 1
+authors = ["mikan-919"]
+description = "hibana 言語（色付けと hibana lsp）"
+repository = "https://github.com/mikan-919/hibana"
+
+# rev は editors/tree-sitter-hibana を含む、push 済みのコミット
+# 手元で試すなら repository = "file:///<このリポジトリの絶対パス>" にして、手元のコミットを rev に書く
+[grammars.hibana]
+repository = "https://github.com/mikan-919/hibana"
+rev = "main"
+path = "editors/tree-sitter-hibana"
+
+[language_servers.hibana]
+name = "hibana"
+languages = ["hibana"]

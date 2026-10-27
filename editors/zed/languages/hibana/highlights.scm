@@ -1,0 +1,14 @@
+(keyword) @keyword
+(boolean) @boolean
+(primitive_type) @type.builtin
+(type_identifier) @type
+(identifier) @variable
+(number) @number
+(string) @string
+(char) @string
+(splice) @variable.special
+(operator) @operator
+(bracket) @punctuation.bracket
+(delimiter) @punctuation.delimiter
+(line_comment) @comment
+(block_comment) @comment
