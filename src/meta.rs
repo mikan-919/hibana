@@ -937,6 +937,7 @@ impl Parser<'_> {
             uses: self.uses.clone(),
             modules: self.modules.clone(),
             known: self.known.clone(),
+            traits: self.traits.clone(),
         };
         let wrap = |e: &str| format!("マクロ {}: {e}", m.name);
         let b = p.block().ctx(wrap)?;
@@ -1014,6 +1015,7 @@ impl Parser<'_> {
             uses: self.uses.clone(),
             modules: self.modules.clone(),
             known: self.known.clone(),
+            traits: self.traits.clone(),
         };
         if m.stmt {
             // 文の並びとして読み、ブロックにする

@@ -115,7 +115,7 @@ pub fn build(src: &str, combined: &str, prog: &Program) -> Index {
         let mut module = String::new();
         for i in 0..toks.len().saturating_sub(1) {
             let kw = match &toks[i].tok {
-                Tok::Punct(p @ ("fn" | "type" | "effect" | "macro" | "syntax")) => *p,
+                Tok::Punct(p @ ("fn" | "type" | "effect" | "macro" | "syntax" | "trait")) => *p,
                 Tok::Punct("module") => {
                     if let Tok::Ident(m) = &toks[i + 1].tok {
                         module = m.clone();
@@ -140,7 +140,8 @@ pub fn build(src: &str, combined: &str, prog: &Program) -> Index {
     let mut syms = Vec::new();
     let effects: HashSet<&str> = prog.fns.iter().filter_map(|f| f.op.as_deref()).collect();
     let info = |q: &str| decls.get(q).cloned().unwrap_or_default();
-    for f in &prog.fns {
+    // impl から作った関数（Show#impl0 など）は利用者が呼ばない
+    for f in prog.fns.iter().filter(|f| !f.name.contains('#')) {
         let (detail, doc, _) = info(&f.name);
         syms.push(Sym { name: written(&f.name), kind: Kind::Function, detail, doc });
     }
@@ -195,5 +196,8 @@ mod tests {
         assert_eq!(ix.get("routes").unwrap().kind, Kind::Macro);
         assert_eq!(ix.fields["P"], ["x", "y"]);
         assert!(ix.modules.contains("web"));
+        // トレイトのメソッドは関数、impl から作った関数は出さない
+        assert_eq!(ix.get("show").unwrap().detail, "fn show(x: A) -> str");
+        assert!(ix.syms.iter().all(|s| !s.name.contains('#')));
     }
 }

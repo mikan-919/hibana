@@ -145,6 +145,14 @@
         {
           "type": "STRING",
           "value": "handle"
+        },
+        {
+          "type": "STRING",
+          "value": "trait"
+        },
+        {
+          "type": "STRING",
+          "value": "impl"
         }
       ]
     },

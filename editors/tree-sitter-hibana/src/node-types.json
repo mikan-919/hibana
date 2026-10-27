@@ -255,6 +255,10 @@
     "named": false
   },
   {
+    "type": "impl",
+    "named": false
+  },
+  {
     "type": "in",
     "named": false
   },
@@ -321,6 +325,10 @@
   },
   {
     "type": "syntax",
+    "named": false
+  },
+  {
+    "type": "trait",
     "named": false
   },
   {

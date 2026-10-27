@@ -13,7 +13,7 @@
     { "name": "string.quoted.single.hibana", "match": "'([^'\\\\]|\\\\.)'" },
     {
       "name": "keyword.control.hibana",
-      "match": "\\b(fn|let|mut|if|else|while|return|syntax|macro|type|match|quote|partial|for|in|use|module|extern|effect|handle)\\b"
+      "match": "\\b(fn|let|mut|if|else|while|return|syntax|macro|type|match|quote|partial|for|in|use|module|extern|effect|handle|trait|impl)\\b"
     },
     { "name": "constant.language.boolean.hibana", "match": "\\b(true|false)\\b" },
     { "name": "support.type.primitive.hibana", "match": "\\b(int|bool|str|unit|never|float)\\b" },

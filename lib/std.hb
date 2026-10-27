@@ -5,6 +5,66 @@
 type Option<A> = None | Some(value: A)
 type Result<A, E> = Ok(value: A) | Err(error: E)
 
+// ---- トレイト ----
+
+// 等しさ。実装がある型では == と != がこれを使う
+trait Eq<A> {
+    fn eq(a: A, b: A) -> bool
+}
+
+// 順序。lt(a, b) は a が b より前
+trait Ord<A>: Eq<A> {
+    fn lt(a: A, b: A) -> bool
+}
+
+// 文字列にする。実装がある型では to_str と print がこれを使う
+trait Show<A> {
+    fn show(x: A) -> str
+}
+
+impl Eq<int> {
+    fn eq(a: int, b: int) -> bool { a == b }
+}
+
+impl Eq<str> {
+    fn eq(a: str, b: str) -> bool { a == b }
+}
+
+impl Eq<bool> {
+    fn eq(a: bool, b: bool) -> bool { a == b }
+}
+
+impl Ord<int> {
+    fn lt(a: int, b: int) -> bool { a < b }
+}
+
+impl Show<int> {
+    fn show(x: int) -> str { to_str(x) }
+}
+
+impl Show<str> {
+    fn show(x: str) -> str { x }
+}
+
+impl Show<bool> {
+    fn show(x: bool) -> str { to_str(x) }
+}
+
+fn max<A: Ord>(a: A, b: A) -> A {
+    if lt(a, b) { b } else { a }
+}
+
+fn min<A: Ord>(a: A, b: A) -> A {
+    if lt(b, a) { b } else { a }
+}
+
+fn contains<A: Eq>(xs: Vec<A>, x: A) -> bool {
+    for y in xs {
+        if eq(x, y) { return true }
+    }
+    false
+}
+
 fn unwrap_or<A>(o: Option<A>, d: A) -> A {
     match o {
         Some(x) => x

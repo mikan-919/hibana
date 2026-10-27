@@ -24,7 +24,7 @@ module.exports = grammar({
     keyword: (_) =>
       choice(
         "fn", "let", "mut", "if", "else", "while", "return", "syntax", "macro", "type", "match",
-        "quote", "partial", "for", "in", "use", "module", "extern", "effect", "handle",
+        "quote", "partial", "for", "in", "use", "module", "extern", "effect", "handle", "trait", "impl",
       ),
     boolean: (_) => choice("true", "false"),
     primitive_type: (_) => choice("int", "bool", "str", "unit", "never", "float"),

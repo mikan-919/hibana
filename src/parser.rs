@@ -97,6 +97,8 @@ pub struct Fn {
     pub effects: Vec<Expr>,
     // effect 宣言の操作なら、その効果の名前
     pub op: Option<String>,
+    // params の末尾の何個がトレイトの実装（<A: Show> の制約）か。呼び出しで省くと型検査が実装を探して足す
+    pub insts: usize,
 }
 
 pub struct Parser<'s> {
@@ -126,6 +128,16 @@ pub struct Parser<'s> {
     pub modules: Rc<HashSet<String>>,
     // 修飾した形の大域の名前（関数・型・構築子）
     pub known: Rc<HashSet<String>>,
+    // トレイトの名前（修飾した形）から、その構造体のフィールドの並び
+    pub traits: Rc<HashMap<String, Trait>>,
+}
+
+// trait 宣言。トレイトは構造体の型 Name<A> = { super#親: 親<A>, メソッド: 関数型 } にする
+#[derive(Debug, Clone, Default)]
+pub struct Trait {
+    pub supers: Vec<String>,
+    // (メソッド名, 引数名, 既定の実装があるか)
+    pub methods: Vec<(String, Vec<String>, bool)>,
 }
 
 use crate::error::Error;
@@ -346,12 +358,15 @@ pub fn parse(src: &str) -> R<Program> {
         uses: Rc::default(),
         modules: Rc::default(),
         known: Rc::default(),
+        traits: Rc::default(),
     };
     let mut g = Grammar::default();
     let mut fn_starts = Vec::new();
     let mut data_starts = Vec::new();
     let mut extern_starts = Vec::new();
     let mut effect_starts = Vec::new();
+    let mut trait_starts = Vec::new();
+    let mut impl_starts = Vec::new();
     let mut types: HashSet<String> = ["Vec", "Ref", "Type"].map(String::from).into();
     let mut generic_fns: HashSet<String> = HashSet::new();
     // 組み込みと利用者のファイルの名前・モジュール名・パターンのリテラル。マクロの衛生性で名前を付け替えない
@@ -480,7 +495,26 @@ pub fn parse(src: &str) -> R<Program> {
                     }
                 }
             }
-            _ => return p.err("fn・type・effect・extern・syntax・macro・use のいずれかが必要"),
+            Tok::Punct("trait") => {
+                if let Some(Tok::Ident(n)) = p.toks.get(p.pos + 1).map(|t| t.tok.clone()) {
+                    types.insert(qual(&cur, &n));
+                    declare(&cur, &n, &mut globals);
+                }
+                trait_starts.push(p.pos);
+                let start = p.pos;
+                p.skip_fn()?;
+                for w in p.toks[start..p.pos].windows(2) {
+                    if let (Tok::Punct("fn"), Tok::Ident(n)) = (&w[0].tok, &w[1].tok) {
+                        let n = n.clone();
+                        declare(&cur, &n, &mut globals);
+                    }
+                }
+            }
+            Tok::Punct("impl") => {
+                impl_starts.push(p.pos);
+                p.skip_fn()?;
+            }
+            _ => return p.err("fn・type・effect・trait・impl・extern・syntax・macro・use のいずれかが必要"),
         }
     }
     p.types = Rc::new(types.clone());
@@ -510,6 +544,15 @@ pub fn parse(src: &str) -> R<Program> {
             TypeDecl::Alias(f) => prog.fns.push(f),
         }
     }
+    let mut traits = HashMap::new();
+    for s in trait_starts {
+        p.pos = s;
+        let (d, fs, t) = p.trait_decl()?;
+        traits.insert(d.name.clone(), t);
+        p.traits = Rc::new(traits.clone());
+        prog.datas.push(d);
+        prog.fns.extend(fs);
+    }
     // 構造体の値 Name { ... } をフィールドの順に並べるため、フィールド名を覚えておく
     p.structs = Rc::new(
         prog.datas
@@ -531,8 +574,23 @@ pub fn parse(src: &str) -> R<Program> {
         p.pos = s;
         prog.fns.extend(p.extern_block()?);
     }
+    for (k, s) in impl_starts.into_iter().enumerate() {
+        p.pos = s;
+        prog.fns.extend(p.impl_decl(k)?);
+    }
     crate::resolve::resolve(&mut prog, &p.uses, &p.known);
     Ok(prog)
+}
+
+// a + b + c の項
+fn plus_leaves<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+    match e.peel() {
+        Expr::Binary("+", a, b) => {
+            plus_leaves(a, out);
+            plus_leaves(b, out);
+        }
+        _ => out.push(e),
+    }
 }
 
 // 優先順位（大きいほど強く結合する）
@@ -742,6 +800,8 @@ impl Parser<'_> {
         } else {
             vec![]
         };
+        // 制約 <A: Show> の実装は引数の末尾に置く
+        let insts: Vec<_> = params.extract_if(.., |p| p.0.starts_with("inst#")).collect();
         let implicit = params.len();
         self.expect("(")?;
         params.extend(self.params()?);
@@ -752,6 +812,8 @@ impl Parser<'_> {
         };
         let effects = self.effects()?;
         self.expect("{")?;
+        let n_insts = insts.len();
+        params.extend(insts);
         Ok(Fn {
             name,
             params,
@@ -764,6 +826,7 @@ impl Parser<'_> {
             js: None,
             effects,
             op: None,
+            insts: n_insts,
         })
     }
 
@@ -830,6 +893,7 @@ impl Parser<'_> {
                 js: None,
                 effects: vec![],
                 op: Some(name.clone()),
+                insts: 0,
             });
             self.eat(",");
         }
@@ -840,6 +904,174 @@ impl Parser<'_> {
             ctors: vec![],
         };
         Ok((d, ops))
+    }
+
+    // 名前がトレイトなら、修飾した形
+    fn trait_name(&self, c: &str) -> Option<String> {
+        if self.traits.contains_key(c) {
+            return Some(c.to_string());
+        }
+        let q = self.qualify(c);
+        self.traits.contains_key(&q).then_some(q)
+    }
+
+    // trait Name<A>: 親<A> + ... { fn メソッド(引数) -> 型 ! 効果 [{ 既定の実装 }] ... }
+    // 構造体の型 Name<A> と、メソッドを呼ぶ関数（実装を末尾の引数 inst#0 で受け取る）・Name#get・既定の実装の関数にする
+    // ponytail: メソッドは自分のジェネリック引数を持てない。持たせるならメソッドの関数型を依存関数型にする
+    fn trait_decl(&mut self) -> R<(Data, Vec<Fn>, Trait)> {
+        self.expect("trait")?;
+        let module = self.cur_module();
+        let name = qual(&module, &self.ident()?);
+        self.expect("<")?;
+        let params = self.type_params()?;
+        let me = Expr::Call(name.clone(), params.iter().map(|p| Expr::Var(p.0.clone())).collect());
+        let mut fields = Vec::new();
+        let mut info = Trait::default();
+        if self.eat(":") {
+            loop {
+                let s = self.binary(6)?;
+                let Expr::Call(sn, _) = s.peel() else {
+                    return self.err("親のトレイトは 名前<引数> で書く");
+                };
+                let sn = self.qualify(sn);
+                fields.push((format!("super#{sn}"), s.clone()));
+                info.supers.push(sn);
+                if !self.eat("+") {
+                    break;
+                }
+            }
+        }
+        self.expect("{")?;
+        let mut fns = Vec::new();
+        let with_inst = |ps: &[(String, Expr)]| {
+            let mut v = params.clone();
+            v.extend(ps.iter().cloned());
+            v.push(("inst#0".to_string(), me.clone()));
+            v
+        };
+        while !self.eat("}") {
+            self.expect("fn")?;
+            let m = self.ident()?;
+            self.expect("(")?;
+            let ps = self.params()?;
+            let ret = if self.eat("->") {
+                self.ret_ty()?
+            } else {
+                Expr::Var("unit".into())
+            };
+            let effects = self.effects()?;
+            let vars: Vec<Expr> = ps.iter().map(|p| Expr::Var(p.0.clone())).collect();
+            let field = Expr::Field(Box::new(Expr::Var("inst#0".into())), m.clone());
+            let mk = |name: String, body: Block| Fn {
+                name,
+                params: with_inst(&ps),
+                ret: Some(ret.clone()),
+                body,
+                alias: false,
+                module: module.clone(),
+                partial: false,
+                implicit: params.len(),
+                js: None,
+                effects: effects.clone(),
+                op: None,
+                insts: 1,
+            };
+            fns.push(mk(
+                qual(&module, &m),
+                Block { stmts: vec![], tail: Some(Box::new(Expr::Apply(Box::new(field), vars))) },
+            ));
+            let has = self.eat("{");
+            if has {
+                let b = self.block()?;
+                fns.push(mk(format!("{name}#default#{m}"), b));
+            }
+            fields.push((m.clone(), Expr::Pi(ps.clone(), Box::new(ret), effects)));
+            info.methods.push((m, ps.into_iter().map(|p| p.0).collect(), has));
+            self.eat(",");
+        }
+        fns.push(Fn {
+            name: format!("{name}#get"),
+            params: with_inst(&[]),
+            ret: Some(me.clone()),
+            body: Block { stmts: vec![], tail: Some(Box::new(Expr::Var("inst#0".into()))) },
+            alias: false,
+            module: module.clone(),
+            partial: false,
+            implicit: params.len(),
+            js: None,
+            effects: vec![],
+            op: None,
+            insts: 1,
+        });
+        let ctor = Ctor { name: format!("{name}{{}}"), fields, ret: None };
+        Ok((Data { name, module, params, ctors: vec![ctor] }, fns, info))
+    }
+
+    // impl<G: 制約> Trait<型> { fn メソッド(引数) -> 型 { 本体 } ... }。
+    // 実装の値を作る関数 Trait#implK（制約の実装を引数に取る）と、メソッドの関数 Trait#implK#メソッド にする
+    fn impl_decl(&mut self, k: usize) -> R<Vec<Fn>> {
+        self.expect("impl")?;
+        let module = self.cur_module();
+        let mut generics = if self.eat("<") { self.type_params()? } else { vec![] };
+        let cons: Vec<_> = generics.extract_if(.., |p| p.0.starts_with("inst#")).collect();
+        let head = self.ret_ty()?;
+        let Expr::Call(tn, _) = head.peel() else {
+            return self.err("impl の後には トレイト<型> が必要");
+        };
+        let Some(q) = self.trait_name(tn) else {
+            return self.err_at(format!("{tn} はトレイトでない"));
+        };
+        let tr = self.traits[&q].clone();
+        let short = q.rsplit('.').next().unwrap();
+        let base = qual(&module, &format!("{short}#impl{k}"));
+        self.expect("{")?;
+        let mut fns = Vec::new();
+        let mut given = HashMap::new();
+        while !self.eat("}") {
+            let mut f = self.func()?;
+            let m = f.name.rsplit('.').next().unwrap().to_string();
+            if !tr.methods.iter().any(|x| x.0 == m) {
+                return self.err_at(format!("トレイト {q} にメソッド {m} は無い"));
+            }
+            f.name = format!("{base}#{m}");
+            let mut ps = generics.clone();
+            ps.append(&mut f.params);
+            ps.extend(cons.iter().cloned());
+            f.params = ps;
+            f.implicit = generics.len();
+            f.insts = cons.len();
+            given.insert(m, f.name.clone());
+            fns.push(f);
+        }
+        let mut args: Vec<Expr> = tr.supers.iter().map(|s| Expr::Call(format!("{s}#get"), vec![])).collect();
+        for (m, ps, has) in &tr.methods {
+            let target = match given.get(m) {
+                Some(n) => n.clone(),
+                None if *has => format!("{q}#default#{m}"),
+                None => return self.err_at(format!("{q} のメソッド {m} の実装が無い")),
+            };
+            let call = Expr::Call(target, ps.iter().map(|p| Expr::Var(p.clone())).collect());
+            let body = Block { stmts: vec![], tail: Some(Box::new(call)) };
+            args.push(Expr::Lam(ps.iter().map(|p| (p.clone(), None)).collect(), None, vec![], body));
+        }
+        let mut params = generics.clone();
+        params.extend(cons.iter().cloned());
+        fns.push(Fn {
+            name: base,
+            params,
+            ret: Some(head),
+            body: Block { stmts: vec![], tail: Some(Box::new(Expr::Call(format!("{q}{{}}"), args))) },
+            alias: false,
+            module,
+            // 既定の実装は自分の実装を探して呼ぶので、この関数は自分を呼びうる（値を作るだけで止まる）
+            partial: true,
+            implicit: generics.len(),
+            js: None,
+            effects: vec![],
+            op: None,
+            insts: cons.len(),
+        });
+        Ok(fns)
     }
 
     // extern "モジュール" { fn 名前(引数) -> 型 ... }。本体の無い関数として並べる（JS ターゲットでだけ使える）
@@ -883,6 +1115,7 @@ impl Parser<'_> {
                 js: Some(js.clone()),
                 effects,
                 op: None,
+                insts: 0,
             });
             self.eat(",");
         }
@@ -916,7 +1149,25 @@ impl Parser<'_> {
             } else {
                 Expr::Var("Type".into())
             };
-            params.push((n, t));
+            // <A: Show + Eq> はトレイトの制約。A は型で、実装を inst#k の引数で受け取る
+            let mut leaves = Vec::new();
+            plus_leaves(&t, &mut leaves);
+            let traits: Option<Vec<String>> = leaves
+                .iter()
+                .map(|l| match l.peel() {
+                    Expr::Var(c) if self.trait_name(c).is_some() => self.trait_name(c),
+                    _ => None,
+                })
+                .collect();
+            if let Some(ts) = traits {
+                params.push((n.clone(), Expr::Var("Type".into())));
+                for c in ts {
+                    let k = params.iter().filter(|p| p.0.starts_with("inst#")).count();
+                    params.push((format!("inst#{k}"), Expr::Call(c, vec![Expr::Var(n.clone())])));
+                }
+            } else {
+                params.push((n, t));
+            }
             if !self.eat(",") {
                 self.expect(">")?;
                 return Ok(params);
@@ -974,6 +1225,7 @@ impl Parser<'_> {
                 implicit: 0,
                 effects: vec![],
                 op: None,
+                insts: 0,
             }));
         }
         self.eat("|");
@@ -1017,7 +1269,7 @@ impl Parser<'_> {
                 Tok::Punct("|") if depth == 0 => return true,
                 Tok::Punct(
                     "fn" | "partial" | "type" | "syntax" | "macro" | "use" | "module" | "extern"
-                    | "effect",
+                    | "effect" | "trait" | "impl",
                 )
                 | Tok::Eof
                     if depth == 0 =>
@@ -1041,7 +1293,7 @@ impl Parser<'_> {
                 Tok::Punct(")" | "]" | "}") => depth -= 1,
                 Tok::Punct(
                     "fn" | "partial" | "type" | "syntax" | "macro" | "use" | "module" | "extern"
-                    | "effect",
+                    | "effect" | "trait" | "impl",
                 ) if depth == 0 => {
                     return;
                 }

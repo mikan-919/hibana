@@ -195,6 +195,40 @@ greet = { git = "https://github.com/someone/hibana-greet", tag = "v0.1.0" }   # 
 - 同じ名前のパッケージは一つの版だけ使えます。違う git の URL で二つ要るとエラーです。版の範囲（semver）の解決とレジストリはまだありません。
 - JavaScript のパッケージは npm で入れます（3.4 節）。
 
+### 3.7 トレイト
+
+トレイトは、型ごとに実装を書ける関数の組です（例は `examples/trait.hb`）。
+
+```
+trait Show<A> {
+    fn show(x: A) -> str
+    fn loud(x: A) -> str { show(x) + "!" }   // 既定の実装。impl で省ける
+}
+
+impl Show<int> {
+    fn show(x: int) -> str { to_str(x) }
+}
+
+impl<A: Show> Show<Vec<A>> {                 // 条件付きの実装
+    fn show(xs: Vec<A>) -> str { ... }
+}
+
+fn twice<A: Show>(x: A) -> str { show(x) + show(x) }   // 制約。<A: Show + Eq> で複数
+
+trait Ord<A>: Eq<A> {                        // 親のトレイト。Ord の実装には Eq の実装が要る
+    fn lt(a: A, b: A) -> bool
+}
+```
+
+- メソッドは、ふつうの関数として `show(x)` で呼びます。
+- 仕組みは辞書渡し（dictionary passing）です。`trait Show<A>` は構造体の型 `Show<A>`（メソッドの関数をフィールドに持つ）になり、`impl` はその型の値を作る関数になります。制約 `<A: Show>` は、実装を受け取る隠れた引数です。呼び出す側では、型検査が型引数を求めた後に実装を探して、その引数を足します。探す順は、自分が制約で受け取った実装（その親のトレイトの実装を含む）、`impl` の順です。
+- 実装は値なので、3つの実行方式は変わりません。メソッドの呼び出しは、実装のフィールドを通した間接の呼び出しになります。
+- 同じトレイトと型の組に `impl` が二つあると、名前の順で最初のものを使います（重なりは検査しません）。
+- メソッドは自分のジェネリック引数を持てません。トレイトの型引数で書きます。
+- メソッドを通した再帰は、停止性の検査で再帰と見なしません。
+
+`std` の `Eq` と `Show` は演算子と組み込み関数に結びついています。`Eq` の実装がある型では `==` と `!=` がその実装の `eq` を、`Show` の実装がある型では `to_str` と `print` がその実装の `show` を使います。実装が無い型では、組み込みの比較と文字列化のままです。`int` `str` `bool` は、細分化型の検査が `==` を直接扱うので、いつも組み込みです。
+
 ## 4. 式
 
 | 式 | 例 |
@@ -353,6 +387,8 @@ macro pow ("pow" "(" x:Expr "," n:Int ")") {
 |---|---|
 | `Option<A>` = `None` \| `Some(value)`、`unwrap_or(o, d)` | 値が無いかもしれないこと |
 | `Result<A, E>` = `Ok(value)` \| `Err(error)` | 成功か失敗 |
+| `Eq<A>`（`eq`）、`Ord<A>: Eq<A>`（`lt`）、`Show<A>`（`show`） | トレイト（3.7 節）。`int` `str` `bool` の `Eq` と `Show`、`int` の `Ord` の実装がある |
+| `max(a, b)` `min(a, b)` `contains(xs, x)` | `Ord` と `Eq` を使う関数 |
 | `map(xs, f)` `filter(xs, f)` `fold(xs, init, f)` | `Vec` の高階関数。`f` の効果をそのまま起こす（効果の多相） |
 | `Map<V>`、`empty()` `get(m, k)` `set(m, k, v)` `keys(m)` | 文字列のキーから値への表。`set` は新しい `Map` を返す。線形探索 |
 | `Json` = `JNull` \| `JBool` \| `JInt` \| `JStr` \| `JArr(Vec<Json>)` \| `JObj(Vec<Field>)`、`Field { key, value }` | JSON の値 |

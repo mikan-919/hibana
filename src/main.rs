@@ -17,22 +17,22 @@ mod typeck;
 use std::io::Write;
 
 fn run(src: &str, out: &mut dyn Write) -> error::R<eval::Value> {
-    let prog = parser::parse(&parser::with_uses(src)?)?;
-    typeck::check(&prog)?;
+    let mut prog = parser::parse(&parser::with_uses(src)?)?;
+    typeck::elaborate(&mut prog)?;
     eval::run(&prog, out)
 }
 
 // JavaScript に変換する
 fn to_js(src: &str) -> error::R<String> {
-    let prog = parser::parse(&parser::with_uses(src)?)?;
-    let info = typeck::check(&prog)?;
+    let mut prog = parser::parse(&parser::with_uses(src)?)?;
+    let info = typeck::elaborate(&mut prog)?;
     Ok(js::emit(&prog, &info))
 }
 
 // C に変換する
 fn to_c(src: &str) -> error::R<String> {
-    let prog = parser::parse(&parser::with_uses(src)?)?;
-    typeck::check(&prog)?;
+    let mut prog = parser::parse(&parser::with_uses(src)?)?;
+    typeck::elaborate(&mut prog)?;
     // JavaScript のモジュールの関数は使えない（大域の関数 extern { } は、呼ぶと実行時エラー）
     if let Some(f) = prog
         .fns
@@ -537,6 +537,23 @@ fn main() {
             "{p}fn main() {{\n let x = handle {{ handle {{ fail(\"in\")\n 1 }} {{ fail(m) => {{ log(m)\n 2 }} }} }} {{ log(m) => {{ print(\"log \" + m)\n resume() }} }}\n print(x) }}"
         );
         assert_eq!(out(&src).unwrap(), "log in\n2\n");
+    }
+
+    // トレイト: 既定の実装・条件付きの実装・制約・親のトレイト・== と to_str と print
+    #[test]
+    fn traits() {
+        let o = out(include_str!("../examples/trait.hb")).unwrap();
+        assert_eq!(
+            o,
+            "int 1\nint 2!\n(1, 2)\nPOINT\n[int 1;int 2;]\n[(3, 4);] [(3, 4);]\ntrue\ntrue\nP5,0\n7\nto_str: P1,2\ntrue\n"
+        );
+        // == は Eq の実装を使う（x だけ比べる実装なら y が違っても等しい）
+        let src = "use std.*\ntype P = { x: int, y: int }\nimpl Eq<P> {\n fn eq(a: P, b: P) -> bool { a.x == b.x }\n}\nfn main() { print(P { x: 1, y: 2 } == P { x: 1, y: 3 }) }";
+        assert_eq!(out(src).unwrap(), "true\n");
+        let e = out("use std.*\nfn main() { print(max(\"a\", \"b\")) }").unwrap_err();
+        assert!(e.msg.contains("Ord<str> の実装が無い"), "{}", e.msg);
+        let e = out("use std.*\nimpl Show<int> {\n fn shw(x: int) -> str { \"\" }\n}\nfn main() {}").unwrap_err();
+        assert!(e.msg.contains("メソッド shw は無い"), "{}", e.msg);
     }
 
     // 型エラーの提案と、効果を起こした操作の位置

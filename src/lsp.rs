@@ -129,7 +129,8 @@ fn name_at(toks: &[Token], ix: &Index, off: usize) -> Option<(String, usize, usi
 
 const KEYWORDS: &[&str] = &[
     "fn", "let", "mut", "if", "else", "while", "for", "in", "return", "match", "type", "effect",
-    "handle", "resume", "use", "macro", "syntax", "quote", "partial", "extern", "true", "false",
+    "handle", "resume", "use", "macro", "syntax", "quote", "partial", "extern", "trait", "impl", "true",
+    "false",
 ];
 
 // 補完の候補
@@ -277,7 +278,7 @@ fn semantic_tokens(src: &str, ix: &Index) -> Value {
             }
         };
         let Some(ty) = ty else { continue };
-        let decl = matches!(prev(1), Some(Tok::Punct("fn" | "type" | "effect" | "macro")));
+        let decl = matches!(prev(1), Some(Tok::Punct("fn" | "type" | "effect" | "macro" | "trait")));
         let pos = position(src, t.span.start.offset);
         let (line, col) = (pos["line"].as_u64().unwrap() as u32, pos["character"].as_u64().unwrap() as u32);
         let dcol = if line == last_line { col - last_col } else { col };
