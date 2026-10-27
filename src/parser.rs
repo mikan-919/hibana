@@ -254,20 +254,29 @@ fn find_dts(spec: &str) -> Option<String> {
 }
 
 // use の対象のモジュール名と本文。組み込みのライブラリ、.hb のファイル、JavaScript / TypeScript のモジュール
-fn load(name: &str, is_str: bool, span: crate::lexer::Span) -> R<(String, String)> {
-    // use web のように名前で書いたら組み込みのライブラリ、文字列で書いたらファイルかパッケージ
+// use を読み込んだ結果 (モジュール名, ソース, そのソースの use "x.hb" の起点)
+fn load(name: &str, is_str: bool, dir: &std::path::Path, span: crate::lexer::Span) -> R<(String, String, std::path::PathBuf)> {
+    // use web のように名前で書いたら組み込みのライブラリか hibana.toml の依存、文字列で書いたらファイルか npm
     if !is_str {
-        return match LIBS.iter().find(|l| l.0 == name) {
-            Some((_, t)) => Ok((name.to_string(), t.to_string())),
-            None => Err(Error::from(format!("ライブラリ {name} が無い")).at(span)),
+        if let Some((_, t)) = LIBS.iter().find(|l| l.0 == name) {
+            return Ok((name.to_string(), t.to_string(), dir.to_path_buf()));
+        }
+        let Some(e) = crate::pkg::entry(&base_dir(), name) else {
+            return Err(Error::from(format!("ライブラリ {name} が無い"))
+                .at(span)
+                .help("パッケージなら hibana.toml の [dependencies] に書き、hibana fetch で取ってくる".into()));
         };
+        let text = std::fs::read_to_string(&e)
+            .map_err(|err| Error::from(format!("{}: {err}（hibana fetch で取ってくる）", e.display())).at(span))?;
+        return Ok((name.to_string(), text, e.parent().unwrap().to_path_buf()));
     }
     let read = |p: &str| {
-        std::fs::read_to_string(base_dir().join(p))
+        std::fs::read_to_string(dir.join(p))
             .map_err(|e| Error::from(format!("{p}: {e}")).at(span))
     };
     if name.ends_with(".hb") {
-        return Ok((module_name(name), read(name)?));
+        let sub = dir.join(name).parent().unwrap().to_path_buf();
+        return Ok((module_name(name), read(name)?, sub));
     }
     // JavaScript / TypeScript は型宣言から extern の宣言を作る（JS ターゲットでだけ使える）
     let dts = if name.ends_with(".ts") {
@@ -284,15 +293,15 @@ fn load(name: &str, is_str: bool, span: crate::lexer::Span) -> R<(String, String
         return Err(Error::from(format!("ライブラリ {name} が無い")).at(span));
     };
     let text = crate::ts::module_text(&dts, name).map_err(|e| e.at(span))?;
-    Ok((module_name(name), text))
+    Ok((module_name(name), text, dir.to_path_buf()))
 }
 
 // use したモジュールの本文を、`module 名前` を前に付けてソースの後ろに足す。同じものは1回だけ読む
 pub fn with_uses(src: &str) -> R<String> {
     let mut out = src.to_string();
     let mut done: Vec<String> = Vec::new();
-    let mut todo = vec![src.to_string()];
-    while let Some(s) = todo.pop() {
+    let mut todo = vec![(src.to_string(), base_dir())];
+    while let Some((s, dir)) = todo.pop() {
         let toks = lex(&s)?;
         for w in toks.windows(2) {
             let (name, is_str) = match (&w[0].tok, &w[1].tok) {
@@ -309,11 +318,12 @@ pub fn with_uses(src: &str) -> R<String> {
             if done.contains(&name) {
                 continue;
             }
-            let (module, text) = load(&name, is_str, w[1].span)?;
+            // ponytail: 別のパッケージにある同じ名前の "x.hb" は一つ目だけ読む。名前の衝突はパッケージごとのモジュールにするときに直す
+            let (module, text, sub) = load(&name, is_str, &dir, w[1].span)?;
             done.push(name);
             out += &format!("\nmodule {module}\n");
             out += &text;
-            todo.push(text);
+            todo.push((text, sub));
         }
     }
     Ok(out)

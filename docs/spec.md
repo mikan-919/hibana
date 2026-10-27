@@ -176,6 +176,25 @@ fn main() ! Async { print(twice_later(5)) }
 - 腕の中では `Async` を起こせません（腕は同期的に呼びます）。
 - `all` は、失敗した処理があっても残りを中断せず、すべて終わるのを待ってから最初の失敗を投げます。
 
+### 3.6 パッケージ
+
+パッケージは git のリポジトリで、入口は `src/lib.hb` です。プロジェクトの直下の `hibana.toml` に依存を書くと、`use 名前` で使えます。名前は組み込みのライブラリ（`std` `web`）、`hibana.toml` の依存の順に探します。
+
+```
+[package]
+name = "app"
+version = "0.1.0"
+
+[dependencies]
+greet = { git = "https://github.com/someone/hibana-greet", tag = "v0.1.0" }   # tag の代わりに branch か rev も書ける。無ければ既定のブランチ
+```
+
+- `hibana fetch` は依存（依存の依存も）を `~/.cache/hibana/名前-コミット`（`XDG_CACHE_HOME` があればその下）に取ってきて、`hibana.lock` にコミットの SHA を書きます。ロックにある依存はそのコミットを使います。版を上げるときは `hibana.lock` から消して取り直します。
+- `hibana.toml` のあるディレクトリの下のファイルを実行・変換すると、取ってきていない依存を先に取ってきます。
+- パッケージの中の `use "x.hb"` は、そのファイルのディレクトリから探します。
+- 同じ名前のパッケージは一つの版だけ使えます。違う git の URL で二つ要るとエラーです。版の範囲（semver）の解決とレジストリはまだありません。
+- JavaScript のパッケージは npm で入れます（3.4 節）。
+
 ## 4. 式
 
 | 式 | 例 |
@@ -397,6 +416,9 @@ web.serve(8080, app)    // hibana js examples/server.hb > server.mjs && node ser
 | `hibana c <ファイル>` | C を標準出力に書く | ネイティブ（出力だけ欲しい時） |
 | `hibana build <ファイル>` | C を作って `cc -O2` でビルドし、拡張子を除いた名前の実行ファイルを作る | ネイティブ |
 | `hibana fmt <ファイル>` | ファイルを整形して書き戻す | 整形。トークンの並びと改行の位置は変えず、字下げ（空白4つ）・行内の空白（`,` の後、`=` `==` `&&` `=>` `->` などの前後、`{ }` の内側）・空行（続く空行は1行、括弧の直後と閉じ括弧の前は無し）・コメントの位置を整える。設定は無い。JSX の要素と `$( )` `${ }` の中は元のまま（JSX の本文は空白も文字列になるため）。`+ - * /` の前後は元の空白のまま。行の長さで改行の位置は変えない |
+| `hibana new <名前>` | `hibana.toml` と `src/main.hb` のディレクトリを作る | パッケージ（3.6 節） |
+| `hibana add <git の URL> [tag]` | `hibana.toml` に依存を足して取ってくる。名前は URL の最後の部分（`hibana-` は除く） | パッケージ（3.6 節） |
+| `hibana fetch` | 依存を取ってきて `hibana.lock` を書く | パッケージ（3.6 節） |
 | `hibana lsp` | Language Server を標準入出力で動かす | エディタ（エラーの表示・整形・hover・定義へのジャンプ・補完・色付け）。VS Code と Zed の拡張機能は `editors/`（`editors/README.md`） |
 
 値の表し方:

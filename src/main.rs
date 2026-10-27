@@ -8,6 +8,7 @@ mod lexer;
 mod lsp;
 mod meta;
 mod parser;
+mod pkg;
 mod resolve;
 mod smt;
 mod ts;
@@ -87,12 +88,29 @@ fn main() {
         lsp::serve();
         return;
     }
+    // パッケージのコマンド
+    let here = || pkg::root(std::path::Path::new(".")).ok_or(format!("{} が無い（hibana new で作る）", pkg::MANIFEST));
+    let r = match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        ["new", name] => Some(pkg::new(name)),
+        ["fetch"] => Some(here().and_then(|r| pkg::fetch(&r))),
+        ["add", url, tag @ ..] if tag.len() <= 1 => {
+            Some(here().and_then(|r| pkg::add(&r, url, tag.first().copied())).map(|n| eprintln!("追加: use {n}")))
+        }
+        _ => None,
+    };
+    if let Some(r) = r {
+        if let Err(e) = r {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let (cmd, path) = match args.as_slice() {
         [p] => ("run", p.clone()),
         [cmd, p] if cmd == "js" || cmd == "c" || cmd == "build" || cmd == "fmt" => (cmd.as_str(), p.clone()),
         _ => {
             eprintln!(
-                "使い方: hibana <ファイル>（実行） | hibana js <ファイル>（JavaScript を出力） | hibana c <ファイル>（C を出力） | hibana build <ファイル>（ネイティブの実行ファイルを作る） | hibana fmt <ファイル>（整形して書き戻す） | hibana lsp（Language Server を標準入出力で動かす）"
+                "使い方: hibana <ファイル>（実行） | hibana js <ファイル>（JavaScript を出力） | hibana c <ファイル>（C を出力） | hibana build <ファイル>（ネイティブの実行ファイルを作る） | hibana fmt <ファイル>（整形して書き戻す） | hibana lsp（Language Server を標準入出力で動かす） | hibana new <名前> | hibana add <git の URL> [tag] | hibana fetch（依存を取ってくる）"
             );
             std::process::exit(2);
         }
@@ -101,6 +119,14 @@ fn main() {
         eprintln!("{path}: {e}");
         std::process::exit(2);
     });
+    // hibana.toml があれば、依存を取ってから（取ってあれば何もしない）コンパイルする
+    let dir = std::path::Path::new(&path).parent().unwrap_or(std::path::Path::new("."));
+    if let Some(root) = pkg::root(if dir.as_os_str().is_empty() { std::path::Path::new(".") } else { dir }) {
+        if let Err(e) = pkg::fetch(&root) {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    }
     // use に書いたファイルは、このファイルのディレクトリから探す
     parser::set_base_dir(
         std::path::Path::new(&path)
