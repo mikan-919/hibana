@@ -50,6 +50,27 @@ impl Show<bool> {
     fn show(x: bool) -> str { to_str(x) }
 }
 
+impl<A: Eq> Eq<Vec<A>> {
+    fn eq(a: Vec<A>, b: Vec<A>) -> bool {
+        if len(a) != len(b) { return false }
+        for i in 0..len(a) {
+            if i < len(b) { if !eq(a[i], b[i]) { return false } }
+        }
+        true
+    }
+}
+
+impl<A: Show> Show<Vec<A>> {
+    fn show(xs: Vec<A>) -> str {
+        let mut s = "["
+        for i in 0..len(xs) {
+            if i > 0 { s = s + ", " }
+            s = s + show(xs[i])
+        }
+        s + "]"
+    }
+}
+
 fn max<A: Ord>(a: A, b: A) -> A {
     if lt(a, b) { b } else { a }
 }

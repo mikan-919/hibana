@@ -102,6 +102,8 @@ function $print(v) { console.log($str(v)); }
 function $len(v) { return BigInt(typeof v === "string" ? [...v].length : v.length); }
 function $split(s, sep) { return s.split(sep); }
 function $starts_with(s, p) { return s.startsWith(p); }
+function $chars(s) { return [...s]; }
+function $code(s) { return s.length ? BigInt(s.codePointAt(0)) : -1n; }
 function $panic(m) { throw new Error(m); }
 function $slice(s, i, j) {
   const cs = [...s];
@@ -557,7 +559,7 @@ impl Gen<'_> {
                     "all" => wait(true, format!("$all({})", vs[0])),
                     "print" => format!("$print({})", vs[0]),
                     "to_str" => format!("$str({})", vs[0]),
-                    "len" | "split" | "starts_with" | "slice" | "panic" => {
+                    "len" | "split" | "starts_with" | "slice" | "chars" | "code" | "panic" => {
                         format!("${name}({})", vs.join(", "))
                     }
                     n if self.ctors.contains(n) => format!("$d({}, [{}])", lit(n), vs.join(", ")),

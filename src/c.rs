@@ -165,6 +165,19 @@ static V h_split(V s, V sep) {
   }
   return mk_arr(n, parts);
 }
+static V h_chars(V s) {
+  V* cs = alloc((s.s->len + 1) * sizeof(V)); int64_t n = 0;
+  for (int64_t k = 0; k < s.s->len; n++) { int64_t e = k + 1; while (e < s.s->len && (s.s->s[e] & 0xC0) == 0x80) e++; cs[n] = mk_str(s.s->s + k, e - k); k = e; }
+  return mk_arr(n, cs);
+}
+static V h_code(V s) {
+  const unsigned char* p = (const unsigned char*)s.s->s; int64_t n = s.s->len;
+  if (n == 0) return mk_int(-1);
+  if (p[0] < 0x80) return mk_int(p[0]);
+  int k = p[0] >= 0xF0 ? 3 : p[0] >= 0xE0 ? 2 : 1; int64_t c = p[0] & (0x3F >> k);
+  for (int i = 1; i <= k && i < n; i++) c = (c << 6) | (p[i] & 0x3F);
+  return mk_int(c);
+}
 static V h_panic(V m) {
   char b[512]; snprintf(b, sizeof b, "%.*s", (int)m.s->len, m.s->s); die(b); return m;
 }
@@ -534,7 +547,7 @@ impl Gen<'_> {
                     }
                     "print" => format!("h_print({})", vs[0]),
                     "to_str" => format!("h_str({})", vs[0]),
-                    "len" | "split" | "starts_with" | "slice" | "panic" => {
+                    "len" | "split" | "starts_with" | "slice" | "chars" | "code" | "panic" => {
                         format!("h_{name}({})", vs.join(", "))
                     }
                     n => match (self.ctors.get(n), self.fns.get(n)) {

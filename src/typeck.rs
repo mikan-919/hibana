@@ -131,6 +131,8 @@ const BUILTINS: &[&str] = &[
     "split",
     "starts_with",
     "slice",
+    "chars",
+    "code",
     "panic",
     "resume",
     "all",
@@ -147,6 +149,9 @@ const STR_FNS: &[(&str, &[&str], &str)] = &[
     ("split", &["str", "str"], "Vec<str>"),
     ("starts_with", &["str", "str"], "bool"),
     ("slice", &["str", "int", "int"], "str"),
+    // 1文字ずつの Vec と、先頭の文字の番号（空なら -1）
+    ("chars", &["str"], "Vec<str>"),
+    ("code", &["str"], "int"),
     // 実行時エラーにする
     ("panic", &["str"], "never"),
 ];
@@ -2547,7 +2552,9 @@ impl Ck<'_> {
     // プリミティブの型は組み込みのまま（細分化型の検査が int の == を直接扱うため）
     fn use_trait(&mut self, e: &Expr, method: &str, t: &V) -> R<()> {
         let tr = if method == "eq" { "std.Eq" } else { "std.Show" };
-        if matches!(base(t), V::Prim(_)) || !self.norm.datas.contains_key(tr) {
+        // Vec の表示は組み込みのまま（文字列の要素を引用符で囲む）。Show<Vec<A>> は制約で求められた時だけ使う
+        let builtin_vec = method != "eq" && matches!(base(t), V::VecT(_));
+        if builtin_vec || matches!(base(t), V::Prim(_)) || !self.norm.datas.contains_key(tr) {
             return Ok(());
         }
         let goal = V::DataT(Rc::new((tr.into(), vec![base(t)])));

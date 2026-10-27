@@ -205,6 +205,8 @@ impl Interp<'_> {
                 | "split"
                 | "starts_with"
                 | "slice"
+                | "chars"
+                | "code"
                 | "panic"
                 | "ident"
         ) || self.fns.contains_key(name)
@@ -238,6 +240,10 @@ impl Interp<'_> {
                     cs[i as usize..j as usize].iter().collect::<String>().into(),
                 )));
             }
+            ("chars", Value::Str(s)) => {
+                return Ok(Some(Value::Arr(Rc::new(s.chars().map(|c| Value::Str(c.to_string().into())).collect()))));
+            }
+            ("code", Value::Str(s)) => return Ok(Some(Value::Int(s.chars().next().map_or(-1, |c| c as i64)))),
             ("ident", Value::Str(s)) => {
                 let tok = Token {
                     tok: Tok::Ident(s.to_string()),

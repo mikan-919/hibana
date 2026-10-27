@@ -420,6 +420,7 @@ enum Shape { Circle(r: int), Rect(w: int, h: int), Dot }
 | `split(s, sep)` | `(str, str) -> Vec<str>` |
 | `starts_with(s, p)` | `(str, str) -> bool` |
 | `slice(s, i, j)` | `(str, int, int) -> str`。範囲外は実行時エラー |
+| `chars(s)` `code(c)` | `str -> Vec<str>`（1 文字ずつ）、`str -> int`（先頭の文字の番号。空なら -1） |
 | `panic(msg)` | `str -> never`。実行時エラーにする |
 | `new_ref(x)` `read(r)` `write(r, x)` | `T -> Ref<T>`、`Ref<T> -> T`、`(Ref<T>, T) -> unit` |
 | `push(v, x)` | `(Vec<T>, T) -> Vec<T>`。`v` の後ろに `x` を足した新しい `Vec`（`v` は変わらない） |
@@ -436,7 +437,7 @@ enum Shape { Circle(r: int), Rect(w: int, h: int), Dot }
 |---|---|
 | `Option<A>` = `None` \| `Some(value)`、`unwrap_or(o, d)` | 値が無いかもしれないこと |
 | `Result<A, E>` = `Ok(value)` \| `Err(error)` | 成功か失敗 |
-| `Eq<A>`（`eq`）、`Ord<A>: Eq<A>`（`lt`）、`Show<A>`（`show`） | トレイト（3.7 節）。`int` `str` `bool` の `Eq` と `Show`、`int` の `Ord` の実装がある |
+| `Eq<A>`（`eq`）、`Ord<A>: Eq<A>`（`lt`）、`Show<A>`（`show`） | トレイト（3.7 節）。`int` `str` `bool` の `Eq` と `Show`、`int` の `Ord`、`Vec<A>` の `Eq` と `Show` の実装がある（`print` と `to_str` での `Vec` の表示は組み込みのまま） |
 | `max(a, b)` `min(a, b)` `contains(xs, x)` | `Ord` と `Eq` を使う関数 |
 | `assert(ok)` `assert_eq(got, want)` | テスト（3.8 節）。偽か等しくなければ実行時エラー |
 | `derive(Eq, Show) struct ...`（`enum` も） | 型の `Eq`・`Show` の `impl` を作る宣言のマクロ（8.4 節） |

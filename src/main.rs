@@ -692,6 +692,43 @@ fn main() {
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 
+    // hibana で書いた字句解析器（selfhost/lexer.hb）が、すべての .hb で Rust 版と同じトークンを出すか
+    #[test]
+    fn selfhost_lexer_matches() {
+        use crate::lexer::Tok;
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files: Vec<_> = ["lib", "examples", "selfhost"]
+            .iter()
+            .flat_map(|d| std::fs::read_dir(root.join(d)).unwrap())
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|x| x == "hb"))
+            .collect();
+        files.sort();
+        let mut want = String::new();
+        for p in &files {
+            for t in crate::lexer::lex(&std::fs::read_to_string(p).unwrap()).unwrap() {
+                let tok = match t.tok {
+                    Tok::Int(n) => format!("TInt({n})"),
+                    Tok::Str(s) => format!("TStr({s})"),
+                    Tok::Char(c) => format!("TChar({c})"),
+                    Tok::Ident(s) => format!("TIdent({s})"),
+                    Tok::Punct(s) => format!("TPunct({s})"),
+                    Tok::Float(f) => format!("TFloat({f})"),
+                    Tok::Eof => "TEof".into(),
+                };
+                want += &format!("{}:{} {tok}\n", t.span.start.line, t.span.start.column);
+            }
+        }
+        let dir = root.join("selfhost");
+        let src = std::fs::read_to_string(dir.join("dump.hb")).unwrap();
+        crate::parser::set_base_dir(&dir);
+        let js = dir.join(format!("dump-{}.mjs", std::process::id()));
+        std::fs::write(&js, super::to_js(&src).unwrap()).unwrap();
+        let r = std::process::Command::new("node").arg(&js).args(&files).output().unwrap();
+        std::fs::remove_file(&js).unwrap();
+        assert_eq!(String::from_utf8(r.stdout).unwrap(), want);
+    }
+
     // よくある条件（routes の添字、fib の停止性など）は Z3 なしで証明できる
     #[test]
     fn builtin_prover() {

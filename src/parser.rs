@@ -400,6 +400,8 @@ fn parse_toks(src: &str, toks: Vec<Token>, round: usize) -> R<Program> {
         "split",
         "starts_with",
         "slice",
+        "chars",
+        "code",
         "panic",
         "resume",
         "all",
