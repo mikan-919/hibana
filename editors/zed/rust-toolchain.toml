@@ -1,0 +1,4 @@
+# Zed が拡張機能を wasm にビルドする時の Rust（リポジトリ直下の rust-toolchain.toml より優先される）
+[toolchain]
+channel = "stable"
+targets = ["wasm32-wasip2"]
