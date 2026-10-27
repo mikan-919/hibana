@@ -898,6 +898,8 @@ struct Ck<'a> {
     collected: Option<Vec<V>>,
     // 呼び出しの式（アドレス）と、省いた制約の実装の式。elaborate で引数の末尾に足す
     elab: HashMap<usize, Vec<Expr>>,
+    // impl から作った、実装の値を作る関数（名前の順）
+    impls: Vec<&'a Fn>,
     // 効果の名前（Async と effect 宣言）
     effect_names: std::collections::HashSet<String>,
 }
@@ -1117,21 +1119,53 @@ fn q_names(q: &[Q], out: &mut Vec<String>) {
 }
 
 // 呼び出しの関係を辿って from から to に着くか
-fn reaches(graph: &HashMap<&str, Vec<String>>, from: &str, to: &str) -> bool {
-    let mut seen = vec![from.to_string()];
-    let mut todo = vec![from.to_string()];
-    while let Some(f) = todo.pop() {
-        for g in graph.get(f.as_str()).into_iter().flatten() {
-            if g == to {
-                return true;
+// 呼び出しの図の強連結成分（互いに呼び合える関数の組）の番号。Tarjan の方法で、関数と呼び出しの数に比例する
+fn components<'a>(graph: &HashMap<&'a str, Vec<String>>) -> HashMap<&'a str, usize> {
+    struct T<'a, 'g> {
+        graph: &'g HashMap<&'a str, Vec<String>>,
+        index: HashMap<&'a str, (usize, usize)>,
+        stack: Vec<&'a str>,
+        on: std::collections::HashSet<&'a str>,
+        comp: HashMap<&'a str, usize>,
+    }
+    fn visit<'a>(t: &mut T<'a, '_>, v: &'a str) {
+        let k = t.index.len();
+        t.index.insert(v, (k, k));
+        t.stack.push(v);
+        t.on.insert(v);
+        for g in &t.graph[v] {
+            let Some((&w, _)) = t.graph.get_key_value(g.as_str()) else {
+                continue;
+            };
+            if !t.index.contains_key(w) {
+                visit(t, w);
+                let low = t.index[w].1.min(t.index[v].1);
+                t.index.get_mut(v).unwrap().1 = low;
+            } else if t.on.contains(w) {
+                let low = t.index[w].0.min(t.index[v].1);
+                t.index.get_mut(v).unwrap().1 = low;
             }
-            if !seen.contains(g) {
-                seen.push(g.clone());
-                todo.push(g.clone());
+        }
+        if t.index[v].0 == t.index[v].1 {
+            let c = t.comp.len();
+            while let Some(w) = t.stack.pop() {
+                t.on.remove(w);
+                t.comp.insert(w, c);
+                if w == v {
+                    break;
+                }
             }
         }
     }
-    false
+    let mut t = T { graph, index: HashMap::new(), stack: vec![], on: Default::default(), comp: HashMap::new() };
+    let mut names: Vec<&str> = graph.keys().copied().collect();
+    names.sort();
+    for v in names {
+        if !t.index.contains_key(v) {
+            visit(&mut t, v);
+        }
+    }
+    t.comp
 }
 
 // 関数の本体から呼ぶ関数名を集める
@@ -1271,6 +1305,11 @@ pub fn check(prog: &Program) -> R<Info> {
         async_inst: Default::default(),
         collected: None,
         elab: HashMap::new(),
+        impls: {
+            let mut v: Vec<&Fn> = prog.fns.iter().filter(|f| is_impl(&f.name)).collect();
+            v.sort_by(|a, b| a.name.cmp(&b.name));
+            v
+        },
         effect_names: std::iter::once("Async".to_string())
             .chain(prog.fns.iter().filter_map(|f| f.op.clone()))
             .chain(
@@ -1310,12 +1349,13 @@ pub fn check(prog: &Program) -> R<Info> {
     // 相互再帰は減る引数の対応を追えないので、partial fn にしてもらう
     let graph: HashMap<&str, Vec<String>> =
         fns.iter().map(|f| (f.name.as_str(), callees(f))).collect();
+    let comp = components(&graph);
     for f in fns.iter().filter(|f| !f.partial) {
         for g in graph[f.name.as_str()]
             .iter()
             .filter(|g| **g != f.name && graph.contains_key(g.as_str()))
         {
-            if reaches(&graph, g, &f.name) {
+            if comp[g.as_str()] == comp[f.name.as_str()] {
                 return Err(format!("関数 {} と {g} が互いに呼び合っている。停止性を検査できないので partial fn にする", f.name).into());
             }
         }
@@ -1425,6 +1465,7 @@ pub fn check_macro(b: &Block, params: &Kinds, rules: &HashMap<String, Kinds>) ->
         async_inst: Default::default(),
         collected: None,
         elab: HashMap::new(),
+        impls: Vec::new(),
         effect_names: Default::default(),
     };
     for (p, k) in params {
@@ -2548,9 +2589,7 @@ impl Ck<'_> {
             }
             i += 1;
         }
-        let mut impls: Vec<&Fn> = self.norm.fns.values().copied().filter(|f| is_impl(&f.name)).collect();
-        impls.sort_by(|a, b| a.name.cmp(&b.name));
-        for f in impls {
+        for f in self.impls.clone() {
             let mut fenv: Env = vec![HashMap::new()];
             let mut ids = Vec::new();
             for (p, _) in &f.params[..f.implicit] {
