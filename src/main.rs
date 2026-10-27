@@ -200,7 +200,10 @@ fn test_cmd(files: &[&str]) -> Result<bool, String> {
         let src = std::fs::read_to_string(p).map_err(|e| format!("{path}: {e}"))?;
         parser::set_base_dir(p.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new(".")));
         // ponytail: main の無いファイルには空の main を足す（型検査が main を要るため）。main を要らなくするなら型検査に入口を渡す
-        let full = if src.contains("fn main(") { src.clone() } else { format!("{src}\nfn main() {{}}\n") };
+        let has_main = lexer::lex(&src).is_ok_and(|ts| {
+            ts.windows(2).any(|w| w[0].tok == lexer::Tok::Punct("fn") && w[1].tok == lexer::Tok::Ident("main".into()))
+        });
+        let full = if has_main { src.clone() } else { format!("{src}\nfn main() {{}}\n") };
         let prog = parser::with_uses(&full).and_then(|s| parser::parse(&s)).and_then(|mut prog| {
             typeck::elaborate(&mut prog)?;
             Ok(prog)
@@ -751,6 +754,54 @@ fn main() {
         let r = std::process::Command::new("node").arg(&js).args(&files).output().unwrap();
         std::fs::remove_file(&js).unwrap();
         assert_eq!(String::from_utf8(r.stdout).unwrap(), want, "{}", String::from_utf8_lossy(&r.stderr));
+    }
+
+    // hibana で書いた型検査器（selfhost/checker.hb）が、依存型を使わない例と小さなプログラムで、Rust 版と同じく通すか止めるか
+    #[test]
+    fn selfhost_checker_matches() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let tmp = std::env::temp_dir().join(format!("hibana-ck-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut files: Vec<_> = ["capture", "fib", "push", "refine", "smt", "strings", "struct"]
+            .iter()
+            .map(|n| root.join(format!("examples/{n}.hb")))
+            .collect();
+        let cases = [
+            "fn id<A>(x: A) -> A { x }\nfn main() { print(id(1) + 1)\n print(id(\"s\") + \"t\") }",
+            "fn f(x: int) -> str { x }\nfn main() {}",
+            "fn main() { let x = 1\n x = 2 }",
+            "fn main() { print(y) }",
+            "fn f(a: int) -> int { a }\nfn main() { print(f(1, 2)) }",
+            "fn main() { if 1 { print(1) } }",
+            "struct P { x: int }\nfn main() { let p = P { x: 1 }\n print(p.y) }",
+            "enum E { A, B(n: int) }\nfn f(e: E) -> int { match e { A => 0, B(n) => \"s\" } }\nfn main() {}",
+            "fn main() { let v = [1, \"a\"] }",
+            "fn main() { let f = fn(x: int) -> int { x }\n print(f(\"a\")) }",
+            "fn main() { for x in 5 { print(x) } }",
+            "fn main() { print(1 + true) }",
+        ];
+        for (i, c) in cases.iter().enumerate() {
+            let p = tmp.join(format!("case{i}.hb"));
+            std::fs::write(&p, c).unwrap();
+            files.push(p);
+        }
+        let mut want = String::new();
+        for p in &files {
+            let prog = crate::parser::parse(&std::fs::read_to_string(p).unwrap()).unwrap();
+            want += if crate::typeck::check(&prog).is_ok() { "ok\n" } else { "error\n" };
+        }
+        let dir = root.join("selfhost");
+        let src = std::fs::read_to_string(dir.join("check_dump.hb")).unwrap();
+        crate::parser::set_base_dir(&dir);
+        let js = dir.join(format!("check-{}.mjs", std::process::id()));
+        std::fs::write(&js, super::to_js(&src).unwrap()).unwrap();
+        let r = std::process::Command::new("node").arg(&js).args(&files).output().unwrap();
+        std::fs::remove_file(&js).unwrap();
+        std::fs::remove_dir_all(&tmp).unwrap();
+        let out = String::from_utf8(r.stdout).unwrap();
+        // エラーの文言は比べず、通るか止まるかだけを比べる
+        let got: String = out.lines().map(|l| if l == "ok" { "ok\n" } else { "error\n" }).collect();
+        assert_eq!(got, want, "{out}{}", String::from_utf8_lossy(&r.stderr));
     }
 
     // よくある条件（routes の添字、fib の停止性など）は Z3 なしで証明できる
