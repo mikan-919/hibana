@@ -1,6 +1,7 @@
 mod c;
 mod error;
 mod eval;
+mod fmt;
 mod js;
 mod lexer;
 mod meta;
@@ -82,10 +83,10 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (cmd, path) = match args.as_slice() {
         [p] => ("run", p.clone()),
-        [cmd, p] if cmd == "js" || cmd == "c" || cmd == "build" => (cmd.as_str(), p.clone()),
+        [cmd, p] if cmd == "js" || cmd == "c" || cmd == "build" || cmd == "fmt" => (cmd.as_str(), p.clone()),
         _ => {
             eprintln!(
-                "使い方: hibana <ファイル>（実行） | hibana js <ファイル>（JavaScript を出力） | hibana c <ファイル>（C を出力） | hibana build <ファイル>（ネイティブの実行ファイルを作る）"
+                "使い方: hibana <ファイル>（実行） | hibana js <ファイル>（JavaScript を出力） | hibana c <ファイル>（C を出力） | hibana build <ファイル>（ネイティブの実行ファイルを作る） | hibana fmt <ファイル>（整形して書き戻す）"
             );
             std::process::exit(2);
         }
@@ -103,6 +104,14 @@ fn main() {
     let r = match cmd {
         "js" => to_js(&src).map(|s| print!("{s}")),
         "c" => to_c(&src).map(|s| print!("{s}")),
+        "fmt" => fmt::format(&src).map(|s| {
+            if s != src {
+                std::fs::write(&path, s).unwrap_or_else(|e| {
+                    eprintln!("{path}: {e}");
+                    std::process::exit(2);
+                });
+            }
+        }),
         "build" => build(&src, &std::path::Path::new(&path).with_extension("")),
         _ => run(&src, &mut std::io::stdout()).map(|_| ()),
     };

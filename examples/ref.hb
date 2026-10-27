@@ -1,7 +1,7 @@
 // 書き換えられる参照 Ref<T>。写し取った無名関数や handle の腕からも、同じ値を書き換えられる
 effect Count { fn tick() }
 fn work() ! Count { tick()
- tick() }
+    tick() }
 fn main() {
     let n = new_ref(0)
     let log: Ref<Vec<str>> = new_ref([])
