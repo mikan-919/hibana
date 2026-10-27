@@ -73,7 +73,7 @@ fn is_ident(t: Tok) -> bool {
     match t { TIdent(n) => true, _ => false }
 }
 
-fn fail<A>(p: P, msg: str) -> A {
+fn fail(p: P, msg: str) -> never {
     let t = tok_at(p, 0)
     panic(msg + "（" + to_str(t.line) + " 行 " + to_str(t.col) + " 列、実際は " + to_str(t.tok) + "）")
 }
@@ -83,19 +83,19 @@ fn eat(p: P, s: str) -> bool {
 }
 
 fn expect(p: P, s: str) {
-    if !eat(p, s) { fail<unit>(p, "\"" + s + "\" が必要") }
+    if !eat(p, s) { fail(p, "\"" + s + "\" が必要") }
 }
 
 fn take_ident(p: P) -> str {
     match peek(p) {
         TIdent(n) => { advance(p); n }
-        _ => fail<str>(p, "識別子が必要"),
+        _ => fail(p, "識別子が必要"),
     }
 }
 
 // 文の区切り: ";"、改行、"}" の直前のいずれか
 fn end_stmt(p: P) {
-    if !(eat(p, ";") || nl(p) || is_p(peek(p), "}")) { fail<unit>(p, "文の区切り（\";\" か改行）が必要") }
+    if !(eat(p, ";") || nl(p) || is_p(peek(p), "}")) { fail(p, "文の区切り（\";\" か改行）が必要") }
 }
 
 fn struct_fields(p: P, name: str) -> Option<Vec<str>> {
@@ -199,8 +199,8 @@ partial fn primary(p: P) -> Expr {
             else if k == "return" {
                 if nl(p) || is_p(peek(p), ";") || is_p(peek(p), "}") { EReturn(None) } else { EReturn(Some(expr(p))) }
             }
-            else { write(p.pos, read(p.pos) - 1); fail<Expr>(p, "式が必要") }
-        _ => { write(p.pos, read(p.pos) - 1); fail<Expr>(p, "式が必要") }
+            else { write(p.pos, read(p.pos) - 1); fail(p, "式が必要") }
+        _ => { write(p.pos, read(p.pos) - 1); fail(p, "式が必要") }
     }
     postfix(p, e)
 }
@@ -213,7 +213,7 @@ partial fn ident_expr(p: P, name: str) -> Expr {
         advance(p)
         ECall(name + "{}", list_of(p, ")"))
     } else if contains(p.types, name) && !nl(p) && is_p(peek(p), "(") {
-        fail<Expr>(p, "型 " + name + " には <> で引数を渡す")
+        fail(p, "型 " + name + " には <> で引数を渡す")
     } else if is_some(fields) && !read(p.no_struct) && !nl(p) && is_p(peek(p), "{") {
         advance(p)
         struct_lit(p, name, unwrap_or(fields, []))
@@ -257,9 +257,9 @@ partial fn struct_lit(p: P, name: str, order: Vec<str>) -> Expr {
         for i in 0..len(names) {
             if names[i] == f && i < len(vals) { args = push(args, vals[i]); found = true }
         }
-        if !found { fail<unit>(p, "構造体 " + name + " のフィールド " + f + " が無い") }
+        if !found { fail(p, "構造体 " + name + " のフィールド " + f + " が無い") }
     }
-    for n in names { if !contains(order, n) { fail<unit>(p, "構造体 " + name + " にフィールド " + n + " は無い") } }
+    for n in names { if !contains(order, n) { fail(p, "構造体 " + name + " にフィールド " + n + " は無い") } }
     ECall(name + "{}", args)
 }
 
@@ -284,7 +284,7 @@ partial fn paren(p: P) -> Expr {
     } else if len(entries) == 1 && !named {
         match entries[0] { EParam(n, t) => unwrap_or(t, EVar("_")), _ => entries[0] }
     } else {
-        fail<Expr>(p, "関数型なら ) の後に -> が必要")
+        fail(p, "関数型なら ) の後に -> が必要")
     }
 }
 
@@ -297,7 +297,7 @@ partial fn lambda(p: P) -> Expr {
         ps = push(ps, EParam(n, if eat(p, ":") { Some(ty(p)) } else { None }))
         if !eat(p, ",") { expect(p, ")"); going = false } else if eat(p, ")") { going = false }
     }
-    let ret: Option<Expr> = if eat(p, "->") { Some(ret_ty(p)) } else { None }
+    let ret = if eat(p, "->") { Some(ret_ty(p)) } else { None }
     let effs = effects(p)
     expect(p, "{")
     ELam(ps, ret, effs, block(p))
@@ -307,7 +307,7 @@ partial fn if_rest(p: P) -> Expr {
     let c = expr(p)
     expect(p, "{")
     let then = block(p)
-    let els: Option<Expr> = if !eat(p, "else") { None } else if eat(p, "if") { Some(if_rest(p)) } else { expect(p, "{"); Some(block(p)) }
+    let els = if !eat(p, "else") { None } else if eat(p, "if") { Some(if_rest(p)) } else { expect(p, "{"); Some(block(p)) }
     EIf(c, then, els)
 }
 
@@ -315,7 +315,7 @@ partial fn for_rest(p: P) -> Expr {
     let x = take_ident(p)
     expect(p, "in")
     let a = expr(p)
-    let b: Option<Expr> = if eat(p, "..") { Some(expr(p)) } else { None }
+    let b = if eat(p, "..") { Some(expr(p)) } else { None }
     expect(p, "{")
     EFor(x, a, b, block(p))
 }
@@ -395,7 +395,7 @@ partial fn let_stmt(p: P) -> Expr {
     expect(p, "let")
     let m = eat(p, "mut")
     let name = take_ident(p)
-    let t: Option<Expr> = if eat(p, ":") { Some(ty(p)) } else { None }
+    let t = if eat(p, ":") { Some(ty(p)) } else { None }
     expect(p, "=")
     let init = expr(p)
     end_stmt(p)
@@ -455,7 +455,7 @@ partial fn func(p: P) -> Func {
     let tps = type_params(p)
     expect(p, "(")
     let ps = concat(tps, params(p))
-    let ret: Option<Expr> = if eat(p, "->") { Some(ret_ty(p)) } else { None }
+    let ret = if eat(p, "->") { Some(ret_ty(p)) } else { None }
     let effs = effects(p)
     expect(p, "{")
     Func { name: name, implicit: len(tps), is_partial: part, params: ps, ret: ret, effs: effs, body: block(p) }
@@ -472,8 +472,8 @@ partial fn type_decl(p: P) -> Result<Data, Func> {
         let mut cs: Vec<Ctor> = []
         while !eat(p, "}") {
             let c = take_ident(p)
-            let fs: Vec<Expr> = if eat(p, "(") { params(p) } else { [] }
-            let ret: Option<Expr> = if eat(p, "->") { Some(ty(p)) } else { None }
+            let fs = if eat(p, "(") { params(p) } else { [] }
+            let ret = if eat(p, "->") { Some(ty(p)) } else { None }
             cs = push(cs, Ctor { name: c, fields: fs, ret: ret })
             eat(p, ",")
         }
@@ -504,14 +504,14 @@ partial fn type_decl(p: P) -> Result<Data, Func> {
 // 関数の本体の終わりまで読み飛ばす
 fn skip_fn(p: P) {
     while !eat(p, "{") {
-        if peek(p) == TEof { fail<unit>(p, "関数の本体が無い") }
+        if peek(p) == TEof { fail(p, "関数の本体が無い") }
         advance(p)
     }
     let mut depth = 1
     while depth > 0 {
         let t = peek(p)
         advance(p)
-        if is_p(t, "{") { depth = depth + 1 } else if is_p(t, "}") { depth = depth - 1 } else if t == TEof { fail<unit>(p, "\"}\" が足りない") }
+        if is_p(t, "{") { depth = depth + 1 } else if is_p(t, "}") { depth = depth - 1 } else if t == TEof { fail(p, "\"}\" が足りない") }
     }
 }
 
@@ -549,7 +549,7 @@ partial fn parse(src: str) -> Program {
         } else if is_p(peek(p0), "fn") || is_p(peek(p0), "partial") {
             skip_fn(p0)
         } else {
-            fail<unit>(p0, "fn・struct・enum・type のいずれかが必要")
+            fail(p0, "fn・struct・enum・type のいずれかが必要")
         }
     }
     let mut structs: Vec<StructInfo> = []

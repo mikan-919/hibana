@@ -573,7 +573,9 @@ fn main() {
                 "fn twice(f: (int) -> int, x: int) -> int { f(f(x)) }\nfn n(x: int) -> int ! Log { x }\nfn main() { handle twice(n, 1) { log(m) => resume() } }",
                 "(int) -> int が必要だが (int) -> int ! Log",
             ),
-            ("fn g() -> never { g() }\nfn main() {}", "効果の操作だけ"),
+            ("fn g() -> never { g() }\nfn main() {}", "停止することを示せない"),
+            ("fn g() -> never { 1 }\nfn main() {}", "戻らない式で終わる"),
+            ("fn g() -> never { return panic(\"x\") }\nfn main() {}", "return を使えない"),
             // 効果の多相: E は渡した関数の効果になり、呼ぶ側で処理する必要がある
             (
                 "fn ap<E: Effect>(f: () -> unit ! E) ! E { f() }\nfn n() ! Log { log(\"a\") }\nfn main() { ap(n) }",

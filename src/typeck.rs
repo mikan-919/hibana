@@ -1407,9 +1407,17 @@ pub fn check(prog: &Program) -> R<Info> {
             Some(t) => ck.eval_type(t).ctx(|e| r(&format!("戻り値: {e}")))?,
             None => prim("unit"),
         };
-        // never はどの型とも一致するので、戻らないことを確かめられない効果の操作でだけ使える
-        if f.op.is_none() && ck.ret == prim("never") {
-            return Err(r("never を戻り値の型にできるのは効果の操作だけ").into());
+        // never はどの型とも一致するので、本体が戻らないこと（never の式で終わり、return を含まない）を確かめる
+        let never_fn = f.op.is_none() && ck.ret == prim("never");
+        if never_fn {
+            let mut ret_found = false;
+            let tail = f.body.tail.iter().map(|t| &**t);
+            for e in f.body.stmts.iter().map(|s| match s { Stmt::Let { init, .. } => init, Stmt::Expr(e) => e }).chain(tail) {
+                walk(e, &mut |x| ret_found |= matches!(x, Expr::Return(_)));
+            }
+            if ret_found {
+                return Err(r("戻り値が never の関数では return を使えない").into());
+            }
         }
         if !f.alias && matches!(base(&ck.ret), V::Univ(_)) {
             return Err(r("関数は型を返せない。型を計算するなら type で定義する").into());
@@ -1435,6 +1443,10 @@ pub fn check(prog: &Program) -> R<Info> {
         // 戻り値が unit の関数は最後の式の値を捨てる
         if ret == prim("unit") {
             ck.block(&f.body).ctx(r)?;
+        } else if never_fn {
+            if ck.block(&f.body).ctx(r)? != prim("never") {
+                return Err(r("戻り値が never の関数は、panic などの戻らない式で終わる必要がある").into());
+            }
         } else {
             ck.check_block(&f.body, &ret)
                 .ctx(|e| r(&format!("戻り値: {e}")))?;
@@ -2227,15 +2239,41 @@ impl Ck<'_> {
                 self.enter_branch(&cv, true);
                 let tt = self.block(then);
                 self.pop();
-                let tt = tt?;
                 let Some(els) = els else {
                     // else が無い if の値は捨てる
+                    tt?;
                     return Ok(prim("unit"));
+                };
+                // 片方の分岐だけで型が決まらない時（None や []）は、もう片方の型で確かめる
+                let tt = match tt {
+                    Ok(t) => t,
+                    Err(e) => {
+                        self.enter_branch(&cv, false);
+                        let et = self.expr(els);
+                        self.pop();
+                        let Ok(et) = et else { return Err(e) };
+                        let et = base(&et);
+                        self.enter_branch(&cv, true);
+                        let r = self.check_block(then, &et);
+                        self.pop();
+                        r?;
+                        return Ok(et);
+                    }
                 };
                 self.enter_branch(&cv, false);
                 let et = self.expr(els);
                 self.pop();
-                let et = et?;
+                let et = match et {
+                    Ok(t) => t,
+                    Err(e) if tt != prim("never") => {
+                        self.enter_branch(&cv, false);
+                        let r = self.check(els, &base(&tt));
+                        self.pop();
+                        r.map_err(|_| e)?;
+                        return Ok(base(&tt));
+                    }
+                    Err(e) => return Err(e),
+                };
                 if tt == et {
                     tt
                 } else {
