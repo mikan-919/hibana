@@ -817,7 +817,8 @@ impl Parser<'_> {
         if q != n
             && (self.types.contains(&q)
                 || self.structs.contains_key(&q)
-                || self.generic_fns.contains(&q))
+                // 関数の名前は f<型>(...) の時だけ。他は局所変数かもしれないので resolve に任せる
+                || (self.generic_fns.contains(&q) && at(1) == Some(Tok::Punct("<"))))
         {
             self.toks[self.pos].tok = Tok::Ident(q);
         }
@@ -1901,5 +1902,87 @@ impl Parser<'_> {
             Some(Box::new(Expr::Block(self.block()?)))
         };
         Ok(Expr::If(Box::new(cond), then, els))
+    }
+}
+
+// 構文木の S 式。selfhost/parser.hb の出力と比べる（位置の包みは外す）
+#[cfg(test)]
+pub mod sexp {
+    use super::*;
+
+    fn list(head: &str, xs: impl IntoIterator<Item = String>) -> String {
+        let xs: Vec<String> = xs.into_iter().collect();
+        if xs.is_empty() { format!("({head})") } else { format!("({head} {})", xs.join(" ")) }
+    }
+    fn opt<T: std::borrow::Borrow<Expr>>(e: &Option<T>) -> String {
+        e.as_ref().map_or("_".into(), |e| expr(e.borrow()))
+    }
+    fn params(ps: &[(String, Expr)]) -> String {
+        list("params", ps.iter().map(|(n, t)| format!("({n} {})", expr(t))))
+    }
+    fn arm(a: &Arm) -> String {
+        list("arm", [a.ctor.clone(), list("binds", a.binds.clone()), expr(&a.body)])
+    }
+    pub fn block(b: &Block) -> String {
+        let st = b.stmts.iter().map(|s| match s {
+            Stmt::Let { name, mutable, ty, init } => {
+                list(if *mutable { "let-mut" } else { "let" }, [name.clone(), opt(ty), expr(init)])
+            }
+            Stmt::Expr(e) => expr(e),
+        });
+        list("block", st.chain([opt(&b.tail)]))
+    }
+    pub fn expr(e: &Expr) -> String {
+        match e.peel() {
+            Expr::Int(n) => n.to_string(),
+            Expr::Bool(b) => b.to_string(),
+            Expr::Str(s) => format!("{s:?}"),
+            Expr::Var(v) => v.clone(),
+            Expr::Unary(op, x) => list(op, [expr(x)]),
+            Expr::Binary(op, a, b) => list(op, [expr(a), expr(b)]),
+            Expr::Call(f, xs) => list(&format!("call {f}"), xs.iter().map(expr)),
+            Expr::Field(x, f) => list("field", [expr(x), f.clone()]),
+            Expr::Method(x, f, xs) => list("method", [expr(x), f.clone()].into_iter().chain(xs.iter().map(expr))),
+            Expr::Assign(n, x) => list("assign", [n.clone(), expr(x)]),
+            Expr::If(c, t, e) => list("if", [expr(c), block(t), opt(e)]),
+            Expr::While(c, b) => list("while", [expr(c), block(b)]),
+            Expr::Block(b) => block(b),
+            Expr::Return(x) => list("return", [opt(x)]),
+            Expr::Array(xs) => list("array", xs.iter().map(expr)),
+            Expr::Index(a, i) => list("index", [expr(a), expr(i)]),
+            Expr::Refine(t, x, c) => list("refine", [expr(t), x.clone(), expr(c)]),
+            Expr::Match(x, arms) => list("match", [expr(x)].into_iter().chain(arms.iter().map(arm))),
+            Expr::Lam(ps, ret, effs, b) => list(
+                "lam",
+                [
+                    list("params", ps.iter().map(|(n, t)| format!("({n} {})", opt(t)))),
+                    opt(ret),
+                    list("effects", effs.iter().map(expr)),
+                    block(b),
+                ],
+            ),
+            Expr::Pi(ps, ret, effs) => list("pi", [params(ps), expr(ret), list("effects", effs.iter().map(expr))]),
+            Expr::Apply(f, xs) => list("apply", [expr(f)].into_iter().chain(xs.iter().map(expr))),
+            Expr::Handle(x, arms) => list("handle", [expr(x)].into_iter().chain(arms.iter().map(arm))),
+            Expr::For(x, a, b, body) => list("for", [x.clone(), expr(a), opt(b), block(body)]),
+            Expr::Macro(n, _) => list("macro", [n.clone()]),
+            Expr::Quote(_) => "(quote)".into(),
+            Expr::At(..) => unreachable!(),
+        }
+    }
+    // 利用者のファイルの関数と型（std などのモジュールと、# を含む生成した名前は除く）
+    pub fn program(p: &Program) -> String {
+        let mut out = String::new();
+        for d in p.datas.iter().filter(|d| d.module.is_empty() && !d.name.contains('#')) {
+            let cs = d.ctors.iter().map(|c| list(&format!("ctor {}", c.name), [params(&c.fields), opt(&c.ret)]));
+            out += &list(&format!("data {}", d.name), [params(&d.params)].into_iter().chain(cs));
+            out += "\n";
+        }
+        for f in p.fns.iter().filter(|f| f.module.is_empty() && !f.name.contains('#')) {
+            let head = format!("fn {} {} {}", f.name, f.implicit, f.partial);
+            out += &list(&head, [params(&f.params), opt(&f.ret), list("effects", f.effects.iter().map(expr)), block(&f.body)]);
+            out += "\n";
+        }
+        out
     }
 }

@@ -729,6 +729,28 @@ fn main() {
         assert_eq!(String::from_utf8(r.stdout).unwrap(), want);
     }
 
+    // hibana で書いた構文解析器（selfhost/parser.hb）が、中核の構文だけの例で Rust 版と同じ構文木を作るか
+    #[test]
+    fn selfhost_parser_matches() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let names = ["capture", "closure", "dependent", "fib", "inductive", "push", "refine", "smt", "strings", "struct"];
+        let files: Vec<_> = names.iter().map(|n| root.join(format!("examples/{n}.hb"))).collect();
+        let mut want = String::new();
+        for p in &files {
+            let prog = crate::parser::parse(&std::fs::read_to_string(p).unwrap()).unwrap();
+            want += &crate::parser::sexp::program(&prog);
+            want += "\n";
+        }
+        let dir = root.join("selfhost");
+        let src = std::fs::read_to_string(dir.join("parse_dump.hb")).unwrap();
+        crate::parser::set_base_dir(&dir);
+        let js = dir.join(format!("parse-{}.mjs", std::process::id()));
+        std::fs::write(&js, super::to_js(&src).unwrap()).unwrap();
+        let r = std::process::Command::new("node").arg(&js).args(&files).output().unwrap();
+        std::fs::remove_file(&js).unwrap();
+        assert_eq!(String::from_utf8(r.stdout).unwrap(), want, "{}", String::from_utf8_lossy(&r.stderr));
+    }
+
     // よくある条件（routes の添字、fib の停止性など）は Z3 なしで証明できる
     #[test]
     fn builtin_prover() {
