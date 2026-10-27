@@ -215,7 +215,7 @@ mod tests {
         std::fs::remove_file(&js).unwrap();
         assert_eq!(
             String::from_utf8(r.stdout).unwrap(),
-            "50\nHIBANA!\n18\n3\n3\nHello, world\n6\n20\n[3, 5]\n[\"a2a\", \"b4b\"]\n"
+            "50\nHIBANA!\n18\n3\n3\nHello, world\n6\n20\n[3, 5]\n[\"a2a\", \"b4b\"]\n[20, 40]\n"
         );
         let e = out(&src).unwrap_err();
         assert!(e.contains("JS ターゲット"), "{e}");
@@ -469,8 +469,8 @@ fn main() {
                 "! Log を書くか",
             ),
             (
-                "fn ap<E: Effect>(f: () -> unit ! E) ! E { f() }\nfn main() ! Async { ap(fn() ! Async { }) }",
-                "Async は入れられない",
+                "fn ap<E: Effect>(f: (int) -> unit ! E) ! E { f(1) }\nfn main() { ap(fn(x) { log(\"a\") }) }",
+                "! Log を書くか",
             ),
             (
                 "fn f() -> int { handle { return 1 } { ask() => resume(2) } }\nfn main() {}",

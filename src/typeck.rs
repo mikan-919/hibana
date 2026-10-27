@@ -870,6 +870,12 @@ struct Ck<'a> {
     in_arm: usize,
     // JavaScript で待つ呼び出しの式と、async にする無名関数の本体（アドレス）
     awaits: std::collections::HashSet<usize>,
+    // 効果の変数を通して効果を起こす呼び出しと、効果の変数を持つ無名関数の本体。多相な関数の async 版で待つ
+    var_awaits: std::collections::HashSet<usize>,
+    // 効果の変数に Async を入れた、多相な関数の呼び出し。async 版を呼ぶ
+    async_inst: std::collections::HashSet<usize>,
+    // 効果を推論している無名関数の本体で起きた効果
+    collected: Option<Vec<V>>,
     // 効果の名前（Async と effect 宣言）
     effect_names: std::collections::HashSet<String>,
 }
@@ -1090,6 +1096,8 @@ fn callees(f: &Fn) -> Vec<String> {
 pub struct Info {
     // JavaScript で待つ呼び出しの式と、async にする無名関数の本体（アドレス）
     pub awaits: std::collections::HashSet<usize>,
+    pub var_awaits: std::collections::HashSet<usize>,
+    pub async_inst: std::collections::HashSet<usize>,
 }
 
 pub fn check(prog: &Program) -> R<Info> {
@@ -1110,6 +1118,9 @@ pub fn check(prog: &Program) -> R<Info> {
         resume: Vec::new(),
         in_arm: 0,
         awaits: Default::default(),
+        var_awaits: Default::default(),
+        async_inst: Default::default(),
+        collected: None,
         effect_names: std::iter::once("Async".to_string())
             .chain(prog.fns.iter().filter_map(|f| f.op.clone()))
             .chain(
@@ -1234,7 +1245,11 @@ pub fn check(prog: &Program) -> R<Info> {
                 .ctx(|e| r(&format!("戻り値: {e}")))?;
         }
     }
-    Ok(Info { awaits: ck.awaits })
+    Ok(Info {
+        awaits: ck.awaits,
+        var_awaits: ck.var_awaits,
+        async_inst: ck.async_inst,
+    })
 }
 
 // マクロ本体を、束縛名を syn 型の変数として検査する。値は syn 型でなければならない
@@ -1255,6 +1270,9 @@ pub fn check_macro(b: &Block, params: &Kinds, rules: &HashMap<String, Kinds>) ->
         resume: Vec::new(),
         in_arm: 0,
         awaits: Default::default(),
+        var_awaits: Default::default(),
+        async_inst: Default::default(),
+        collected: None,
         effect_names: Default::default(),
     };
     for (p, k) in params {
@@ -1596,7 +1614,7 @@ impl Ck<'_> {
                         .get(n.as_str())
                         .is_some_and(|f| f.implicit > 0) =>
             {
-                let t = self.call_fn(n, args, Some(expected))?;
+                let t = self.call_fn(n, args, Some(expected), e)?;
                 self.subsume(e, &t, expected)
             }
             // 期待する型から、new_ref([]) の要素の型が分かる
@@ -1904,7 +1922,9 @@ impl Ck<'_> {
                 let t = self.expr(f)?;
                 return self.apply_type(&t, args, e);
             }
-            Expr::Lam(params, ret, effs, body) => return self.lam_infer(params, ret, effs, body),
+            Expr::Lam(params, ret, effs, body) => {
+                return self.lam_infer(params, ret, effs, body, None);
+            }
             Expr::Pi(binders, ret, effs) => return self.pi_type(binders, ret, effs),
             Expr::Match(s, arms) => return self.check_match(s, arms, None),
             // 書き換えられる参照。new_ref(x) で作り、read(r) で読み、write(r, x) で書く
@@ -1977,7 +1997,7 @@ impl Ck<'_> {
                 if !self.norm.fns.contains_key(name.as_str()) {
                     return Err(format!("未定義の関数 {name}").into());
                 }
-                return self.call_fn(name, args, None);
+                return self.call_fn(name, args, None, e);
             }
             Expr::Assign(name, x) => {
                 let en = self.lookup(name).ok_or(format!("未定義の変数 {name}"))?;
@@ -2163,7 +2183,7 @@ impl Ck<'_> {
     }
 
     // トップレベルの関数の呼び出し。ジェネリック引数を省いた時は、メタ変数にして引数と期待する型から求める
-    fn call_fn(&mut self, name: &str, args: &[Expr], expected: Option<&V>) -> R<V> {
+    fn call_fn(&mut self, name: &str, args: &[Expr], expected: Option<&V>, e: &Expr) -> R<V> {
         let f = self.norm.fns[name];
         let explicit = f.params.len() - f.implicit;
         let infer = f.implicit > 0 && args.len() == explicit;
@@ -2212,7 +2232,16 @@ impl Ck<'_> {
                 .iter()
                 .any(|id| !sol.contains_key(id) && mentions(&t, *id))
             {
-                let at = self.expr(a).ctx(r)?;
+                let open = |v: &V| ids.iter().any(|id| !sol.contains_key(id) && mentions(v, *id));
+                let at = match (a.peel(), base(&t)) {
+                    // 引数の型が決まっていれば、無名関数の引数の型を省ける。戻り値の型と効果は本体から求める
+                    (Expr::Lam(ps, ret, effs, body), V::Pi(p)) if !p.doms.iter().any(open) => {
+                        let collect = effs.is_empty() && p.effs.iter().any(open);
+                        self.lam_infer(ps, ret, effs, body, Some((&p, collect)))
+                            .ctx(r)?
+                    }
+                    _ => self.expr(a).ctx(r)?,
+                };
                 if !self.unify(&t, &at, &ids, &mut sol)? {
                     return Err(r(&format!("{} が必要だが {}", show(&t), show(&at))).into());
                 }
@@ -2242,10 +2271,6 @@ impl Ck<'_> {
                     }
                 };
                 let v = self.apply(&sol, &v)?;
-                // ponytail: 効果の変数の中の Async は、多相な関数の中で待つ呼び出しにできない。単相化すれば入れられる
-                if is_eff && flat(&[v.clone()]).iter().any(|e| eff_key(e) == "Async") {
-                    return Err(format!("関数 {name} の効果の変数 {p} に Async は入れられない（JavaScript で待てないため）").into());
-                }
                 fenv[0].insert(p.clone(), v.clone());
                 solved.push(v);
             }
@@ -2262,8 +2287,21 @@ impl Ck<'_> {
                 .collect();
             self.use_effect(V::DataT(Rc::new((eff.clone(), args))))?;
         }
-        for e in &f.effects {
-            for v in self.effect_inst(e, &mut fenv)? {
+        // 効果の変数に Async が入れば、JavaScript では多相な関数の async 版を呼んで待つ
+        let poly = f.params[..f.implicit]
+            .iter()
+            .any(|(_, t)| matches!(t.peel(), Expr::Var(k) if k == "Effect"));
+        let addr = e as *const Expr as usize;
+        for ef in &f.effects {
+            for v in self.effect_inst(ef, &mut fenv)? {
+                let k = eff_key(&v);
+                if poly && k == "Async" {
+                    self.async_inst.insert(addr);
+                    self.awaits.insert(addr);
+                }
+                if k.contains('#') {
+                    self.var_awaits.insert(addr);
+                }
                 self.use_effect(v)?;
             }
         }
@@ -2302,13 +2340,20 @@ impl Ck<'_> {
         if key == "Async" && self.in_arm > 0 {
             return Err("handle の腕の中では Async の効果を起こせない".into());
         }
-        let Some(slot) = self.avail.iter_mut().rev().find(|(n, _)| *n == key) else {
+        let Some(slot) = self.avail.iter_mut().rev().find(|(n, _)| *n == key || n == "*") else {
             let s = show(&inst);
             return Err(format!(
                 "効果 {s} を起こすには、関数の型に ! {s} を書くか、handle で処理する"
             )
             .into());
         };
+        if slot.0 == "*" {
+            let c = self.collected.as_mut().unwrap();
+            if !c.iter().any(|x| same(x, &inst)) {
+                c.push(inst);
+            }
+            return Ok(());
+        }
         match &slot.1 {
             None => slot.1 = Some(inst),
             Some(have) if same(have, &inst) => {}
@@ -2453,6 +2498,9 @@ impl Ck<'_> {
                 if eff_key(&eff) == "Async" {
                     self.awaits.insert(e as *const Expr as usize);
                 }
+                if eff_key(&eff).contains('#') {
+                    self.var_awaits.insert(e as *const Expr as usize);
+                }
                 self.use_effect(eff)?;
             }
         }
@@ -2493,18 +2541,31 @@ impl Ck<'_> {
         r
     }
 
+    // 無名関数の本体が効果 e を起こせるなら、JavaScript で待つ本体として記録する
+    fn note_body(&mut self, e: &V, body: &Block) {
+        let k = eff_key(e);
+        if k == "Async" {
+            self.awaits.insert(body as *const Block as usize);
+        }
+        if k.contains('#') {
+            self.var_awaits.insert(body as *const Block as usize);
+        }
+    }
+
     // 無名関数の型を、書かれた引数の型から求める
+    // hint は引数の型だけが分かっている関数型。true なら効果も本体から集める
     fn lam_infer(
         &mut self,
         params: &[(String, Option<Expr>)],
         ret: &Option<Box<Expr>>,
         effs: &[Expr],
         body: &Block,
+        hint: Option<(&PiV, bool)>,
     ) -> R<V> {
         let level = self.norm.pi_depth;
         self.norm.pi_depth += 1;
         self.push();
-        let r = self.lam_infer_inner(level, params, ret, effs, body);
+        let r = self.lam_infer_inner(level, params, ret, effs, body, hint);
         self.pop();
         self.norm.pi_depth -= 1;
         r
@@ -2517,17 +2578,41 @@ impl Ck<'_> {
         ret: &Option<Box<Expr>>,
         effs: &[Expr],
         body: &Block,
+        hint: Option<(&PiV, bool)>,
     ) -> R<V> {
+        if let Some((p, _)) = hint
+            && p.doms.len() != params.len()
+        {
+            return Err(format!("引数は{}個", p.doms.len()).into());
+        }
         let mut doms = Vec::new();
-        let mut ids = Vec::new();
-        for (n, t) in params {
-            let Some(t) = t else {
-                return Err(format!(
-                    "無名関数の引数 {n} の型を書く（期待する型が無いので推論できない）"
-                )
-                .into());
+        let mut ids: Vec<usize> = Vec::new();
+        for (i, (n, t)) in params.iter().enumerate() {
+            // 引数の型の分かる関数型の、i 番目の引数の型
+            let mut d = None;
+            if let Some((p, _)) = hint {
+                let mut x = p.doms[i].clone();
+                for (j, id) in ids.iter().enumerate() {
+                    x = self.norm.subst(&x, binder(p.level, j), &neu(Neu::Var(*id, params[j].0.clone())))?;
+                }
+                d = Some(x);
+            }
+            let ty = match (t, d) {
+                (Some(t), d) => {
+                    let ty = self.eval_type(t)?;
+                    if let Some(d) = d {
+                        want(&ty, &d, &format!("引数 {n}"))?;
+                    }
+                    ty
+                }
+                (None, Some(d)) => d,
+                (None, None) => {
+                    return Err(format!(
+                        "無名関数の引数 {n} の型を書く（期待する型が無いので推論できない）"
+                    )
+                    .into());
+                }
             };
-            let ty = self.eval_type(t)?;
             let id = self.norm.fresh();
             self.bind(n, ty.clone(), neu(Neu::Var(id, n.clone())), false)?;
             doms.push(ty);
@@ -2537,21 +2622,43 @@ impl Ck<'_> {
             Some(t) => Some(self.eval_type(t)?),
             None => None,
         };
-        // 期待する型の無い無名関数は、書いた効果だけを起こせる
-        // ponytail: 効果は推論しない。推論するなら本体で起きた効果を集める
+        // 書いた効果があればそれだけを起こせる。無ければ、効果の変数を持つ関数型に渡す時は本体で起きた効果を集め、
+        // それ以外の関数型に渡す時はその効果を起こせる。期待する型の無い無名関数は効果を起こせない
         let mut es = Vec::new();
         let mut avail = Vec::new();
         for e in effs {
             let mut env = self.val_env();
             for v in self.effect_inst(e, &mut env)? {
-                if eff_key(&v) == "Async" {
-                    self.awaits.insert(body as *const Block as usize);
-                }
+                self.note_body(&v, body);
                 avail.push((eff_key(&v), Some(v.clone())));
                 es.push(v);
             }
         }
-        let cod = self.fn_body(body, rt, avail)?;
+        let collect = matches!(hint, Some((_, true)));
+        if let (Some((p, false)), true) = (hint, effs.is_empty()) {
+            for e in &p.effs {
+                let mut e = e.clone();
+                for (j, id) in ids.iter().enumerate() {
+                    e = self.norm.subst(&e, binder(p.level, j), &neu(Neu::Var(*id, params[j].0.clone())))?;
+                }
+                for e in flat(&[e]) {
+                    self.note_body(&e, body);
+                    avail.push((eff_key(&e), Some(e.clone())));
+                    es.push(e);
+                }
+            }
+        }
+        if collect {
+            avail.push(("*".to_string(), None));
+        }
+        let saved = std::mem::replace(&mut self.collected, collect.then(Vec::new));
+        let cod = self.fn_body(body, rt, avail);
+        let found = std::mem::replace(&mut self.collected, saved);
+        let cod = cod?;
+        for e in found.unwrap_or_default() {
+            self.note_body(&e, body);
+            es.push(e);
+        }
         // 引数の変数を、関数型の引数の番号に置き換える
         let mut out = Vec::new();
         for (i, d) in doms.iter().enumerate() {
@@ -2636,9 +2743,7 @@ impl Ck<'_> {
                     e = self.norm.subst(&e, binder(p.level, j), v)?;
                 }
                 for e in flat(&[e]) {
-                    if eff_key(&e) == "Async" {
-                        self.awaits.insert(body as *const Block as usize);
-                    }
+                    self.note_body(&e, body);
                     avail.push((eff_key(&e), Some(e)));
                 }
             }

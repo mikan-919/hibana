@@ -133,6 +133,9 @@ function $from(d, v) {
 pub fn emit(prog: &Program, info: &crate::typeck::Info) -> String {
     let mut g = Gen {
         awaits: &info.awaits,
+        var_awaits: &info.var_awaits,
+        async_inst: &info.async_inst,
+        variant: false,
         fns: prog.fns.iter().map(|f| (f.name.as_str(), f)).collect(),
         ctors: prog
             .datas
@@ -239,6 +242,13 @@ fn is_async(f: &Fn) -> bool {
     has_async(&f.effects)
 }
 
+// 効果の変数（<E: Effect>）を持つ関数
+fn is_poly(f: &Fn) -> bool {
+    f.params[..f.implicit]
+        .iter()
+        .any(|(_, t)| matches!(t.peel(), Expr::Var(k) if k == "Effect"))
+}
+
 // 待つ呼び出し。待った後に、待つ前の handle の並びに戻す
 fn wait(yes: bool, call: String) -> String {
     if yes {
@@ -287,6 +297,12 @@ struct Gen<'a> {
     async_fns: std::collections::HashSet<&'a str>,
     // 型検査が記録した、待つ呼び出しと async にする無名関数の本体（アドレス）
     awaits: &'a std::collections::HashSet<usize>,
+    // 効果の変数を通して効果を起こす呼び出しと本体。async 版の中でだけ待つ
+    var_awaits: &'a std::collections::HashSet<usize>,
+    // 多相な関数の async 版を呼ぶ呼び出し
+    async_inst: &'a std::collections::HashSet<usize>,
+    // 多相な関数の async 版を出力している
+    variant: bool,
 }
 
 impl Gen<'_> {
@@ -297,7 +313,11 @@ impl Gen<'_> {
 
     // 型検査が待つと記録した呼び出しなら待つ
     fn await_(&self, e: &Expr, call: String) -> String {
-        wait(self.awaits.contains(&(e as *const Expr as usize)), call)
+        wait(self.waits(e as *const Expr as usize), call)
+    }
+
+    fn waits(&self, addr: usize) -> bool {
+        self.awaits.contains(&addr) || (self.variant && self.var_awaits.contains(&addr))
     }
 
     // 失敗しうる式か（算術・slice・操作・JavaScript の関数の呼び出し）。実行時エラーの位置を記録する所
@@ -391,11 +411,22 @@ impl Gen<'_> {
 
     fn func(&mut self, f: &Fn) -> String {
         let params: Vec<String> = f.params.iter().map(|p| p.0.clone()).collect();
-        format!(
+        let mut s = format!(
             "const {} = {};\n",
             ident("f_", &f.name),
             self.function(&params, &f.body, is_async(f))
-        )
+        );
+        // 効果の多相な関数は、効果の変数に Async が入った時に呼ぶ async 版も出力する（効果の変数を通した呼び出しを待つ）
+        if is_poly(f) {
+            self.variant = true;
+            s += &format!(
+                "const {}$a = {};\n",
+                ident("f_", &f.name),
+                self.function(&params, &f.body, true)
+            );
+            self.variant = false;
+        }
+        s
     }
 
     fn block(&mut self, b: &Block) -> String {
@@ -535,10 +566,17 @@ impl Gen<'_> {
                                 full.append(&mut vs);
                                 vs = full;
                             }
-                            wait(
-                                self.async_fns.contains(n),
-                                format!("{}({})", ident("f_", n), vs.join(", ")),
-                            )
+                            let addr = e as *const Expr as usize;
+                            if self.async_inst.contains(&addr)
+                                || (self.variant && is_poly(f) && self.var_awaits.contains(&addr))
+                            {
+                                wait(true, format!("{}$a({})", ident("f_", n), vs.join(", ")))
+                            } else {
+                                wait(
+                                    self.async_fns.contains(n),
+                                    format!("{}({})", ident("f_", n), vs.join(", ")),
+                                )
+                            }
                         }
                         // 型を作る呼び出し（Vec<int> など）。実行時には名前だけ
                         None => lit(n),
@@ -637,7 +675,7 @@ impl Gen<'_> {
                     .map(|(js, _)| js.clone())
                     .collect();
                 let params: Vec<String> = params.iter().map(|p| p.0.clone()).collect();
-                let a = self.awaits.contains(&(body as *const Block as usize));
+                let a = self.waits(body as *const Block as usize);
                 let f = self.function(&params, body, a);
                 self.let_(format!("(({0}) => {f})({0})", muts.join(", ")))
             }

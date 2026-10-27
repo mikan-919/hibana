@@ -2,6 +2,7 @@
 // 型は TypeScript の型宣言から読む。モジュール名はファイル名（util・greet）
 use "./js/util.ts"
 use "./js/greet.js"
+use std.*
 
 // Promise を返す関数は Async の効果を持つ。呼ぶ関数にも ! Async を書き、await は書かない
 fn twice_later(x: int) -> int ! Async {
@@ -36,4 +37,6 @@ fn main() ! Async {
     // Async の関数型の値も渡せる。JavaScript からは Promise を返す関数に見える
     print(util.mapLater([1, 2], fn(x) { util.later(x) + 1 }))
     print(all([fn() { job("a", 1) }, fn() { job("b", 2) }]))
+    // 効果の多相な関数にも Async を渡せる（JavaScript では map の async 版を呼んで待つ）
+    print(map([1, 2], fn(x) { util.later(x) * 10 }))
 }

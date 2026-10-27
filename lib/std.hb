@@ -15,7 +15,6 @@ fn unwrap_or<A>(o: Option<A>, d: A) -> A {
 // ---- Vec の高階関数 ----
 
 // f が起こす効果を E として、そのまま起こす（効果の多相）
-// ponytail: 無名関数を渡す時は引数の型を書く（fn(x: int) -> int { ... }）。期待する型から推論するなら、引数ごとに推論し直す
 fn map<A, B, E: Effect>(xs: Vec<A>, f: (A) -> B ! E) -> Vec<B> ! E {
     let mut out: Vec<B> = []
     for x in xs { out = push(out, f(x)) }
