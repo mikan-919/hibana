@@ -19,6 +19,7 @@ fn record(sp: &crate::lexer::Span, t: &V) {
 }
 
 use crate::error::{Ctx, Error, R};
+use crate::lexer::Span;
 
 // 型検査中の値。型そのものも値として表す
 #[derive(Debug, Clone, PartialEq)]
@@ -893,7 +894,7 @@ struct Scope {
     facts: Vec<V>,
 }
 
-// ponytail: 行番号は式（Expr::At）と関数の宣言（Fn.span）にだけ付く。match のパターンと data・trait・impl の宣言にはスパンが無いので、その中の誤りは近くの式か関数の行になるか、行番号が付かない。足す時は Pattern と Data に Span を持たせ、ここで使う
+// ponytail: 行番号は式（Expr::At）と宣言・腕（Fn・Data・Arm の span）に付く。特定の場所が無い誤り（main 関数が無い、など）には付かない
 struct Ck<'a> {
     norm: Norm<'a>,
     scopes: Vec<Scope>,
@@ -1316,6 +1317,14 @@ pub fn check(prog: &Program) -> R<Info> {
     check_prog(prog).map_err(Error::with_line)
 }
 
+// 位置が分かっている宣言・腕の誤りには、その位置を付ける（内側で付いた位置は残す）
+fn at_opt(e: Error, s: Option<Span>) -> Error {
+    match s {
+        Some(s) => e.at(s),
+        None => e,
+    }
+}
+
 fn check_prog(prog: &Program) -> R<Info> {
     let fns = &prog.fns;
     let mut ck = Ck {
@@ -1355,17 +1364,17 @@ fn check_prog(prog: &Program) -> R<Info> {
     };
     // 関数名・型名・構築子名は同じ名前空間にある
     let mut names: Vec<&str> = Vec::new();
-    for n in prog
+    for (n, sp) in prog
         .datas
         .iter()
-        .flat_map(|d| std::iter::once(&d.name).chain(d.ctors.iter().map(|c| &c.name)))
-        .chain(fns.iter().map(|f| &f.name))
+        .flat_map(|d| std::iter::once((&d.name, d.span)).chain(d.ctors.iter().map(|c| (&c.name, d.span))))
+        .chain(fns.iter().map(|f| (&f.name, f.span)))
     {
         let reserved = BUILTINS.contains(&n.as_str())
             || PRIMS.contains(&n.as_str())
             || SYN_FNS.iter().any(|s| s.0 == n);
         if reserved || names.contains(&n.as_str()) {
-            return Err(format!("名前 {n} が重複している").into());
+            return Err(at_opt(format!("名前 {n} が重複している").into(), sp));
         }
         names.push(n);
     }
@@ -1397,7 +1406,7 @@ fn check_prog(prog: &Program) -> R<Info> {
     for _ in 0..8 {
         let mut changed = false;
         for d in &prog.datas {
-            let l = ck.data_level(d)?;
+            let l = ck.data_level(d).map_err(|e| at_opt(e, d.span))?;
             changed |= ck.levels.insert(d.name.clone(), l) != Some(l);
         }
         if !changed {
@@ -1409,10 +1418,7 @@ fn check_prog(prog: &Program) -> R<Info> {
         _ => return Err("引数なしの main 関数が必要".into()),
     }
     for f in fns {
-        check_fn(&mut ck, f).map_err(|e| match f.span {
-            Some(s) => e.at(s),
-            None => e,
-        })?;
+        check_fn(&mut ck, f).map_err(|e| at_opt(e, f.span))?;
     }
     Ok(Info {
         awaits: ck.awaits,
@@ -2853,18 +2859,19 @@ impl Ck<'_> {
         let mut effs: Vec<String> = Vec::new();
         for a in arms {
             let Some(f) = self.norm.fns.get(a.ctor.as_str()).copied() else {
-                return Err(format!("未定義の操作 {}", a.ctor).into());
+                return Err(at_opt(format!("未定義の操作 {}", a.ctor).into(), a.span));
             };
             let Some(e) = &f.op else {
-                return Err(format!("{} は効果の操作でない", a.ctor).into());
+                return Err(at_opt(format!("{} は効果の操作でない", a.ctor).into(), a.span));
             };
             if arms.iter().filter(|b| b.ctor == a.ctor).count() > 1 {
-                return Err(format!("操作 {} の腕が重複している", a.ctor).into());
+                return Err(at_opt(format!("操作 {} の腕が重複している", a.ctor).into(), a.span));
             }
             if a.binds.len() != f.params.len() - f.implicit {
-                return Err(
+                return Err(at_opt(
                     format!("操作 {} の引数は{}個", a.ctor, f.params.len() - f.implicit).into(),
-                );
+                    a.span,
+                ));
             }
             if !effs.contains(e) {
                 effs.push(e.clone());
@@ -2921,7 +2928,7 @@ impl Ck<'_> {
             r
         })();
         self.pop();
-        r.ctx(|e| format!("操作 {} の腕: {e}", a.ctor))
+        r.ctx(|e| format!("操作 {} の腕: {e}", a.ctor)).map_err(|e| at_opt(e, a.span))
     }
 
     // トップレベルの関数を値として使った時の型
@@ -3611,6 +3618,7 @@ impl Ck<'_> {
         let mut result: Option<V> = None;
         for arm in arms {
             let r = |e: &str| format!("{} の場合: {e}", arm.ctor);
+            let at = |e: Error| at_opt(e, arm.span);
             self.push();
             let mut exp = expected.cloned();
             if arm.ctor == "_" {
@@ -3618,19 +3626,19 @@ impl Ck<'_> {
             } else {
                 let Some((dd, c)) = self.norm.ctors.get(arm.ctor.as_str()).copied() else {
                     self.pop();
-                    return Err(format!("不明な構築子 {}", arm.ctor).into());
+                    return Err(at(format!("不明な構築子 {}", arm.ctor).into()));
                 };
                 if dd.name != d.name || arm.binds.len() != c.fields.len() {
                     self.pop();
-                    return Err(format!(
+                    return Err(at(format!(
                         "{} は {} の構築子でないか、フィールドの数が違う",
                         arm.ctor, d.name
                     )
-                    .into());
+                    .into()));
                 }
                 covered.push(c.name.clone());
                 let Some((mut substs, fvals)) =
-                    self.enter_ctor(d, c, &dt.1, Some(&arm.binds)).ctx(r)?
+                    self.enter_ctor(d, c, &dt.1, Some(&arm.binds)).ctx(r).map_err(at)?
                 else {
                     // 添字が合わないので、この場合は起こらない
                     self.pop();
@@ -3651,9 +3659,9 @@ impl Ck<'_> {
                 }
                 for (id, v) in &substs {
                     if let Some(e) = &mut exp {
-                        *e = self.norm.subst(e, *id, v)?;
+                        *e = self.norm.subst(e, *id, v).map_err(at)?;
                     }
-                    self.refine_var(*id, v)?;
+                    self.refine_var(*id, v).map_err(at)?;
                 }
             }
             let t = match &exp {
@@ -3661,7 +3669,7 @@ impl Ck<'_> {
                 None => self.expr(&arm.body),
             };
             self.pop();
-            let t = t.ctx(r)?;
+            let t = t.ctx(r).map_err(at)?;
             if expected.is_some() {
                 continue;
             }
@@ -3669,7 +3677,7 @@ impl Ck<'_> {
                 None => t,
                 Some(prev) if prev == prim("never") => t,
                 Some(prev) => {
-                    want(&base(&prev), &t, &r("場合ごとの型"))?;
+                    want(&base(&prev), &t, &r("場合ごとの型")).map_err(at)?;
                     base(&prev)
                 }
             });
