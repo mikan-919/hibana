@@ -443,6 +443,9 @@ enum Shape { Circle(r: int), Rect(w: int, h: int), Dot }
 | `assert(ok)` `assert_eq(got, want)` | テスト（3.8 節）。偽か等しくなければ実行時エラー |
 | `derive(Eq, Show) struct ...`（`enum` も） | 型の `Eq`・`Show` の `impl` を作る宣言のマクロ（8.4 節） |
 | `map(xs, f)` `filter(xs, f)` `fold(xs, init, f)` | `Vec` の高階関数。`f` の効果をそのまま起こす（効果の多相） |
+| `concat(a, b)` `reverse(xs)` `take(xs, n)` `drop(xs, n)` `last(xs)` `range(a, b)` `sum(xs)` | `Vec` の操作。`last` は `Option` を返す。`range` は `a` 以上 `b` 未満の `int` の `Vec` |
+| `some(xs, f)` `every(xs, f)` `find(xs, f)` | 一つでも・すべてが条件を満たすか、最初の要素（`Option`）。`f` の効果をそのまま起こす。`all` は並行実行の組み込みなので `every` と呼ぶ |
+| `join(xs, sep)` `repeat(s, n)` `trim(s)` `replace(s, from, to)` `lines(s)` `ends_with(s, w)` `includes(s, w)` | 文字列の操作 |
 | `Map<V>`、`empty()` `get(m, k)` `set(m, k, v)` `keys(m)` | 文字列のキーから値への表。`set` は新しい `Map` を返す。線形探索 |
 | `Json` = `JNull` \| `JBool` \| `JInt` \| `JStr` \| `JArr(Vec<Json>)` \| `JObj(Vec<Field>)`、`Field { key, value }` | JSON の値 |
 | `stringify(j)` `quote_str(s)` | JSON の文字列にする |

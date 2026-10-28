@@ -883,7 +883,7 @@ fn main() {
         std::fs::write(&js, super::to_js(&src).unwrap()).unwrap();
         let tmp = std::env::temp_dir().join(format!("hibana-cg-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
-        for n in ["capture", "derive", "effects", "eq", "fib", "poly", "push", "ref", "refine", "smt", "strings", "struct", "trait"] {
+        for n in ["capture", "derive", "effects", "eq", "fib", "poly", "push", "ref", "refine", "smt", "stdlib", "strings", "struct", "trait"] {
             let p = root.join(format!("examples/{n}.hb"));
             let r = std::process::Command::new("node").arg(&js).arg(&p).output().unwrap();
             let mjs = tmp.join(format!("{n}.mjs"));

@@ -71,6 +71,30 @@ impl<A: Show> Show<Vec<A>> {
     }
 }
 
+impl<A: Eq> Eq<Option<A>> {
+    fn eq(a: Option<A>, b: Option<A>) -> bool {
+        match a {
+            None => match b {
+                None => true
+                Some(y) => false
+            }
+            Some(x) => match b {
+                None => false
+                Some(y) => eq(x, y)
+            }
+        }
+    }
+}
+
+impl<A: Show> Show<Option<A>> {
+    fn show(o: Option<A>) -> str {
+        match o {
+            None => "None"
+            Some(x) => "Some(" + show(x) + ")"
+        }
+    }
+}
+
 fn max<A: Ord>(a: A, b: A) -> A {
     if lt(a, b) { b } else { a }
 }
@@ -216,6 +240,133 @@ fn fold<A, B, E: Effect>(xs: Vec<A>, init: B, f: (B, A) -> B ! E) -> B ! E {
     for x in xs { acc = f(acc, x) }
     acc
 }
+
+fn concat<A>(a: Vec<A>, b: Vec<A>) -> Vec<A> {
+    let mut out = a
+    for x in b { out = push(out, x) }
+    out
+}
+
+fn reverse<A>(xs: Vec<A>) -> Vec<A> {
+    let mut out: Vec<A> = []
+    for x in xs { out = concat([x], out) }
+    out
+}
+
+// 先頭から n 個
+fn take<A>(xs: Vec<A>, n: int) -> Vec<A> {
+    let mut out: Vec<A> = []
+    for i in 0..len(xs) {
+        if i < n { out = push(out, xs[i]) }
+    }
+    out
+}
+
+// 先頭の n 個を除いた残り
+fn drop<A>(xs: Vec<A>, n: int) -> Vec<A> {
+    let mut out: Vec<A> = []
+    for i in 0..len(xs) {
+        if i >= n { out = push(out, xs[i]) }
+    }
+    out
+}
+
+fn last<A>(xs: Vec<A>) -> Option<A> {
+    if len(xs) > 0 { Some(xs[len(xs) - 1]) } else { None }
+}
+
+// a 以上 b 未満の整数
+fn range(a: int, b: int) -> Vec<int> {
+    let mut out: Vec<int> = []
+    for i in a..b { out = push(out, i) }
+    out
+}
+
+fn sum(xs: Vec<int>) -> int {
+    let mut s = 0
+    for x in xs { s = s + x }
+    s
+}
+
+fn some<A, E: Effect>(xs: Vec<A>, f: (A) -> bool ! E) -> bool ! E {
+    for x in xs {
+        if f(x) { return true }
+    }
+    false
+}
+
+fn every<A, E: Effect>(xs: Vec<A>, f: (A) -> bool ! E) -> bool ! E {
+    for x in xs {
+        if !f(x) { return false }
+    }
+    true
+}
+
+fn find<A, E: Effect>(xs: Vec<A>, f: (A) -> bool ! E) -> Option<A> ! E {
+    for x in xs {
+        if f(x) { return Some(x) }
+    }
+    None
+}
+
+// ---- 文字列 ----
+
+fn join(xs: Vec<str>, sep: str) -> str {
+    let mut s = ""
+    for i in 0..len(xs) {
+        if i > 0 { s = s + sep }
+        s = s + xs[i]
+    }
+    s
+}
+
+fn repeat(s: str, n: int) -> str {
+    let mut r = ""
+    for i in 0..n { r = r + s }
+    r
+}
+
+fn ends_with(s: str, w: str) -> bool {
+    starts_at(s, len(s) - len(w), w)
+}
+
+// s の中に w があるか
+fn includes(s: str, w: str) -> bool {
+    for i in 0..len(s) + 1 {
+        if starts_at(s, i, w) { return true }
+    }
+    false
+}
+
+fn is_space(c: str) -> bool { c == " " || c == "\n" || c == "\t" || c == "\r" }
+
+// 前後の空白を除く
+fn trim(s: str) -> str {
+    let mut a = 0
+    let mut b = len(s)
+    while a < b && is_space(char_at(s, a)) { a = a + 1 }
+    while b > a && is_space(char_at(s, b - 1)) { b = b - 1 }
+    slice(s, a, b)
+}
+
+// from を to に置き換える（from が空なら変えない）
+fn replace(s: str, from: str, to: str) -> str {
+    if len(from) == 0 { return s }
+    let mut out = ""
+    let mut i = 0
+    while i < len(s) {
+        if starts_at(s, i, from) {
+            out = out + to
+            i = i + len(from)
+        } else {
+            out = out + char_at(s, i)
+            i = i + 1
+        }
+    }
+    out
+}
+
+fn lines(s: str) -> Vec<str> { split(s, "\n") }
 
 // ---- Map（文字列のキーから値へ） ----
 
