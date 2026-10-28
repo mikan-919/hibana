@@ -1,5 +1,6 @@
 // 型検査器。selfhost/parser.hb の構文木を検査する
-// ponytail: 依存型・添字付きの型族・細分化型の証明は無い（細分化型は元の型として扱う）。効果は見ない
+// ponytail: 依存型・添字付きの型族・細分化型の証明は無い（細分化型は元の型として扱う）
+// 効果: 起きた効果を集め、関数の終わりで宣言と比べる。無名関数の効果は本体から推論する。Async はどこでも起こせる
 // ponytail: 宣言の探索は線形。大きいプログラムで遅ければ Map にする
 use "./parser.hb".*
 use std.*
@@ -9,7 +10,9 @@ enum Ty {
     YVec(a: Ty),
     YRef(a: Ty),
     YData(name: str, args: Vec<Ty>),
-    YFn(ps: Vec<Ty>, ret: Ty),
+    YFn(ps: Vec<Ty>, ret: Ty, effs: Vec<Ty>),
+    // 効果の変数（E: Effect）の中身。効果の並び
+    YRow(effs: Vec<Ty>),
     // 推論中の型変数（subst の添字）
     YVar(id: int),
     // 検査中の関数のジェネリック引数
@@ -29,6 +32,11 @@ struct C {
     fname: Ref<str>,
     ret: Ref<Ty>,
     tparams: Ref<Vec<Bind>>,
+    // 検査中の式で起きた効果と、handle の腕の resume に渡す型
+    raised: Ref<Vec<Ty>>,
+    resume: Ref<Ty>,
+    // 検査中の関数が宣言した効果。起きた効果の型引数はこれから決める（need() の T など）
+    declared: Ref<Vec<Ty>>,
 }
 
 fn err(c: C, msg: str) -> Ty {
@@ -70,7 +78,9 @@ partial fn show_ty(c: C, t0: Ty) -> str {
         YVec(a) => "Vec<" + show_ty(c, a) + ">",
         YRef(a) => "Ref<" + show_ty(c, a) + ">",
         YData(n, args) => if len(args) == 0 { n } else { n + "<" + join(map(args, fn(a: Ty) -> str { show_ty(c, a) })) + ">" },
-        YFn(ps, r) => "(" + join(map(ps, fn(a: Ty) -> str { show_ty(c, a) })) + ") -> " + show_ty(c, r),
+        YFn(ps, r, es) => "(" + join(map(ps, fn(a: Ty) -> str { show_ty(c, a) })) + ") -> " + show_ty(c, r) +
+            (if len(es) == 0 { "" } else { " ! " + join(map(es, fn(a: Ty) -> str { show_ty(c, a) })) }),
+        YRow(es) => join(map(es, fn(a: Ty) -> str { show_ty(c, a) })),
         YVar(id) => "?" + to_str(id),
         YParam(n) => n,
     }
@@ -114,10 +124,54 @@ partial fn same_shape(c: C, a: Ty, b: Ty) -> bool {
         YVec(x) => match b { YVec(y) => unify(c, x, y), _ => false },
         YRef(x) => match b { YRef(y) => unify(c, x, y), _ => false },
         YData(n, xs) => match b { YData(m, ys) => n == m && unify_all(c, xs, ys), _ => false },
-        YFn(ps, r) => match b { YFn(qs, s) => unify_all(c, ps, qs) && unify(c, r, s), _ => false },
+        YFn(ps, r, es) => match b { YFn(qs, s, fs) => unify_all(c, ps, qs) && unify(c, r, s) && unify_effs(c, es, fs), _ => false },
         YParam(n) => match b { YParam(m) => n == m, _ => false },
         _ => false,
     }
+}
+
+// 効果の並びを展開する。決まった効果の変数は中身に、決まっていない変数は空にする
+partial fn expand(c: C, es: Vec<Ty>) -> Vec<Ty> {
+    let mut r: Vec<Ty> = []
+    for e in es {
+        match walk(c, e) {
+            YRow(xs) => { for x in expand(c, xs) { r = push(r, x) } }
+            YVar(i) => {}
+            _ => { r = push(r, walk(c, e)) }
+        }
+    }
+    r
+}
+
+fn eff_name(t: Ty) -> str { match t { YData(n, xs) => n, YParam(n) => n, _ => "" } }
+
+// want の並びが got の効果をすべて含むか。一方が一つの決まっていない変数なら、もう一方の並びにする
+partial fn unify_effs(c: C, want: Vec<Ty>, got: Vec<Ty>) -> bool {
+    if len(want) == 1 && is_var(walk(c, want[0])) { return unify(c, want[0], YRow(got)) }
+    if len(got) == 1 && is_var(walk(c, got[0])) { return unify(c, got[0], YRow(want)) }
+    let ws = expand(c, want)
+    let mut ok = true
+    for g in expand(c, got) { if !covers(c, ws, g) { ok = false } }
+    ok
+}
+
+fn is_var(t: Ty) -> bool { match t { YVar(i) => true, _ => false } }
+
+partial fn covers(c: C, ws: Vec<Ty>, g: Ty) -> bool {
+    let n = eff_name(g)
+    if n == "Async" { return true }
+    let mut ok = false
+    for w in ws { if !ok && eff_name(w) == n { ok = unify(c, w, g) } }
+    ok
+}
+
+partial fn raise(c: C, es: Vec<Ty>) {
+    let mut r = read(c.raised)
+    for e in es {
+        for d in read(c.declared) { if eff_name(d) != "" && eff_name(d) == eff_name(walk(c, e)) { unify(c, d, e); } }
+        r = push(r, e)
+    }
+    write(c.raised, r)
 }
 
 // want の型が必要な所に got の型の式を置く
@@ -170,7 +224,7 @@ partial fn ty_of(c: C, env: Vec<Bind>, e: Expr) -> Ty {
         EVar(n) => match lookup_bind(env, n) {
             Some(t) => t,
             None => if n == "int" { YInt } else if n == "bool" { YBool } else if n == "str" { YStr }
-                else if n == "unit" { YUnit } else if n == "never" { YNever } else if n == "Type" { YType }
+                else if n == "unit" { YUnit } else if n == "never" { YNever } else if n == "Type" { YType } else if n == "Async" { YData(n, []) }
                 else { named_ty(c, env, n, []) }
         },
         ECall(n, args) => named_ty(c, env, n, map(args, fn(a: Expr) -> Ty { ty_of(c, env, a) })),
@@ -182,7 +236,7 @@ partial fn ty_of(c: C, env: Vec<Bind>, e: Expr) -> Ty {
                 let t = match param_ty(p) { Some(x) => ty_of(c, env2, x), None => fresh(c) }
                 tys = push(tys, t)
             }
-            YFn(tys, ty_of(c, env2, r))
+            YFn(tys, ty_of(c, env2, r), map(effs, fn(x: Expr) -> Ty { ty_of(c, env2, x) }))
         }
         _ => err(c, "型でない式"),
     }
@@ -221,13 +275,13 @@ partial fn inst_fn(c: C, f: Func, targs: Vec<Ty>) -> Ty {
             ps = push(ps, match param_ty(p) { Some(t) => ty_of(c, bs, t), None => fresh(c) })
         }
     }
-    YFn(ps, match f.ret { Some(t) => ty_of(c, bs, t), None => YUnit })
+    YFn(ps, match f.ret { Some(t) => ty_of(c, bs, t), None => YUnit }, map(f.effs, fn(x: Expr) -> Ty { ty_of(c, bs, x) }))
 }
 
 partial fn inst_ctor(c: C, k: CtorOf) -> Ty {
     let bs = data_binds(c, k.d)
     let ps = map(k.ctor.fields, fn(p: Expr) -> Ty { match param_ty(p) { Some(t) => ty_of(c, bs, t), None => YNever } })
-    YFn(ps, YData(k.d.name, map(bs, fn(b: Bind) -> Ty { b.ty })))
+    YFn(ps, YData(k.d.name, map(bs, fn(b: Bind) -> Ty { b.ty })), [])
 }
 
 // ---- 式 ----
@@ -241,10 +295,11 @@ fn lookup(env: Vec<Local>, name: str) -> Option<Local> {
 // 引数の型を確かめて戻り値の型を返す
 partial fn apply_ty(c: C, env: Vec<Local>, name: str, ft: Ty, args: Vec<Expr>) -> Ty {
     match walk(c, ft) {
-        YFn(ps, r) => if len(ps) != len(args) {
+        YFn(ps, r, es) => if len(ps) != len(args) {
             err(c, name + " の引数は " + to_str(len(ps)) + " 個だが " + to_str(len(args)) + " 個渡した")
         } else {
             for i in 0..len(args) { if i < len(ps) { expect_ty(c, ps[i], synth(c, env, args[i]), name + " の引数") } }
+            raise(c, es)
             r
         }
         YNever => YNever,
@@ -254,23 +309,29 @@ partial fn apply_ty(c: C, env: Vec<Local>, name: str, ft: Ty, args: Vec<Expr>) -
 
 partial fn builtin(c: C, env: Vec<Local>, name: str, args: Vec<Expr>) -> Option<Ty> {
     let a = fresh(c)
-    let sig = if name == "print" { Some(YFn([a], YUnit)) }
-        else if name == "to_str" { Some(YFn([a], YStr)) }
-        else if name == "push" { Some(YFn([YVec(a), a], YVec(a))) }
-        else if name == "split" { Some(YFn([YStr, YStr], YVec(YStr))) }
-        else if name == "starts_with" { Some(YFn([YStr, YStr], YBool)) }
-        else if name == "slice" { Some(YFn([YStr, YInt, YInt], YStr)) }
-        else if name == "chars" { Some(YFn([YStr], YVec(YStr))) }
-        else if name == "code" { Some(YFn([YStr], YInt)) }
-        else if name == "panic" { Some(YFn([YStr], YNever)) }
-        else if name == "new_ref" { Some(YFn([a], YRef(a))) }
-        else if name == "read" { Some(YFn([YRef(a)], a)) }
-        else if name == "write" { Some(YFn([YRef(a), a], YUnit)) }
+    let sig = if name == "print" { Some(YFn([a], YUnit, [])) }
+        else if name == "to_str" { Some(YFn([a], YStr, [])) }
+        else if name == "push" { Some(YFn([YVec(a), a], YVec(a), [])) }
+        else if name == "split" { Some(YFn([YStr, YStr], YVec(YStr), [])) }
+        else if name == "starts_with" { Some(YFn([YStr, YStr], YBool, [])) }
+        else if name == "slice" { Some(YFn([YStr, YInt, YInt], YStr, [])) }
+        else if name == "chars" { Some(YFn([YStr], YVec(YStr), [])) }
+        else if name == "code" { Some(YFn([YStr], YInt, [])) }
+        else if name == "panic" { Some(YFn([YStr], YNever, [])) }
+        else if name == "new_ref" { Some(YFn([a], YRef(a), [])) }
+        else if name == "read" { Some(YFn([YRef(a)], a, [])) }
+        else if name == "write" { Some(YFn([YRef(a), a], YUnit, [])) }
+        else if name == "all" { Some(YFn([YVec(YFn([], a, [YData("Async", [])]))], YVec(a), [YData("Async", [])])) }
         else { None }
     match sig {
         Some(t) => Some(apply_ty(c, env, name, t, args)),
         // len は Vec と str の両方
-        None => if name == "len" && len(args) == 1 {
+        // resume(x) は腕の操作の戻り値を渡す。resume の後には戻らない
+        None => if name == "resume" && len(args) <= 1 {
+            let t = if len(args) == 1 { synth(c, env, args[0]) } else { YUnit }
+            expect_ty(c, read(c.resume), t, "resume の引数")
+            Some(YNever)
+        } else if name == "len" && len(args) == 1 {
             match walk(c, synth(c, env, args[0])) {
                 YStr => Some(YInt),
                 _ => { expect_ty(c, YVec(fresh(c)), synth(c, env, args[0]), "len の引数"); Some(YInt) }
@@ -308,7 +369,7 @@ partial fn synth(c: C, env: Vec<Local>, e: Expr) -> Ty {
             None => match find_fn(c, n) {
                 Some(f) => inst_fn(c, f, []),
                 None => match find_ctor(c, n) {
-                    Some(k) => match inst_ctor(c, k) { YFn(ps, r) => if len(ps) == 0 { r } else { YFn(ps, r) }, _ => YNever },
+                    Some(k) => match inst_ctor(c, k) { YFn(ps, r, es) => if len(ps) == 0 { r } else { YFn(ps, r, es) }, _ => YNever },
                     None => err(c, "未定義の変数 " + n),
                 },
             },
@@ -355,6 +416,7 @@ partial fn synth(c: C, env: Vec<Local>, e: Expr) -> Ty {
             a
         }
         EMatch(x, arms) => match_ty(c, env, synth(c, env, x), arms),
+        EHandle(x, arms) => handle_ty(c, env, x, arms),
         ELam(ps, ret, effs, body) => {
             let mut env2 = env
             let mut tys: Vec<Ty> = []
@@ -363,13 +425,22 @@ partial fn synth(c: C, env: Vec<Local>, e: Expr) -> Ty {
                 tys = push(tys, t)
                 env2 = push(env2, Local { name: param_name(p), ty: t, mutable: false })
             }
-            // 無名関数の中の return は無名関数から戻る
+            // 無名関数の中の return は無名関数から戻る。本体の効果は無名関数の型の効果にする
             let saved = read(c.ret)
+            let saved_raised = read(c.raised)
+            write(c.raised, [])
             let r = match ret { Some(x) => ty_of(c, read(c.tparams), x), None => fresh(c) }
             write(c.ret, r)
             expect_ty(c, r, synth(c, env2, body), "無名関数の戻り値")
             write(c.ret, saved)
-            YFn(tys, r)
+            let got = expand(c, read(c.raised))
+            write(c.raised, saved_raised)
+            let es = if len(effs) == 0 { got } else {
+                let ws = map(effs, fn(x: Expr) -> Ty { ty_of(c, read(c.tparams), x) })
+                for g in got { if !covers(c, ws, g) { err(c, "無名関数が宣言していない効果 " + show_ty(c, g) + " を起こす"); } }
+                ws
+            }
+            YFn(tys, r, es)
         }
         EFor(x, a, b, body) => {
             let xt = match b {
@@ -426,7 +497,7 @@ partial fn match_ty(c: C, env: Vec<Local>, t: Ty, arms: Vec<Expr>) -> Ty {
                 if ctor != "_" {
                     match find_ctor(c, ctor) {
                         Some(k) => match inst_ctor(c, k) {
-                            YFn(ps, dt) => {
+                            YFn(ps, dt, es) => {
                                 expect_ty(c, dt, t, "match の構築子 " + ctor)
                                 if len(ps) != len(binds) { err(c, "構築子 " + ctor + " のフィールドは " + to_str(len(ps)) + " 個"); }
                                 for i in 0..len(binds) { if i < len(ps) { env2 = push(env2, Local { name: binds[i], ty: ps[i], mutable: false }) } }
@@ -444,6 +515,45 @@ partial fn match_ty(c: C, env: Vec<Local>, t: Ty, arms: Vec<Expr>) -> Ty {
         }
     }
     result
+}
+
+// 本体で起きた効果のうち、腕の操作の効果を取り除く。腕の引数の型は、本体で起きた効果の型引数から決まる
+partial fn handle_ty(c: C, env: Vec<Local>, x: Expr, arms: Vec<Expr>) -> Ty {
+    let saved = read(c.raised)
+    write(c.raised, [])
+    let bt = synth(c, env, x)
+    let inner = expand(c, read(c.raised))
+    write(c.raised, saved)
+    let mut handled: Vec<str> = []
+    for arm in arms {
+        match arm {
+            EArm(op, binds, body) => match find_fn(c, op) {
+                Some(f) => if f.kind != "op" { err(c, op + " は効果の操作でない"); } else {
+                    match inst_fn(c, f, []) {
+                        YFn(ps, r, es) => {
+                            for e in es {
+                                handled = push(handled, eff_name(e))
+                                for t in inner { if eff_name(t) == eff_name(e) { unify(c, e, t); } }
+                            }
+                            if len(ps) != len(binds) { err(c, "操作 " + op + " の引数は " + to_str(len(ps)) + " 個"); }
+                            let mut env2 = env
+                            for i in 0..len(binds) { if i < len(ps) { env2 = push(env2, Local { name: binds[i], ty: ps[i], mutable: false }) } }
+                            let saved_r = read(c.resume)
+                            write(c.resume, r)
+                            let at = synth(c, env2, body)
+                            write(c.resume, saved_r)
+                            expect_ty(c, bt, at, "handle の腕")
+                        }
+                        _ => {}
+                    }
+                }
+                None => { err(c, "不明な操作 " + op); }
+            },
+            _ => {}
+        }
+    }
+    raise(c, filter(inner, fn(t: Ty) -> bool { !contains(handled, eff_name(t)) }))
+    bt
 }
 
 partial fn block_ty(c: C, env0: Vec<Local>, stmts: Vec<Expr>, tail: Option<Expr>) -> Ty {
@@ -483,15 +593,19 @@ partial fn check_fn(c: C, f: Func) {
     write(c.tparams, bs)
     let r = match f.ret { Some(t) => ty_of(c, bs, t), None => YUnit }
     write(c.ret, r)
+    write(c.raised, [])
+    let ws = map(f.effs, fn(x: Expr) -> Ty { ty_of(c, bs, x) })
+    write(c.declared, ws)
     let bt = synth(c, env, f.body)
     match r { YUnit => {}, _ => expect_ty(c, r, bt, "戻り値") }
+    for g in expand(c, read(c.raised)) { if !covers(c, ws, g) { err(c, "効果 " + show_ty(c, g) + " を処理していない（! で宣言するか handle で処理する）"); } }
 }
 
 // 型エラーの並び（無ければ空）
 partial fn check(prog: Program) -> Vec<str> {
-    let c = C { prog: prog, subst: new_ref([]), errs: new_ref([]), fname: new_ref(""), ret: new_ref(YUnit), tparams: new_ref([]) }
+    let c = C { prog: prog, subst: new_ref([]), errs: new_ref([]), fname: new_ref(""), ret: new_ref(YUnit), tparams: new_ref([]), raised: new_ref([]), resume: new_ref(YUnit), declared: new_ref([]) }
     // トレイトのメソッドと JS の関数は本体が無い
-    for f in prog.fns { if !is_alias(f) && f.kind != "trait" && !starts_with(f.kind, "js:") { check_fn(c, f) } }
+    for f in prog.fns { if !is_alias(f) && f.kind != "trait" && f.kind != "op" && !starts_with(f.kind, "js:") { check_fn(c, f) } }
     read(c.errs)
 }
 

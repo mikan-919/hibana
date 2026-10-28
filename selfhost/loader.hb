@@ -151,6 +151,7 @@ partial fn re(r: R, env: Vec<str>, e: Expr) -> Expr {
         EApply(f, xs) => EApply(re(r, env, f), rs(r, env, xs)),
         EFor(x, a, b, body) => EFor(x, re(r, env, a), ro(r, env, b), re(r, push(env, x), body)),
         EParam(n, t) => EParam(n, ro(r, env, t)),
+        EHandle(x, arms) => EHandle(re(r, env, x), rs(r, env, arms)),
         _ => e,
     }
 }
@@ -159,7 +160,8 @@ partial fn resolve_fn(r: R, f: Func) -> Func {
     let name = if f.kind == "impl" {
         let parts = split(f.name, "#")
         if len(parts) == 2 { full_name(r.names, parts[0]) + "#" + full_name(r.names, parts[1]) } else { f.name }
-    } else if starts_with(f.kind, "js:") { f.name } else { full_name(r.names, f.name) }
+    } else if f.kind == "default" { full_name(r.names, slice(f.name, 0, len(f.name) - 8)) + "#default" }
+    else if starts_with(f.kind, "js:") { f.name } else { full_name(r.names, f.name) }
     let env = param_names(f.params)
     Func { name: name, implicit: f.implicit, is_partial: f.is_partial, params: rparams(r, [], f.params), ret: ro(r, env, f.ret), effs: rs(r, env, f.effs), body: re(r, env, f.body), kind: f.kind }
 }
@@ -178,7 +180,7 @@ fn own_names(prog: Program, prefix: str) -> Vec<Name> {
         ns = push(ns, q(d.name))
         for c in d.ctors { ns = push(ns, q(c.name)) }
     }
-    for f in prog.fns { if f.kind != "impl" { ns = push(ns, q(f.name)) } }
+    for f in prog.fns { if f.kind != "impl" && f.kind != "default" { ns = push(ns, q(f.name)) } }
     // トレイトの名前は型の位置にしか現れず、検査も生成も使わないので修飾しない
     ns
 }

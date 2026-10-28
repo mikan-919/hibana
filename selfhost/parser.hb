@@ -29,6 +29,8 @@ enum Expr {
     EPi(params: Vec<Expr>, ret: Expr, effs: Vec<Expr>),
     EApply(f: Expr, args: Vec<Expr>),
     EFor(x: str, a: Expr, b: Option<Expr>, body: Expr),
+    // handle 式 { 操作(引数) => 式 ... }。腕は EArm（ctor は操作の名前）
+    EHandle(x: Expr, arms: Vec<Expr>),
     // 引数 名前: 型（無名関数では型を省ける）
     EParam(name: str, ty: Option<Expr>),
 }
@@ -36,7 +38,7 @@ enum Expr {
 struct Ctor { name: str, fields: Vec<Expr>, ret: Option<Expr> }
 struct Data { name: str, params: Vec<Expr>, ctors: Vec<Ctor> }
 // kind: "" は普通の関数、"trait" はトレイトのメソッド（本体が無い）、"impl" は実装のメソッド（名前は メソッド#型）、
-// "js:パス" は JS のモジュールの関数（名前は 別名.関数）
+// "default" はトレイトのメソッドの既定の実装（名前は メソッド#default）、"js:パス" は JS のモジュールの関数（名前は 別名.関数）、"op" は効果の操作（本体が無い。effs に効果の型が一つ入る）
 struct Func { name: str, implicit: int, is_partial: bool, params: Vec<Expr>, ret: Option<Expr>, effs: Vec<Expr>, body: Expr, kind: str }
 struct StructInfo { name: str, fields: Vec<str> }
 // モジュールが宣言した名前。use したモジュールを読む時に使う
@@ -200,6 +202,7 @@ partial fn primary(p: P) -> Expr {
             else if k == "while" { let c = expr(p); expect(p, "{"); EWhile(c, block(p)) }
             else if k == "for" { for_rest(p) }
             else if k == "match" { match_rest(p) }
+            else if k == "handle" { handle_rest(p) }
             else if k == "return" {
                 if nl(p) || is_p(peek(p), ";") || is_p(peek(p), "}") { EReturn(None) } else { EReturn(Some(expr(p))) }
             }
@@ -343,6 +346,26 @@ partial fn match_rest(p: P) -> Expr {
         eat(p, ",")
     }
     EMatch(s, arms)
+}
+
+partial fn handle_rest(p: P) -> Expr {
+    let body = expr(p)
+    expect(p, "{")
+    let mut arms: Vec<Expr> = []
+    while !eat(p, "}") {
+        let op = take_ident(p)
+        expect(p, "(")
+        let mut binds: Vec<str> = []
+        let mut going = !eat(p, ")")
+        while going {
+            binds = push(binds, take_ident(p))
+            if !eat(p, ",") { expect(p, ")"); going = false } else if eat(p, ")") { going = false }
+        }
+        expect(p, "=>")
+        arms = push(arms, EArm(op, binds, expr(p)))
+        eat(p, ",")
+    }
+    EHandle(body, arms)
 }
 
 // 式に続く .名前、.名前(引数)、(引数)、[添字]、[x -> 条件]
@@ -552,7 +575,8 @@ fn concat_f(a: Vec<Func>, b: Vec<Func>) -> Vec<Func> {
 }
 
 // trait Name<A>: 親<A> { fn メソッド(引数) -> 型 ... }。メソッドはトレイトの型引数をジェネリック引数に持つ関数にする
-// ponytail: 既定の実装と、親のトレイトの検査は無い
+// 既定の実装は メソッド#default という kind "default" の関数にする
+// ponytail: 親のトレイトの検査は無い
 partial fn trait_decl(p: P) -> Vec<Func> {
     expect(p, "trait")
     take_ident(p)
@@ -566,11 +590,33 @@ partial fn trait_decl(p: P) -> Vec<Func> {
         let ps = params(p)
         let ret = if eat(p, "->") { Some(ret_ty(p)) } else { None }
         let effs = effects(p)
-        if is_p(peek(p), "{") { fail(p, "トレイトの既定の実装は未対応") }
         fs = push(fs, Func { name: m, implicit: len(tps), is_partial: false, params: concat(tps, ps), ret: ret, effs: effs, body: EBlock([], None), kind: "trait" })
+        if eat(p, "{") { fs = push(fs, Func { name: m + "#default", implicit: len(tps), is_partial: true, params: concat(tps, ps), ret: ret, effs: effs, body: block(p), kind: "default" }) }
         eat(p, ",")
     }
     fs
+}
+
+// effect Name<A> { fn 操作(引数) -> 型 ... }。効果は構築子の無い型、操作は効果の型引数をジェネリック引数に持つ関数
+struct Effect { data: Data, ops: Vec<Func> }
+
+partial fn effect_decl(p: P) -> Effect {
+    expect(p, "effect")
+    let name = take_ident(p)
+    let tps = type_params(p)
+    expect(p, "{")
+    let me = if len(tps) == 0 { EVar(name) } else { ECall(name, map(tps, fn(t: Expr) -> Expr { match t { EParam(n, x) => EVar(n), _ => t } })) }
+    let mut ops: Vec<Func> = []
+    while !eat(p, "}") {
+        expect(p, "fn")
+        let m = take_ident(p)
+        expect(p, "(")
+        let ps = params(p)
+        let ret = if eat(p, "->") { Some(ret_ty(p)) } else { None }
+        ops = push(ops, Func { name: m, implicit: len(tps), is_partial: true, params: concat(tps, ps), ret: ret, effs: [me], body: EBlock([], None), kind: "op" })
+        eat(p, ",")
+    }
+    Effect { data: Data { name: name, params: tps, ctors: [] }, ops: ops }
 }
 
 // 型の式の頭の名前。Vec<A> なら Vec
@@ -684,7 +730,7 @@ partial fn parse_with(src: str, ext: Ext) -> Program {
         if depth == 0 && i + 2 < len(ts0) {
             match ts0[i + 1].tok {
                 TIdent(n) => {
-                    if is_type_kw(t) || is_p(t, "trait") { types = push(types, n) }
+                    if is_type_kw(t) || is_p(t, "trait") || is_p(t, "effect") { types = push(types, n) }
                     if is_p(t, "fn") && is_p(ts0[i + 2].tok, "<") { generics = push(generics, n) }
                 }
                 _ => {}
@@ -706,6 +752,8 @@ partial fn parse_with(src: str, ext: Ext) -> Program {
                 Ok(d) => { datas = push(datas, d); if len(traits) > 0 { derived = derived + derive_src(d, traits) } }
                 Err(f) => { aliases = push(aliases, f) }
             }
+        } else if h == "effect" {
+            datas = push(datas, effect_decl(p0).data)
         } else if h == "fn" || h == "partial" || h == "trait" || h == "impl" || h == "macro" || h == "test" {
             skip_fn(p0)
         } else if h == "use" {
@@ -737,6 +785,7 @@ partial fn parse_with(src: str, ext: Ext) -> Program {
         else if is_type_kw(peek(p)) { type_decl(p); }
         else if h == "fn" || h == "partial" { fns = push(fns, func(p)) }
         else if h == "trait" { fns = concat_f(fns, trait_decl(p)) }
+        else if h == "effect" { fns = concat_f(fns, effect_decl(p).ops) }
         else if h == "impl" { fns = concat_f(fns, impl_decl(p)) }
         else if h == "use" { skip_line(p, "") }
         else if h == "syntax" { skip_line(p, "|") }
@@ -794,6 +843,7 @@ partial fn sexp(e: Expr) -> str {
         EApply(f, xs) => list("apply", concat_s([sexp(f)], sexps(xs))),
         EFor(x, a, b, body) => list("for", [x, sexp(a), opt(b), sexp(body)]),
         EParam(n, t) => "(" + n + " " + opt(t) + ")",
+        EHandle(x, arms) => list("handle", concat_s([sexp(x)], sexps(arms))),
     }
 }
 

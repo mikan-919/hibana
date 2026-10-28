@@ -1,5 +1,6 @@
 // コード生成。selfhost/parser.hb の構文木から JavaScript を作る（src/js.rs と同じ値の表し方）
-// ponytail: push は毎回写す（その場で足す最適化は無い）。効果は無い
+// ponytail: push は毎回写す（その場で足す最適化は無い）。Async は意味を持たず、all は順に実行する
+// 効果は src/js.rs と同じ形: 処理中の handle の並び $h から腕を探し、resume しない腕の値は例外 $Abort で handle まで戻す
 // トレイトのメソッドは、最初の引数の実行時の型で実装を選ぶ（型引数が戻り値にだけ現れるメソッドは呼べない）
 use "./parser.hb".*
 use std.*
@@ -97,6 +98,8 @@ fn builtin(name: str, a: str) -> str {
     else if name == "new_ref" { "({ v: " + a + " })" }
     else if name == "read" { "(" + a + ").v" }
     else if name == "write" { "$write(" + a + ")" }
+    else if name == "resume" { "{ $c: \"$resume\", $f: [" + a + "] }" }
+    else if name == "all" { "(" + a + ").map((f) => f())" }
     else { "$" + name + "(" + a + ")" }
 }
 
@@ -147,6 +150,26 @@ partial fn gen(g: G, env: Vec<Var>, e: Expr) -> Code {
             Code { pre: a.pre + "const " + r + " = $index(" + a.val + ");\n", val: r }
         }
         EMatch(x, arms) => match_code(g, env, x, arms),
+        EHandle(x, arms) => {
+            // 腕は無名関数にする。本体はその場に書き、resume しなかった腕の値を例外で受け取る
+            let mut pre = ""
+            let mut fs: Vec<str> = []
+            for arm in arms {
+                match arm {
+                    EArm(op, binds, body) => {
+                        let lam = gen(g, env, ELam(map(binds, fn(b: str) -> Expr { EParam(b, None) }), None, [], EBlock([], Some(body))))
+                        pre = pre + lam.pre
+                        fs = push(fs, dquote(op) + ": " + lam.val)
+                    }
+                    _ => {}
+                }
+            }
+            let h = tmp(g)
+            let r = tmp(g)
+            let saved = tmp(g)
+            let b = gen(g, env, x)
+            Code { pre: pre + "const " + h + " = { arms: { " + join(fs, ", ") + " } };\nlet " + r + ";\nconst " + saved + " = $h; $h = [...$h, " + h + "];\ntry {\n" + b.pre + r + " = " + b.val + ";\n} catch (e) { if (e instanceof $Abort && e.h === " + h + ") " + r + " = e.v; else throw e; } finally { $h = " + saved + "; }\n", val: r }
+        }
         ELam(ps, ret, effs, body) => {
             // 作った時の可変な変数の値を写し取る（インタプリタと同じ意味にする）
             let muts = map(filter(env, fn(v: Var) -> bool { v.mutable }), fn(v: Var) -> str { v.js })
@@ -280,10 +303,10 @@ fn runtime() -> str {
     "  if (typeof v === \"boolean\") return \"bool\";\n" +
     "  if (Array.isArray(v)) return \"Vec\";\n" +
     "  return v && v.$c !== undefined ? $types[v.$c] : \"\";\n}\n" +
-    "const $impls = {};\n" +
+    "const $impls = {}, $defaults = {};\n" +
     "function $impl(m, k, f) { ($impls[m] ??= {})[k] = f; }\n" +
     "function $call(m, a) {\n" +
-    "  const f = $impls[m]?.[$key(a[0])];\n" +
+    "  const f = $impls[m]?.[$key(a[0])] ?? $defaults[m];\n" +
     "  if (!f) throw new Error(m + \" の \" + $key(a[0]) + \" の実装が無い\");\n" +
     "  return f(...a);\n}\n" +
     "// Show の実装がある型は to_str と print でそれを使う（Vec は組み込みの表示）\n" +
@@ -304,7 +327,21 @@ fn runtime() -> str {
     "function $slice(s, i, j) { return [...s].slice(Number(i), Number(j)).join(\"\"); }\n" +
     "function $chars(s) { return [...s]; }\n" +
     "function $code(s) { return s.length ? BigInt(s.codePointAt(0)) : -1n; }\n" +
-    "function $panic(m) { throw new Error(m); }\n"
+    "function $panic(m) { throw new Error(m); }\n" +
+    "let $h = [];\n" +
+    "class $Abort { constructor(h, v) { this.h = h; this.v = v; } }\n" +
+    "function $op(op, args) {\n" +
+    "  for (let i = $h.length - 1; i >= 0; i--) {\n" +
+    "    const h = $h[i];\n" +
+    "    if (!Object.hasOwn(h.arms, op)) continue;\n" +
+    "    const saved = $h;\n" +
+    "    $h = $h.slice(0, i);\n" +
+    "    let r;\n" +
+    "    try { r = h.arms[op](...args); } finally { $h = saved; }\n" +
+    "    if (r && r.$c === \"$resume\") return r.$f[0];\n" +
+    "    throw new $Abort(h, r);\n" +
+    "  }\n" +
+    "  throw new Error(\"操作 \" + op + \" を処理する handle が無い\");\n}\n"
 }
 
 // プログラム全体の JavaScript。最後に main を呼ぶ
@@ -324,7 +361,9 @@ partial fn compile(prog: Program) -> str {
     let mut imports = ""
     let mut paths: Vec<str> = []
     for f in prog.fns {
-        if f.kind == "trait" {
+        if f.kind == "op" {
+            out = out + "function " + fname(f.name) + "(...a) { return $op(" + dquote(f.name) + ", a); }\n"
+        } else if f.kind == "trait" {
             out = out + "function " + fname(f.name) + "(...a) { return $call(" + dquote(f.name) + ", a); }\n"
         } else if starts_with(f.kind, "js:") {
             // JS のモジュールは import * as $jsK で読む
@@ -354,6 +393,7 @@ partial fn compile(prog: Program) -> str {
                 let parts = split(f.name, "#")
                 if len(parts) == 2 { out = out + "$impl(" + dquote(parts[0]) + ", " + dquote(parts[1]) + ", " + fname(f.name) + ");\n" }
             }
+            if f.kind == "default" { out = out + "$defaults[" + dquote(slice(f.name, 0, len(f.name) - 8)) + "] = " + fname(f.name) + ";\n" }
         }
     }
     imports + out + "f_main();\n"

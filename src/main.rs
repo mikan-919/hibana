@@ -789,6 +789,10 @@ fn main() {
             "fn main() { let f = fn(x: int) -> int { x }\n print(f(\"a\")) }",
             "fn main() { for x in 5 { print(x) } }",
             "fn main() { print(1 + true) }",
+            "effect Log { fn log(m: str) }\nfn main() { log(\"x\") }",
+            "effect Log { fn log(m: str) }\nfn ap(f: (str) -> unit) { f(\"a\") }\nfn main() { handle ap(fn(x) { log(x) }) { log(m) => resume() } }",
+            "effect Log { fn log(m: str) }\nfn f() ! Log { log(\"a\") }\nfn main() { handle f() { log(m) => resume(1) } }",
+            "effect Log { fn log(m: str) }\nfn f() ! Log { log(\"a\") }\nfn main() { handle f() { log(m) => resume() } }",
         ];
         for (i, c) in cases.iter().enumerate() {
             let p = tmp.join(format!("case{i}.hb"));
@@ -825,7 +829,7 @@ fn main() {
         std::fs::write(&js, super::to_js(&src).unwrap()).unwrap();
         let tmp = std::env::temp_dir().join(format!("hibana-cg-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
-        for n in ["capture", "fib", "push", "refine", "smt", "strings", "struct"] {
+        for n in ["capture", "derive", "effects", "fib", "poly", "push", "ref", "refine", "smt", "strings", "struct", "trait"] {
             let p = root.join(format!("examples/{n}.hb"));
             let r = std::process::Command::new("node").arg(&js).arg(&p).output().unwrap();
             let mjs = tmp.join(format!("{n}.mjs"));
