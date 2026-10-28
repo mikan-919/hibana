@@ -684,6 +684,14 @@ fn main() {
         assert_eq!(&src[at..at + n], "log(\"a\")");
     }
 
+    // 重複した名前のエラーは、後の宣言の名前を指す
+    #[test]
+    fn duplicate_name_position() {
+        let src = "fn f() {}\nstruct f { x: int }\nfn main() {}";
+        let e = out(src).unwrap_err();
+        assert_eq!(e.span, Some((17, 1)), "{e:?}");
+    }
+
     // 実行時エラーの位置。インタプリタはエラーに位置を付け、JS と C はメッセージに行と列を足す
     #[test]
     fn runtime_error_positions() {

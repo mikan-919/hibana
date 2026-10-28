@@ -432,16 +432,18 @@ fn parse_toks(src: &str, toks: Vec<Token>, round: usize) -> R<Program> {
     let mut uses: HashMap<String, Vec<Use>> = HashMap::new();
     let mut modules: HashSet<String> = HashSet::new();
     let mut module_at: Vec<(usize, String)> = vec![(0, String::new())];
+    // 名前を宣言する。同じモジュールで既に宣言していれば false
     let mut declare = |m: &str, n: &str, globals: &mut HashSet<String>| {
         mod_names
             .entry(m.to_string())
             .or_default()
             .insert(n.to_string());
-        known.insert(qual(m, n));
         if m.is_empty() {
             globals.insert(n.to_string());
         }
+        known.insert(qual(m, n))
     };
+    let dup = |p: &Parser, i: usize, n: &str| Err(Error::from(format!("名前 {n} が重複している")).at(p.toks[i].span));
     // 先に syntax と macro だけを読む（宣言より前の関数や宣言の位置でも、後で宣言したマクロを使えるようにする）
     let mut decl_end: HashMap<usize, usize> = HashMap::new();
     {
@@ -512,7 +514,9 @@ fn parse_toks(src: &str, toks: Vec<Token>, round: usize) -> R<Program> {
             Tok::Punct("effect") => {
                 if let Some(Tok::Ident(n)) = p.toks.get(p.pos + 1).map(|t| t.tok.clone()) {
                     types.insert(qual(&cur, &n));
-                    declare(&cur, &n, &mut globals);
+                    if !declare(&cur, &n, &mut globals) {
+                        return dup(&p, p.pos + 1, &n);
+                    }
                 }
                 effect_starts.push(p.pos);
                 let start = p.pos;
@@ -534,7 +538,9 @@ fn parse_toks(src: &str, toks: Vec<Token>, round: usize) -> R<Program> {
                     if p.toks.get(p.pos + k + 1).map(|t| &t.tok) == Some(&Tok::Punct("<")) {
                         generic_fns.insert(qual(&cur, &n));
                     }
-                    declare(&cur, &n, &mut globals);
+                    if !declare(&cur, &n, &mut globals) {
+                        return dup(&p, p.pos + k, &n);
+                    }
                 }
                 fn_starts.push(p.pos);
                 p.skip_fn()?;
@@ -543,7 +549,9 @@ fn parse_toks(src: &str, toks: Vec<Token>, round: usize) -> R<Program> {
                 let kw = *kw;
                 if let Some(Tok::Ident(n)) = p.toks.get(p.pos + 1).map(|t| t.tok.clone()) {
                     types.insert(qual(&cur, &n));
-                    declare(&cur, &n, &mut globals);
+                    if !declare(&cur, &n, &mut globals) {
+                        return dup(&p, p.pos + 1, &n);
+                    }
                 }
                 data_starts.push(p.pos);
                 let start = p.pos;
@@ -557,7 +565,9 @@ fn parse_toks(src: &str, toks: Vec<Token>, round: usize) -> R<Program> {
             Tok::Punct("trait") => {
                 if let Some(Tok::Ident(n)) = p.toks.get(p.pos + 1).map(|t| t.tok.clone()) {
                     types.insert(qual(&cur, &n));
-                    declare(&cur, &n, &mut globals);
+                    if !declare(&cur, &n, &mut globals) {
+                        return dup(&p, p.pos + 1, &n);
+                    }
                 }
                 trait_starts.push(p.pos);
                 let start = p.pos;
