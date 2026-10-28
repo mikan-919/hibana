@@ -21,7 +21,7 @@ let $at;
 // 書き換えられる参照
 class $Ref { constructor(v) { this.v = v; } }
 function $d(c, f) { return { $c: c, $f: f }; }
-function $field(x, f) { return x.$f[$fields[x.$c].indexOf(f)]; }
+function $field(x, f) { return x.$f[$fi[x.$c][f]]; }
 function $eq(a, b) {
   if (a === b) return true;
   if (a instanceof $Ref) return false;
@@ -153,6 +153,18 @@ pub fn emit(prog: &Program, info: &crate::typeck::Info) -> String {
             .flat_map(|d| &d.ctors)
             .map(|c| c.name.as_str())
             .collect(),
+        slots: {
+            let mut m: HashMap<&str, Option<usize>> = HashMap::new();
+            for c in prog.datas.iter().flat_map(|d| &d.ctors) {
+                for (i, f) in c.fields.iter().enumerate() {
+                    let e = m.entry(f.0.as_str()).or_insert(Some(i));
+                    if *e != Some(i) {
+                        *e = None;
+                    }
+                }
+            }
+            m
+        },
         lines: Vec::new(),
         scopes: Vec::new(),
         next: 0,
@@ -174,6 +186,8 @@ pub fn emit(prog: &Program, info: &crate::typeck::Info) -> String {
         })
         .collect();
     out += &format!("const $fields = {{ {} }};\n", fields.join(", "));
+    // 構築子ごとの、フィールドの名前から位置への表
+    out += "const $fi = Object.fromEntries(Object.entries($fields).map(([c, fs]) => [c, Object.fromEntries(fs.map((f, i) => [f, i]))]));\n";
     let mut imports = String::new();
     for f in &prog.fns {
         match &f.js {
@@ -298,6 +312,8 @@ fn ident(prefix: &str, n: &str) -> String {
 struct Gen<'a> {
     fns: HashMap<&'a str, &'a Fn>,
     ctors: std::collections::HashSet<&'a str>,
+    // フィールドの名前から、どの構築子でも同じならその位置（違えば None で、実行時に $field で探す）
+    slots: HashMap<&'a str, Option<usize>>,
     // 今の関数の文
     lines: Vec<String>,
     // hibana の変数名から (JavaScript の名前, 可変か)
@@ -612,7 +628,10 @@ impl Gen<'_> {
             }
             Expr::Field(x, f) => {
                 let a = self.expr(x);
-                self.let_(format!("$field({a}, {})", lit(f)))
+                match self.slots.get(f.as_str()) {
+                    Some(Some(k)) => self.let_(format!("{a}.$f[{k}]")),
+                    _ => self.let_(format!("$field({a}, {})", lit(f))),
+                }
             }
             Expr::Index(v, i) => {
                 let (a, b) = (self.look(v), self.expr(i));

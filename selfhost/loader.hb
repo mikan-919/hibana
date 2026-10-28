@@ -195,7 +195,8 @@ fn concat_names(a: Vec<Name>, b: Vec<Name>) -> Vec<Name> {
 partial fn load_module(l: L, path: str, root: bool) {
     if is_some_m(find_module(l, path)) { return }
     let src = io.readFile(path)
-    let specs = match lex(src) { Ok(ts) => uses_of(ts), Err(e) => panic(path + ": " + e.msg) }
+    let ts = match lex(src) { Ok(ts) => ts, Err(e) => panic(path + ": " + e.msg) }
+    let specs = uses_of(ts)
     let mut deps: Vec<Module> = []
     let mut js: Vec<str> = []
     let mut js_fns: Vec<Func> = []
@@ -212,7 +213,7 @@ partial fn load_module(l: L, path: str, root: bool) {
     }
     let mut ext = no_ext()
     for m in deps { ext = Ext { types: concat_str(ext.types, m.info.types), generics: concat_str(ext.generics, m.info.generics), structs: concat_si(ext.structs, m.info.structs) } }
-    let prog = parse_with(src, ext)
+    let prog = parse_tokens(ts, ext)
     let own = own_names(prog, if root { "" } else { base_name(path) })
     let mut names = own
     for m in deps { names = concat_names(names, m.names) }

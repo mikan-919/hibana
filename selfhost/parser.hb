@@ -718,7 +718,10 @@ fn concat_str(a: Vec<str>, b: Vec<str>) -> Vec<str> {
 
 // ext は use したモジュールが宣言した名前
 partial fn parse_with(src: str, ext: Ext) -> Program {
-    let ts0 = match lex(src) { Ok(ts) => ts, Err(e) => panic(e.msg) }
+    match lex(src) { Ok(ts) => parse_tokens(ts, ext), Err(e) => panic(e.msg) }
+}
+
+partial fn parse_tokens(ts0: Vec<Token>, ext: Ext) -> Program {
     // 型の名前とジェネリックな関数の名前を前もって集める（括弧の外の宣言の頭だけを見る）
     let mut types: Vec<str> = []
     let mut generics: Vec<str> = []

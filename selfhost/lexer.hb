@@ -76,10 +76,10 @@ fn lex(src: str) -> Result<Vec<Token>, LexError> {
                 if c == "\n" { line = line + 1; bol = i + 1 }
                 i = i + 1
                 gap = true
-            } else if ahead(cs, i, "//") {
+            } else if c == "/" && char_at(cs, i + 1) == "/" {
                 while char_at(cs, i) != "\n" && char_at(cs, i) != "" { i = i + 1 }
                 gap = true
-            } else if ahead(cs, i, "/*") {
+            } else if c == "/" && char_at(cs, i + 1) == "*" {
                 i = i + 2
                 while !ahead(cs, i, "*/") && char_at(cs, i) != "" {
                     if char_at(cs, i) == "\n" { line = line + 1; bol = i + 1 }
@@ -113,7 +113,7 @@ fn lex(src: str) -> Result<Vec<Token>, LexError> {
         } else if is_alpha(c) {
             let mut w = ""
             while is_alpha(char_at(cs, i)) || is_digit(char_at(cs, i)) { w = w + char_at(cs, i); i = i + 1 }
-            tok = if contains(kws, w) { TPunct(w) } else { TIdent(w) }
+            tok = if has(kws, w) { TPunct(w) } else { TIdent(w) }
         } else if c == "\"" || c == "'" {
             i = i + 1
             let mut s = ""
@@ -135,15 +135,21 @@ fn lex(src: str) -> Result<Vec<Token>, LexError> {
             i = i + 1
             tok = if c == "\"" { TStr(s) } else { TChar(s) }
         } else {
-            let mut k = 0
-            while k < len(ps) && !ahead(cs, i, char_at(ps, k)) { k = k + 1 }
-            if k < len(ps) { tok = TPunct(char_at(ps, k)); i = i + len(char_at(ps, k)) } else { err = "不明な文字 " + c }
+            // 2 文字の記号を先に試す
+            let two = c + char_at(cs, i + 1)
+            if has(ps, two) { tok = TPunct(two); i = i + 2 } else if has(ps, c) { tok = TPunct(c); i = i + 1 } else { err = "不明な文字 " + c }
         }
         if err == "" {
             out = push(out, Token { tok: tok, line: l0, col: c0, gap: gap, nl: nl })
         }
     }
     if err == "" { Ok(out) } else { Err(LexError { msg: err, line: line, col: i - bol + 1 }) }
+}
+
+fn has(xs: Vec<str>, s: str) -> bool {
+    let mut r = false
+    for x in xs { if x == s { r = true } }
+    r
 }
 
 fn kinds(src: str) -> Vec<Tok> {

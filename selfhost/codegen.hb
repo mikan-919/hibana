@@ -1,5 +1,6 @@
 // コード生成。selfhost/parser.hb の構文木から JavaScript を作る（src/js.rs と同じ値の表し方）
-// ponytail: push は毎回写す（その場で足す最適化は無い）。Async は意味を持たず、all は順に実行する
+// xs = push(xs, x) は src/js.rs と同じく、xs の変数だけが指す配列（$o の印）ならその場で足す。可変な変数を読むと $sh が印を消す
+// ponytail: Async は意味を持たず、all は順に実行する
 // 効果は src/js.rs と同じ形: 処理中の handle の並び $h から腕を探し、resume しない腕の値は例外 $Abort で handle まで戻す
 // トレイトのメソッドは、最初の引数の実行時の型で実装を選ぶ（型引数が戻り値にだけ現れるメソッドは呼べない）
 use "./parser.hb".*
@@ -10,7 +11,33 @@ struct Code { pre: str, val: str }
 // 引数の並び。vals は左から順の値
 struct Codes { pre: str, vals: Vec<str> }
 struct Var { name: str, js: str, mutable: bool }
-struct G { prog: Program, n: Ref<int> }
+// フィールドの名前と、どの構築子でも同じならその位置（違えば -1）
+struct Slot { name: str, k: int }
+struct G { prog: Program, n: Ref<int>, slots: Vec<Slot> }
+
+fn slots_of(prog: Program) -> Vec<Slot> {
+    let mut r: Vec<Slot> = []
+    for d in prog.datas {
+        for c in d.ctors {
+            for i in 0..len(c.fields) {
+                let n = param_name(c.fields[i])
+                let mut found = false
+                let mut next: Vec<Slot> = []
+                for s in r {
+                    if s.name == n { found = true; next = push(next, Slot { name: n, k: if s.k == i { i } else { -1 } }) } else { next = push(next, s) }
+                }
+                r = if found { next } else { push(next, Slot { name: n, k: i }) }
+            }
+        }
+    }
+    r
+}
+
+fn slot(g: G, f: str) -> int {
+    let mut k = -1
+    for s in g.slots { if s.name == f { k = s.k } }
+    k
+}
 
 fn tmp(g: G) -> str {
     write(g.n, read(g.n) + 1)
@@ -83,7 +110,8 @@ partial fn call(g: G, env: Vec<Var>, name: str, xs: Vec<Expr>) -> Code {
                 spill(g, Code { pre: a.pre, val: fname(name) + "(" + a.val + ")" })
             }
             None => {
-                let a = args(g, env, xs)
+                // len は配列を他に渡さないので、印を消さずに読む
+                let a = if name == "len" && len(xs) == 1 { look(g, env, xs[0]) } else { args(g, env, xs) }
                 if is_ctor(g, name) { spill(g, Code { pre: a.pre, val: "{ $c: " + dquote(name) + ", $f: [" + a.val + "] }" }) }
                 else { spill(g, Code { pre: a.pre, val: builtin(name, a.val) }) }
             }
@@ -109,7 +137,7 @@ partial fn gen(g: G, env: Vec<Var>, e: Expr) -> Code {
         EBool(b) => pure(to_str(b)),
         EStr(s) => pure(dquote(s)),
         EVar(n) => match lookup_var(env, n) {
-            Some(v) => pure(v.js),
+            Some(v) => pure(if v.mutable { "$sh(" + v.js + ")" } else { v.js }),
             None => if is_ctor(g, n) { pure("{ $c: " + dquote(n) + ", $f: [] }") } else { pure(fname(n)) },
         },
         EUnary(op, x) => { let c = gen(g, env, x); Code { pre: c.pre, val: "(" + op + c.val + ")" } }
@@ -120,11 +148,17 @@ partial fn gen(g: G, env: Vec<Var>, e: Expr) -> Code {
             let a = args(g, env, xs)
             spill(g, Code { pre: fc.pre + a.pre, val: fc.val + "(" + a.val + ")" })
         }
-        EField(x, f) => { let c = gen(g, env, x); Code { pre: c.pre, val: "$get(" + c.val + ", " + dquote(f) + ")" } }
-        EAssign(n, x) => {
+        EField(x, f) => {
             let c = gen(g, env, x)
+            let k = slot(g, f)
+            Code { pre: c.pre, val: if k >= 0 { c.val + ".$f[" + to_str(k) + "]" } else { "$get(" + c.val + ", " + dquote(f) + ")" } }
+        }
+        EAssign(n, x) => {
             let js = match lookup_var(env, n) { Some(v) => v.js, None => n }
-            Code { pre: c.pre + js + " = " + c.val + ";\n", val: "undefined" }
+            match self_push(g, env, n, x) {
+                Some(y) => { let c = gen(g, env, y); Code { pre: c.pre + js + " = $opush(" + js + ", " + c.val + ");\n", val: "undefined" } }
+                None => { let c = gen(g, env, x); Code { pre: c.pre + js + " = " + c.val + ";\n", val: "undefined" } }
+            }
         }
         EIf(cond, t, els) => {
             let c = gen(g, env, cond)
@@ -145,9 +179,10 @@ partial fn gen(g: G, env: Vec<Var>, e: Expr) -> Code {
         }
         EArray(xs) => { let a = args(g, env, xs); Code { pre: a.pre, val: "[" + a.val + "]" } }
         EIndex(v, i) => {
-            let a = args(g, env, [v, i])
+            let a = look(g, env, v)
+            let ic = gen(g, env, i)
             let r = tmp(g)
-            Code { pre: a.pre + "const " + r + " = $index(" + a.val + ");\n", val: r }
+            Code { pre: a.pre + ic.pre + "const " + r + " = $index(" + a.val + ", " + ic.val + ");\n", val: r }
         }
         EMatch(x, arms) => match_code(g, env, x, arms),
         EHandle(x, arms) => {
@@ -182,7 +217,7 @@ partial fn gen(g: G, env: Vec<Var>, e: Expr) -> Code {
             }
             let b = gen(g, env2, body)
             let f = "(" + join(names, ", ") + ") => {\n" + b.pre + "return " + b.val + ";\n}"
-            spill(g, pure("((" + join(muts, ", ") + ") => " + f + ")(" + join(muts, ", ") + ")"))
+            spill(g, pure("((" + join(muts, ", ") + ") => " + f + ")(" + join(map(muts, fn(m: str) -> str { "$sh(" + m + ")" }), ", ") + ")"))
         }
         EFor(x, a, b, body) => {
             let js = tmp(g)
@@ -210,6 +245,28 @@ fn fname(n: str) -> str {
     for c in chars(n) { s = s + (if c == "." || c == "#" || c == "{" || c == "}" { "$" } else { c }) }
     s
 }
+
+// 印を消さずに読む。変数でなければ普通に生成する
+partial fn look(g: G, env: Vec<Var>, e: Expr) -> Code {
+    match e {
+        EVar(n) => match lookup_var(env, n) { Some(v) => pure(v.js), None => gen(g, env, e) },
+        _ => gen(g, env, e),
+    }
+}
+
+// n = push(n, y) の y。n は可変な局所変数で、push は組み込み
+fn self_push(g: G, env: Vec<Var>, n: str, x: Expr) -> Option<Expr> {
+    match x {
+        ECall(f, xs) => if f == "push" && len(xs) == 2 && !is_some_v(lookup_var(env, f)) && !is_some_f(find_fn(g, f)) {
+            match xs[0] { EVar(m) => if m == n && is_mut(lookup_var(env, n)) { Some(xs[1]) } else { None }, _ => None }
+        } else { None },
+        _ => None,
+    }
+}
+
+fn is_some_v(o: Option<Var>) -> bool { match o { Some(v) => true, None => false } }
+fn is_some_f(o: Option<Func>) -> bool { match o { Some(f) => true, None => false } }
+fn is_mut(o: Option<Var>) -> bool { match o { Some(v) => v.mutable, None => false } }
 
 fn param_name(e: Expr) -> str { match e { EParam(n, t) => n, _ => "" } }
 
@@ -317,6 +374,8 @@ fn runtime() -> str {
     "function $print(v) { console.log($str(v)); }\n" +
     "function $len(v) { return BigInt(typeof v === \"string\" ? [...v].length : v.length); }\n" +
     "function $push(v, x) { return [...v, x]; }\n" +
+    "function $sh(v) { if (v !== null && v !== undefined && v.$o) v.$o = false; return v; }\n" +
+    "function $opush(v, x) { if (v.$o) { v.push(x); return v; } const r = [...v, x]; r.$o = true; return r; }\n" +
     "function $write(r, x) { r.v = x; }\n" +
     "function $get(v, f) { return v.$f[$fields[v.$c].indexOf(f)]; }\n" +
     "function $index(v, i) { return v[Number(i)]; }\n" +
@@ -346,7 +405,7 @@ fn runtime() -> str {
 
 // プログラム全体の JavaScript。最後に main を呼ぶ
 partial fn compile(prog: Program) -> str {
-    let g = G { prog: prog, n: new_ref(0) }
+    let g = G { prog: prog, n: new_ref(0), slots: slots_of(prog) }
     let mut out = runtime()
     let mut fields: Vec<str> = []
     let mut types: Vec<str> = []
