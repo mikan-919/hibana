@@ -530,7 +530,7 @@ web.serve(8080, app)    // hibana js examples/server.hb > server.mjs && node ser
 
 ### セルフホスト
 
-`selfhost/` に hibana で書いたコンパイラーがあります。`node` で動かす JavaScript にしてから使い、`compile.hb` が入口です（`hibana js selfhost/compile.hb > c.mjs` の後に `node c.mjs 入力.hb`）。
+`selfhost/` に hibana で書いたコンパイラーがあります。言語が実用の規模のプログラムを書けることの実証で、本流は Rust の実装です（selfhost に Rust 版の全機能を移す予定はありません）。`node` で動かす JavaScript にしてから使い、`compile.hb` が入口です（`hibana js selfhost/compile.hb > c.mjs` の後に `node c.mjs 入力.hb`）。
 
 | ファイル | 内容 |
 |---|---|
