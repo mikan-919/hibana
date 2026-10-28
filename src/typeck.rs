@@ -893,7 +893,7 @@ struct Scope {
     facts: Vec<V>,
 }
 
-// ponytail: エラーに行番号が無い。AST にスパンを持たせる時に追加する
+// ponytail: 行番号は式（Expr::At）と関数の宣言（Fn.span）にだけ付く。match のパターンと data・trait・impl の宣言にはスパンが無いので、その中の誤りは近くの式か関数の行になるか、行番号が付かない。足す時は Pattern と Data に Span を持たせ、ここで使う
 struct Ck<'a> {
     norm: Norm<'a>,
     scopes: Vec<Scope>,
@@ -1313,6 +1313,10 @@ fn is_impl(name: &str) -> bool {
 }
 
 pub fn check(prog: &Program) -> R<Info> {
+    check_prog(prog).map_err(Error::with_line)
+}
+
+fn check_prog(prog: &Program) -> R<Info> {
     let fns = &prog.fns;
     let mut ck = Ck {
         norm: Norm::new(),
@@ -1405,76 +1409,10 @@ pub fn check(prog: &Program) -> R<Info> {
         _ => return Err("引数なしの main 関数が必要".into()),
     }
     for f in fns {
-        let r = |e: &str| format!("関数 {}: {e}", f.name);
-        ck.scopes = vec![Scope::default()];
-        ck.cur_fn = None;
-        for (n, t) in &f.params {
-            let ty = ck.eval_type(t).ctx(|e| r(&format!("引数 {n}: {e}")))?;
-            let id = ck.norm.fresh();
-            ck.bind(n, ty, neu(Neu::Var(id, n.clone())), false).ctx(r)?;
-        }
-        ck.avail = Vec::new();
-        for e in &f.effects {
-            let mut env = ck.val_env();
-            for v in ck.effect_inst(e, &mut env).ctx(r)? {
-                let k = eff_key(&v);
-                if f.name == "main" && k != "Async" {
-                    return Err(r(
-                        "main 関数が起こせる効果は Async だけ（ほかの効果は handle で処理する）",
-                    )
-                    .into());
-                }
-                ck.avail.push((k, Some(v)));
-            }
-        }
-        ck.ret = match &f.ret {
-            Some(t) => ck.eval_type(t).ctx(|e| r(&format!("戻り値: {e}")))?,
-            None => prim("unit"),
-        };
-        // never はどの型とも一致するので、本体が戻らないこと（never の式で終わり、return を含まない）を確かめる
-        let never_fn = f.op.is_none() && ck.ret == prim("never");
-        if never_fn {
-            let mut ret_found = false;
-            let tail = f.body.tail.iter().map(|t| &**t);
-            for e in f.body.stmts.iter().map(|s| match s { Stmt::Let { init, .. } => init, Stmt::Expr(e) => e }).chain(tail) {
-                walk(e, &mut |x| ret_found |= matches!(x, Expr::Return(_)));
-            }
-            if ret_found {
-                return Err(r("戻り値が never の関数では return を使えない").into());
-            }
-        }
-        if !f.alias && matches!(base(&ck.ret), V::Univ(_)) {
-            return Err(r("関数は型を返せない。型を計算するなら type で定義する").into());
-        }
-        if f.partial && ck.is_proof_type(&ck.ret) {
-            return Err(r("partial fn は証明の型（添字付きの型族）を返せない。止まらない関数で偽の証明が作れてしまうため").into());
-        }
-        // extern の関数と効果の操作は本体が無いので、型の宣言だけを検査する
-        if f.js.is_some() || f.op.is_some() {
-            continue;
-        }
-        ck.cur_fn = (!f.partial).then(|| f.name.clone());
-        ck.cur_params = f
-            .params
-            .iter()
-            .map(|(n, _)| {
-                let e = ck.lookup(n).unwrap();
-                (e.val.clone(), e.ty.clone())
-            })
-            .collect();
-        ck.decr = vec![true; f.params.len()];
-        let ret = ck.ret.clone();
-        // 戻り値が unit の関数は最後の式の値を捨てる
-        if ret == prim("unit") {
-            ck.block(&f.body).ctx(r)?;
-        } else if never_fn {
-            if ck.block(&f.body).ctx(r)? != prim("never") {
-                return Err(r("戻り値が never の関数は、panic などの戻らない式で終わる必要がある").into());
-            }
-        } else {
-            ck.check_block(&f.body, &ret)
-                .ctx(|e| r(&format!("戻り値: {e}")))?;
-        }
+        check_fn(&mut ck, f).map_err(|e| match f.span {
+            Some(s) => e.at(s),
+            None => e,
+        })?;
     }
     Ok(Info {
         awaits: ck.awaits,
@@ -1484,8 +1422,87 @@ pub fn check(prog: &Program) -> R<Info> {
     })
 }
 
+// 関数 1 つを検査する
+fn check_fn(ck: &mut Ck, f: &Fn) -> R<()> {
+    let r = |e: &str| format!("関数 {}: {e}", f.name);
+    ck.scopes = vec![Scope::default()];
+    ck.cur_fn = None;
+    for (n, t) in &f.params {
+        let ty = ck.eval_type(t).ctx(|e| r(&format!("引数 {n}: {e}")))?;
+        let id = ck.norm.fresh();
+        ck.bind(n, ty, neu(Neu::Var(id, n.clone())), false).ctx(r)?;
+    }
+    ck.avail = Vec::new();
+    for e in &f.effects {
+        let mut env = ck.val_env();
+        for v in ck.effect_inst(e, &mut env).ctx(r)? {
+            let k = eff_key(&v);
+            if f.name == "main" && k != "Async" {
+                return Err(r(
+                    "main 関数が起こせる効果は Async だけ（ほかの効果は handle で処理する）",
+                )
+                .into());
+            }
+            ck.avail.push((k, Some(v)));
+        }
+    }
+    ck.ret = match &f.ret {
+        Some(t) => ck.eval_type(t).ctx(|e| r(&format!("戻り値: {e}")))?,
+        None => prim("unit"),
+    };
+    // never はどの型とも一致するので、本体が戻らないこと（never の式で終わり、return を含まない）を確かめる
+    let never_fn = f.op.is_none() && ck.ret == prim("never");
+    if never_fn {
+        let mut ret_found = false;
+        let tail = f.body.tail.iter().map(|t| &**t);
+        for e in f.body.stmts.iter().map(|s| match s { Stmt::Let { init, .. } => init, Stmt::Expr(e) => e }).chain(tail) {
+            walk(e, &mut |x| ret_found |= matches!(x, Expr::Return(_)));
+        }
+        if ret_found {
+            return Err(r("戻り値が never の関数では return を使えない").into());
+        }
+    }
+    if !f.alias && matches!(base(&ck.ret), V::Univ(_)) {
+        return Err(r("関数は型を返せない。型を計算するなら type で定義する").into());
+    }
+    if f.partial && ck.is_proof_type(&ck.ret) {
+        return Err(r("partial fn は証明の型（添字付きの型族）を返せない。止まらない関数で偽の証明が作れてしまうため").into());
+    }
+    // extern の関数と効果の操作は本体が無いので、型の宣言だけを検査する
+    if f.js.is_some() || f.op.is_some() {
+        return Ok(());
+    }
+    ck.cur_fn = (!f.partial).then(|| f.name.clone());
+    ck.cur_params = f
+        .params
+        .iter()
+        .map(|(n, _)| {
+            let e = ck.lookup(n).unwrap();
+            (e.val.clone(), e.ty.clone())
+        })
+        .collect();
+    ck.decr = vec![true; f.params.len()];
+    let ret = ck.ret.clone();
+    // 戻り値が unit の関数は最後の式の値を捨てる
+    if ret == prim("unit") {
+        ck.block(&f.body).ctx(r)?;
+    } else if never_fn {
+        if ck.block(&f.body).ctx(r)? != prim("never") {
+            return Err(r("戻り値が never の関数は、panic などの戻らない式で終わる必要がある").into());
+        }
+    } else {
+        ck.check_block(&f.body, &ret)
+            .ctx(|e| r(&format!("戻り値: {e}")))?;
+    }
+    Ok(())
+}
+
 // マクロ本体を、束縛名を syn 型の変数として検査する。値は syn 型でなければならない
 pub fn check_macro(b: &Block, params: &Kinds, rules: &HashMap<String, Kinds>) -> R<()> {
+    check_macro_body(b, params, rules).map_err(Error::with_line)
+}
+
+fn check_macro_body(b: &Block, params: &Kinds, rules: &HashMap<String, Kinds>) -> R<()> {
     let mut ck = Ck {
         norm: Norm::new(),
         scopes: vec![Scope::default()],

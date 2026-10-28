@@ -98,6 +98,8 @@ pub struct Block {
 
 #[derive(Debug)]
 pub struct Fn {
+    // 宣言の位置（partial fn 名 まで）。利用者が書いた関数だけ Some。展開で作った関数は呼び出し位置
+    pub span: Option<Span>,
     pub name: String,
     pub params: Vec<(String, Expr)>,
     // None は unit
@@ -623,7 +625,8 @@ fn parse_toks(src: &str, toks: Vec<Token>, round: usize) -> R<Program> {
         let mut toks = p.toks.clone();
         for (s, e, k, rec) in decl_macros.into_iter().rev() {
             p.pos = e;
-            let out = p.expand_decl(k, rec)?;
+            let site = p.span_of(s);
+            let out = p.expand_decl(k, rec, site)?;
             toks.splice(s..e, out);
         }
         return parse_toks(src, toks, round + 1);
@@ -686,6 +689,7 @@ fn parse_toks(src: &str, toks: Vec<Token>, round: usize) -> R<Program> {
         let name = qual(&module, &format!("test#{k}"));
         prog.tests.push((label, name.clone()));
         prog.fns.push(Fn {
+            span: Some(p.toks[s].site.unwrap_or(p.toks[s].span)),
             name,
             params: vec![],
             ret: None,
@@ -943,10 +947,13 @@ impl Parser<'_> {
     }
 
     fn func(&mut self) -> R<Fn> {
+        let start = self.pos;
         let partial = self.eat("partial");
         self.expect("fn")?;
         let module = self.cur_module();
         let name = qual(&module, &self.ident()?);
+        // 行番号の表示に使う。partial fn 名 までを指す
+        let span = self.span_of(start);
         // ジェネリック引数は引数の先頭に置き、呼び出しで省けるようにする
         let mut params = if self.eat("<") {
             self.type_params()?
@@ -968,6 +975,7 @@ impl Parser<'_> {
         let n_insts = insts.len();
         params.extend(insts);
         Ok(Fn {
+            span: Some(span),
             name,
             params,
             ret,
@@ -1032,6 +1040,7 @@ impl Parser<'_> {
                 None
             };
             ops.push(Fn {
+                span: None,
                 name: op,
                 params: ps,
                 ret,
@@ -1116,6 +1125,7 @@ impl Parser<'_> {
             let vars: Vec<Expr> = ps.iter().map(|p| Expr::Var(p.0.clone())).collect();
             let field = Expr::Field(Box::new(Expr::Var("inst#0".into())), m.clone());
             let mk = |name: String, body: Block| Fn {
+                span: None,
                 name,
                 params: with_inst(&ps),
                 ret: Some(ret.clone()),
@@ -1143,6 +1153,7 @@ impl Parser<'_> {
             self.eat(",");
         }
         fns.push(Fn {
+            span: None,
             name: format!("{name}#get"),
             params: with_inst(&[]),
             ret: Some(me.clone()),
@@ -1210,6 +1221,7 @@ impl Parser<'_> {
         let mut params = generics.clone();
         params.extend(cons.iter().cloned());
         fns.push(Fn {
+            span: None,
             name: base,
             params,
             ret: Some(head),
@@ -1257,6 +1269,7 @@ impl Parser<'_> {
             };
             // 中身が分からないので、停止性は検査せず、型の計算でも展開しない
             fns.push(Fn {
+                span: None,
                 name,
                 params,
                 ret,
@@ -1395,6 +1408,7 @@ impl Parser<'_> {
             };
             let ret = Some(Expr::Var("Type".into()));
             return Ok(TypeDecl::Alias(Fn {
+                span: None,
                 name,
                 params,
                 ret,
@@ -1548,7 +1562,7 @@ impl Parser<'_> {
     }
 
     fn wrap(&self, start: usize, e: Expr) -> Expr {
-        Expr::At(self.span_from(start), Box::new(e))
+        Expr::At(self.span_of(start), Box::new(e))
     }
 
     fn unary(&mut self) -> R<Expr> {

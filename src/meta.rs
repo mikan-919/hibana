@@ -874,13 +874,17 @@ impl Parser<'_> {
     // 文の位置（stmt）か式の位置で、全マクロを照合する
     pub fn try_macros(&mut self, stmt: bool) -> R<Option<Expr>> {
         let g = self.g.clone();
+        let start = self.pos;
         let Some((k, rec)) = self.find_macro(|m| m.stmt == stmt && !m.decl)? else {
             return Ok(None);
         };
         let m = &g.macros[k];
         match &m.body {
             None => Ok(Some(Expr::Macro(m.name.clone(), Box::new(rec)))),
-            Some(_) => self.expand(m, rec).map(Some),
+            Some(_) => {
+                let site = self.span_of(start);
+                self.expand(m, rec, site).map(Some)
+            }
         }
     }
 
@@ -890,13 +894,13 @@ impl Parser<'_> {
     }
 
     // 宣言のマクロを展開したトークン列。self.pos は呼び出しの直後
-    pub fn expand_decl(&self, k: usize, rec: Node) -> R<Vec<Token>> {
+    pub fn expand_decl(&self, k: usize, rec: Node, site: Span) -> R<Vec<Token>> {
         let g = self.g.clone();
         let m = &g.macros[k];
         if m.body.is_none() {
             return Err(format!("マクロ {} の展開コードが無い", m.name).into());
         }
-        self.expand_toks(m, rec)
+        self.expand_toks(m, rec, site)
     }
 
     // pred に合うマクロを照合する。一つだけ合えば、その番号と照合結果を返し、self.pos を直後に進める
@@ -991,9 +995,9 @@ impl Parser<'_> {
 
     // ponytail: 衛生的でない。展開コード内の let は呼び出し側の変数と衝突しうる
     // ponytail: 展開のたびにトークン列全体を複製する。遅ければ Parser.toks を Rc にする
-    fn expand(&self, m: &Macro, rec: Node) -> R<Expr> {
+    fn expand(&self, m: &Macro, rec: Node, site: Span) -> R<Expr> {
         let wrap = |e: &str| format!("マクロ {} の展開: {e}", m.name);
-        let toks = self.expand_toks(m, rec)?;
+        let toks = self.expand_toks(m, rec, site)?;
         let end = self.toks[self.pos].clone();
         let eof = Token {
             tok: Tok::Eof,
@@ -1038,7 +1042,7 @@ impl Parser<'_> {
     }
 
     // マクロ本体を実行し、展開結果をトークン列にする
-    fn expand_toks(&self, m: &Macro, rec: Node) -> R<Vec<Token>> {
+    fn expand_toks(&self, m: &Macro, rec: Node, site: Span) -> R<Vec<Token>> {
         if self.depth >= 64 {
             return Err(format!("マクロ {} の展開が深すぎる", m.name).into());
         }
@@ -1071,7 +1075,8 @@ impl Parser<'_> {
         let end = self.toks[self.pos].clone();
         let mut toks = Vec::new();
         emit(&v, &end, &mut toks).ctx(wrap)?;
-        Ok(toks)
+        // 展開したコードの位置は呼び出し位置にする。定義側の位置は利用者の見る場所と違う
+        Ok(toks.into_iter().map(|t| Token { site: Some(site), ..t }).collect())
     }
 
     fn could_start(&self, (f, nullable): &Firsts) -> bool {
@@ -1099,6 +1104,16 @@ impl Parser<'_> {
             s
         };
         Span { start: s, end }
+    }
+
+    // start から今までの位置。マクロの展開で作ったトークンが端にあれば、その呼び出し位置を使う
+    // ponytail: 端のどちらかが展開のトークンなら、範囲全体を呼び出し位置にする。途中だけが展開の式は、定義側の位置が混じる。範囲の始めと終わりを別々に写せば正確になる
+    pub fn span_of(&self, start: usize) -> Span {
+        let end = self.pos.saturating_sub(1).max(start);
+        self.toks[start]
+            .site
+            .or(self.toks[end].site)
+            .unwrap_or_else(|| self.span_from(start))
     }
 
     // 選択枝を順に試し、最初に一致した枝を採る

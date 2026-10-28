@@ -692,6 +692,14 @@ fn main() {
         assert_eq!(e.span, Some((17, 1)), "{e:?}");
     }
 
+    // 型エラーのメッセージには、誤った式の行を「行 N: 」で前に付ける（式は 3 行目から始まる）
+    #[test]
+    fn type_error_has_line() {
+        let src = "fn main() -> int {\n    let y = 1\n    let z: int = y +\n        \"s\"\n    z\n}\n";
+        let e = out(src).unwrap_err();
+        assert!(e.msg.starts_with("行 3: 関数 main: "), "{e:?}");
+    }
+
     // 実行時エラーの位置。インタプリタはエラーに位置を付け、JS と C はメッセージに行と列を足す
     #[test]
     fn runtime_error_positions() {
