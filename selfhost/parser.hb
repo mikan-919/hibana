@@ -579,7 +579,7 @@ fn concat_f(a: Vec<Func>, b: Vec<Func>) -> Vec<Func> {
 // ponytail: 親のトレイトの検査は無い
 partial fn trait_decl(p: P) -> Vec<Func> {
     expect(p, "trait")
-    take_ident(p)
+    let tname = take_ident(p)
     let tps = type_params(p)
     while !eat(p, "{") { advance(p) }
     let mut fs: Vec<Func> = []
@@ -594,7 +594,10 @@ partial fn trait_decl(p: P) -> Vec<Func> {
         if eat(p, "{") { fs = push(fs, Func { name: m + "#default", implicit: len(tps), is_partial: true, params: concat(tps, ps), ret: ret, effs: effs, body: block(p), kind: "default" }) }
         eat(p, ",")
     }
-    fs
+    // トレイトの名前とメソッド名。<A: Trait> の制約を検査するのに使う（実行時には出さない）
+    let mut ms: Vec<Expr> = []
+    for f in fs { if f.kind == "trait" { ms = push(ms, EParam(f.name, None)) } }
+    push(fs, Func { name: tname, implicit: 0, is_partial: true, params: ms, ret: None, effs: [], body: EBlock([], None), kind: "traitdef" })
 }
 
 // effect Name<A> { fn 操作(引数) -> 型 ... }。効果は構築子の無い型、操作は効果の型引数をジェネリック引数に持つ関数

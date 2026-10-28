@@ -801,6 +801,9 @@ fn main() {
             "effect Log { fn log(m: str) }\nfn ap(f: (str) -> unit) { f(\"a\") }\nfn main() { handle ap(fn(x) { log(x) }) { log(m) => resume() } }",
             "effect Log { fn log(m: str) }\nfn f() ! Log { log(\"a\") }\nfn main() { handle f() { log(m) => resume(1) } }",
             "effect Log { fn log(m: str) }\nfn f() ! Log { log(\"a\") }\nfn main() { handle f() { log(m) => resume() } }",
+            "trait D<A> { fn d(x: A) -> str }\nimpl D<int> { fn d(x: int) -> str { \"i\" } }\nfn tw<A: D>(x: A) -> str { d(x) + d(x) }\nfn main() { print(tw(1)) }",
+            "trait D<A> { fn d(x: A) -> str }\nimpl D<int> { fn d(x: int) -> str { \"i\" } }\nfn tw<A: D>(x: A) -> str { d(x) + d(x) }\nfn main() { print(tw(\"s\")) }",
+            "trait D<A> { fn d(x: A) -> str }\nimpl D<int> { fn d(x: int) -> str { \"i\" } }\nfn main() { print(d(true)) }",
         ];
         for (i, c) in cases.iter().enumerate() {
             let p = tmp.join(format!("case{i}.hb"));

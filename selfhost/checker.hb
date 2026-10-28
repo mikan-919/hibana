@@ -37,7 +37,12 @@ struct C {
     resume: Ref<Ty>,
     // 検査中の関数が宣言した効果。起きた効果の型引数はこれから決める（need() の T など）
     declared: Ref<Vec<Ty>>,
+    // 関数の終わりで impl の有無を確かめる制約
+    bounds: Ref<Vec<Bound>>,
 }
+
+// ty の型にメソッドのどれかの impl が要る。call は トレイトのメソッドの呼び出し（既定の実装でもよい）
+struct Bound { methods: Vec<str>, ty: Ty, call: bool }
 
 fn err(c: C, msg: str) -> Ty {
     write(c.errs, push(read(c.errs), "関数 " + read(c.fname) + ": " + msg))
@@ -264,17 +269,60 @@ fn data_binds(c: C, d: Data) -> Vec<Bind> {
 }
 
 // 関数の型。ジェネリック引数は新しい型変数にする（明示した型引数があれば targs）
+fn find_traitdef(c: C, name: str) -> Option<Func> {
+    let mut r: Option<Func> = None
+    for f in c.prog.fns { if f.kind == "traitdef" && f.name == name { r = Some(f) } }
+    r
+}
+
+// <A: T1 + T2> の各トレイトを制約にする
+partial fn add_bounds(c: C, t: Expr, ty: Ty) {
+    match t {
+        EBinary(op, a, b) => { add_bounds(c, a, ty); add_bounds(c, b, ty) },
+        EVar(n) => match find_traitdef(c, n) {
+            Some(f) => write(c.bounds, push(read(c.bounds), Bound { methods: map(f.params, param_name), ty: ty, call: false })),
+            None => {},
+        },
+        _ => {},
+    }
+}
+
+fn key_of(c: C, t: Ty) -> str {
+    match walk(c, t) { YInt => "int", YStr => "str", YBool => "bool", YVec(x) => "Vec", YData(n, xs) => n, _ => "" }
+}
+
+fn has_impl(c: C, ms: Vec<str>, key: str, call: bool) -> bool {
+    let mut ok = false
+    for f in c.prog.fns {
+        for m in ms {
+            if (f.kind == "impl" && f.name == m + "#" + key) || (call && f.kind == "default" && f.name == m + "#default") { ok = true }
+        }
+    }
+    ok
+}
+
+// ponytail: 型変数のまま残った型と YParam は検査しない。制約は「メソッドのどれかの impl がある」までしか見ない
+partial fn check_bounds(c: C) {
+    for b in read(c.bounds) {
+        let k = key_of(c, b.ty)
+        if k != "" && !has_impl(c, b.methods, k, b.call) { err(c, "型 " + show_ty(c, b.ty) + " に " + join_s(b.methods, "・") + " の impl が無い"); }
+    }
+}
+
 partial fn inst_fn(c: C, f: Func, targs: Vec<Ty>) -> Ty {
     let mut bs: Vec<Bind> = []
     let mut ps: Vec<Ty> = []
     for i in 0..len(f.params) {
         let p = f.params[i]
         if i < f.implicit {
-            bs = push(bs, Bind { name: param_name(p), ty: if i < len(targs) { targs[i] } else { fresh(c) } })
+            let bt = if i < len(targs) { targs[i] } else { fresh(c) }
+            bs = push(bs, Bind { name: param_name(p), ty: bt })
+            match param_ty(p) { Some(t) => add_bounds(c, t, bt), None => {} }
         } else {
             ps = push(ps, match param_ty(p) { Some(t) => ty_of(c, bs, t), None => fresh(c) })
         }
     }
+    if f.kind == "trait" { for b in bs { write(c.bounds, push(read(c.bounds), Bound { methods: [f.name], ty: b.ty, call: true })) } }
     YFn(ps, match f.ret { Some(t) => ty_of(c, bs, t), None => YUnit }, map(f.effs, fn(x: Expr) -> Ty { ty_of(c, bs, x) }))
 }
 
@@ -580,6 +628,7 @@ partial fn block_ty(c: C, env0: Vec<Local>, stmts: Vec<Expr>, tail: Option<Expr>
 
 partial fn check_fn(c: C, f: Func) {
     write(c.fname, f.name)
+    write(c.bounds, [])
     write(c.subst, [])
     let mut bs: Vec<Bind> = []
     let mut env: Vec<Local> = []
@@ -600,13 +649,14 @@ partial fn check_fn(c: C, f: Func) {
     let bt = synth(c, env, f.body)
     match r { YUnit => {}, _ => expect_ty(c, r, bt, "戻り値") }
     for g in expand(c, read(c.raised)) { if !covers(c, ws, g) { err(c, "効果 " + show_ty(c, g) + " を処理していない（! で宣言するか handle で処理する）"); } }
+    check_bounds(c)
 }
 
 // 型エラーの並び（無ければ空）
 partial fn check(prog: Program) -> Vec<str> {
-    let c = C { prog: prog, subst: new_ref([]), errs: new_ref([]), fname: new_ref(""), ret: new_ref(YUnit), tparams: new_ref([]), raised: new_ref([]), resume: new_ref(YUnit), declared: new_ref([]) }
+    let c = C { prog: prog, subst: new_ref([]), errs: new_ref([]), fname: new_ref(""), ret: new_ref(YUnit), tparams: new_ref([]), raised: new_ref([]), resume: new_ref(YUnit), declared: new_ref([]), bounds: new_ref([]) }
     // トレイトのメソッドと JS の関数は本体が無い
-    for f in prog.fns { if !is_alias(f) && f.kind != "trait" && f.kind != "op" && !starts_with(f.kind, "js:") { check_fn(c, f) } }
+    for f in prog.fns { if !is_alias(f) && f.kind != "trait" && f.kind != "traitdef" && f.kind != "op" && !starts_with(f.kind, "js:") { check_fn(c, f) } }
     read(c.errs)
 }
 

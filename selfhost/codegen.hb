@@ -439,7 +439,7 @@ partial fn compile(prog: Program) -> str {
             let mut js = ""
             for x in split(f.name, ".") { js = x }
             out = out + "function " + fname(f.name) + "(...a) { return $js" + to_str(k) + "." + js + "(...a); }\n"
-        } else if !is_alias(f) {
+        } else if !is_alias(f) && f.kind != "traitdef" {
             let mut env: Vec<Var> = []
             let mut names: Vec<str> = []
             for i in 0..len(f.params) {

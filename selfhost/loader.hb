@@ -163,7 +163,8 @@ partial fn resolve_fn(r: R, f: Func) -> Func {
     } else if f.kind == "default" { full_name(r.names, slice(f.name, 0, len(f.name) - 8)) + "#default" }
     else if starts_with(f.kind, "js:") { f.name } else { full_name(r.names, f.name) }
     let env = param_names(f.params)
-    Func { name: name, implicit: f.implicit, is_partial: f.is_partial, params: rparams(r, [], f.params), ret: ro(r, env, f.ret), effs: rs(r, env, f.effs), body: re(r, env, f.body), kind: f.kind }
+    let ps = if f.kind == "traitdef" { map(f.params, fn(p: Expr) -> Expr { match p { EParam(n, t) => EParam(full_name(r.names, n), None), _ => p } }) } else { rparams(r, [], f.params) }
+    Func { name: name, implicit: f.implicit, is_partial: f.is_partial, params: ps, ret: ro(r, env, f.ret), effs: rs(r, env, f.effs), body: re(r, env, f.body), kind: f.kind }
 }
 
 partial fn resolve_data(r: R, d: Data) -> Data {
