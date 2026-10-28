@@ -108,6 +108,11 @@ function $opush(v, x) {
   if (v.$o) { v.push(x); return v; }
   const c = [...v, x]; c.$o = true; return c;
 }
+function $set(v, i, x) { const c = [...v]; c[Number(i)] = x; return c; }
+function $oset(v, i, x) {
+  if (v.$o) { v[Number(i)] = x; return v; }
+  const c = [...v]; c[Number(i)] = x; c.$o = true; return c;
+}
 function $chars(s) { return [...s]; }
 function $code(s) { return s.length ? BigInt(s.codePointAt(0)) : -1n; }
 function $panic(m) { throw new Error(m); }
@@ -587,6 +592,7 @@ impl Gen<'_> {
                     "read" => format!("{}.v", vs[0]),
                     "write" => format!("($w = {}, $w.v = {}, undefined)", vs[0], vs[1]),
                     "push" => format!("[...{}, {}]", vs[0], vs[1]),
+                    "set_at" => format!("$set({}, {}, {})", vs[0], vs[1], vs[2]),
                     "all" => wait(true, format!("$all({})", vs[0])),
                     "print" => format!("$print({})", vs[0]),
                     "to_str" => format!("$str({})", vs[0]),
@@ -643,8 +649,12 @@ impl Gen<'_> {
             }
             Expr::Assign(n, x) => {
                 let js = self.lookup(n).expect("型検査済み").0.clone();
-                let v = match x.self_push(n) {
-                    Some(e) if !self.fns.contains_key("push") => format!("$opush({js}, {})", self.expr(e)),
+                let v = match (x.self_push(n), x.self_set(n)) {
+                    (Some(e), _) if !self.fns.contains_key("push") => format!("$opush({js}, {})", self.expr(e)),
+                    (_, Some((i, e))) if !self.fns.contains_key("set_at") => {
+                        let i = self.expr(i);
+                        format!("$oset({js}, {i}, {})", self.expr(e))
+                    }
                     _ => self.expr(x),
                 };
                 self.push(format!("{js} = {v};"));

@@ -566,6 +566,15 @@ impl Interp<'_> {
                     let mut xs = xs.to_vec();
                     xs.push(x);
                     Value::Arr(Rc::new(xs))
+                } else if name == "set_at" && !self.fns.contains_key(name.as_str()) {
+                    let x = vs.pop().unwrap();
+                    let i = int(vs.pop().unwrap());
+                    let Value::Arr(xs) = vs.pop().unwrap() else {
+                        unreachable!("型検査済み")
+                    };
+                    let mut xs = xs.to_vec();
+                    xs[i as usize] = x;
+                    Value::Arr(Rc::new(xs))
                 } else if name == "resume" {
                     // 腕の値として返し、perform が操作の戻り値にする
                     Value::Data(Rc::new((
@@ -671,6 +680,15 @@ impl Interp<'_> {
                 let slot = env.iter_mut().rev().find_map(|s| s.get_mut(name)).unwrap();
                 let Value::Arr(xs) = slot else { unreachable!("型検査済み") };
                 Rc::make_mut(xs).push(v);
+                Value::Unit
+            }
+            Expr::Assign(name, x) if x.self_set(name).is_some() && !self.fns.contains_key("set_at") => {
+                let (i, e) = x.self_set(name).unwrap();
+                let i = int(self.expr(i, env)?);
+                let v = self.expr(e, env)?;
+                let slot = env.iter_mut().rev().find_map(|s| s.get_mut(name)).unwrap();
+                let Value::Arr(xs) = slot else { unreachable!("型検査済み") };
+                Rc::make_mut(xs)[i as usize] = v;
                 Value::Unit
             }
             Expr::Assign(name, x) => {

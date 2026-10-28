@@ -231,6 +231,20 @@ static V h_opush(V v, V x) {
   p->items[p->n++] = x;
   V r = { .tag = T_ARR }; r.a = p; return r;
 }
+static V h_vset(V v, V i, V x) {
+  V* items = alloc(v.a->n * sizeof(V));
+  memcpy(items, v.a->items, v.a->n * sizeof(V));
+  items[i.i] = x;
+  return mk_arr(v.a->n, items);
+}
+static V h_oset(V v, V i, V x) {
+  if (v.a->own) { v.a->items[i.i] = x; return v; }
+  int64_t cap = v.a->n + 4;
+  Arr* p = alloc(sizeof(Arr) + cap * sizeof(V)); p->n = v.a->n; p->cap = cap; p->own = 1;
+  memcpy(p->items, v.a->items, p->n * sizeof(V));
+  p->items[i.i] = x;
+  V r = { .tag = T_ARR }; r.a = p; return r;
+}
 // all。並行の処理が無いので順に実行する
 static V h_all(V fs) {
   V* out = alloc(fs.a->n * sizeof(V));
@@ -554,6 +568,7 @@ impl Gen<'_> {
                 let v = match name.as_str() {
                     "all" => format!("h_all({})", vs[0]),
                     "push" => format!("h_vpush({}, {})", vs[0], vs[1]),
+                    "set_at" => format!("h_vset({}, {}, {})", vs[0], vs[1], vs[2]),
                     "new_ref" => format!("mk_ref({})", vs[0]),
                     "read" => format!("(*{}.r)", vs[0]),
                     "write" => format!("h_write({}, {})", vs[0], vs[1]),
@@ -605,8 +620,12 @@ impl Gen<'_> {
             }
             Expr::Assign(n, x) => {
                 let c = self.lookup(n).expect("型検査済み").clone();
-                let v = match x.self_push(n) {
-                    Some(e) if !self.fns.contains_key("push") => format!("h_opush({c}, {})", self.expr(e)),
+                let v = match (x.self_push(n), x.self_set(n)) {
+                    (Some(e), _) if !self.fns.contains_key("push") => format!("h_opush({c}, {})", self.expr(e)),
+                    (_, Some((i, e))) if !self.fns.contains_key("set_at") => {
+                        let i = self.expr(i);
+                        format!("h_oset({c}, {i}, {})", self.expr(e))
+                    }
                     _ => self.expr(x),
                 };
                 self.push(format!("{c} = {v};"));

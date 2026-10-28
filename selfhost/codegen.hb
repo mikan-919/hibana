@@ -374,6 +374,7 @@ fn runtime() -> str {
     "function $print(v) { console.log($str(v)); }\n" +
     "function $len(v) { return BigInt(typeof v === \"string\" ? [...v].length : v.length); }\n" +
     "function $push(v, x) { return [...v, x]; }\n" +
+    "function $set_at(v, i, x) { const c = [...v]; c[Number(i)] = x; return c; }\n" +
     "function $sh(v) { if (v !== null && v !== undefined && v.$o) v.$o = false; return v; }\n" +
     "function $opush(v, x) { if (v.$o) { v.push(x); return v; } const r = [...v, x]; r.$o = true; return r; }\n" +
     "function $write(r, x) { r.v = x; }\n" +

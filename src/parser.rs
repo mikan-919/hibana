@@ -61,6 +61,16 @@ impl Expr {
         }
     }
 
+    // x = set_at(x, i, e) の形なら (i, e)。値を写さずにその場で書き換えられる
+    pub fn self_set(&self, x: &str) -> Option<(&Expr, &Expr)> {
+        match self.peel() {
+            Expr::Call(n, a) if n == "set_at" && a.len() == 3 && matches!(a[0].peel(), Expr::Var(v) if v == x) => {
+                Some((&a[1], &a[2]))
+            }
+            _ => None,
+        }
+    }
+
     pub fn peel(&self) -> &Expr {
         match self {
             Expr::At(_, e) => e.peel(),
@@ -416,6 +426,7 @@ fn parse_toks(src: &str, toks: Vec<Token>, round: usize) -> R<Program> {
         "resume",
         "all",
         "push",
+        "set_at",
         "Ref",
         "new_ref",
         "read",

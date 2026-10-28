@@ -424,6 +424,7 @@ enum Shape { Circle(r: int), Rect(w: int, h: int), Dot }
 | `panic(msg)` | `str -> never`。実行時エラーにする |
 | `new_ref(x)` `read(r)` `write(r, x)` | `T -> Ref<T>`、`Ref<T> -> T`、`(Ref<T>, T) -> unit` |
 | `push(v, x)` | `(Vec<T>, T) -> Vec<T>`。`v` の後ろに `x` を足した新しい `Vec`（`v` は変わらない）。`xs = push(xs, x)` の形で、`xs` の配列を他から指していなければ、写さずにその場で足す（平均 O(1)） |
+| `set_at(v, i, x)` | `(Vec<T>, int, T) -> Vec<T>`。`v` の `i` 番目を `x` にした新しい `Vec`。`i` が範囲内であることを添字と同じく証明する。`xs = set_at(xs, i, x)` の形は `push` と同じく、その場で書き換える（O(1)） |
 | `all(fs)` | `(Vec<() -> T ! Async>) -> Vec<T> ! Async`（3.5 節） |
 | `resume(x)` | `handle` の腕の中で、続きを再開する（3.5 節） |
 

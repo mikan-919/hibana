@@ -312,6 +312,7 @@ partial fn builtin(c: C, env: Vec<Local>, name: str, args: Vec<Expr>) -> Option<
     let sig = if name == "print" { Some(YFn([a], YUnit, [])) }
         else if name == "to_str" { Some(YFn([a], YStr, [])) }
         else if name == "push" { Some(YFn([YVec(a), a], YVec(a), [])) }
+        else if name == "set_at" { Some(YFn([YVec(a), YInt, a], YVec(a), [])) }
         else if name == "split" { Some(YFn([YStr, YStr], YVec(YStr), [])) }
         else if name == "starts_with" { Some(YFn([YStr, YStr], YBool, [])) }
         else if name == "slice" { Some(YFn([YStr, YInt, YInt], YStr, [])) }

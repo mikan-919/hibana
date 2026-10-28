@@ -137,6 +137,7 @@ const BUILTINS: &[&str] = &[
     "resume",
     "all",
     "push",
+    "set_at",
     "Ref",
     "new_ref",
     "read",
@@ -248,9 +249,14 @@ fn show(v: &V) -> String {
                     args.iter().map(show).collect::<Vec<_>>().join(", ")
                 )
             }
+            // ジェネリック引数は値の計算では () になるので、先頭の () は表示しない
             Neu::Call(f, args) => format!(
                 "{f}({})",
-                args.iter().map(show).collect::<Vec<_>>().join(", ")
+                args.iter()
+                    .skip_while(|a| matches!(a, V::Unit))
+                    .map(show)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             Neu::App(f, args) => format!(
                 "{}({})",
@@ -1696,6 +1702,17 @@ impl Ck<'_> {
         ]
     }
 
+    // 0 <= i < len(v) を証明する
+    fn in_range(&mut self, v: &Expr, i: &Expr) -> R<()> {
+        let (vv, iv) = (self.eval_value(v)?, self.eval_value(i)?);
+        let len = Norm::len(vv);
+        let goal = Norm::bin("&&", Norm::bin("<=", V::Int(0), iv.clone()), Norm::bin("<", iv, len));
+        if !self.prove(&goal) {
+            return Err(format!("添字の範囲 {} を証明できない", show(&goal)).into());
+        }
+        Ok(())
+    }
+
     fn eval_value(&mut self, e: &Expr) -> R<V> {
         let mut env = self.val_env();
         self.norm.eval_or_opaque(e, &mut env)
@@ -1957,16 +1974,7 @@ impl Ck<'_> {
                     return Err("添字は Vec にだけ使える".into());
                 };
                 self.check(i, &int)?;
-                let (vv, iv) = (self.eval_value(v)?, self.eval_value(i)?);
-                let len = Norm::len(vv);
-                let goal = Norm::bin(
-                    "&&",
-                    Norm::bin("<=", V::Int(0), iv.clone()),
-                    Norm::bin("<", iv, len),
-                );
-                if !self.prove(&goal) {
-                    return Err(format!("添字の範囲 {} を証明できない", show(&goal)).into());
-                }
+                self.in_range(v, i)?;
                 (*a).clone()
             }
             Expr::Refine(b, x, p) => {
@@ -2040,6 +2048,20 @@ impl Ck<'_> {
                     return Err(format!("push は Vec に使う（実際は {}）", show(&t)).into());
                 };
                 self.check(x, a)?;
+                t
+            }
+            // set_at(v, i, x) は v の i 番目を x にした新しい Vec。i は範囲内であることを証明する
+            Expr::Call(name, args) if name == "set_at" && self.lookup(name).is_none() => {
+                let [v, i, x] = args.as_slice() else {
+                    return Err("set_at の引数は3個".into());
+                };
+                let t = base(&self.expr(v)?);
+                let V::VecT(a) = &t else {
+                    return Err(format!("set_at は Vec に使う（実際は {}）", show(&t)).into());
+                };
+                self.check(i, &int)?;
+                self.check(x, a)?;
+                self.in_range(v, i)?;
                 t
             }
             Expr::Call(name, args) if name == "all" && self.lookup(name).is_none() => {
@@ -2694,7 +2716,7 @@ impl Ck<'_> {
             .chain(self.norm.fns.keys().copied())
             .chain(STR_FNS.iter().map(|s| s.0))
             .chain([
-                "print", "len", "push", "to_str", "new_ref", "read", "write", "all", "resume",
+                "print", "len", "push", "set_at", "to_str", "new_ref", "read", "write", "all", "resume",
             ])
             .map(|k| k.to_string());
         let best = names
