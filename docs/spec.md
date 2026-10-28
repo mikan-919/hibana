@@ -528,6 +528,22 @@ web.serve(8080, app)    // hibana js examples/server.hb > server.mjs && node ser
 
 どのバックエンドも、インタプリタと同じ出力になることをテスト（`examples/` のすべてのプログラム）で確かめています。`fib(30)`（約135万回の関数呼び出し）は、ネイティブ 0.007 秒、Node.js 0.11 秒、インタプリタ 1.8 秒でした。
 
+### セルフホスト
+
+`selfhost/` に hibana で書いたコンパイラーがあります。`node` で動かす JavaScript にしてから使い、`compile.hb` が入口です（`hibana js selfhost/compile.hb > c.mjs` の後に `node c.mjs 入力.hb`）。
+
+| ファイル | 内容 |
+|---|---|
+| `lexer.hb` `parser.hb` | 字句解析と構文解析。`derive` の展開と、トレイト・効果の宣言を含む |
+| `loader.hb` | `use`（相対パス・`std`・TypeScript の `export function`）を辿って名前を `モジュール.名前` にする |
+| `checker.hb` | 型検査。ジェネリクス・無名関数の推論・効果・トレイトの制約（impl の有無）を見る |
+| `codegen.hb` | JavaScript の生成。トレイトは実行時に第 1 引数の型で振り分ける |
+| `fmt.hb` | 整形。`hibana fmt` と同じ結果になる |
+
+テストが次を確かめます。字句と構文木は Rust 版と同じ、型検査は Rust 版と同じく通すか止める、生成した JavaScript の出力はインタプリタと同じ、自分自身をコンパイルした 2 段目と 3 段目の出力が同じ（固定点）、整形は Rust 版と同じ結果です。
+
+Rust 版にあって selfhost に無いもの: マクロ（`syntax`・`macro`）、依存型と細分化型の証明（Z3 を含む）、C バックエンド、LSP、パッケージ管理、`hibana test`。型検査器は細分化型を元の型として扱います。
+
 構文木を直接評価する評価器は、型の計算（依存型の正規化）とマクロ本体の実行に必要なので残します。
 
 ## 12. 既知の制約
