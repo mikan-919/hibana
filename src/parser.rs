@@ -1893,6 +1893,8 @@ impl Parser<'_> {
         let open = if close == "}" { "{" } else { "(" };
         let mut out = Vec::new();
         let mut depth = 0;
+        // 開いている括弧の並び。{ は「直前が名前」なら構造体の波括弧として true にする
+        let mut opens: Vec<bool> = Vec::new();
         loop {
             let t = self.toks[self.pos].clone();
             match &t.tok {
@@ -1910,7 +1912,21 @@ impl Parser<'_> {
                 }
                 _ => {}
             }
-            out.push(Q::Tok(t));
+            // 構造体リテラル・宣言の フィールド名 Name { x: 式 } の x。直前が { か , で、直後が :
+            // ponytail: $( ... ) の中は外の括弧が見えないので、その中の Name { x: ... } の x は改名される。外から見える括弧の並びを渡すようにすれば直る
+            let field = matches!(t.tok, Tok::Ident(_))
+                && opens.last() == Some(&true)
+                && self.toks.get(self.pos + 1).is_some_and(|n| n.tok == Tok::Punct(":"))
+                && matches!(out.last(), Some(Q::Tok(p)) if matches!(p.tok, Tok::Punct("{" | ",")));
+            match &t.tok {
+                Tok::Punct("(" | "[") => opens.push(false),
+                Tok::Punct("{") => opens.push(matches!(out.last(), Some(Q::Tok(p)) if matches!(p.tok, Tok::Ident(_)))),
+                Tok::Punct(")" | "]" | "}") => {
+                    opens.pop();
+                }
+                _ => {}
+            }
+            out.push(if field { Q::Field(t) } else { Q::Tok(t) });
             self.pos += 1;
         }
     }

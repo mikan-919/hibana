@@ -33,6 +33,17 @@ macro add_fn ("add_fn" "(" x:Expr ")") -> Expr {
         g(1) } }
 }
 
+struct Pt {
+    x: int,
+    y: int,
+}
+
+// 構造体リテラルのフィールド名 x は改名しない。値の x（let で束縛した名前）は改名する
+macro make_pt ("make_pt" "(" v:Expr ")") -> Expr {
+    quote { { let x = $v
+        Pt { x: x, y: 0 } } }
+}
+
 fn main() {
     let total = 10
     let len = 20
@@ -40,4 +51,12 @@ fn main() {
     print(plus_len(len))
     print(add_circle(Circle(1), total))
     print(add_fn(total))
+    let x = 7
+    let p = make_pt(x)
+    if p.x != 7 {
+        panic("構造体の値の x が呼び出し側の x と違う")
+    }
+    if p.y != 0 {
+        panic("構造体の値の y が違う")
+    }
 }

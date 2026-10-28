@@ -161,6 +161,8 @@ pub struct Grammar {
 #[derive(Debug, Clone)]
 pub enum Q {
     Tok(Token),
+    // 構造体のフィールド名（Name { x: 式 } の x）。値の名前と違い、改名しない
+    Field(Token),
     // $a.b.c。rest は a の後ろの ". 名前" のトークン列
     Var {
         dollar: Token,
@@ -303,7 +305,7 @@ fn bound_names(q: &[Q]) -> HashSet<String> {
     fn flat(q: &[Q], out: &mut Vec<Option<Tok>>) {
         for x in q {
             match x {
-                Q::Tok(t) => out.push(Some(t.tok.clone())),
+                Q::Tok(t) | Q::Field(t) => out.push(Some(t.tok.clone())),
                 Q::Rep(inner, _) => flat(inner, out),
                 Q::Var { .. } | Q::Splice(..) => out.push(None),
             }
@@ -470,7 +472,7 @@ fn q_paths<'a>(q: &'a [Q], out: &mut Vec<&'a [String]>) {
         match x {
             Q::Var { path, .. } => out.push(path),
             Q::Rep(inner, _) => q_paths(inner, out),
-            Q::Tok(_) | Q::Splice(..) => {}
+            Q::Tok(_) | Q::Field(_) | Q::Splice(..) => {}
         }
     }
 }
@@ -498,6 +500,7 @@ fn splice_in(
     for x in q {
         match x {
             Q::Tok(t) => out.push(hygienic(t, out.last(), bound)),
+            Q::Field(t) => out.push(t.clone()),
             Q::Var { dollar, path, rest } => {
                 let (v, n) = walk(env, path, false)?;
                 emit(&v, dollar, out).map_err(|e| {

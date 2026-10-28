@@ -3756,7 +3756,7 @@ impl Ck<'_> {
     fn check_q(&mut self, q: &[Q]) -> R<()> {
         for x in q {
             match x {
-                Q::Tok(_) => {}
+                Q::Tok(_) | Q::Field(_) => {}
                 Q::Var { path, .. } => {
                     let t = self
                         .lookup(&path[0])
