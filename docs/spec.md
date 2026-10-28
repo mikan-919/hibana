@@ -415,7 +415,7 @@ enum Shape { Circle(r: int), Rect(w: int, h: int), Dot }
 | 関数 | 型 |
 |---|---|
 | `print(x)` | 任意の値を表示する |
-| `len(v)` | `Vec<T>` か `str` の長さ |
+| `len(v)` | `Vec<T>` か `str` の長さ。`mut` の変数は、初期値と `push`・`set_at` の代入から長さを追う（ループと分岐の後は分からなくなる） |
 | `to_str(x)` | 任意の値を文字列にする |
 | `split(s, sep)` | `(str, str) -> Vec<str>` |
 | `starts_with(s, p)` | `(str, str) -> bool` |

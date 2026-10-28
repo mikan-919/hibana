@@ -366,6 +366,18 @@ fn mentions(v: &V, id: usize) -> bool {
     }
 }
 
+// 項の中の len(変数 id) を t に置き換える（足し算・引き算の中だけ）
+fn replace_len(v: &V, id: usize, t: &V) -> V {
+    if let V::Neu(n) = v {
+        match &**n {
+            Neu::Call(f, a) if f == "len" && matches!(&a[..], [V::Neu(x)] if matches!(&**x, Neu::Var(i, _) if *i == id)) => return t.clone(),
+            Neu::Bin(op, a, b) if matches!(*op, "+" | "-") => return Norm::bin(op, replace_len(a, id, t), replace_len(b, id, t)),
+            _ => {}
+        }
+    }
+    v.clone()
+}
+
 // 評価が止まる理由。Stuck は値の分からない条件で分岐した時など
 enum Halt {
     Stuck,
@@ -489,6 +501,12 @@ impl Norm<'_> {
         match &v {
             V::Arr(xs) => V::Int(xs.len() as i64),
             V::Str(s) => V::Int(s.chars().count() as i64),
+            V::Neu(n) => match &**n {
+                // push は 1 つ増やし、set_at は変えない
+                Neu::Call(f, a) if f == "push" && a.len() == 2 => Self::bin("+", Self::len(a[0].clone()), V::Int(1)),
+                Neu::Call(f, a) if f == "set_at" && a.len() == 3 => Self::len(a[0].clone()),
+                _ => neu(Neu::Call("len".into(), vec![v.clone()])),
+            },
             _ => neu(Neu::Call("len".into(), vec![v])),
         }
     }
@@ -1570,6 +1588,32 @@ impl Ck<'_> {
         }
     }
 
+    // name = x の後の len(name) の値。x の長さが len(name) を含むなら、len(name) == t の事実で置き換える
+    fn new_len(&mut self, name: &str, x: &Expr) -> R<Option<(V, V)>> {
+        let val = self.lookup(name).unwrap().val.clone();
+        let V::Neu(n) = &val else { return Ok(None) };
+        let Neu::Var(id, _) = &**n else { return Ok(None) };
+        let id = *id;
+        let mut l = Norm::len(self.eval_value(x)?);
+        if mentions(&l, id) {
+            let own = Norm::len(val.clone());
+            let known = self.scopes.iter().flat_map(|s| &s.facts).find_map(|f| match f {
+                V::Neu(n) => match &**n {
+                    Neu::Bin("==", a, b) if *a == own && !mentions(b, id) => Some(b.clone()),
+                    Neu::Bin("==", a, b) if *b == own && !mentions(a, id) => Some(a.clone()),
+                    _ => None,
+                },
+                _ => None,
+            });
+            let Some(t) = known else { return Ok(None) };
+            l = replace_len(&l, id, &t);
+            if mentions(&l, id) {
+                return Ok(None);
+            }
+        }
+        Ok(Some((val, l)))
+    }
+
     // 変数の値が変わるので、その変数についての事実を捨てる。型の条件は代入でも保たれるので残す
     fn forget(&mut self, name: &str) -> R<()> {
         let Some(en) = self.lookup(name) else {
@@ -1764,7 +1808,12 @@ impl Ck<'_> {
                     } else {
                         self.eval_value(init)?
                     };
-                    self.bind(name, t, val, *mutable)?;
+                    self.bind(name, t.clone(), val.clone(), *mutable)?;
+                    // 可変な Vec は、初期値の長さを事実として持つ
+                    if *mutable && matches!(base(&t), V::VecT(_)) {
+                        let l = Norm::len(self.eval_value(init)?);
+                        self.add_fact(Norm::bin("==", Norm::len(val), l));
+                    }
                 }
                 Stmt::Expr(e) => diverges |= self.expr(e)? == prim("never"),
             }
@@ -2268,7 +2317,12 @@ impl Ck<'_> {
                 }
                 let t = en.ty.clone();
                 self.check(x, &t).ctx(|e| format!("変数 {name}: {e}"))?;
+                // 代入前の長さが分かっていれば、新しい長さを代入前の変数を使わない式にして事実にする
+                let new_len = if matches!(base(&t), V::VecT(_)) { self.new_len(name, x)? } else { None };
                 self.forget(name)?;
+                if let Some((v, l)) = new_len {
+                    self.add_fact(Norm::bin("==", Norm::len(v), l));
+                }
                 prim("unit")
             }
             Expr::If(c, then, els) => {

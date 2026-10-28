@@ -889,6 +889,17 @@ fn main() {
         }
     }
 
+    // mut の Vec も、初期値と push・set_at から長さが分かる
+    #[test]
+    fn mutable_vec_length() {
+        assert_eq!(out("fn main() { let mut v = [1, 2]\n v = push(v, 3)\n v = set_at(v, 0, 5)\n print(v[2]) }").unwrap(), "3\n");
+        let e = out("fn main() { let mut v = [1, 2]\n v = push(v, 3)\n print(v[3]) }").unwrap_err();
+        assert!(e.contains("添字の範囲"), "{e}");
+        // ループの後は長さが分からない
+        let e = out("fn main() { let mut v = [1]\n for i in 0..2 { v = push(v, 1) }\n print(v[1]) }").unwrap_err();
+        assert!(e.contains("添字の範囲"), "{e}");
+    }
+
     #[test]
     fn errors() {
         for (src, msg) in [
