@@ -61,7 +61,7 @@ struct P {
 
 fn tok_at(p: P, k: int) -> Token {
     let i = read(p.pos) + k
-    if i >= 0 && i < len(p.ts) { p.ts[i] } else { Token { tok: TEof, line: 0, col: 0, gap: false, nl: false } }
+    if i >= 0 && i < len(p.ts) { p.ts[i] } else { Token { tok: TEof, line: 0, col: 0, gap: false, s: 0, e: 0, nl: false } }
 }
 
 fn peek(p: P) -> Tok { tok_at(p, 0).tok }

@@ -774,6 +774,49 @@ fn main() {
         assert_eq!(String::from_utf8(r.stdout).unwrap(), want, "{}", String::from_utf8_lossy(&r.stderr));
     }
 
+    // hibana で書いたフォーマッター（selfhost/fmt.hb）が、すべての .hb と整形前の入力で Rust 版と同じ結果を出すか
+    #[test]
+    fn selfhost_fmt_matches() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let tmp = std::env::temp_dir().join(format!("hibana-fmt-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut files: Vec<_> = ["lib", "examples", "selfhost"]
+            .iter()
+            .flat_map(|d| std::fs::read_dir(root.join(d)).unwrap())
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|x| x == "hb"))
+            .collect();
+        // 整形前の入力。コメント・括弧・演算子・JSX・syntax の続きの行
+        let cases = [
+            "fn add(a:int,b :int)->int{   a+b }  // 足す\n\n\n\nfn main(){\nlet x=add( 1,2 )\n      if x==3 {print( \"ok\" )}else{\n  print(\"ng\")\n}\n    /* c */\n  let ok = x == 3 ||\n  x == 4\n  print(<p>a   b {x}</p>)\n  print(web.json(f([\n    1\n    ])))\n\n}\n",
+            "// 先頭のコメント\nfn f() {\n  let v = [1,\n  2 ,3]\n  v\n    .map(1)\n    | 2\n}\n",
+            "fn f(){ /* a */ 1 }\n/* b */ fn g() { 2 }\n",
+        ];
+        for (i, c) in cases.iter().enumerate() {
+            let p = tmp.join(format!("case{i}.hb"));
+            std::fs::write(&p, c).unwrap();
+            files.push(p);
+        }
+        let mut want = String::new();
+        for p in &files {
+            match crate::fmt::format(&std::fs::read_to_string(p).unwrap()) {
+                Ok(s) => want += &format!("{s}\n"),
+                Err(_) => want += "ERROR\n",
+            }
+            want += "=====\n";
+        }
+        let dir = root.join("selfhost");
+        let src = std::fs::read_to_string(dir.join("fmt_dump.hb")).unwrap();
+        crate::parser::set_base_dir(&dir);
+        let js = dir.join(format!("fmt-{}.mjs", std::process::id()));
+        std::fs::write(&js, super::to_js(&src).unwrap()).unwrap();
+        let r = std::process::Command::new("node").arg(&js).args(&files).output().unwrap();
+        std::fs::remove_file(&js).unwrap();
+        std::fs::remove_dir_all(&tmp).unwrap();
+        let got = String::from_utf8(r.stdout).unwrap();
+        assert!(got == want, "{}\n{}", String::from_utf8_lossy(&r.stderr), got.lines().zip(want.lines()).find(|(a, b)| a != b).map_or(String::new(), |(a, b)| format!("{a:?} != {b:?}")));
+    }
+
     // hibana で書いた型検査器（selfhost/checker.hb）が、依存型を使わない例と小さなプログラムで、Rust 版と同じく通すか止めるか
     #[test]
     fn selfhost_checker_matches() {

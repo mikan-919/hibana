@@ -4,8 +4,9 @@ use std.*
 derive(Eq, Show)
 enum Tok { TInt(n: int), TStr(s: str), TChar(c: str), TIdent(name: str), TPunct(p: str), TEof }
 
+// s・e はソースの文字の位置（s から e の手前まで）
 derive(Eq, Show)
-struct Token { tok: Tok, line: int, col: int, gap: bool, nl: bool }
+struct Token { tok: Tok, line: int, col: int, gap: bool, nl: bool, s: int, e: int }
 
 struct LexError { msg: str, line: int, col: int }
 
@@ -96,6 +97,7 @@ fn lex(src: str) -> Result<Vec<Token>, LexError> {
         let nl = line > line0
         let l0 = line
         let c0 = i - bol + 1
+        let s0 = i
         let c = char_at(cs, i)
         let mut tok = TEof
         if err != "" {
@@ -140,7 +142,7 @@ fn lex(src: str) -> Result<Vec<Token>, LexError> {
             if has(ps, two) { tok = TPunct(two); i = i + 2 } else if has(ps, c) { tok = TPunct(c); i = i + 1 } else { err = "不明な文字 " + c }
         }
         if err == "" {
-            out = push(out, Token { tok: tok, line: l0, col: c0, gap: gap, nl: nl })
+            out = push(out, Token { tok: tok, line: l0, col: c0, gap: gap, nl: nl, s: s0, e: i })
         }
     }
     if err == "" { Ok(out) } else { Err(LexError { msg: err, line: line, col: i - bol + 1 }) }
