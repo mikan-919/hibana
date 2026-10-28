@@ -515,6 +515,7 @@ impl Gen<'_> {
         args.iter().map(|a| self.expr(a)).collect()
     }
 
+    // 位置の包みと算術・比較は、深く入れ子になるので大きな expr_inner のフレームを通らずに生成する
     fn expr(&mut self, e: &Expr) -> String {
         match e {
             Expr::At(sp, x) => {
@@ -524,6 +525,32 @@ impl Gen<'_> {
                 }
                 self.expr(x)
             }
+            // && と || は右辺を条件付きで生成するので expr_inner で扱う
+            Expr::Binary(op, l, r) if !matches!(*op, "&&" | "||") => self.binary(op, l, r),
+            _ => self.expr_inner(e),
+        }
+    }
+
+    #[inline(never)]
+    fn binary(&mut self, op: &str, l: &Expr, r: &Expr) -> String {
+        let (a, b) = (self.expr(l), self.expr(r));
+        let v = match op {
+            "+" => format!("$add({a}, {b})"),
+            "-" => format!("$sub({a}, {b})"),
+            "*" => format!("$mul({a}, {b})"),
+            "/" => format!("$div({a}, {b})"),
+            "%" => format!("$rem({a}, {b})"),
+            "==" => format!("$eq({a}, {b})"),
+            "!=" => format!("!$eq({a}, {b})"),
+            op => format!("({a} {op} {b})"),
+        };
+        self.let_(v)
+    }
+
+    #[inline(never)]
+    fn expr_inner(&mut self, e: &Expr) -> String {
+        match e {
+            Expr::At(..) => unreachable!("expr で外している"),
             Expr::Int(n) => format!("{n}n"),
             Expr::Bool(b) => b.to_string(),
             Expr::Str(s) => lit(s),
@@ -556,20 +583,7 @@ impl Gen<'_> {
                 self.branch(&t, |g| g.expr(r));
                 t
             }
-            Expr::Binary(op, l, r) => {
-                let (a, b) = (self.expr(l), self.expr(r));
-                let v = match *op {
-                    "+" => format!("$add({a}, {b})"),
-                    "-" => format!("$sub({a}, {b})"),
-                    "*" => format!("$mul({a}, {b})"),
-                    "/" => format!("$div({a}, {b})"),
-                    "%" => format!("$rem({a}, {b})"),
-                    "==" => format!("$eq({a}, {b})"),
-                    "!=" => format!("!$eq({a}, {b})"),
-                    op => format!("({a} {op} {b})"),
-                };
-                self.let_(v)
-            }
+            Expr::Binary(..) => unreachable!("expr で分けている"),
             Expr::Call(name, args) => {
                 if let Some((js, _)) = self.lookup(name).cloned() {
                     let vs = self.args(args);

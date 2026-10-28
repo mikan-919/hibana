@@ -1910,6 +1910,64 @@ impl Ck<'_> {
             }
             return r;
         }
+        // 長い a + b + ... は左に深く再帰するので、大きな expr_inner のフレームを通らずに検査する
+        if let Expr::Binary(op, l, r) = e {
+            return self.binary(e, op, l, r);
+        }
+        self.expr_inner(e)
+    }
+
+    #[inline(never)]
+    fn binary(&mut self, e: &Expr, op: &str, l: &Expr, r: &Expr) -> R<V> {
+        let int = prim("int");
+        let boolean = prim("bool");
+        Ok({
+            let lt = self.expr(l)?;
+            // a && b の b では a が真、a || b の b では a が偽と分かっている
+            let rt = if matches!(op, "&&" | "||") {
+                let lv = self.eval_value(l)?;
+                self.enter_branch(&lv, op == "&&");
+                let rt = self.expr(r);
+                self.pop();
+                rt?
+            } else {
+                self.expr(r)?
+            };
+            match op {
+                "+" if base(&lt) == prim("str") => {
+                    want(&prim("str"), &rt, op)?;
+                    prim("str")
+                }
+                "+" | "-" | "*" | "/" | "%" | "<" | "<=" | ">" | ">=" => {
+                    want(&int, &lt, op)?;
+                    want(&int, &rt, op)?;
+                    if matches!(op, "+" | "-" | "*" | "/" | "%") {
+                        int
+                    } else {
+                        boolean
+                    }
+                }
+                "&&" | "||" => {
+                    want(&boolean, &lt, op)?;
+                    want(&boolean, &rt, op)?;
+                    boolean
+                }
+                _ => {
+                    // == と !=
+                    let lt = base(&lt);
+                    want(&lt, &base(&rt), op)?;
+                    if lt == prim("syn") {
+                        return Err("syn は比較できない".into());
+                    }
+                    self.use_trait(e, "eq", &lt)?;
+                    boolean
+                }
+            }
+        })
+    }
+
+    #[inline(never)]
+    fn expr_inner(&mut self, e: &Expr) -> R<V> {
         let int = prim("int");
         let boolean = prim("bool");
         Ok(match e {
@@ -1994,49 +2052,7 @@ impl Ck<'_> {
                 want(&t, &self.expr(x)?, op)?;
                 t
             }
-            Expr::Binary(op, l, r) => {
-                let lt = self.expr(l)?;
-                // a && b の b では a が真、a || b の b では a が偽と分かっている
-                let rt = if matches!(*op, "&&" | "||") {
-                    let lv = self.eval_value(l)?;
-                    self.enter_branch(&lv, *op == "&&");
-                    let rt = self.expr(r);
-                    self.pop();
-                    rt?
-                } else {
-                    self.expr(r)?
-                };
-                match *op {
-                    "+" if base(&lt) == prim("str") => {
-                        want(&prim("str"), &rt, op)?;
-                        prim("str")
-                    }
-                    "+" | "-" | "*" | "/" | "%" | "<" | "<=" | ">" | ">=" => {
-                        want(&int, &lt, op)?;
-                        want(&int, &rt, op)?;
-                        if matches!(*op, "+" | "-" | "*" | "/" | "%") {
-                            int
-                        } else {
-                            boolean
-                        }
-                    }
-                    "&&" | "||" => {
-                        want(&boolean, &lt, op)?;
-                        want(&boolean, &rt, op)?;
-                        boolean
-                    }
-                    _ => {
-                        // == と !=
-                        let lt = base(&lt);
-                        want(&lt, &base(&rt), op)?;
-                        if lt == prim("syn") {
-                            return Err("syn は比較できない".into());
-                        }
-                        self.use_trait(e, "eq", &lt)?;
-                        boolean
-                    }
-                }
-            }
+            Expr::Binary(..) => unreachable!("expr で分けている"),
             Expr::Handle(body, arms) => return self.handle(body, arms),
             // push(v, x) は v の後ろに x を足した新しい Vec
             Expr::Call(name, args) if name == "push" && self.lookup(name).is_none() => {
