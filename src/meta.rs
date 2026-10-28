@@ -295,18 +295,79 @@ thread_local! {
 }
 static NEXT_EXPANSION: AtomicUsize = AtomicUsize::new(1);
 
+// quote の中で束縛される名前。let と for の変数、fn の引数、match と handle の腕の束縛。
+// 大域の名前と同じでも、束縛された名前は改名する（呼び出し側の同じ名前を隠さないため）
+// ponytail: 同じ quote で、束縛した名前と同じ名前の大域の関数や構築子を呼ぶと、その呼び出しも改名される。呼び出しの位置で大域かどうかを見分けるなら、束縛の範囲を追う必要がある
+fn bound_names(q: &[Q]) -> HashSet<String> {
+    // $ の差し込みは None にして、並びを切る
+    fn flat(q: &[Q], out: &mut Vec<Option<Tok>>) {
+        for x in q {
+            match x {
+                Q::Tok(t) => out.push(Some(t.tok.clone())),
+                Q::Rep(inner, _) => flat(inner, out),
+                Q::Var { .. } | Q::Splice(..) => out.push(None),
+            }
+        }
+    }
+    let mut ts = Vec::new();
+    flat(q, &mut ts);
+    let is = |i: usize, t: &Tok| ts.get(i).is_some_and(|x| x.as_ref() == Some(t));
+    let ident = |i: usize| match ts.get(i) {
+        Some(Some(Tok::Ident(n))) => Some(n.clone()),
+        _ => None,
+    };
+    let p = |s: &'static str| Tok::Punct(s);
+    let mut out = HashSet::new();
+    for i in 0..ts.len() {
+        // let x・let mut x・for x in
+        if is(i, &p("let")) || is(i, &p("for")) {
+            let j = if is(i + 1, &p("mut")) { i + 2 } else { i + 1 };
+            out.extend(ident(j));
+        }
+        // fn 名(引数) と fn(引数)、構築子(束縛) => の束縛。( の位置で、閉じ ) までを見る
+        let fn_params = is(i, &p("(")) && (is(i.wrapping_sub(1), &p("fn")) || is(i.wrapping_sub(2), &p("fn")));
+        let arm = is(i, &p("(")) && ident(i.wrapping_sub(1)).is_some() && {
+            let mut d = 0;
+            let mut k = i;
+            while k < ts.len() && !(d == 1 && is(k, &p(")"))) {
+                d += is(k, &p("(")) as i32 - is(k, &p(")")) as i32;
+                k += 1;
+            }
+            is(k + 1, &p("=>"))
+        };
+        if fn_params || arm {
+            // 中の名前で、直前が ( か , で、入れ子の括弧の外にあるもの
+            let mut d = 0;
+            for k in i + 1.. {
+                if is(k, &p(")")) && d == 0 {
+                    break;
+                }
+                if k >= ts.len() {
+                    break;
+                }
+                d += is(k, &p("(")) as i32 - is(k, &p(")")) as i32;
+                if d == 0 && (is(k - 1, &p("(")) || is(k - 1, &p(","))) {
+                    out.extend(ident(k));
+                }
+            }
+        }
+    }
+    out
+}
+
 // quote に直接書いた名前を、展開ごとに固有の名前 名前#番号 にする（利用者は # を書けないので衝突しない）。
-// 大域の名前と、. の後のフィールド名はそのまま。$x で差し込んだ呼び出し側のトークンはここを通らない
-fn hygienic(t: &Token, prev: Option<&Token>) -> Token {
+// 大域の名前と、. の後のフィールド名はそのまま。ただし束縛された名前（bound_names）は大域の名前でも改名する。
+// $x で差し込んだ呼び出し側のトークンはここを通らない
+fn hygienic(t: &Token, prev: Option<&Token>, bound: &HashSet<String>) -> Token {
     HYGIENE.with(|h| match (&*h.borrow(), &t.tok) {
         _ if matches!(prev.map(|p| &p.tok), Some(Tok::Punct(".")))
             || t.tok == Tok::Ident("_".into()) => t.clone(),
         // ライブラリのマクロが自分のモジュールの名前を使うなら、使う側でもその名前を指すよう修飾する
-        (Some((_, _, m, names)), Tok::Ident(n)) if !m.is_empty() && names.contains(n) => Token {
+        (Some((_, _, m, names)), Tok::Ident(n)) if !m.is_empty() && names.contains(n) && !bound.contains(n) => Token {
             tok: Tok::Ident(format!("{m}.{n}")),
             ..t.clone()
         },
-        (Some((id, globals, _, _)), Tok::Ident(n)) if !globals.contains(n) => Token {
+        (Some((id, globals, _, _)), Tok::Ident(n)) if !globals.contains(n) || bound.contains(n) => Token {
             tok: Tok::Ident(format!("{n}#{id}")),
             ..t.clone()
         },
@@ -423,9 +484,20 @@ pub fn splice(
     out: &mut Vec<Token>,
     ev: &mut Eval,
 ) -> R<()> {
+    let bound = bound_names(q);
+    splice_in(q, env, out, ev, &bound)
+}
+
+fn splice_in(
+    q: &[Q],
+    env: &mut Vec<(String, Value)>,
+    out: &mut Vec<Token>,
+    ev: &mut Eval,
+    bound: &HashSet<String>,
+) -> R<()> {
     for x in q {
         match x {
-            Q::Tok(t) => out.push(hygienic(t, out.last())),
+            Q::Tok(t) => out.push(hygienic(t, out.last(), bound)),
             Q::Var { dollar, path, rest } => {
                 let (v, n) = walk(env, path, false)?;
                 emit(&v, dollar, out).map_err(|e| {
@@ -476,7 +548,7 @@ pub fn splice(
                         };
                         env.push((key.clone(), Value::Syn(Rc::new(s.child(v[k].clone())))));
                     }
-                    let r = splice(inner, env, out, ev);
+                    let r = splice_in(inner, env, out, ev, bound);
                     env.truncate(base);
                     r?;
                 }
@@ -993,7 +1065,7 @@ impl Parser<'_> {
         Ok(())
     }
 
-    // ponytail: 衛生的でない。展開コード内の let は呼び出し側の変数と衝突しうる
+    // ponytail: 衛生性は quote に書いた名前だけに効く。束縛は字句で数える（let・for・fn の引数・腕の束縛）ので、ほかの形で束縛した名前は改名されない
     // ponytail: 展開のたびにトークン列全体を複製する。遅ければ Parser.toks を Rc にする
     fn expand(&self, m: &Macro, rec: Node, site: Span) -> R<Expr> {
         let wrap = |e: &str| format!("マクロ {} の展開: {e}", m.name);

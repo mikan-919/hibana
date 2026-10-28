@@ -530,6 +530,13 @@ fn main() {
         assert_eq!(out(src).unwrap(), "2\n1\n");
     }
 
+    // 束縛した名前が大域の関数・組み込みの関数・構築子と同じでも、呼び出し側の変数を隠さない（3 つの実行方式は examples の検査で確かめる）
+    #[test]
+    fn hygiene_bound_names() {
+        let src = include_str!("../examples/hygiene.hb");
+        assert_eq!(out(src).unwrap(), "11\n21\n11\n11\n");
+    }
+
     #[test]
     fn example_runs() {
         let src = include_str!("../examples/fib.hb");
