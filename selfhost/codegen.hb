@@ -343,7 +343,9 @@ fn runtime() -> str {
     "function $eq(a, b) {\n" +
     "  if (a === b) return true;\n" +
     "  if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((x, i) => $eq(x, b[i]));\n" +
-    "  if (a && b && typeof a === \"object\" && typeof b === \"object\") return a.$c === b.$c && $eq(a.$f, b.$f);\n" +
+    "  if (a && b && typeof a === \"object\" && typeof b === \"object\") {\n" +
+    "    const f = a.$c !== undefined && $impls[\"std.eq\"]?.[$types[a.$c]];\n" +
+    "    return f ? f(a, b) : a.$c === b.$c && $eq(a.$f, b.$f);\n  }\n" +
     "  return false;\n}\n" +
     "function $show(v) {\n" +
     "  if (typeof v === \"bigint\" || typeof v === \"boolean\") return String(v);\n" +
