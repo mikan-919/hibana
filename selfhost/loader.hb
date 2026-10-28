@@ -55,7 +55,7 @@ fn ts_ty(ts: Vec<Token>, i: int) -> Expr {
 }
 
 // export function 名前(引数: 型, ...): 型 を、別名.名前 という関数にする
-// ponytail: number は BigInt に変換しない。型は string・number・boolean・void とその配列だけ
+// ponytail: 型は string・number・boolean・void とその配列だけ
 fn ts_fns(src: str, alias: str, path: str) -> Vec<Func> {
     let ts = match lex(src) { Ok(ts) => ts, Err(e) => panic(path + ": " + e.msg) }
     let mut fs: Vec<Func> = []

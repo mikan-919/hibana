@@ -338,6 +338,27 @@ fn is_alias(f: Func) -> bool {
     match f.ret { Some(t) => match t { EVar(n) => n == "Type", _ => false }, None => false }
 }
 
+// JS のモジュールとの境界での値の変換の記述。int は BigInt と number の変換、Vec は要素ごと、ほかはそのまま渡す
+// ponytail: 関数・構造体・Async は無い。TS の宣言は string・number・boolean・void とその配列だけなので足りる
+partial fn desc(t: Expr) -> str {
+    match t {
+        EVar(n) => if n == "int" || n == "unit" { dquote(n) } else { "\"any\"" },
+        ECall(n, xs) => if n == "Vec" && len(xs) == 1 { "{ vec: " + desc(xs[0]) + " }" } else { "\"any\"" },
+        _ => "\"any\"",
+    }
+}
+
+fn js_wrapper(f: Func, k: int, js: str) -> str {
+    let mut ps: Vec<str> = []
+    let mut as_: Vec<str> = []
+    for i in 0..len(f.params) {
+        ps = push(ps, "a" + to_str(i))
+        as_ = push(as_, "$to(" + (match f.params[i] { EParam(n, o) => match o { Some(t) => desc(t), None => "\"any\"" }, _ => "\"any\"" }) + ", a" + to_str(i) + ")")
+    }
+    let ret = match f.ret { Some(t) => desc(t), None => "\"unit\"" }
+    "function " + fname(f.name) + "(" + join(ps, ", ") + ") { return $from(" + ret + ", $js" + to_str(k) + "." + js + "(" + join(as_, ", ") + ")); }\n"
+}
+
 // 実行時の補助関数（src/js.rs の前置きの一部と同じ動き）
 fn runtime() -> str {
     "function $eq(a, b) {\n" +
@@ -356,6 +377,15 @@ fn runtime() -> str {
     "  if (v.$c.endsWith(\"{}\") && $fields[v.$c][0] === \"0\") return v.$c.slice(0, -2) + \"(\" + v.$f.map($show).join(\", \") + \")\";\n" +
     "  if (v.$c.endsWith(\"{}\")) return v.$c.slice(0, -2) + \" { \" + $fields[v.$c].map((f, i) => f + \": \" + $show(v.$f[i])).join(\", \") + \" }\";\n" +
     "  return v.$f.length === 0 ? v.$c : v.$c + \"(\" + v.$f.map($show).join(\", \") + \")\";\n}\n" +
+    "function $to(d, v) {\n" +
+    "  if (d === \"int\") return Number(v);\n" +
+    "  if (d.vec) return v.map((x) => $to(d.vec, x));\n" +
+    "  return v;\n}\n" +
+    "function $from(d, v) {\n" +
+    "  if (d === \"int\") { if (typeof v !== \"bigint\" && !Number.isInteger(v)) throw new Error(\"JavaScript の値 \" + v + \" は int でない\"); return BigInt(v); }\n" +
+    "  if (d === \"unit\") return undefined;\n" +
+    "  if (d.vec) return Array.from(v, (x) => $from(d.vec, x));\n" +
+    "  return v;\n}\n" +
     "function $key(v) {\n" +
     "  if (typeof v === \"bigint\") return \"int\";\n" +
     "  if (typeof v === \"string\") return \"str\";\n" +
@@ -438,7 +468,7 @@ partial fn compile(prog: Program) -> str {
             for i in 0..len(paths) { if paths[i] == path { k = i } }
             let mut js = ""
             for x in split(f.name, ".") { js = x }
-            out = out + "function " + fname(f.name) + "(...a) { return $js" + to_str(k) + "." + js + "(...a); }\n"
+            out = out + js_wrapper(f, k, js)
         } else if !is_alias(f) && f.kind != "traitdef" {
             let mut env: Vec<Var> = []
             let mut names: Vec<str> = []

@@ -846,9 +846,17 @@ fn main() {
             let mjs = tmp.join(format!("{n}.mjs"));
             std::fs::write(&mjs, &r.stdout).unwrap();
             let run = std::process::Command::new("node").arg(&mjs).output().unwrap();
+            crate::parser::set_base_dir(&root.join("examples"));
             let want = out(&std::fs::read_to_string(&p).unwrap()).unwrap();
             assert_eq!(String::from_utf8(run.stdout).unwrap(), want, "{n}: {}", String::from_utf8_lossy(&run.stderr));
         }
+        // TypeScript の number は境界で int と変換される（インタプリタは extern を動かせないので出力を直接比べる）
+        let p = root.join("examples/ts_num.hb");
+        let r = std::process::Command::new("node").arg(&js).arg(&p).output().unwrap();
+        let mjs = tmp.join("ts_num.mjs");
+        std::fs::write(&mjs, &r.stdout).unwrap();
+        let run = std::process::Command::new("node").arg(&mjs).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&run.stdout), "50\n6\n4\n6\n", "{}", String::from_utf8_lossy(&run.stderr));
         // 自分自身をコンパイルする。そうして作ったコンパイラーが、自分自身から同じ JavaScript を作るか
         let me = dir.join("compile.hb");
         let stage = |compiler: &std::path::Path, out: &std::path::Path| {
