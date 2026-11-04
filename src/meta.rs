@@ -161,6 +161,8 @@ pub struct Grammar {
 #[derive(Debug, Clone)]
 pub enum Q {
     Tok(Token),
+    // 構造体のフィールド名（Name { x: 式 } の x）。値の名前と違い、改名しない
+    Field(Token),
     // $a.b.c。rest は a の後ろの ". 名前" のトークン列
     Var {
         dollar: Token,
@@ -295,18 +297,79 @@ thread_local! {
 }
 static NEXT_EXPANSION: AtomicUsize = AtomicUsize::new(1);
 
+// quote の中で束縛される名前。let と for の変数、fn の引数、match と handle の腕の束縛。
+// 大域の名前と同じでも、束縛された名前は改名する（呼び出し側の同じ名前を隠さないため）
+// ponytail: 同じ quote で、束縛した名前と同じ名前の大域の関数や構築子を呼ぶと、その呼び出しも改名される。呼び出しの位置で大域かどうかを見分けるなら、束縛の範囲を追う必要がある
+fn bound_names(q: &[Q]) -> HashSet<String> {
+    // $ の差し込みは None にして、並びを切る
+    fn flat(q: &[Q], out: &mut Vec<Option<Tok>>) {
+        for x in q {
+            match x {
+                Q::Tok(t) | Q::Field(t) => out.push(Some(t.tok.clone())),
+                Q::Rep(inner, _) => flat(inner, out),
+                Q::Var { .. } | Q::Splice(..) => out.push(None),
+            }
+        }
+    }
+    let mut ts = Vec::new();
+    flat(q, &mut ts);
+    let is = |i: usize, t: &Tok| ts.get(i).is_some_and(|x| x.as_ref() == Some(t));
+    let ident = |i: usize| match ts.get(i) {
+        Some(Some(Tok::Ident(n))) => Some(n.clone()),
+        _ => None,
+    };
+    let p = |s: &'static str| Tok::Punct(s);
+    let mut out = HashSet::new();
+    for i in 0..ts.len() {
+        // let x・let mut x・for x in
+        if is(i, &p("let")) || is(i, &p("for")) {
+            let j = if is(i + 1, &p("mut")) { i + 2 } else { i + 1 };
+            out.extend(ident(j));
+        }
+        // fn 名(引数) と fn(引数)、構築子(束縛) => の束縛。( の位置で、閉じ ) までを見る
+        let fn_params = is(i, &p("(")) && (is(i.wrapping_sub(1), &p("fn")) || is(i.wrapping_sub(2), &p("fn")));
+        let arm = is(i, &p("(")) && ident(i.wrapping_sub(1)).is_some() && {
+            let mut d = 0;
+            let mut k = i;
+            while k < ts.len() && !(d == 1 && is(k, &p(")"))) {
+                d += is(k, &p("(")) as i32 - is(k, &p(")")) as i32;
+                k += 1;
+            }
+            is(k + 1, &p("=>"))
+        };
+        if fn_params || arm {
+            // 中の名前で、直前が ( か , で、入れ子の括弧の外にあるもの
+            let mut d = 0;
+            for k in i + 1.. {
+                if is(k, &p(")")) && d == 0 {
+                    break;
+                }
+                if k >= ts.len() {
+                    break;
+                }
+                d += is(k, &p("(")) as i32 - is(k, &p(")")) as i32;
+                if d == 0 && (is(k - 1, &p("(")) || is(k - 1, &p(","))) {
+                    out.extend(ident(k));
+                }
+            }
+        }
+    }
+    out
+}
+
 // quote に直接書いた名前を、展開ごとに固有の名前 名前#番号 にする（利用者は # を書けないので衝突しない）。
-// 大域の名前と、. の後のフィールド名はそのまま。$x で差し込んだ呼び出し側のトークンはここを通らない
-fn hygienic(t: &Token, prev: Option<&Token>) -> Token {
+// 大域の名前と、. の後のフィールド名はそのまま。ただし束縛された名前（bound_names）は大域の名前でも改名する。
+// $x で差し込んだ呼び出し側のトークンはここを通らない
+fn hygienic(t: &Token, prev: Option<&Token>, bound: &HashSet<String>) -> Token {
     HYGIENE.with(|h| match (&*h.borrow(), &t.tok) {
         _ if matches!(prev.map(|p| &p.tok), Some(Tok::Punct(".")))
             || t.tok == Tok::Ident("_".into()) => t.clone(),
         // ライブラリのマクロが自分のモジュールの名前を使うなら、使う側でもその名前を指すよう修飾する
-        (Some((_, _, m, names)), Tok::Ident(n)) if !m.is_empty() && names.contains(n) => Token {
+        (Some((_, _, m, names)), Tok::Ident(n)) if !m.is_empty() && names.contains(n) && !bound.contains(n) => Token {
             tok: Tok::Ident(format!("{m}.{n}")),
             ..t.clone()
         },
-        (Some((id, globals, _, _)), Tok::Ident(n)) if !globals.contains(n) => Token {
+        (Some((id, globals, _, _)), Tok::Ident(n)) if !globals.contains(n) || bound.contains(n) => Token {
             tok: Tok::Ident(format!("{n}#{id}")),
             ..t.clone()
         },
@@ -409,7 +472,7 @@ fn q_paths<'a>(q: &'a [Q], out: &mut Vec<&'a [String]>) {
         match x {
             Q::Var { path, .. } => out.push(path),
             Q::Rep(inner, _) => q_paths(inner, out),
-            Q::Tok(_) | Q::Splice(..) => {}
+            Q::Tok(_) | Q::Field(_) | Q::Splice(..) => {}
         }
     }
 }
@@ -423,9 +486,21 @@ pub fn splice(
     out: &mut Vec<Token>,
     ev: &mut Eval,
 ) -> R<()> {
+    let bound = bound_names(q);
+    splice_in(q, env, out, ev, &bound)
+}
+
+fn splice_in(
+    q: &[Q],
+    env: &mut Vec<(String, Value)>,
+    out: &mut Vec<Token>,
+    ev: &mut Eval,
+    bound: &HashSet<String>,
+) -> R<()> {
     for x in q {
         match x {
-            Q::Tok(t) => out.push(hygienic(t, out.last())),
+            Q::Tok(t) => out.push(hygienic(t, out.last(), bound)),
+            Q::Field(t) => out.push(t.clone()),
             Q::Var { dollar, path, rest } => {
                 let (v, n) = walk(env, path, false)?;
                 emit(&v, dollar, out).map_err(|e| {
@@ -476,7 +551,7 @@ pub fn splice(
                         };
                         env.push((key.clone(), Value::Syn(Rc::new(s.child(v[k].clone())))));
                     }
-                    let r = splice(inner, env, out, ev);
+                    let r = splice_in(inner, env, out, ev, bound);
                     env.truncate(base);
                     r?;
                 }
@@ -874,13 +949,17 @@ impl Parser<'_> {
     // 文の位置（stmt）か式の位置で、全マクロを照合する
     pub fn try_macros(&mut self, stmt: bool) -> R<Option<Expr>> {
         let g = self.g.clone();
+        let start = self.pos;
         let Some((k, rec)) = self.find_macro(|m| m.stmt == stmt && !m.decl)? else {
             return Ok(None);
         };
         let m = &g.macros[k];
         match &m.body {
             None => Ok(Some(Expr::Macro(m.name.clone(), Box::new(rec)))),
-            Some(_) => self.expand(m, rec).map(Some),
+            Some(_) => {
+                let site = self.span_of(start);
+                self.expand(m, rec, site).map(Some)
+            }
         }
     }
 
@@ -890,13 +969,13 @@ impl Parser<'_> {
     }
 
     // 宣言のマクロを展開したトークン列。self.pos は呼び出しの直後
-    pub fn expand_decl(&self, k: usize, rec: Node) -> R<Vec<Token>> {
+    pub fn expand_decl(&self, k: usize, rec: Node, site: Span) -> R<Vec<Token>> {
         let g = self.g.clone();
         let m = &g.macros[k];
         if m.body.is_none() {
             return Err(format!("マクロ {} の展開コードが無い", m.name).into());
         }
-        self.expand_toks(m, rec)
+        self.expand_toks(m, rec, site)
     }
 
     // pred に合うマクロを照合する。一つだけ合えば、その番号と照合結果を返し、self.pos を直後に進める
@@ -989,11 +1068,11 @@ impl Parser<'_> {
         Ok(())
     }
 
-    // ponytail: 衛生的でない。展開コード内の let は呼び出し側の変数と衝突しうる
+    // ponytail: 衛生性は quote に書いた名前だけに効く。束縛は字句で数える（let・for・fn の引数・腕の束縛）ので、ほかの形で束縛した名前は改名されない
     // ponytail: 展開のたびにトークン列全体を複製する。遅ければ Parser.toks を Rc にする
-    fn expand(&self, m: &Macro, rec: Node) -> R<Expr> {
+    fn expand(&self, m: &Macro, rec: Node, site: Span) -> R<Expr> {
         let wrap = |e: &str| format!("マクロ {} の展開: {e}", m.name);
-        let toks = self.expand_toks(m, rec)?;
+        let toks = self.expand_toks(m, rec, site)?;
         let end = self.toks[self.pos].clone();
         let eof = Token {
             tok: Tok::Eof,
@@ -1038,7 +1117,7 @@ impl Parser<'_> {
     }
 
     // マクロ本体を実行し、展開結果をトークン列にする
-    fn expand_toks(&self, m: &Macro, rec: Node) -> R<Vec<Token>> {
+    fn expand_toks(&self, m: &Macro, rec: Node, site: Span) -> R<Vec<Token>> {
         if self.depth >= 64 {
             return Err(format!("マクロ {} の展開が深すぎる", m.name).into());
         }
@@ -1071,7 +1150,8 @@ impl Parser<'_> {
         let end = self.toks[self.pos].clone();
         let mut toks = Vec::new();
         emit(&v, &end, &mut toks).ctx(wrap)?;
-        Ok(toks)
+        // 展開したコードの位置は呼び出し位置にする。定義側の位置は利用者の見る場所と違う
+        Ok(toks.into_iter().map(|t| Token { site: Some(site), ..t }).collect())
     }
 
     fn could_start(&self, (f, nullable): &Firsts) -> bool {
@@ -1099,6 +1179,16 @@ impl Parser<'_> {
             s
         };
         Span { start: s, end }
+    }
+
+    // start から今までの位置。マクロの展開で作ったトークンが端にあれば、その呼び出し位置を使う
+    // ponytail: 端のどちらかが展開のトークンなら、範囲全体を呼び出し位置にする。途中だけが展開の式は、定義側の位置が混じる。範囲の始めと終わりを別々に写せば正確になる
+    pub fn span_of(&self, start: usize) -> Span {
+        let end = self.pos.saturating_sub(1).max(start);
+        self.toks[start]
+            .site
+            .or(self.toks[end].site)
+            .unwrap_or_else(|| self.span_from(start))
     }
 
     // 選択枝を順に試し、最初に一致した枝を採る

@@ -11,6 +11,8 @@ pub struct Error {
     pub help: Option<String>,
     // 関係する別の位置（効果を起こした操作など）
     pub origin: Option<(usize, usize)>,
+    // span の行番号。with_line で msg の前に「行 N: 」を付けると None に戻る
+    pub line: Option<usize>,
 }
 
 pub type R<T> = Result<T, Error>;
@@ -20,6 +22,16 @@ impl Error {
     pub fn at(mut self, s: Span) -> Self {
         if self.span.is_none() {
             self.span = Some((s.start.offset, s.end.offset - s.start.offset));
+            // 行は 1 から数える。0 は位置の無い Span::default() なので付けない
+            self.line = (s.start.line > 0).then_some(s.start.line);
+        }
+        self
+    }
+
+    // 行番号があれば msg の前に「行 N: 」を付ける。型検査の結果を外へ返す時に一度だけ使う
+    pub fn with_line(mut self) -> Self {
+        if let Some(n) = self.line.take() {
+            self.msg = format!("行 {n}: {}", self.msg);
         }
         self
     }
@@ -45,6 +57,7 @@ impl From<String> for Error {
             span: None,
             help: None,
             origin: None,
+            line: None,
         }
     }
 }
@@ -73,6 +86,7 @@ impl<T> Ctx<T> for R<T> {
             span: e.span,
             help: e.help,
             origin: e.origin,
+            line: e.line,
         })
     }
 }

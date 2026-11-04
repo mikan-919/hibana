@@ -530,6 +530,13 @@ fn main() {
         assert_eq!(out(src).unwrap(), "2\n1\n");
     }
 
+    // 束縛した名前が大域の関数・組み込みの関数・構築子と同じでも、呼び出し側の変数を隠さない（3 つの実行方式は examples の検査で確かめる）
+    #[test]
+    fn hygiene_bound_names() {
+        let src = include_str!("../examples/hygiene.hb");
+        assert_eq!(out(src).unwrap(), "11\n21\n11\n11\n");
+    }
+
     #[test]
     fn example_runs() {
         let src = include_str!("../examples/fib.hb");
@@ -690,6 +697,46 @@ fn main() {
         let src = "fn f() {}\nstruct f { x: int }\nfn main() {}";
         let e = out(src).unwrap_err();
         assert_eq!(e.span, Some((17, 1)), "{e:?}");
+    }
+
+    // 型エラーのメッセージには、誤った式の行を「行 N: 」で前に付ける（式は 3 行目から始まる）
+    #[test]
+    fn type_error_has_line() {
+        let src = "fn main() -> int {\n    let y = 1\n    let z: int = y +\n        \"s\"\n    z\n}\n";
+        let e = out(src).unwrap_err();
+        assert!(e.msg.starts_with("行 3: 関数 main: "), "{e:?}");
+    }
+
+    // match の腕の型エラーは、腕のパターンの行を指す（Circle(a, b) は 8 行目）
+    #[test]
+    fn arm_error_has_line() {
+        let src = "enum Shape {\n    Circle(r: int),\n    Dot,\n}\nfn main() -> int {\n    let s = Circle(1)\n    match s {\n        Circle(a, b) => 1,\n        Dot => 0,\n    }\n}\n";
+        let e = out(src).unwrap_err();
+        assert!(e.msg.starts_with("行 8: "), "{e:?}");
+    }
+
+    // data の宣言の型エラーは、宣言の行を指す（struct P は 2 行目。フィールドの式には位置が無い）
+    #[test]
+    fn data_error_has_line() {
+        let src = "fn main() {}\nstruct P {\n    f: (x: P) -> int,\n}\n";
+        let e = out(src).unwrap_err();
+        assert!(e.msg.starts_with("行 2: 構築子 P{}: "), "{e:?}");
+    }
+
+    // trait の宣言の型エラーは、trait の行を指す（trait Show は 2 行目）
+    #[test]
+    fn trait_error_has_line() {
+        let src = "fn main() {}\ntrait Show<A> {\n    fn show(f: (x: Show<A>) -> int) -> int\n}\n";
+        let e = out(src).unwrap_err();
+        assert!(e.msg.starts_with("行 2: "), "{e:?}");
+    }
+
+    // impl の型エラーは、impl の行を指す（生成した構築子の引数の検査。impl は 5 行目）
+    #[test]
+    fn impl_error_has_line() {
+        let src = "fn main() {}\ntrait Show<A> {\n    fn show(x: A) -> int\n}\nimpl Show<int> {\n    fn show(x: int) -> str { \"a\" }\n}\n";
+        let e = out(src).unwrap_err();
+        assert!(e.msg.starts_with("行 5: 関数 Show#impl0: "), "{e:?}");
     }
 
     // 実行時エラーの位置。インタプリタはエラーに位置を付け、JS と C はメッセージに行と列を足す

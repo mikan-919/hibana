@@ -13,7 +13,7 @@ function $add(a, b) { return typeof a === "string" ? a + b : $chk(a + b); }
 function $sub(a, b) { return $chk(a - b); }
 function $mul(a, b) { return $chk(a * b); }
 function $div(a, b) { if (b === 0n) throw new Error("0 で除算した"); return $chk(a / b); }
-function $rem(a, b) { if (b === 0n) throw new Error("0 で除算した"); return a % b; }
+function $rem(a, b) { if (b === 0n) throw new Error("0 で除算した"); if (a === $MIN && b === -1n) throw new Error("オーバーフロー"); return a % b; }
 function $neg(a) { return $chk(-a); }
 let $w;
 // 最後に通った、失敗しうる式の位置

@@ -19,6 +19,7 @@ fn record(sp: &crate::lexer::Span, t: &V) {
 }
 
 use crate::error::{Ctx, Error, R};
+use crate::lexer::Span;
 
 // 型検査中の値。型そのものも値として表す
 #[derive(Debug, Clone, PartialEq)]
@@ -893,7 +894,7 @@ struct Scope {
     facts: Vec<V>,
 }
 
-// ponytail: エラーに行番号が無い。AST にスパンを持たせる時に追加する
+// ponytail: 行番号は式（Expr::At）と宣言・腕（Fn・Data・Arm の span）に付く。特定の場所が無い誤り（main 関数が無い、など）には付かない
 struct Ck<'a> {
     norm: Norm<'a>,
     scopes: Vec<Scope>,
@@ -1313,6 +1314,18 @@ fn is_impl(name: &str) -> bool {
 }
 
 pub fn check(prog: &Program) -> R<Info> {
+    check_prog(prog).map_err(Error::with_line)
+}
+
+// 位置が分かっている宣言・腕の誤りには、その位置を付ける（内側で付いた位置は残す）
+fn at_opt(e: Error, s: Option<Span>) -> Error {
+    match s {
+        Some(s) => e.at(s),
+        None => e,
+    }
+}
+
+fn check_prog(prog: &Program) -> R<Info> {
     let fns = &prog.fns;
     let mut ck = Ck {
         norm: Norm::new(),
@@ -1351,17 +1364,17 @@ pub fn check(prog: &Program) -> R<Info> {
     };
     // 関数名・型名・構築子名は同じ名前空間にある
     let mut names: Vec<&str> = Vec::new();
-    for n in prog
+    for (n, sp) in prog
         .datas
         .iter()
-        .flat_map(|d| std::iter::once(&d.name).chain(d.ctors.iter().map(|c| &c.name)))
-        .chain(fns.iter().map(|f| &f.name))
+        .flat_map(|d| std::iter::once((&d.name, d.span)).chain(d.ctors.iter().map(|c| (&c.name, d.span))))
+        .chain(fns.iter().map(|f| (&f.name, f.span)))
     {
         let reserved = BUILTINS.contains(&n.as_str())
             || PRIMS.contains(&n.as_str())
             || SYN_FNS.iter().any(|s| s.0 == n);
         if reserved || names.contains(&n.as_str()) {
-            return Err(format!("名前 {n} が重複している").into());
+            return Err(at_opt(format!("名前 {n} が重複している").into(), sp));
         }
         names.push(n);
     }
@@ -1393,7 +1406,7 @@ pub fn check(prog: &Program) -> R<Info> {
     for _ in 0..8 {
         let mut changed = false;
         for d in &prog.datas {
-            let l = ck.data_level(d)?;
+            let l = ck.data_level(d).map_err(|e| at_opt(e, d.span))?;
             changed |= ck.levels.insert(d.name.clone(), l) != Some(l);
         }
         if !changed {
@@ -1405,76 +1418,7 @@ pub fn check(prog: &Program) -> R<Info> {
         _ => return Err("引数なしの main 関数が必要".into()),
     }
     for f in fns {
-        let r = |e: &str| format!("関数 {}: {e}", f.name);
-        ck.scopes = vec![Scope::default()];
-        ck.cur_fn = None;
-        for (n, t) in &f.params {
-            let ty = ck.eval_type(t).ctx(|e| r(&format!("引数 {n}: {e}")))?;
-            let id = ck.norm.fresh();
-            ck.bind(n, ty, neu(Neu::Var(id, n.clone())), false).ctx(r)?;
-        }
-        ck.avail = Vec::new();
-        for e in &f.effects {
-            let mut env = ck.val_env();
-            for v in ck.effect_inst(e, &mut env).ctx(r)? {
-                let k = eff_key(&v);
-                if f.name == "main" && k != "Async" {
-                    return Err(r(
-                        "main 関数が起こせる効果は Async だけ（ほかの効果は handle で処理する）",
-                    )
-                    .into());
-                }
-                ck.avail.push((k, Some(v)));
-            }
-        }
-        ck.ret = match &f.ret {
-            Some(t) => ck.eval_type(t).ctx(|e| r(&format!("戻り値: {e}")))?,
-            None => prim("unit"),
-        };
-        // never はどの型とも一致するので、本体が戻らないこと（never の式で終わり、return を含まない）を確かめる
-        let never_fn = f.op.is_none() && ck.ret == prim("never");
-        if never_fn {
-            let mut ret_found = false;
-            let tail = f.body.tail.iter().map(|t| &**t);
-            for e in f.body.stmts.iter().map(|s| match s { Stmt::Let { init, .. } => init, Stmt::Expr(e) => e }).chain(tail) {
-                walk(e, &mut |x| ret_found |= matches!(x, Expr::Return(_)));
-            }
-            if ret_found {
-                return Err(r("戻り値が never の関数では return を使えない").into());
-            }
-        }
-        if !f.alias && matches!(base(&ck.ret), V::Univ(_)) {
-            return Err(r("関数は型を返せない。型を計算するなら type で定義する").into());
-        }
-        if f.partial && ck.is_proof_type(&ck.ret) {
-            return Err(r("partial fn は証明の型（添字付きの型族）を返せない。止まらない関数で偽の証明が作れてしまうため").into());
-        }
-        // extern の関数と効果の操作は本体が無いので、型の宣言だけを検査する
-        if f.js.is_some() || f.op.is_some() {
-            continue;
-        }
-        ck.cur_fn = (!f.partial).then(|| f.name.clone());
-        ck.cur_params = f
-            .params
-            .iter()
-            .map(|(n, _)| {
-                let e = ck.lookup(n).unwrap();
-                (e.val.clone(), e.ty.clone())
-            })
-            .collect();
-        ck.decr = vec![true; f.params.len()];
-        let ret = ck.ret.clone();
-        // 戻り値が unit の関数は最後の式の値を捨てる
-        if ret == prim("unit") {
-            ck.block(&f.body).ctx(r)?;
-        } else if never_fn {
-            if ck.block(&f.body).ctx(r)? != prim("never") {
-                return Err(r("戻り値が never の関数は、panic などの戻らない式で終わる必要がある").into());
-            }
-        } else {
-            ck.check_block(&f.body, &ret)
-                .ctx(|e| r(&format!("戻り値: {e}")))?;
-        }
+        check_fn(&mut ck, f).map_err(|e| at_opt(e, f.span))?;
     }
     Ok(Info {
         awaits: ck.awaits,
@@ -1484,8 +1428,87 @@ pub fn check(prog: &Program) -> R<Info> {
     })
 }
 
+// 関数 1 つを検査する
+fn check_fn(ck: &mut Ck, f: &Fn) -> R<()> {
+    let r = |e: &str| format!("関数 {}: {e}", f.name);
+    ck.scopes = vec![Scope::default()];
+    ck.cur_fn = None;
+    for (n, t) in &f.params {
+        let ty = ck.eval_type(t).ctx(|e| r(&format!("引数 {n}: {e}")))?;
+        let id = ck.norm.fresh();
+        ck.bind(n, ty, neu(Neu::Var(id, n.clone())), false).ctx(r)?;
+    }
+    ck.avail = Vec::new();
+    for e in &f.effects {
+        let mut env = ck.val_env();
+        for v in ck.effect_inst(e, &mut env).ctx(r)? {
+            let k = eff_key(&v);
+            if f.name == "main" && k != "Async" {
+                return Err(r(
+                    "main 関数が起こせる効果は Async だけ（ほかの効果は handle で処理する）",
+                )
+                .into());
+            }
+            ck.avail.push((k, Some(v)));
+        }
+    }
+    ck.ret = match &f.ret {
+        Some(t) => ck.eval_type(t).ctx(|e| r(&format!("戻り値: {e}")))?,
+        None => prim("unit"),
+    };
+    // never はどの型とも一致するので、本体が戻らないこと（never の式で終わり、return を含まない）を確かめる
+    let never_fn = f.op.is_none() && ck.ret == prim("never");
+    if never_fn {
+        let mut ret_found = false;
+        let tail = f.body.tail.iter().map(|t| &**t);
+        for e in f.body.stmts.iter().map(|s| match s { Stmt::Let { init, .. } => init, Stmt::Expr(e) => e }).chain(tail) {
+            walk(e, &mut |x| ret_found |= matches!(x, Expr::Return(_)));
+        }
+        if ret_found {
+            return Err(r("戻り値が never の関数では return を使えない").into());
+        }
+    }
+    if !f.alias && matches!(base(&ck.ret), V::Univ(_)) {
+        return Err(r("関数は型を返せない。型を計算するなら type で定義する").into());
+    }
+    if f.partial && ck.is_proof_type(&ck.ret) {
+        return Err(r("partial fn は証明の型（添字付きの型族）を返せない。止まらない関数で偽の証明が作れてしまうため").into());
+    }
+    // extern の関数と効果の操作は本体が無いので、型の宣言だけを検査する
+    if f.js.is_some() || f.op.is_some() {
+        return Ok(());
+    }
+    ck.cur_fn = (!f.partial).then(|| f.name.clone());
+    ck.cur_params = f
+        .params
+        .iter()
+        .map(|(n, _)| {
+            let e = ck.lookup(n).unwrap();
+            (e.val.clone(), e.ty.clone())
+        })
+        .collect();
+    ck.decr = vec![true; f.params.len()];
+    let ret = ck.ret.clone();
+    // 戻り値が unit の関数は最後の式の値を捨てる
+    if ret == prim("unit") {
+        ck.block(&f.body).ctx(r)?;
+    } else if never_fn {
+        if ck.block(&f.body).ctx(r)? != prim("never") {
+            return Err(r("戻り値が never の関数は、panic などの戻らない式で終わる必要がある").into());
+        }
+    } else {
+        ck.check_block(&f.body, &ret)
+            .ctx(|e| r(&format!("戻り値: {e}")))?;
+    }
+    Ok(())
+}
+
 // マクロ本体を、束縛名を syn 型の変数として検査する。値は syn 型でなければならない
 pub fn check_macro(b: &Block, params: &Kinds, rules: &HashMap<String, Kinds>) -> R<()> {
+    check_macro_body(b, params, rules).map_err(Error::with_line)
+}
+
+fn check_macro_body(b: &Block, params: &Kinds, rules: &HashMap<String, Kinds>) -> R<()> {
     let mut ck = Ck {
         norm: Norm::new(),
         scopes: vec![Scope::default()],
@@ -2836,18 +2859,19 @@ impl Ck<'_> {
         let mut effs: Vec<String> = Vec::new();
         for a in arms {
             let Some(f) = self.norm.fns.get(a.ctor.as_str()).copied() else {
-                return Err(format!("未定義の操作 {}", a.ctor).into());
+                return Err(at_opt(format!("未定義の操作 {}", a.ctor).into(), a.span));
             };
             let Some(e) = &f.op else {
-                return Err(format!("{} は効果の操作でない", a.ctor).into());
+                return Err(at_opt(format!("{} は効果の操作でない", a.ctor).into(), a.span));
             };
             if arms.iter().filter(|b| b.ctor == a.ctor).count() > 1 {
-                return Err(format!("操作 {} の腕が重複している", a.ctor).into());
+                return Err(at_opt(format!("操作 {} の腕が重複している", a.ctor).into(), a.span));
             }
             if a.binds.len() != f.params.len() - f.implicit {
-                return Err(
+                return Err(at_opt(
                     format!("操作 {} の引数は{}個", a.ctor, f.params.len() - f.implicit).into(),
-                );
+                    a.span,
+                ));
             }
             if !effs.contains(e) {
                 effs.push(e.clone());
@@ -2904,7 +2928,7 @@ impl Ck<'_> {
             r
         })();
         self.pop();
-        r.ctx(|e| format!("操作 {} の腕: {e}", a.ctor))
+        r.ctx(|e| format!("操作 {} の腕: {e}", a.ctor)).map_err(|e| at_opt(e, a.span))
     }
 
     // トップレベルの関数を値として使った時の型
@@ -3594,6 +3618,7 @@ impl Ck<'_> {
         let mut result: Option<V> = None;
         for arm in arms {
             let r = |e: &str| format!("{} の場合: {e}", arm.ctor);
+            let at = |e: Error| at_opt(e, arm.span);
             self.push();
             let mut exp = expected.cloned();
             if arm.ctor == "_" {
@@ -3601,19 +3626,19 @@ impl Ck<'_> {
             } else {
                 let Some((dd, c)) = self.norm.ctors.get(arm.ctor.as_str()).copied() else {
                     self.pop();
-                    return Err(format!("不明な構築子 {}", arm.ctor).into());
+                    return Err(at(format!("不明な構築子 {}", arm.ctor).into()));
                 };
                 if dd.name != d.name || arm.binds.len() != c.fields.len() {
                     self.pop();
-                    return Err(format!(
+                    return Err(at(format!(
                         "{} は {} の構築子でないか、フィールドの数が違う",
                         arm.ctor, d.name
                     )
-                    .into());
+                    .into()));
                 }
                 covered.push(c.name.clone());
                 let Some((mut substs, fvals)) =
-                    self.enter_ctor(d, c, &dt.1, Some(&arm.binds)).ctx(r)?
+                    self.enter_ctor(d, c, &dt.1, Some(&arm.binds)).ctx(r).map_err(at)?
                 else {
                     // 添字が合わないので、この場合は起こらない
                     self.pop();
@@ -3634,9 +3659,9 @@ impl Ck<'_> {
                 }
                 for (id, v) in &substs {
                     if let Some(e) = &mut exp {
-                        *e = self.norm.subst(e, *id, v)?;
+                        *e = self.norm.subst(e, *id, v).map_err(at)?;
                     }
-                    self.refine_var(*id, v)?;
+                    self.refine_var(*id, v).map_err(at)?;
                 }
             }
             let t = match &exp {
@@ -3644,7 +3669,7 @@ impl Ck<'_> {
                 None => self.expr(&arm.body),
             };
             self.pop();
-            let t = t.ctx(r)?;
+            let t = t.ctx(r).map_err(at)?;
             if expected.is_some() {
                 continue;
             }
@@ -3652,7 +3677,7 @@ impl Ck<'_> {
                 None => t,
                 Some(prev) if prev == prim("never") => t,
                 Some(prev) => {
-                    want(&base(&prev), &t, &r("場合ごとの型"))?;
+                    want(&base(&prev), &t, &r("場合ごとの型")).map_err(at)?;
                     base(&prev)
                 }
             });
@@ -3731,7 +3756,7 @@ impl Ck<'_> {
     fn check_q(&mut self, q: &[Q]) -> R<()> {
         for x in q {
             match x {
-                Q::Tok(_) => {}
+                Q::Tok(_) | Q::Field(_) => {}
                 Q::Var { path, .. } => {
                     let t = self
                         .lookup(&path[0])

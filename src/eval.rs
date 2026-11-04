@@ -248,6 +248,7 @@ impl Interp<'_> {
                 let tok = Token {
                     tok: Tok::Ident(s.to_string()),
                     span: Span::default(),
+                    site: None,
                     gap_before: true,
                     nl_before: false,
                 };

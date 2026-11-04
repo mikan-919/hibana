@@ -44,6 +44,8 @@ pub struct Token {
     pub gap_before: bool,
     // 直前のトークンとの間に改行があるか（文の区切りに使う）
     pub nl_before: bool,
+    // マクロの展開で作ったトークンの呼び出し位置。展開したコードのノードはこの位置を指す
+    pub site: Option<Span>,
 }
 
 const KEYWORDS: &[&str] = &[
@@ -200,6 +202,7 @@ pub fn lex(src: &str) -> R<Vec<Token>> {
                 span: Span { start, end: start },
                 gap_before: gap,
                 nl_before: nl,
+                site: None,
             });
             return Ok(out);
         };
@@ -247,6 +250,7 @@ pub fn lex(src: &str) -> R<Vec<Token>> {
             },
             gap_before: gap,
             nl_before: nl,
+            site: None,
         });
     }
 }
