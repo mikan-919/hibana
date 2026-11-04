@@ -153,10 +153,21 @@ static V h_print(V v) {
 static int64_t utf8_len(const char* s, int64_t n) { int64_t c = 0; for (int64_t k = 0; k < n; k++) if ((s[k] & 0xC0) != 0x80) c++; return c; }
 static V h_len(V v) { return mk_int(v.tag == T_STR ? utf8_len(v.s->s, v.s->len) : v.a->n); }
 static V h_starts_with(V s, V p) { return mk_bool(s.s->len >= p.s->len && memcmp(s.s->s, p.s->s, p.s->len) == 0); }
-// ponytail: 区切りが空文字列の時の振る舞いはインタプリタ（Rust の split）と違う
 static V h_split(V s, V sep) {
-  int64_t cap = 4, n = 0; V* parts = alloc(cap * sizeof(V));
   const char* p = s.s->s; const char* end = p + s.s->len; int64_t m = sep.s->len;
+  if (m == 0) {
+    int64_t count = utf8_len(p, s.s->len) + 2;
+    V* parts = alloc(count * sizeof(V)); int64_t n = 0;
+    parts[n++] = mk_str(p, 0);
+    while (p < end) {
+      const char* q = p + 1;
+      while (q < end && (((unsigned char)*q & 0xC0) == 0x80)) q++;
+      parts[n++] = mk_str(p, q - p); p = q;
+    }
+    parts[n++] = mk_str(end, 0);
+    return mk_arr(n, parts);
+  }
+  int64_t cap = 4, n = 0; V* parts = alloc(cap * sizeof(V));
   for (;;) {
     const char* q = p;
     while (q + m <= end && (m == 0 || memcmp(q, sep.s->s, m) != 0)) q++;

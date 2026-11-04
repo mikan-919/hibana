@@ -100,7 +100,7 @@ function $op(op, args) {
 function $str(v) { return typeof v === "string" ? v : $show(v); }
 function $print(v) { console.log($str(v)); }
 function $len(v) { return BigInt(typeof v === "string" ? [...v].length : v.length); }
-function $split(s, sep) { return s.split(sep); }
+function $split(s, sep) { return sep === "" ? ["", ...s, ""] : s.split(sep); }
 function $starts_with(s, p) { return s.startsWith(p); }
 // x = push(x, e)。$o は x の変数だけが指している配列の印で、x を他で読むと $sh が消す
 function $sh(v) { if (v !== null && v !== undefined && v.$o) v.$o = false; return v; }

@@ -15,6 +15,11 @@ fn main() {
         joined = joined + "[" + parts[i] + "]"
     }
     print(joined)
+    print(split("", ""))
+    print(split("abc", ""))
+    print(split("aé🙂", ""))
+    print(split("a,,b", ","))
+    print(split("", ","))
     print(slice("hibana", 0, 3) + to_str(1 + 2) + to_str(starts_with("hibana", "hi")))
     // a && b の b では a が真と分かっている
     if len(parts) > 2 && parts[2] == "42" { print("id is 42") }
