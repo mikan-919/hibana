@@ -117,7 +117,8 @@ impl Lx<'_> {
                 }
             } else if self.rest().starts_with("/*") {
                 let start = self.pos();
-                self.i += 2;
+                self.bump();
+                self.bump();
                 while !self.rest().starts_with("*/") {
                     if self.bump().is_none() {
                         return Err(Error::from("ブロックコメントが閉じていない").at(Span {
@@ -129,7 +130,8 @@ impl Lx<'_> {
                         }));
                     }
                 }
-                self.i += 2;
+                self.bump();
+                self.bump();
             } else {
                 return Ok(gap);
             }
@@ -140,7 +142,8 @@ impl Lx<'_> {
     fn number(&mut self) -> R<Tok> {
         let s = self.i;
         if self.rest().starts_with("0x") || self.rest().starts_with("0X") {
-            self.i += 2;
+            self.bump();
+            self.bump();
             while self.peek().is_some_and(|c| c.is_ascii_hexdigit()) {
                 self.bump();
             }
@@ -258,6 +261,28 @@ pub fn lex(src: &str) -> R<Vec<Token>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn block_comment_updates_positions_and_newline_flag() {
+        let ts = lex("a/*\nxy*/0xA z").unwrap();
+        assert_eq!(ts[1].tok, Tok::Int(10));
+        assert_eq!(ts[1].span.start, Pos { line: 2, column: 5, offset: 8 });
+        assert_eq!(ts[1].span.end, Pos { line: 2, column: 8, offset: 11 });
+        assert!(ts[1].gap_before);
+        assert!(ts[1].nl_before);
+        assert_eq!(ts[2].span.start, Pos { line: 2, column: 9, offset: 12 });
+        assert_eq!(ts[2].span.end, Pos { line: 2, column: 10, offset: 13 });
+        assert!(!ts[2].nl_before);
+    }
+
+    #[test]
+    fn hex_prefix_updates_column_and_offset() {
+        let ts = lex("0xA z").unwrap();
+        assert_eq!(ts[0].span.start, Pos { line: 1, column: 1, offset: 0 });
+        assert_eq!(ts[0].span.end, Pos { line: 1, column: 4, offset: 3 });
+        assert_eq!(ts[1].span.start, Pos { line: 1, column: 5, offset: 4 });
+        assert_eq!(ts[1].span.end, Pos { line: 1, column: 6, offset: 5 });
+    }
 
     #[test]
     fn gap_and_literals() {
