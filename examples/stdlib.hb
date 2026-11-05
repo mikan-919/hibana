@@ -29,3 +29,10 @@ test "str" {
 fn main() {
     print(join(map(range(1, 4), fn(x) { to_str(x * x) }), " "))
 }
+
+test "json int boundaries" {
+    assert(match parse_json("9223372036854775807") { Some(v) => match v { JInt(n) => n == 9223372036854775807 _ => false } None => false })
+    assert(match parse_json("-9223372036854775808") { Some(v) => match v { JInt(n) => n == -9223372036854775807 - 1 _ => false } None => false })
+    assert(match parse_json("9223372036854775808") { None => true _ => false })
+    assert(match parse_json("-9223372036854775809") { None => true _ => false })
+}
