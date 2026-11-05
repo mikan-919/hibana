@@ -498,14 +498,31 @@ fn parse_int(s: str, i: int) -> Parsed {
     if neg { j = j + 1 }
     let start = j
     let mut n = 0
+    let mut overflow = false
     while digit(char_at(s, j)) >= 0 {
-        n = n * 10 + digit(char_at(s, j))
+        let d = digit(char_at(s, j))
+        // 負数は負のまま蓄積し、int の最小値を絶対値なしで表す。
+        if !overflow {
+            if neg {
+                if n < -922337203685477580 || (n == -922337203685477580 && d > 8) {
+                    overflow = true
+                } else {
+                    n = n * 10 - d
+                }
+            } else {
+                if n > 922337203685477580 || (n == 922337203685477580 && d > 7) {
+                    overflow = true
+                } else {
+                    n = n * 10 + d
+                }
+            }
+        }
         j = j + 1
     }
-    if j == start {
+    if j == start || overflow {
         no_parse()
     } else {
-        Parsed { ok: true, value: JInt(if neg { 0 - n } else { n }), pos: j }
+        Parsed { ok: true, value: JInt(n), pos: j }
     }
 }
 
