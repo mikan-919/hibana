@@ -3,11 +3,12 @@
 // 値はタグ付きの struct V。int は int64_t（オーバーフローは実行時エラー）、文字列・配列・type の値・関数は
 // ヒープに置く。関数の値は (コード, 写し取った変数) の組で、無名関数は見えている局所変数をすべて写し取る。
 // 式は1つずつ一時変数に入れて、評価の順序をインタプリタと揃える
-// ponytail: メモリを解放しない。長く動くプログラムには Boehm GC などを入れる
+// ヒープは Boehm GC（保守的なごみ集め）で確保し、使われなくなった値を回収する。ビルドには libgc が要る
 use crate::parser::{Arm, Block, Expr, Fn, Program, Stmt};
 use std::collections::HashMap;
 
-const PRELUDE: &str = r#"#include <stdint.h>
+const PRELUDE: &str = r#"#include <gc.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,7 +34,7 @@ static void die(const char* m) {
   if (h_at) fprintf(stderr, "実行時エラー: %s（%s）\n", m, h_at); else fprintf(stderr, "実行時エラー: %s\n", m);
   exit(1);
 }
-static void* alloc(size_t n) { void* p = malloc(n ? n : 1); if (!p) die("メモリが足りない"); return p; }
+static void* alloc(size_t n) { void* p = GC_MALLOC(n ? n : 1); if (!p) die("メモリが足りない"); return p; }
 static V mk_int(int64_t i) { V v = { .tag = T_INT }; v.i = i; return v; }
 static V mk_bool(bool b) { V v = { .tag = T_BOOL }; v.b = b; return v; }
 static V mk_ty(const char* t) { V v = { .tag = T_TY }; v.ty = t; return v; }
@@ -326,7 +327,7 @@ pub fn emit(prog: &Program) -> String {
     for l in &g.lambdas {
         out += l;
     }
-    out += "int main(void) { f_main(); return 0; }\n";
+    out += "int main(void) { GC_INIT(); f_main(); return 0; }\n";
     out
 }
 

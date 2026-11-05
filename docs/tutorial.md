@@ -4,7 +4,7 @@ hibana は静的型付けの言語です。型検査を通ったプログラム�
 
 ## 1. 動かす
 
-`hibana <ファイル>` でインタプリタが実行します。`hibana js <ファイル>` は JavaScript を標準出力に書き、`hibana build <ファイル>` は C を経由してネイティブの実行ファイルを作ります（`cc` が要ります）。
+`hibana <ファイル>` でインタプリタが実行します。`hibana js <ファイル>` は JavaScript を標準出力に書き、`hibana build <ファイル>` は C を経由してネイティブの実行ファイルを作ります（`cc` と Boehm GC の `libgc` が要ります）。
 
 ```
 fn greet(name: str) -> str {

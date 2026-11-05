@@ -57,6 +57,7 @@ fn build(src: &str, out: &std::path::Path) -> error::R<()> {
         .args(["-O2", "-w", "-o"])
         .arg(out)
         .arg(&c_path)
+        .arg("-lgc")
         .status()
         .map_err(|e| format!("cc を起動できない: {e}"))?;
     if !r.success() {
@@ -325,6 +326,26 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    // ネイティブの実行ファイルは、使われなくなった値を回収する。合わせて約 100MB の文字列を作るプログラムが、
+    // 仮想メモリ 50MB の上限の中で最後まで動く
+    #[test]
+    fn native_heap_is_collected() {
+        let src = "fn main() {\n    let mut total = 0\n    for i in 0..1000000 {\n        let s = to_str(i) + \"-0123456789012345678901234567890123456789012345678901234567890123456789\"\n        total = total + len(s)\n    }\n    print(total)\n}\n";
+        let tmp = std::env::temp_dir().join(format!("hibana-gc-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let exe = tmp.join("churn");
+        super::build(src, &exe).unwrap();
+        let r = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("ulimit -v 50000; exec \"$0\"")
+            .arg(&exe)
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(&tmp).unwrap();
+        assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+        assert_eq!(String::from_utf8(r.stdout).unwrap(), out(src).unwrap());
     }
 
     // use で JavaScript と TypeScript のモジュールを使う例を、Node.js で実行する
