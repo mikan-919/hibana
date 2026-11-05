@@ -414,7 +414,7 @@ fn runtime() -> str {
     "function $index(v, i) { return v[Number(i)]; }\n" +
     "function $div(a, b) { if (b === 0n) throw new Error(\"0 で除算した\"); return a / b; }\n" +
     "function $mod(a, b) { if (b === 0n) throw new Error(\"0 で除算した\"); return a % b; }\n" +
-    "function $split(s, sep) { return s.split(sep); }\n" +
+    "function $split(s, sep) { return sep === \"\" ? [\"\", ...s, \"\"] : s.split(sep); }\n" +
     "function $starts_with(s, p) { return s.startsWith(p); }\n" +
     "function $slice(s, i, j) { return [...s].slice(Number(i), Number(j)).join(\"\"); }\n" +
     "function $chars(s) { return [...s]; }\n" +
