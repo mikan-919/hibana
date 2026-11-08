@@ -9,6 +9,7 @@ miette = { version = "7.6.0", features = ["fancy"] }
 thiserror = "2.0.21"
 z3 = "0.21.1"
 toml = { version = "1.1.6", features = ["preserve_order"] }
+wasm-encoder = "0.227.1"
 
 [features]
 # Z3 をソースからビルドして静的にリンクする（時間がかかる。実行ファイル1つで動く）

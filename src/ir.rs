@@ -7,23 +7,24 @@ use std::fmt::{self, Write};
 
 #[derive(Debug, PartialEq)]
 pub struct Program {
-    functions: Vec<Function>,
+    pub(crate) functions: Vec<Function>,
 }
 
 #[derive(Debug, PartialEq)]
-struct Function {
-    name: String,
-    params: usize,
-    instructions: Vec<Instruction>,
-    result: Option<usize>,
+pub(crate) struct Function {
+    pub(crate) name: String,
+    pub(crate) params: usize,
+    pub(crate) instructions: Vec<Instruction>,
+    pub(crate) result: Option<usize>,
 }
 
 #[derive(Debug, PartialEq)]
-enum Instruction {
+pub(crate) enum Instruction {
     Int(i64),
     // 演算は 64 ビット整数で、範囲外と 0 による除算は実行時エラー。
     Binary(&'static str, usize, usize),
     Call(String, Vec<usize>),
+    Print(usize),
 }
 
 fn is_int(e: &Expr) -> bool {
@@ -67,18 +68,47 @@ pub fn lower(p: &parser::Program) -> R<Program> {
                     let value = expr(init, &vars, &mut instructions, f.params.len(), &signatures)?;
                     vars.insert(name, value);
                 }
+                Stmt::Expr(e) if matches!(e.peel(), Expr::Call(name, args) if name == "print" && args.len() == 1) =>
+                {
+                    let Expr::Call(_, args) = e.peel() else {
+                        unreachable!()
+                    };
+                    let value = expr(
+                        &args[0],
+                        &vars,
+                        &mut instructions,
+                        f.params.len(),
+                        &signatures,
+                    )?;
+                    instructions.push(Instruction::Print(value));
+                }
                 Stmt::Expr(e) => {
                     expr(e, &vars, &mut instructions, f.params.len(), &signatures)?;
                 }
                 _ => return Err("IR はこの文に未対応".into()),
             }
         }
-        let result = f
-            .body
-            .tail
-            .as_ref()
-            .map(|e| expr(e, &vars, &mut instructions, f.params.len(), &signatures))
-            .transpose()?;
+        let result = match f.body.tail.as_deref().map(Expr::peel) {
+            Some(Expr::Call(name, args)) if name == "print" && args.len() == 1 => {
+                let value = expr(
+                    &args[0],
+                    &vars,
+                    &mut instructions,
+                    f.params.len(),
+                    &signatures,
+                )?;
+                instructions.push(Instruction::Print(value));
+                None
+            }
+            Some(e) => Some(expr(
+                e,
+                &vars,
+                &mut instructions,
+                f.params.len(),
+                &signatures,
+            )?),
+            None => None,
+        };
         if result.is_some() != f.ret.is_some() {
             return Err(format!("IR は関数 {} の戻り値に未対応", f.name).into());
         }
@@ -142,6 +172,10 @@ impl fmt::Display for Program {
                 if fun.result.is_some() { " -> int" } else { "" }
             )?;
             for (i, inst) in fun.instructions.iter().enumerate() {
+                if let Instruction::Print(value) = inst {
+                    writeln!(f, "  print %{value}")?;
+                    continue;
+                }
                 write!(f, "  %{} = ", fun.params + i)?;
                 match inst {
                     Instruction::Int(n) => write!(f, "int {n}")?,
@@ -156,6 +190,7 @@ impl fmt::Display for Program {
                         }
                         f.write_char(')')?;
                     }
+                    Instruction::Print(_) => unreachable!(),
                 }
                 writeln!(f)?;
             }

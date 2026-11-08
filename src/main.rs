@@ -14,6 +14,7 @@ mod resolve;
 mod smt;
 mod ts;
 mod typeck;
+mod wasm;
 
 use std::io::Write;
 
@@ -34,6 +35,12 @@ fn to_ir(src: &str) -> error::R<String> {
     let mut prog = parser::parse(&parser::with_uses(src)?)?;
     typeck::elaborate(&mut prog)?;
     Ok(ir::lower(&prog)?.to_string())
+}
+
+fn to_wasm(src: &str) -> error::R<Vec<u8>> {
+    let mut prog = parser::parse(&parser::with_uses(src)?)?;
+    typeck::elaborate(&mut prog)?;
+    Ok(wasm::emit(&ir::lower(&prog)?))
 }
 
 // C に変換する
@@ -128,10 +135,10 @@ fn run_cli() {
     }
     let (cmd, path) = match args.as_slice() {
         [p] => ("run", p.clone()),
-        [cmd, p] if cmd == "ir" || cmd == "js" || cmd == "c" || cmd == "build" || cmd == "fmt" => (cmd.as_str(), p.clone()),
+        [cmd, p] if cmd == "ir" || cmd == "wasm" || cmd == "js" || cmd == "c" || cmd == "build" || cmd == "fmt" => (cmd.as_str(), p.clone()),
         _ => {
             eprintln!(
-                "使い方: hibana <ファイル>（実行） | hibana ir <ファイル>（中間表現を出力） | hibana js <ファイル>（JavaScript を出力） | hibana c <ファイル>（C を出力） | hibana build <ファイル>（ネイティブの実行ファイルを作る） | hibana fmt <ファイル>（整形して書き戻す） | hibana lsp（Language Server を標準入出力で動かす） | hibana new <名前> | hibana add <git の URL> [tag] | hibana fetch（依存を取ってくる） | hibana test [ファイル]（test を実行する）"
+                "使い方: hibana <ファイル>（実行） | hibana ir <ファイル>（中間表現を出力） | hibana wasm <ファイル>（WASM を出力） | hibana js <ファイル>（JavaScript を出力） | hibana c <ファイル>（C を出力） | hibana build <ファイル>（ネイティブの実行ファイルを作る） | hibana fmt <ファイル>（整形して書き戻す） | hibana lsp（Language Server を標準入出力で動かす） | hibana new <名前> | hibana add <git の URL> [tag] | hibana fetch（依存を取ってくる） | hibana test [ファイル]（test を実行する）"
             );
             std::process::exit(2);
         }
@@ -156,6 +163,7 @@ fn run_cli() {
     );
     let r = match cmd {
         "ir" => to_ir(&src).map(|s| print!("{s}")),
+        "wasm" => to_wasm(&src).and_then(|bytes| std::io::stdout().write_all(&bytes).map_err(|e| e.to_string().into())),
         "js" => to_js(&src).map(|s| print!("{s}")),
         "c" => to_c(&src).map(|s| print!("{s}")),
         "fmt" => fmt::format(&src).map(|s| {
