@@ -3,6 +3,7 @@ mod error;
 mod eval;
 mod fmt;
 mod index;
+mod ir;
 mod js;
 mod lexer;
 mod lsp;
@@ -27,6 +28,12 @@ fn to_js(src: &str) -> error::R<String> {
     let mut prog = parser::parse(&parser::with_uses(src)?)?;
     let info = typeck::elaborate(&mut prog)?;
     Ok(js::emit(&prog, &info))
+}
+
+fn to_ir(src: &str) -> error::R<String> {
+    let mut prog = parser::parse(&parser::with_uses(src)?)?;
+    typeck::elaborate(&mut prog)?;
+    Ok(ir::lower(&prog)?.to_string())
 }
 
 // C に変換する
@@ -121,10 +128,10 @@ fn run_cli() {
     }
     let (cmd, path) = match args.as_slice() {
         [p] => ("run", p.clone()),
-        [cmd, p] if cmd == "js" || cmd == "c" || cmd == "build" || cmd == "fmt" => (cmd.as_str(), p.clone()),
+        [cmd, p] if cmd == "ir" || cmd == "js" || cmd == "c" || cmd == "build" || cmd == "fmt" => (cmd.as_str(), p.clone()),
         _ => {
             eprintln!(
-                "使い方: hibana <ファイル>（実行） | hibana js <ファイル>（JavaScript を出力） | hibana c <ファイル>（C を出力） | hibana build <ファイル>（ネイティブの実行ファイルを作る） | hibana fmt <ファイル>（整形して書き戻す） | hibana lsp（Language Server を標準入出力で動かす） | hibana new <名前> | hibana add <git の URL> [tag] | hibana fetch（依存を取ってくる） | hibana test [ファイル]（test を実行する）"
+                "使い方: hibana <ファイル>（実行） | hibana ir <ファイル>（中間表現を出力） | hibana js <ファイル>（JavaScript を出力） | hibana c <ファイル>（C を出力） | hibana build <ファイル>（ネイティブの実行ファイルを作る） | hibana fmt <ファイル>（整形して書き戻す） | hibana lsp（Language Server を標準入出力で動かす） | hibana new <名前> | hibana add <git の URL> [tag] | hibana fetch（依存を取ってくる） | hibana test [ファイル]（test を実行する）"
             );
             std::process::exit(2);
         }
@@ -148,6 +155,7 @@ fn run_cli() {
             .unwrap_or(std::path::Path::new(".")),
     );
     let r = match cmd {
+        "ir" => to_ir(&src).map(|s| print!("{s}")),
         "js" => to_js(&src).map(|s| print!("{s}")),
         "c" => to_c(&src).map(|s| print!("{s}")),
         "fmt" => fmt::format(&src).map(|s| {

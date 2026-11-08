@@ -504,6 +504,7 @@ web.serve(8080, app)    // hibana js examples/server.hb > server.mjs && node ser
 | コマンド | 出力 | 用途 |
 |---|---|---|
 | `hibana <ファイル>` | 構文木を直接評価して実行 | 開発中の確認。マクロと型の計算もこの評価器で行う |
+| `hibana ir <ファイル>` | 型検査後の中間表現を標準出力に書く | コンパイラーの開発。整数の定数・算術演算・不変変数・整数を返す関数の呼び出しに対応し、それ以外はエラーにする |
 | `hibana js <ファイル>` | JavaScript を標準出力に書く | Web（ブラウザ・Node.js・Cloudflare Workers など） |
 | `hibana c <ファイル>` | C を標準出力に書く | ネイティブ（出力だけ欲しい時） |
 | `hibana build <ファイル>` | C を作って `cc -O2 ... -lgc` でビルドし（ヒープは Boehm GC が回収する）、拡張子を除いた名前の実行ファイルを作る | ネイティブ |
