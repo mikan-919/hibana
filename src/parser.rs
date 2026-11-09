@@ -263,6 +263,18 @@ pub fn set_base_dir(p: &std::path::Path) {
     BASE.with(|b| *b.borrow_mut() = p.to_path_buf());
 }
 
+pub(crate) fn with_base_dir<T>(p: &std::path::Path, f: impl FnOnce() -> T) -> T {
+    struct Restore(std::path::PathBuf);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            BASE.with(|b| *b.borrow_mut() = std::mem::take(&mut self.0));
+        }
+    }
+    let old = BASE.with(|b| b.replace(p.to_path_buf()));
+    let _restore = Restore(old);
+    f()
+}
+
 fn base_dir() -> std::path::PathBuf {
     BASE.with(|b| b.borrow().clone())
 }

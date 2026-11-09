@@ -26,7 +26,8 @@ nix develop -c cargo run -q -- <ファイル>   # 実行（js / c / build / fmt 
 | `src/eval.rs` `src/js.rs` `src/c.rs` | インタプリタ、JavaScript、C のバックエンド。3 つは同じ出力になる |
 | `src/fmt.rs` `src/lsp.rs` `src/index.rs` | フォーマッタ（設定なし）、Language Server、シンボルの索引 |
 | `src/pkg.rs` | パッケージ管理（`hibana.toml`・`hibana.lock`） |
-| `src/main.rs` | CLI と、全体のテスト（`mod tests`） |
+| `src/main.rs` `src/cli.rs` | CLI の入口と、全体のテスト（`mod tests`） |
+| `src/lib.rs` `src/pipeline.rs` | コンパイラーのライブラリと、ビルドの各段階 |
 | `lib/` | 標準ライブラリ（`std.hb`）と web ライブラリ（`web.hb`）。hibana で書いてある |
 | `examples/` | 例。多くはテストの入力になる |
 | `selfhost/` | hibana で書いたコンパイラー。機能の実証用で、本流は Rust の実装 |
@@ -44,7 +45,7 @@ nix develop -c cargo run -q -- <ファイル>   # 実行（js / c / build / fmt 
 
 ## selfhost のテスト
 
-`src/main.rs` の `selfhost_*` テストが次を確かめます。
+`src/cli.rs` の `selfhost_*` テストが次を確かめます。
 
 - 字句（`selfhost_lexer_matches`）と構文木（`selfhost_parser_matches`）が Rust 版と同じ。
 - 型検査（`selfhost_checker_matches`）が Rust 版と同じく通すか止める。

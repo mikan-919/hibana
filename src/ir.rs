@@ -5,26 +5,47 @@ use crate::parser::{self, Expr, Stmt};
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Write};
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub(crate) functions: Vec<Function>,
 }
 
-#[derive(Debug, PartialEq)]
-pub(crate) struct Function {
+#[derive(Debug, Clone, PartialEq)]
+pub struct Function {
     pub(crate) name: String,
     pub(crate) params: usize,
     pub(crate) instructions: Vec<Instruction>,
     pub(crate) result: Option<usize>,
 }
 
-#[derive(Debug, PartialEq)]
-pub(crate) enum Instruction {
+#[derive(Debug, Clone, PartialEq)]
+pub enum Instruction {
     Int(i64),
     // 演算は 64 ビット整数で、範囲外と 0 による除算は実行時エラー。
     Binary(&'static str, usize, usize),
     Call(String, Vec<usize>),
     Print(usize),
+}
+
+impl Program {
+    pub fn functions(&self) -> &[Function] {
+        &self.functions
+    }
+}
+
+impl Function {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn params(&self) -> usize {
+        self.params
+    }
+    pub fn instructions(&self) -> &[Instruction] {
+        &self.instructions
+    }
+    pub fn result(&self) -> Option<usize> {
+        self.result
+    }
 }
 
 fn is_int(e: &Expr) -> bool {

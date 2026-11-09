@@ -507,6 +507,7 @@ web.serve(8080, app)    // hibana js examples/server.hb > server.mjs && node ser
 | `hibana run <ファイル>` | WASM に変換し、組み込んだ Wasmtime で実行 | WASM 出力が対応するプログラムの実行 |
 | `hibana ir <ファイル>` | 型検査後の中間表現を標準出力に書く | コンパイラーの開発。整数の定数・算術演算・不変変数・整数を返す関数の呼び出しに対応し、それ以外はエラーにする |
 | `hibana wasm <ファイル> [--export 関数名 ...]` | WebAssembly のバイナリを標準出力に書く | 整数を扱う IR に対応。`--export` で公開関数を選べる |
+| `hibana glue <ファイル> --export 関数名 ...` | WASM に接続する JavaScript の ES モジュールを標準出力に書く | 同じ公開関数を指定して生成し、整数の引数を変換する |
 | `hibana js <ファイル>` | JavaScript を標準出力に書く | Web（ブラウザ・Node.js・Cloudflare Workers など） |
 | `hibana c <ファイル>` | C を標準出力に書く | ネイティブ（出力だけ欲しい時） |
 | `hibana build <ファイル>` | C を作って `cc -O2 ... -lgc` でビルドし（ヒープは Boehm GC が回収する）、拡張子を除いた名前の実行ファイルを作る | ネイティブ |
@@ -533,6 +534,35 @@ node -e 'const fs = require("fs"); const m = new WebAssembly.Module(fs.readFileS
 ```
 
 この例で公開されるのは `twice` だけです。`add` は内部の呼び出しに必要なので含まれます。`--export` を省いた場合は、これまでどおり `main` が必要で、すべての関数を公開します。
+
+JavaScript の接続コードは WASM と別に生成できます。`instantiate` の引数には WASM のバイト列と、必要な外部関数を渡します。公開関数には安全に表せる JavaScript の整数か `BigInt` を渡し、整数の結果は `BigInt` で受け取ります。
+
+```sh
+hibana glue math.hb --export twice > math.mjs
+node --input-type=module -e 'import fs from "node:fs"; import { instantiate } from "./math.mjs"; const math = await instantiate(fs.readFileSync("math.wasm")); console.log(math.twice(21))'
+```
+
+Rust のライブラリからは、`hibana::pipeline` の各関数を組み合わせられます。`load` は `use` のファイルを読み、`parse` は構文木を作り、`check` は型検査します。`lower` は IR を作り、`link` は IR から公開関数とその呼び出し先を選びます。`emit_wasm` と `emit_js_glue` はそれぞれバイト列と文字列を返すため、書き込みや外部ツールの起動は呼び出し側で決められます。
+
+```rust
+use hibana::pipeline::{self, Kind};
+use std::path::Path;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let source = "fn twice(n: int) -> int { n + n }";
+    let loaded = pipeline::load(source, Path::new("."))?;
+    let parsed = pipeline::parse(&loaded)?;
+    let checked = pipeline::check(parsed, Kind::Library)?;
+    let ir = pipeline::lower(&checked, None)?;
+    let exports = vec!["twice".to_string()];
+    let linked = pipeline::link(&ir, &exports)?;
+    let wasm = pipeline::emit_wasm(&linked, Some(&exports))?;
+    let glue = pipeline::emit_js_glue(&linked, &exports)?;
+    Ok(())
+}
+```
+
+現在の IR は整数の演算と呼び出しに限ります。全関数が IR に対応していない場合は、`lower(&checked, Some(&exports))` に公開関数を渡すと、使う関数だけを変換できます。任意の外部関数、文字列や配列の受け渡し、WASM モジュール同士のリンクには未対応です。
 
 ```sh
 hibana wasm input.hb > input.wasm
