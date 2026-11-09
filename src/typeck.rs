@@ -1221,6 +1221,15 @@ pub struct Info {
 // 型検査して、省いた制約の実装を呼び出しに足す。足したら、アドレスで覚える情報のためにもう一度検査する
 // ponytail: 実装を省いた呼び出しがあると2回検査する。遅ければ足した式を記録の側で持つ
 pub fn elaborate(prog: &mut Program) -> R<Info> {
+    elaborate_mode(prog, true)
+}
+
+pub fn elaborate_library(prog: &mut Program) -> R<Info> {
+    elaborate_mode(prog, false)
+}
+
+fn elaborate_mode(prog: &mut Program, require_main: bool) -> R<Info> {
+    let check = |p: &Program| check_prog(p, require_main).map_err(Error::with_line);
     let info = check(prog)?;
     if info.elab.is_empty() {
         return Ok(info);
@@ -1314,7 +1323,7 @@ fn is_impl(name: &str) -> bool {
 }
 
 pub fn check(prog: &Program) -> R<Info> {
-    check_prog(prog).map_err(Error::with_line)
+    check_prog(prog, true).map_err(Error::with_line)
 }
 
 // 位置が分かっている宣言・腕の誤りには、その位置を付ける（内側で付いた位置は残す）
@@ -1325,7 +1334,7 @@ fn at_opt(e: Error, s: Option<Span>) -> Error {
     }
 }
 
-fn check_prog(prog: &Program) -> R<Info> {
+fn check_prog(prog: &Program, require_main: bool) -> R<Info> {
     let fns = &prog.fns;
     let mut ck = Ck {
         norm: Norm::new(),
@@ -1413,9 +1422,11 @@ fn check_prog(prog: &Program) -> R<Info> {
             break;
         }
     }
-    match ck.norm.fns.get("main") {
-        Some(f) if f.params.is_empty() => {}
-        _ => return Err("引数なしの main 関数が必要".into()),
+    if require_main {
+        match ck.norm.fns.get("main") {
+            Some(f) if f.params.is_empty() => {}
+            _ => return Err("引数なしの main 関数が必要".into()),
+        }
     }
     for f in fns {
         check_fn(&mut ck, f).map_err(|e| at_opt(e, f.span))?;

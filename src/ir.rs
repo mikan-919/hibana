@@ -2,7 +2,7 @@
 // ponytail: 整数・不変変数・関数呼び出しだけ対応する。制御フローや他の値は対応時に命令を足す。
 use crate::error::R;
 use crate::parser::{self, Expr, Stmt};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Write};
 
 #[derive(Debug, PartialEq)]
@@ -32,8 +32,41 @@ fn is_int(e: &Expr) -> bool {
 }
 
 pub fn lower(p: &parser::Program) -> R<Program> {
+    lower_selected(p, None)
+}
+
+pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>) -> R<Program> {
     let mut signatures = HashMap::new();
-    for f in &p.fns {
+    let mut sources = HashMap::new();
+    for (i, f) in p.fns.iter().enumerate() {
+        signatures.insert(f.name.as_str(), (f.params.len(), f.ret.is_some()));
+        sources.insert(f.name.as_str(), (i, f));
+    }
+    if exports.is_none() && (!p.datas.is_empty() || !p.tests.is_empty()) {
+        return Err("IR は型宣言とテスト宣言に未対応".into());
+    }
+    let mut pending = match exports {
+        Some(names) => {
+            let mut seen = HashSet::new();
+            for name in names {
+                if !signatures.contains_key(name.as_str()) {
+                    return Err(format!("公開する関数 {name} が無い").into());
+                }
+                if !seen.insert(name) {
+                    return Err(format!("公開する関数 {name} が重複している").into());
+                }
+            }
+            names.iter().map(String::as_str).collect::<Vec<_>>()
+        }
+        None => p.fns.iter().map(|f| f.name.as_str()).collect(),
+    };
+    let mut visited = HashSet::new();
+    let mut functions = Vec::new();
+    while let Some(name) = pending.pop() {
+        if !visited.insert(name) {
+            continue;
+        }
+        let f = sources[name].1;
         if f.js.is_some()
             || f.alias
             || f.op.is_some()
@@ -45,13 +78,6 @@ pub fn lower(p: &parser::Program) -> R<Program> {
         {
             return Err(format!("IR は関数 {} の宣言に未対応", f.name).into());
         }
-        signatures.insert(f.name.as_str(), (f.params.len(), f.ret.is_some()));
-    }
-    if !p.datas.is_empty() || !p.tests.is_empty() {
-        return Err("IR は型宣言とテスト宣言に未対応".into());
-    }
-    let mut functions = Vec::new();
-    for f in &p.fns {
         let mut vars = HashMap::new();
         for (i, (name, _)) in f.params.iter().enumerate() {
             vars.insert(name.as_str(), i);
@@ -112,6 +138,11 @@ pub fn lower(p: &parser::Program) -> R<Program> {
         if result.is_some() != f.ret.is_some() {
             return Err(format!("IR は関数 {} の戻り値に未対応", f.name).into());
         }
+        for inst in &instructions {
+            if let Instruction::Call(name, _) = inst {
+                pending.push(sources[name.as_str()].1.name.as_str());
+            }
+        }
         functions.push(Function {
             name: f.name.clone(),
             params: f.params.len(),
@@ -119,6 +150,7 @@ pub fn lower(p: &parser::Program) -> R<Program> {
             result,
         });
     }
+    functions.sort_by_key(|f| sources[f.name.as_str()].0);
     Ok(Program { functions })
 }
 

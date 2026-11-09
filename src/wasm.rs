@@ -47,6 +47,10 @@ pub fn run<W: Write + 'static>(bytes: &[u8], out: W) -> crate::error::R<W> {
 }
 
 pub fn emit(program: &Program) -> Vec<u8> {
+    emit_selected(program, None)
+}
+
+pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> {
     let has_print = program
         .functions
         .iter()
@@ -81,7 +85,9 @@ pub fn emit(program: &Program) -> Vec<u8> {
     let mut code = CodeSection::new();
     for (index, f) in program.functions.iter().enumerate() {
         functions.function(index as u32 + offset);
-        exports.export(&f.name, ExportKind::Func, index as u32 + offset);
+        if selected.is_none_or(|names| names.contains(&f.name)) {
+            exports.export(&f.name, ExportKind::Func, index as u32 + offset);
+        }
         let mut body = Function::new([(f.instructions.len() as u32, ValType::I64)]);
         for (i, inst) in f.instructions.iter().enumerate() {
             let result = (f.params + i) as u32;
@@ -184,6 +190,75 @@ fn trap_if(f: &mut Function) {
 mod tests {
     use std::io::Write;
     use std::process::{Command, Stdio};
+
+    #[test]
+    fn library_exports_only_requested_reachable_functions() {
+        let used = "fn plus(a: int, b: int) -> int { a + b }\nfn twice(n: int) -> int { plus(n, n) }\nfn result(n: int) -> int { twice(n) + 1 }\n";
+        let with_unused = format!(
+            "{used}fn unused() -> str {{ \"unused\" }}\nfn unused_print() {{ print(999) }}\n"
+        );
+        let names = vec!["result".to_string()];
+        let bytes = crate::to_wasm_library(&with_unused, &names).unwrap();
+        assert_eq!(bytes, crate::to_wasm_library(used, &names).unwrap());
+        let script = r#"
+const m = new WebAssembly.Module(require('fs').readFileSync(0));
+if (JSON.stringify(WebAssembly.Module.imports(m)) !== '[]') throw Error('unexpected imports');
+const x = new WebAssembly.Instance(m, {}).exports;
+if (Object.keys(x).join(',') !== 'result' || x.result(20n) !== 41n) throw Error('unexpected exports or result');
+"#;
+        let mut child = Command::new("node")
+            .args(["-e", script])
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(&bytes).unwrap();
+        let result = child.wait_with_output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+
+        let bytes = crate::to_wasm_library(used, &["result".into(), "plus".into()]).unwrap();
+        let engine = wasmtime::Engine::default();
+        let module = wasmtime::Module::new(&engine, bytes).unwrap();
+        let names: Vec<_> = module
+            .exports()
+            .map(|export| export.name().to_string())
+            .collect();
+        assert_eq!(names, ["plus", "result"]);
+        let mut store = wasmtime::Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+        assert_eq!(
+            instance
+                .get_typed_func::<(i64, i64), i64>(&mut store, "plus")
+                .unwrap()
+                .call(&mut store, (20, 22))
+                .unwrap(),
+            42
+        );
+
+        assert!(
+            crate::to_wasm_library(used, &["missing".into()])
+                .unwrap_err()
+                .contains("無い")
+        );
+        assert!(
+            crate::to_wasm_library(used, &["result".into(), "result".into()])
+                .unwrap_err()
+                .contains("重複")
+        );
+        assert!(
+            crate::to_wasm_library(&with_unused, &["unused".into()])
+                .unwrap_err()
+                .contains("未対応")
+        );
+        assert!(
+            crate::to_wasm_library(&format!("{used}fn bad() -> int {{ true }}"), &names).is_err()
+        );
+        assert!(crate::to_wasm(used).unwrap_err().contains("main"));
+    }
 
     #[test]
     fn embedded_runtime_matches_interpreter_and_reports_errors() {

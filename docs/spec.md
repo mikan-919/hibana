@@ -506,7 +506,7 @@ web.serve(8080, app)    // hibana js examples/server.hb > server.mjs && node ser
 | `hibana <ファイル>` | 構文木を直接評価して実行 | 開発中の確認。マクロと型の計算もこの評価器で行う |
 | `hibana run <ファイル>` | WASM に変換し、組み込んだ Wasmtime で実行 | WASM 出力が対応するプログラムの実行 |
 | `hibana ir <ファイル>` | 型検査後の中間表現を標準出力に書く | コンパイラーの開発。整数の定数・算術演算・不変変数・整数を返す関数の呼び出しに対応し、それ以外はエラーにする |
-| `hibana wasm <ファイル>` | WebAssembly のバイナリを標準出力に書く | 整数を扱う IR に対応。整数の `print` は実行環境が渡す関数を呼ぶ |
+| `hibana wasm <ファイル> [--export 関数名 ...]` | WebAssembly のバイナリを標準出力に書く | 整数を扱う IR に対応。`--export` で公開関数を選べる |
 | `hibana js <ファイル>` | JavaScript を標準出力に書く | Web（ブラウザ・Node.js・Cloudflare Workers など） |
 | `hibana c <ファイル>` | C を標準出力に書く | ネイティブ（出力だけ欲しい時） |
 | `hibana build <ファイル>` | C を作って `cc -O2 ... -lgc` でビルドし（ヒープは Boehm GC が回収する）、拡張子を除いた名前の実行ファイルを作る | ネイティブ |
@@ -518,6 +518,21 @@ web.serve(8080, app)    // hibana js examples/server.hb > server.mjs && node ser
 | `hibana lsp` | Language Server を標準入出力で動かす | エディタ（エラーの表示・整形・hover・定義へのジャンプ・補完・色付け）。VS Code と Zed の拡張機能は `editors/`（`editors/README.md`） |
 
 WASM 出力は関数を名前で公開します。整数は符号付き 64 ビットで、JavaScript からは `BigInt` で渡します。整数の `print` がある場合、取り込み `hibana.print` に `i64` 引数の関数を渡します。整数の範囲外や 0 による除算では WASM の実行を停止します。文字列・分岐・外部関数など、IR が扱えない構文はコンパイル時にエラーになります。
+
+ライブラリは `--export` に公開する関数を指定します。`--export` は複数回指定でき、`main` は必要ありません。型検査はライブラリ全体に行い、WASM には公開関数と、そこから呼ぶ関数だけを含めます。未使用の関数や型が IR に未対応でも、型検査を通れば含めません。
+
+```text
+// math.hb
+fn add(a: int, b: int) -> int { a + b }
+fn twice(n: int) -> int { add(n, n) }
+```
+
+```sh
+hibana wasm math.hb --export twice > math.wasm
+node -e 'const fs = require("fs"); const m = new WebAssembly.Module(fs.readFileSync("math.wasm")); console.log(new WebAssembly.Instance(m).exports.twice(21n))'
+```
+
+この例で公開されるのは `twice` だけです。`add` は内部の呼び出しに必要なので含まれます。`--export` を省いた場合は、これまでどおり `main` が必要で、すべての関数を公開します。
 
 ```sh
 hibana wasm input.hb > input.wasm
