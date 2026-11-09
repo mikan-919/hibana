@@ -504,6 +504,7 @@ web.serve(8080, app)    // hibana js examples/server.hb > server.mjs && node ser
 | コマンド | 出力 | 用途 |
 |---|---|---|
 | `hibana <ファイル>` | 構文木を直接評価して実行 | 開発中の確認。マクロと型の計算もこの評価器で行う |
+| `hibana run <ファイル>` | WASM に変換し、組み込んだ Wasmtime で実行 | WASM 出力が対応するプログラムの実行 |
 | `hibana ir <ファイル>` | 型検査後の中間表現を標準出力に書く | コンパイラーの開発。整数の定数・算術演算・不変変数・整数を返す関数の呼び出しに対応し、それ以外はエラーにする |
 | `hibana wasm <ファイル>` | WebAssembly のバイナリを標準出力に書く | 整数を扱う IR に対応。整数の `print` は実行環境が渡す関数を呼ぶ |
 | `hibana js <ファイル>` | JavaScript を標準出力に書く | Web（ブラウザ・Node.js・Cloudflare Workers など） |

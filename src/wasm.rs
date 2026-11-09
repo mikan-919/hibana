@@ -1,10 +1,50 @@
 // 整数の IR を WebAssembly に変換する。
 use crate::ir::{Instruction as Ir, Program};
 use std::collections::HashMap;
+use std::io::Write;
 use wasm_encoder::{
     BlockType, CodeSection, EntityType, ExportKind, ExportSection, Function, FunctionSection,
     ImportSection, Instruction as I, Module, TypeSection, ValType,
 };
+
+// WASM の取り込みに整数の出力を渡して main を呼ぶ。
+pub fn run<W: Write + 'static>(bytes: &[u8], out: W) -> crate::error::R<W> {
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, bytes)
+        .map_err(|e| format!("WASM の読み込みに失敗した: {e}"))?;
+    let mut store = wasmtime::Store::new(&engine, out);
+    let mut linker = wasmtime::Linker::new(&engine);
+    linker
+        .func_wrap(
+            "hibana",
+            "print",
+            |mut caller: wasmtime::Caller<'_, W>, value: i64| -> wasmtime::Result<()> {
+                writeln!(caller.data_mut(), "{value}")?;
+                Ok(())
+            },
+        )
+        .map_err(|e| format!("WASM の出力関数を登録できない: {e}"))?;
+    let instance = linker
+        .instantiate(&mut store, &module)
+        .map_err(|e| format!("WASM の初期化に失敗した: {e}"))?;
+    let main = instance
+        .get_typed_func::<(), ()>(&mut store, "main")
+        .map_err(|e| format!("WASM の main を呼べない: {e}"))?;
+    main.call(&mut store, ()).map_err(|e| {
+        if let Some(error) = e.downcast_ref::<std::io::Error>() {
+            return crate::error::Error::from(format!("出力に失敗した: {error}"));
+        }
+        let msg = match e.downcast_ref::<wasmtime::Trap>() {
+            Some(wasmtime::Trap::IntegerDivisionByZero) => "0 で除算した".to_string(),
+            Some(wasmtime::Trap::IntegerOverflow | wasmtime::Trap::UnreachableCodeReached) => {
+                "オーバーフロー".to_string()
+            }
+            _ => format!("WASM の実行に失敗した: {e}"),
+        };
+        crate::error::Error::from(msg)
+    })?;
+    Ok(store.into_data())
+}
 
 pub fn emit(program: &Program) -> Vec<u8> {
     let has_print = program
@@ -144,6 +184,40 @@ fn trap_if(f: &mut Function) {
 mod tests {
     use std::io::Write;
     use std::process::{Command, Stdio};
+
+    #[test]
+    fn embedded_runtime_matches_interpreter_and_reports_errors() {
+        let src = "fn add(a: int, b: int) -> int { a + b }\nfn main() { print(add(19, 23)) }";
+        let mut expected = Vec::new();
+        crate::run(src, &mut expected).unwrap();
+        let output = super::run(&crate::to_wasm(src).unwrap(), Vec::new()).unwrap();
+        assert_eq!(output, expected);
+
+        let src = "fn div(a: int, b: int) -> int { a / b }\nfn main() { print(div(1, 0)) }";
+        let err = super::run(&crate::to_wasm(src).unwrap(), Vec::new()).unwrap_err();
+        assert!(err.contains("0 で除算した"), "{err}");
+
+        let src = "fn add(a: int, b: int) -> int { a + b }\nfn main() { print(add(9223372036854775807, 1)) }";
+        let err = super::run(&crate::to_wasm(src).unwrap(), Vec::new()).unwrap_err();
+        assert!(err.contains("オーバーフロー"), "{err}");
+
+        struct Fails;
+        impl Write for Fails {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("出力失敗"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let src = "fn main() { print(1) }";
+        assert!(
+            super::run(&crate::to_wasm(src).unwrap(), Fails)
+                .err()
+                .unwrap()
+                .contains("出力失敗")
+        );
+    }
 
     #[test]
     fn executes_and_checks_integer_errors() {
