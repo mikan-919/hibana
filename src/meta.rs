@@ -327,7 +327,8 @@ fn bound_names(q: &[Q]) -> HashSet<String> {
             out.extend(ident(j));
         }
         // fn 名(引数) と fn(引数)、構築子(束縛) => の束縛。( の位置で、閉じ ) までを見る
-        let fn_params = is(i, &p("(")) && (is(i.wrapping_sub(1), &p("fn")) || is(i.wrapping_sub(2), &p("fn")));
+        let fn_params =
+            is(i, &p("(")) && (is(i.wrapping_sub(1), &p("fn")) || is(i.wrapping_sub(2), &p("fn")));
         let arm = is(i, &p("(")) && ident(i.wrapping_sub(1)).is_some() && {
             let mut d = 0;
             let mut k = i;
@@ -363,16 +364,25 @@ fn bound_names(q: &[Q]) -> HashSet<String> {
 fn hygienic(t: &Token, prev: Option<&Token>, bound: &HashSet<String>) -> Token {
     HYGIENE.with(|h| match (&*h.borrow(), &t.tok) {
         _ if matches!(prev.map(|p| &p.tok), Some(Tok::Punct(".")))
-            || t.tok == Tok::Ident("_".into()) => t.clone(),
+            || t.tok == Tok::Ident("_".into()) =>
+        {
+            t.clone()
+        }
         // ライブラリのマクロが自分のモジュールの名前を使うなら、使う側でもその名前を指すよう修飾する
-        (Some((_, _, m, names)), Tok::Ident(n)) if !m.is_empty() && names.contains(n) && !bound.contains(n) => Token {
-            tok: Tok::Ident(format!("{m}.{n}")),
-            ..t.clone()
-        },
-        (Some((id, globals, _, _)), Tok::Ident(n)) if !globals.contains(n) || bound.contains(n) => Token {
-            tok: Tok::Ident(format!("{n}#{id}")),
-            ..t.clone()
-        },
+        (Some((_, _, m, names)), Tok::Ident(n))
+            if !m.is_empty() && names.contains(n) && !bound.contains(n) =>
+        {
+            Token {
+                tok: Tok::Ident(format!("{m}.{n}")),
+                ..t.clone()
+            }
+        }
+        (Some((id, globals, _, _)), Tok::Ident(n)) if !globals.contains(n) || bound.contains(n) => {
+            Token {
+                tok: Tok::Ident(format!("{n}#{id}")),
+                ..t.clone()
+            }
+        }
         _ => t.clone(),
     })
 }
@@ -1001,7 +1011,10 @@ impl Parser<'_> {
             1 => {
                 let (k, m, b, end) = hits.pop().unwrap();
                 self.pos = end;
-                Ok(Some((k, record(Some(&m.name), self.span_from(start), &m.fields, b))))
+                Ok(Some((
+                    k,
+                    record(Some(&m.name), self.span_from(start), &m.fields, b),
+                )))
             }
             _ => {
                 let names: Vec<&str> = hits.iter().map(|h| h.1.name.as_str()).collect();
@@ -1030,6 +1043,7 @@ impl Parser<'_> {
             },
         ]);
         let mut p = Parser {
+            helpers: self.helpers.clone(),
             toks,
             pos: 0,
             src: self.src,
@@ -1048,14 +1062,21 @@ impl Parser<'_> {
             traits: self.traits.clone(),
         };
         let wrap = |e: &str| format!("マクロ {}: {e}", m.name);
-        let b = p.block().ctx(wrap)?;
+        let mut b = p.block().ctx(wrap)?;
+        crate::resolve::resolve_macro(
+            &mut b,
+            &m.module,
+            field_kinds(&m.pat).into_iter().map(|(n, _)| n).collect(),
+            &self.uses,
+            &self.known,
+        );
         let rules: HashMap<String, Kinds> = self
             .g
             .rules
             .iter()
             .map(|(n, r)| (n.clone(), field_kinds(&r.pat)))
             .collect();
-        typeck::check_macro(&b, &field_kinds(&m.pat), &rules).ctx(wrap)?;
+        typeck::check_macro(&b, &field_kinds(&m.pat), &rules, &self.helpers).ctx(wrap)?;
         let _ = m.compiled.set(b.clone());
         Ok(b)
     }
@@ -1079,6 +1100,7 @@ impl Parser<'_> {
             ..end.clone()
         };
         let mut p = Parser {
+            helpers: self.helpers.clone(),
             toks,
             pos: 0,
             src: self.src,
@@ -1144,14 +1166,20 @@ impl Parser<'_> {
         let names = self.mod_names.get(&m.module).cloned().unwrap_or_default();
         let prev =
             HYGIENE.with(|h| h.replace(Some((id, self.globals.clone(), m.module.clone(), names))));
-        let v = eval::run_macro(&block, vars);
+        let v = eval::run_macro(&block, vars, &self.helpers);
         HYGIENE.with(|h| h.replace(prev));
         let v = v.map_err(Error::from).ctx(wrap)?;
         let end = self.toks[self.pos].clone();
         let mut toks = Vec::new();
         emit(&v, &end, &mut toks).ctx(wrap)?;
         // 展開したコードの位置は呼び出し位置にする。定義側の位置は利用者の見る場所と違う
-        Ok(toks.into_iter().map(|t| Token { site: Some(site), ..t }).collect())
+        Ok(toks
+            .into_iter()
+            .map(|t| Token {
+                site: Some(site),
+                ..t
+            })
+            .collect())
     }
 
     fn could_start(&self, (f, nullable): &Firsts) -> bool {

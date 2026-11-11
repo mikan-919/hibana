@@ -116,11 +116,21 @@ pub fn run_fn(
 }
 
 // マクロ本体を実行する。print はコンパイル時の出力として標準エラーに書く
-pub fn run_macro(b: &Block, vars: Vec<(String, Value)>) -> Result<Value, String> {
+pub fn run_macro(b: &Block, vars: Vec<(String, Value)>, prog: &Program) -> Result<Value, String> {
     let mut err = std::io::stderr();
     let mut it = Interp {
-        fns: HashMap::new(),
-        ctors: HashMap::new(),
+        fns: prog.fns.iter().map(|f| (f.name.as_str(), f)).collect(),
+        ctors: prog
+            .datas
+            .iter()
+            .flat_map(|d| &d.ctors)
+            .map(|c| {
+                (
+                    c.name.as_str(),
+                    c.fields.iter().map(|f| f.0.as_str()).collect(),
+                )
+            })
+            .collect(),
         out: &mut err,
         handlers: Vec::new(),
         next_h: 0,
@@ -604,41 +614,71 @@ impl Interp<'_> {
                 {
                     // 型を作る呼び出し（Option(int) など）。実行時には名前だけを持つ
                     Value::Ty(name.as_str().into())
-                } else if matches!(name.as_str(), "build_emit" | "build_wasm" | "build_glue") {
+                } else if matches!(
+                    name.as_str(),
+                    "artifact" | "compile" | "inspect_exports" | "utf8"
+                ) {
                     if !self.in_macro {
-                        return Err(Flow::Error(format!("{name} はマクロ本体でだけ使えます")));
+                        return Err(Flow::Error(format!("{name} はコンパイル時だけ使えます")));
                     }
-                    let [Value::Str(path), contents] = vs.as_slice() else {
-                        return Err(Flow::Error(format!("{name} の引数の型が違います")));
-                    };
-                    let path = path.to_string();
-                    let request = if name == "build_emit" {
-                        let Value::Str(contents) = contents else {
-                            return Err(Flow::Error("build_emit の内容は str".into()));
-                        };
-                        crate::build::Request::Text {
-                            path,
-                            contents: contents.to_string(),
-                        }
-                    } else {
-                        let Value::Arr(exports) = contents else {
-                            return Err(Flow::Error(format!("{name} の公開名は Vec<str>")));
-                        };
-                        let exports = exports
-                            .iter()
-                            .map(|value| match value {
-                                Value::Str(s) => Ok(s.to_string()),
-                                _ => Err(Flow::Error(format!("{name} の公開名は str"))),
-                            })
-                            .collect::<R<Vec<_>>>()?;
-                        if name == "build_wasm" {
-                            crate::build::Request::Wasm { path, exports }
-                        } else {
-                            crate::build::Request::Glue { path, exports }
+                    let str_arg = |i: usize| -> R<String> {
+                        match vs.get(i) {
+                            Some(Value::Str(s)) => Ok(s.to_string()),
+                            _ => Err(Flow::Error(format!("{name} の引数は str"))),
                         }
                     };
-                    crate::build::register(request).map_err(Flow::Error)?;
-                    Value::Unit
+                    let bytes_value = |bytes: Vec<u8>| {
+                        Value::Arr(Rc::new(
+                            bytes.into_iter().map(|b| Value::Int(b as i64)).collect(),
+                        ))
+                    };
+                    match name.as_str() {
+                        "utf8" => bytes_value(str_arg(0)?.into_bytes()),
+                        "artifact" => {
+                            let path = str_arg(0)?;
+                            let Some(Value::Arr(values)) = vs.get(1) else {
+                                return Err(Flow::Error("artifact の内容は Vec<int>".into()));
+                            };
+                            let contents = values
+                                .iter()
+                                .map(|v| match v {
+                                    Value::Int(n) => u8::try_from(*n).map_err(|_| {
+                                        Flow::Error("artifact のバイトは0..255".into())
+                                    }),
+                                    _ => Err(Flow::Error("artifact の内容は Vec<int>".into())),
+                                })
+                                .collect::<R<Vec<u8>>>()?;
+                            crate::build::register(crate::build::Request { path, contents })
+                                .map_err(Flow::Error)?;
+                            Value::Unit
+                        }
+                        _ => {
+                            let source = str_arg(0)?;
+                            let index = if name == "compile" { 2 } else { 1 };
+                            let Some(Value::Arr(values)) = vs.get(index) else {
+                                return Err(Flow::Error(format!("{name} の公開名は Vec<str>")));
+                            };
+                            let exports = values
+                                .iter()
+                                .map(|v| match v {
+                                    Value::Str(s) => Ok(s.to_string()),
+                                    _ => Err(Flow::Error(format!("{name} の公開名は str"))),
+                                })
+                                .collect::<R<Vec<String>>>()?;
+                            if name == "compile" {
+                                bytes_value(
+                                    crate::pipeline::compile(&source, &str_arg(1)?, &exports)
+                                        .map_err(|e| Flow::Error(e.to_string()))?,
+                                )
+                            } else {
+                                Value::Str(
+                                    crate::pipeline::inspect_exports(&source, &exports)
+                                        .map_err(|e| Flow::Error(e.to_string()))?
+                                        .into(),
+                                )
+                            }
+                        }
+                    }
                 } else if let Some(v) = self.syn_fn(name, &mut vs)? {
                     v
                 } else if name == "print" {

@@ -102,7 +102,7 @@ pub struct Block {
     pub tail: Option<Box<Expr>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Fn {
     // 宣言の位置（partial fn 名 まで）。利用者が書いた関数だけ Some。展開で作った関数は呼び出し位置
     pub span: Option<Span>,
@@ -130,6 +130,7 @@ pub struct Fn {
 }
 
 pub struct Parser<'s> {
+    pub helpers: Rc<Program>,
     pub toks: Vec<Token>,
     pub pos: usize,
     pub src: &'s str,
@@ -172,7 +173,7 @@ use crate::error::Error;
 pub use crate::error::R;
 
 // data 宣言。構築子の ret は添字付きの型族の戻り値の型（無ければ Name(params)）
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Data {
     // 宣言の位置（キーワードから名前まで）。型検査の誤りに行番号を付けるのに使う
     pub span: Option<Span>,
@@ -182,7 +183,7 @@ pub struct Data {
     pub ctors: Vec<Ctor>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Ctor {
     pub name: String,
     pub fields: Vec<(String, Expr)>,
@@ -204,7 +205,7 @@ enum TypeDecl {
     Alias(Fn),
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Program {
     pub fns: Vec<Fn>,
     pub datas: Vec<Data>,
@@ -410,6 +411,7 @@ fn parse_toks(src: &str, toks: Vec<Token>, round: usize) -> R<Program> {
         return Err("宣言のマクロの展開が終わらない".into());
     }
     let mut p = Parser {
+        helpers: Rc::default(),
         toks,
         pos: 0,
         src,
@@ -446,9 +448,10 @@ fn parse_toks(src: &str, toks: Vec<Token>, round: usize) -> R<Program> {
         "is_null",
         "int_of",
         "str_of",
-        "build_emit",
-        "build_wasm",
-        "build_glue",
+        "artifact",
+        "compile",
+        "inspect_exports",
+        "utf8",
         "error",
         "int",
         "bool",
@@ -663,18 +666,6 @@ fn parse_toks(src: &str, toks: Vec<Token>, round: usize) -> R<Program> {
     p.uses = Rc::new(uses);
     p.modules = Rc::new(modules);
     p.module_at = Rc::new(module_at);
-    // 宣言のマクロは、名前がそろってから（衛生性のため）展開し、展開した宣言を含めて最初から読み直す
-    if !decl_macros.is_empty() {
-        let mut toks = p.toks.clone();
-        for (s, e, k, rec) in decl_macros.into_iter().rev() {
-            p.pos = e;
-            let site = p.span_of(s);
-            let out = p.expand_decl(k, rec, site)?;
-            toks.splice(s..e, out);
-        }
-        return parse_toks(src, toks, round + 1);
-    }
-    p.check_macros()?;
     let mut prog = Program::default();
     for s in effect_starts {
         p.pos = s;
@@ -711,9 +702,15 @@ fn parse_toks(src: &str, toks: Vec<Token>, round: usize) -> R<Program> {
             })
             .collect(),
     );
+    // 宣言マクロが型を追加する場合、既存関数の本体をまだ読めないことがある。
+    // また式マクロが後方の補助関数を呼ぶ場合も、補助関数がそろってから読み直す。
+    let mut deferred = Vec::new();
     for s in fn_starts {
         p.pos = s;
-        prog.fns.push(p.func()?);
+        match p.func() {
+            Ok(f) => prog.fns.push(f),
+            Err(e) => deferred.push((s, e)),
+        }
     }
     for s in extern_starts {
         p.pos = s;
@@ -723,6 +720,39 @@ fn parse_toks(src: &str, toks: Vec<Token>, round: usize) -> R<Program> {
         p.pos = s;
         prog.fns.extend(p.impl_decl(k)?);
     }
+    let mut helpers = prog.clone();
+    crate::resolve::resolve(&mut helpers, &p.uses, &p.known);
+    p.helpers = Rc::new(helpers);
+    // 宣言のマクロは、名前がそろってから（衛生性のため）展開し、展開した宣言を含めて最初から読み直す
+    if !decl_macros.is_empty() {
+        let mut toks = p.toks.clone();
+        for (s, e, k, rec) in decl_macros.into_iter().rev() {
+            p.pos = e;
+            let site = p.span_of(s);
+            let out = p.expand_decl(k, rec, site)?;
+            toks.splice(s..e, out);
+        }
+        return parse_toks(src, toks, round + 1);
+    }
+    while !deferred.is_empty() {
+        let before = deferred.len();
+        let mut failed = Vec::new();
+        for (s, _) in deferred {
+            p.pos = s;
+            match p.func() {
+                Ok(f) => prog.fns.push(f),
+                Err(e) => failed.push((s, e)),
+            }
+        }
+        if failed.len() == before {
+            return Err(failed.remove(0).1);
+        }
+        deferred = failed;
+        let mut helpers = prog.clone();
+        crate::resolve::resolve(&mut helpers, &p.uses, &p.known);
+        p.helpers = Rc::new(helpers);
+    }
+    p.check_macros()?;
     // test "名前" { 本体 } は引数の無い関数 test#k にする
     for (k, s) in test_starts.into_iter().enumerate() {
         p.pos = s + 1;
@@ -750,6 +780,9 @@ fn parse_toks(src: &str, toks: Vec<Token>, round: usize) -> R<Program> {
         });
     }
     crate::resolve::resolve(&mut prog, &p.uses, &p.known);
+    let compile_only = crate::typeck::compile_only(&prog);
+    prog.fns
+        .retain(|f| f.name == "main" || !compile_only.contains(&f.name));
     Ok(prog)
 }
 

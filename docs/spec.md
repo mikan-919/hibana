@@ -412,30 +412,41 @@ enum Shape { Circle(r: int), Rect(w: int, h: int), Dot }
 
 ### 8.5 ビルド時の成果物
 
-マクロ本体から次の関数で成果物を登録できます。呼び出した時点ではファイルを書かず、`hibana build <ファイル> --out-dir <ディレクトリ>` が、展開後のプログラム全体の型検査と成果物の生成・出力先の検査を済ませてから書き出します。`main` は要りません。
+マクロから通常の hibana 関数を呼べます。読み込んだライブラリの関数や、マクロ呼び出しより後に定義した関数も使えます。関数本体は型検査されます。次のビルド時 API を直接・間接に使う関数はビルド時専用となり、実行時のプログラムには残りません。実行時から呼ぶとエラーになります。
 
 | 関数 | 内容 |
 |---|---|
-| `build_emit(path, contents)` | `(str, str) -> unit`。UTF-8 のテキストを成果物にする |
-| `build_wasm(path, exports)` | `(str, Vec<str>) -> unit`。指定した関数を公開する WASM を生成する |
-| `build_glue(path, exports)` | `(str, Vec<str>) -> unit`。指定した関数用の JS 接続コードを生成する |
+| `artifact(path, contents)` | `(str, Vec<int>) -> unit`。バイト列を成果物に登録する。各要素は 0〜255 |
+| `utf8(text)` | `str -> Vec<int>`。UTF-8 のバイト列を作る |
+| `compile(source, target, exports)` | `(str, str, Vec<str>) -> Vec<int>`。明示したソースをコンパイルする |
+| `inspect_exports(source, exports)` | `(str, Vec<str>) -> str`。公開関数と外部関数の ABI 情報を JSON 文字列で返す |
+
+`compile` の target は `"wasm"`・`"js"`・`"c"` です。WASM は空でない exports を受け取り、指定した関数を公開するライブラリを返します。JS と C は exports を空にし、`main` を持つプログラムを渡します（ライブラリ出力は未対応）。コンパイル対象ソースがさらに成果物を登録することはできません。
+
+`inspect_exports` は `{"exports":[[名前,[引数型,...],戻り型],...],"imports":[...]}` の形式です。型名は現在の WASM ABI の `"int"`・`"str"`・`"unit"` です。任意の型付き構文木を読むリフレクションではありません。
 
 ```
+fn emit_text(path: str, text: str) {
+    artifact(path, utf8(text))
+}
+
 macro page ("page" path:String text:String) -> Decl {
-    build_emit(str_of(path), str_of(text))
+    emit_text(str_of(path), str_of(text))
     quote {}
 }
 
 page "index.html" "<h1>hello</h1>"
 ```
 
-このマクロは空の宣言列を返します。実行時の処理を残さず、成果物だけを作るプログラムとして成立します。`build_*` はマクロ専用で、普通の関数からは呼べません。成果物を受け取るビルド処理の外で登録しようとするとエラーになります。`pipeline::build_artifacts` はファイルを書かず、名前とバイト列の一覧を返すライブラリ API です。
+このマクロは空の宣言列を返します。実行時の処理も `main` も残さず、成果物だけを作れます。生成処理は通常の関数で組み合わせ、ビルド側には名前とバイト列だけを登録します。WASM や JS 接続コード専用の成果物登録関数はありません。
+
+`artifact` は呼び出した時点ではファイルを書きません。`hibana build <ファイル> --out-dir <ディレクトリ>` は、展開後のプログラム全体の型検査と生成・出力先の検査を済ませてから書き出します。成果物を受け取るビルド処理の外で登録しようとするとエラーになります。`pipeline::build_artifacts` はファイルを書かず、名前とバイト列の一覧を返す Rust API です。
 
 出力先は `--out-dir` からの相対パスです。絶対パス、`.`・`..`、重複する名前、ファイルとディレクトリが衝突する名前、シンボリックリンクを通る出力先は拒否します。型検査・生成・出力先検査の失敗では書き出しません。ただし、書き出し途中の OS の I/O エラーを巻き戻す仕組みではありません。
 
-`lib/build_web.hb` は、公開する関数の一覧から WASM と JS の生成を登録する `web_build` と、静的ファイルを登録する `build_asset` を提供します。マクロの定義を読み込むだけでは登録せず、呼び出した時に登録します。
+`lib/build_web.hb` は通常の関数 `build_text`・`build_web`・`web_javascript` と、呼び出し用のマクロ `web_build`・`build_asset` を提供します。JS の生成処理はこの hibana ライブラリにあり、コンパイラの専用組み込みではありません。ライブラリを読むだけでは成果物を登録しません。
 
-現在の WASM / JS 接続は `int`・`str` の引数、`int`・`str`・`unit` の戻り値など、IR が扱う範囲に限ります。JS は `instantiate(wasm, imports)` を公開し、整数には `bigint`、文字列には JS の文字列を使います。構造体の自動変換、型検査後の型情報を読む生成処理、任意のビルド依存グラフ、外部コマンド実行はまだありません。WASM と JS を組にする場合は、同じ公開関数一覧を渡します。
+現在はコンパイル対象を明示的なソース文字列として渡します。現在のファイルの型検査済み宣言を暗黙に参照する機能はありません。JS は `instantiate(wasm, imports)` を公開し、整数には `bigint`、文字列には JS の文字列を使います。構造体の自動変換、任意のビルド依存グラフ、外部コマンド実行はまだありません。
 
 ## 9. 組み込み関数
 

@@ -156,11 +156,8 @@ test "join" {
 ```
 use build_web
 
-web_build "app.wasm", "app.mjs" exports (echo, add)
+web_build "app.wasm", "app.mjs" source "fn echo(message: str) -> str { message } fn add(a: int, b: int) -> int { a + b }" exports (echo, add)
 build_asset "message.txt", "ビルドで生成したファイル"
-
-fn echo(message: str) -> str { message }
-fn add(a: int, b: int) -> int { a + b }
 ```
 
 `app.hb` として保存し、次を実行します。
@@ -181,7 +178,11 @@ console.log(app.echo("こんにちは"));
 console.log(app.add(2n, 3n));
 ```
 
-自分のライブラリでも、既存の `macro (...) -> Decl { ... }` の本体から `build_emit`・`build_wasm`・`build_glue` を呼び、最後に `quote {}` を返せます。ファイルはマクロ実行中には書かず、全体の型検査後に生成します。詳しくは仕様の 8.5 節と `lib/build_web.hb`、ブラウザ用の例は `tests/fixtures/build_artifacts.hb` を参照してください。現時点では型情報から構造体の受け渡しを自動生成する機能や、外部ツールを実行する機能はありません。
+生成処理は通常の hibana 関数です。`build_web` は `compile(source, "wasm", exports)` でバイト列を作り、`inspect_exports` で得た関数の型情報から `web_javascript` が JS の文字列を生成します。`artifact(path, bytes)` が成果物を登録する汎用 API で、テキストなら `utf8(text)` でバイト列にします。
+
+自分のマクロからも通常の関数を呼んで生成処理を組み合わせ、最後に `quote {}` を返せます。ビルド時 API を使う関数は実行時には残りません。ファイルはマクロ実行中には書かず、生成・型検査・出力先検査のあとで書き出します。
+
+この例のコンパイル対象は `source` に明示した文字列です。現在のファイルの宣言を自動的に読み取る仕組みではありません。型情報から構造体の受け渡しを自動生成する機能、ビルドの依存グラフ、外部ツールの実行はまだありません。詳しくは仕様の 8.5 節と `lib/build_web.hb`、ブラウザ用の例は `tests/fixtures/build_artifacts.hb` を参照してください。
 
 ## 8. 次に読むもの
 

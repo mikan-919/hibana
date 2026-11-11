@@ -35,16 +35,14 @@ pub fn parse(source: &str) -> R<parser::Program> {
 }
 
 /// マクロが登録した成果物を作る。main は不要で、ファイルには書き込まない。
-/// すべての宣言の型検査を終えてから生成する。
+/// 生成はマクロ評価中に行い、すべての宣言の型検査が通った場合だけ結果を返す。
 pub fn build_artifacts(source: &str) -> R<Vec<build::Artifact>> {
     let source = parser::with_uses(source)?;
     let (program, requests) = build::capture(|| parse(&source));
-    let checked = check(program?, Kind::Library)?;
+    let _checked = check(program?, Kind::Library)?;
     let mut names = Vec::new();
     for request in &requests {
-        let (build::Request::Text { path, .. }
-        | build::Request::Wasm { path, .. }
-        | build::Request::Glue { path, .. }) = request;
+        let path = &request.path;
         // 区切りを / に限定し、別 OS でも同じ出力先になるようにする。
         if path.is_empty()
             || path.contains(['\\', ':', '\0'])
@@ -63,29 +61,88 @@ pub fn build_artifacts(source: &str) -> R<Vec<build::Artifact>> {
         }
         names.push(path.as_str());
     }
-    requests
+    Ok(requests
         .into_iter()
-        .map(|request| {
-            let (name, contents) = match request {
-                build::Request::Text { path, contents } => (path, contents.into_bytes()),
-                build::Request::Wasm { path, exports } => {
-                    if exports.is_empty() {
-                        return Err("WASM の公開関数が必要".into());
-                    }
-                    let ir = link(&lower(&checked, Some(&exports))?, &exports)?;
-                    (path, emit_wasm(&ir, Some(&exports))?)
-                }
-                build::Request::Glue { path, exports } => {
-                    if exports.is_empty() {
-                        return Err("接続コードの公開関数が必要".into());
-                    }
-                    let ir = link(&lower(&checked, Some(&exports))?, &exports)?;
-                    (path, emit_js_glue(&ir, &exports)?.into_bytes())
-                }
-            };
-            Ok(build::Artifact { name, contents })
+        .map(|request| build::Artifact {
+            name: request.path,
+            contents: request.contents,
         })
-        .collect()
+        .collect())
+}
+
+/// 明示したソースをコンパイルする。ビルド成果物を登録するソースは受け付けない。
+pub fn compile(source: &str, target: &str, exports: &[String]) -> R<Vec<u8>> {
+    match target {
+        "wasm" => {
+            let program = compiler_input(source, Kind::Library)?;
+            let ir = exported_ir(&program, exports)?;
+            emit_wasm(&ir, Some(exports))
+        }
+        "js" | "c" => {
+            if !exports.is_empty() {
+                return Err("js/c の compile は公開関数の指定に未対応。main と空の公開関数一覧を使ってください".into());
+            }
+            let program = compiler_input(source, Kind::Executable)?;
+            let text = if target == "js" {
+                emit_js(&program)
+            } else {
+                emit_c(&program)?
+            };
+            Ok(text.into_bytes())
+        }
+        _ => Err(format!("未対応のコンパイル先: {target}").into()),
+    }
+}
+
+/// WASM 境界で扱える公開関数と外部関数の型を JSON で返す。
+/// 現在の境界型は int/str/unit。プログラム全体の型リフレクションではない。
+pub fn inspect_exports(source: &str, exports: &[String]) -> R<String> {
+    let program = compiler_input(source, Kind::Library)?;
+    let ir = exported_ir(&program, exports)?;
+    let ty = |t: &ir::ValueType| match t {
+        ir::ValueType::Int => "int",
+        ir::ValueType::Str => "str",
+        ir::ValueType::Unit => "unit",
+    };
+    let functions: Vec<_> = select_exports(&ir, exports)?
+        .into_iter()
+        .map(|f| {
+            (
+                &f.name,
+                f.param_types.iter().map(ty).collect::<Vec<_>>(),
+                ty(&f.result_type),
+            )
+        })
+        .collect();
+    let imports: Vec<_> = ir
+        .imports
+        .iter()
+        .map(|f| {
+            (
+                &f.name,
+                f.param_types.iter().map(ty).collect::<Vec<_>>(),
+                ty(&f.result_type),
+            )
+        })
+        .collect();
+    Ok(serde_json::json!({"exports": functions, "imports": imports}).to_string())
+}
+
+fn compiler_input(source: &str, kind: Kind) -> R<Checked> {
+    let source = parser::with_uses(source)?;
+    let (program, requests) = build::capture(|| parse(&source));
+    let program = program?;
+    if !requests.is_empty() {
+        return Err("コンパイラに渡すソースでは成果物を登録できない".into());
+    }
+    check(program, kind)
+}
+
+fn exported_ir(checked: &Checked, exports: &[String]) -> R<ir::Program> {
+    if exports.is_empty() {
+        return Err("WASM の公開関数が必要".into());
+    }
+    link(&lower(checked, Some(exports))?, exports)
 }
 
 /// 構文木を型検査し、必要な引数を補う。

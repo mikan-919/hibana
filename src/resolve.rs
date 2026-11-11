@@ -48,6 +48,22 @@ pub fn resolve(prog: &mut Program, uses: &HashMap<String, Vec<Use>>, known: &Has
     }
 }
 
+pub(crate) fn resolve_macro(
+    block: &mut Block,
+    module: &str,
+    params: Vec<String>,
+    uses: &HashMap<String, Vec<Use>>,
+    known: &HashSet<String>,
+) {
+    let mut r = Resolver {
+        module: module.into(),
+        uses,
+        known,
+        locals: vec![params],
+    };
+    r.block(block);
+}
+
 struct Resolver<'a> {
     module: String,
     uses: &'a HashMap<String, Vec<Use>>,

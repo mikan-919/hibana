@@ -8,10 +8,9 @@ pub struct Artifact {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Request {
-    Text { path: String, contents: String },
-    Wasm { path: String, exports: Vec<String> },
-    Glue { path: String, exports: Vec<String> },
+pub struct Request {
+    pub path: String,
+    pub contents: Vec<u8>,
 }
 
 thread_local! {
@@ -51,60 +50,9 @@ mod tests {
     use super::*;
 
     fn text(path: &str) -> Request {
-        Request::Text {
+        Request {
             path: path.into(),
-            contents: "hello".into(),
-        }
-    }
-
-    #[test]
-    fn macro_registers_without_runtime_declarations() {
-        let source = r#"
-macro assets ("assets") -> Decl {
-    build_emit("hello.txt", "hello");
-    build_wasm("app.wasm", ["greet"]);
-    build_glue("app.mjs", ["greet"]);
-    quote {}
-}
-assets
-"#;
-        let (program, requests) = capture(|| crate::parser::parse(source));
-        assert!(program.unwrap().fns.is_empty());
-        assert_eq!(
-            requests,
-            vec![
-                text("hello.txt"),
-                Request::Wasm {
-                    path: "app.wasm".into(),
-                    exports: vec!["greet".into()]
-                },
-                Request::Glue {
-                    path: "app.mjs".into(),
-                    exports: vec!["greet".into()]
-                },
-            ]
-        );
-        assert!(crate::parser::parse(source).is_err());
-    }
-
-    #[test]
-    fn rejects_build_calls_outside_macros_and_wrong_types() {
-        for source in [
-            r#"fn main() { build_emit("x", "y") }"#,
-            r#"fn main() { build_wasm("x", ["f"]) }"#,
-            r#"fn main() { build_glue("x", ["f"]) }"#,
-        ] {
-            assert!(crate::to_js(source).is_err());
-        }
-        for body in [
-            r#"build_emit("x", 1)"#,
-            r#"build_wasm("x", [1])"#,
-            r#"build_glue(1, [])"#,
-        ] {
-            let source = format!("macro asset (\"asset\") -> Decl {{ {body}; quote {{}} }} asset");
-            let (result, requests) = capture(|| crate::parser::parse(&source));
-            assert!(result.is_err());
-            assert!(requests.is_empty());
+            contents: b"hello".to_vec(),
         }
     }
 
