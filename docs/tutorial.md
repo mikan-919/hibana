@@ -149,7 +149,41 @@ test "join" {
 - パッケージは git のリポジトリです。`hibana new 名前` でプロジェクトを作り、`hibana add <git の URL> [tag]` で依存を足します。`hibana fetch` が依存を取ってきて、`hibana.lock` にコミットを書きます。詳細は仕様の 3.6 節です。
 - JavaScript と TypeScript のモジュールは `use "./util.ts"` で読めます。型は TypeScript の宣言から読みます。詳細は仕様の 3.4 節です。
 
-## 7. 次に読むもの
+## 7. ビルドだけで成果物を作る
+
+マクロは実行時のコードを返すだけでなく、ビルド時に成果物を登録できます。次は `build_web` ライブラリのマクロで WASM・JS 接続コード・静的ファイルをまとめて登録する例です。
+
+```
+use build_web
+
+web_build "app.wasm", "app.mjs" exports (echo, add)
+build_asset "message.txt", "ビルドで生成したファイル"
+
+fn echo(message: str) -> str { message }
+fn add(a: int, b: int) -> int { a + b }
+```
+
+`app.hb` として保存し、次を実行します。
+
+```sh
+hibana build app.hb --out-dir dist
+```
+
+`dist/app.wasm`、`dist/app.mjs`、`dist/message.txt` ができます。`main` は不要です。`web_build` や `build_asset` の呼び出しは空の宣言列に展開されるので、それ自体の実行時処理は残りません。利用側が成果物名や公開関数を選び、ライブラリが生成の組み合わせを決めます。
+
+生成した JS は次のように使えます（WASM の取得方法は実行環境に合わせます）。
+
+```js
+import { instantiate } from "./dist/app.mjs";
+const wasm = await (await fetch("./dist/app.wasm")).arrayBuffer();
+const app = await instantiate(wasm);
+console.log(app.echo("こんにちは"));
+console.log(app.add(2n, 3n));
+```
+
+自分のライブラリでも、既存の `macro (...) -> Decl { ... }` の本体から `build_emit`・`build_wasm`・`build_glue` を呼び、最後に `quote {}` を返せます。ファイルはマクロ実行中には書かず、全体の型検査後に生成します。詳しくは仕様の 8.5 節と `lib/build_web.hb`、ブラウザ用の例は `tests/fixtures/build_artifacts.hb` を参照してください。現時点では型情報から構造体の受け渡しを自動生成する機能や、外部ツールを実行する機能はありません。
+
+## 8. 次に読むもの
 
 - 言語の規則と既知の制約: `docs/spec.md`
 - 例: `examples/`（効果は `effects.hb`、トレイトは `trait.hb`、Web サーバーは `server.hb`、依存型は `dependent.hb`、マクロは `macros.hb`）

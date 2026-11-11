@@ -1,5 +1,5 @@
 //! ビルドの段階。ファイルの書き込みや外部ツールの起動は呼び出し側が行う。
-use crate::{c, error::R, ir, js, parser, typeck, wasm};
+use crate::{build, c, error::R, ir, js, parser, typeck, wasm};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -34,6 +34,60 @@ pub fn parse(source: &str) -> R<parser::Program> {
     parser::parse(source)
 }
 
+/// マクロが登録した成果物を作る。main は不要で、ファイルには書き込まない。
+/// すべての宣言の型検査を終えてから生成する。
+pub fn build_artifacts(source: &str) -> R<Vec<build::Artifact>> {
+    let source = parser::with_uses(source)?;
+    let (program, requests) = build::capture(|| parse(&source));
+    let checked = check(program?, Kind::Library)?;
+    let mut names = Vec::new();
+    for request in &requests {
+        let (build::Request::Text { path, .. }
+        | build::Request::Wasm { path, .. }
+        | build::Request::Glue { path, .. }) = request;
+        // 区切りを / に限定し、別 OS でも同じ出力先になるようにする。
+        if path.is_empty()
+            || path.contains(['\\', ':', '\0'])
+            || path
+                .split('/')
+                .any(|p| p.is_empty() || p == "." || p == "..")
+        {
+            return Err(format!("成果物のパスは相対パスが必要: {path}").into());
+        }
+        if names.iter().any(|name: &&str| {
+            *name == path
+                || name.starts_with(&format!("{path}/"))
+                || path.starts_with(&format!("{name}/"))
+        }) {
+            return Err(format!("成果物のパスが衝突している: {path}").into());
+        }
+        names.push(path.as_str());
+    }
+    requests
+        .into_iter()
+        .map(|request| {
+            let (name, contents) = match request {
+                build::Request::Text { path, contents } => (path, contents.into_bytes()),
+                build::Request::Wasm { path, exports } => {
+                    if exports.is_empty() {
+                        return Err("WASM の公開関数が必要".into());
+                    }
+                    let ir = link(&lower(&checked, Some(&exports))?, &exports)?;
+                    (path, emit_wasm(&ir, Some(&exports))?)
+                }
+                build::Request::Glue { path, exports } => {
+                    if exports.is_empty() {
+                        return Err("接続コードの公開関数が必要".into());
+                    }
+                    let ir = link(&lower(&checked, Some(&exports))?, &exports)?;
+                    (path, emit_js_glue(&ir, &exports)?.into_bytes())
+                }
+            };
+            Ok(build::Artifact { name, contents })
+        })
+        .collect()
+}
+
 /// 構文木を型検査し、必要な引数を補う。
 pub fn check(mut program: parser::Program, kind: Kind) -> R<Checked> {
     let info = match kind {
@@ -64,6 +118,9 @@ pub fn link(program: &ir::Program, exports: &[String]) -> R<ir::Program> {
         if !visited.insert(name) {
             continue;
         }
+        if program.imports.iter().any(|f| f.name == name) {
+            continue;
+        }
         let function = functions
             .get(name)
             .ok_or_else(|| format!("IR に呼び出し先 {name} が無い"))?;
@@ -74,6 +131,12 @@ pub fn link(program: &ir::Program, exports: &[String]) -> R<ir::Program> {
         }
     }
     Ok(ir::Program {
+        imports: program
+            .imports
+            .iter()
+            .filter(|f| visited.contains(f.name.as_str()))
+            .cloned()
+            .collect(),
         functions: program
             .functions
             .iter()
@@ -92,41 +155,113 @@ pub fn emit_wasm(program: &ir::Program, exports: Option<&[String]>) -> R<Vec<u8>
 }
 
 /// 公開関数を JavaScript から呼ぶための ES モジュールを作る。
-/// 入力の数値は安全な整数か BigInt とし、WASM には BigInt を渡す。
+/// int は BigInt、str は文字列、unit は undefined として渡す。
 pub fn emit_js_glue(program: &ir::Program, exports: &[String]) -> R<String> {
+    fn ty(t: &ir::ValueType) -> &'static str {
+        match t {
+            ir::ValueType::Int => "int",
+            ir::ValueType::Str => "str",
+            ir::ValueType::Unit => "unit",
+        }
+    }
     let signatures: Vec<_> = select_exports(program, exports)?
         .into_iter()
-        .map(|f| (&f.name, f.params))
+        .map(|f| {
+            (
+                &f.name,
+                f.param_types.iter().map(ty).collect::<Vec<_>>(),
+                ty(&f.result_type),
+            )
+        })
         .collect();
-    let names =
-        serde_json::to_string(&signatures).expect("関数の名前と引数の数を JSON に変換できる");
-    Ok(format!(
-        r#"// hibana が生成した JavaScript 接続コード
-export async function instantiate(bytes, imports = {{}}) {{
-  const {{ instance }} = await WebAssembly.instantiate(bytes, imports);
+    let hosts: Vec<_> = program
+        .imports
+        .iter()
+        .map(|f| {
+            (
+                &f.name,
+                f.param_types.iter().map(ty).collect::<Vec<_>>(),
+                ty(&f.result_type),
+            )
+        })
+        .collect();
+    let names = serde_json::to_string(&signatures).expect("関数の型を JSON に変換できる");
+    let hosts = serde_json::to_string(&hosts).expect("外部関数の型を JSON に変換できる");
+    let template = r#"// hibana が生成した JavaScript 接続コード
+export async function instantiate(bytes, imports = {}) {
+  let instance;
+  let active = false;
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  function encode(value, type) {
+    if (type === "unit") {
+      if (value !== undefined) throw new TypeError("unit の戻り値は undefined が必要");
+      return undefined;
+    }
+    if (type === "str") {
+      if (typeof value !== "string") throw new TypeError("文字列が必要");
+      const data = encoder.encode(value);
+      const ptr = instance.exports.__hibana_alloc(data.length) >>> 0;
+      new Uint8Array(instance.exports.memory.buffer, ptr, data.length).set(data);
+      return BigInt.asIntN(64, (BigInt(data.length) << 32n) | BigInt(ptr));
+    }
+    if (typeof value !== "number" && typeof value !== "bigint") throw new TypeError("整数が必要");
+    if (typeof value === "number" && !Number.isSafeInteger(value)) throw new RangeError("安全な整数が必要");
+    const n = BigInt(value);
+    if (n < -(1n << 63n) || n >= (1n << 63n)) throw new RangeError("64 ビット整数の範囲外");
+    return n;
+  }
+  function decode(value, type) {
+    if (type === "unit") return undefined;
+    if (type === "int") return value;
+    const packed = BigInt.asUintN(64, value);
+    const ptr = Number(packed & 0xffffffffn);
+    const len = Number(packed >> 32n);
+    return decoder.decode(new Uint8Array(instance.exports.memory.buffer, ptr, len));
+  }
+  const host = Object.create(null);
+  for (const [name, params, result] of __HOSTS__) {
+    const callback = imports.hibana_host?.[name];
+    if (typeof callback !== "function") throw new TypeError("外部関数が必要: " + name);
+    host[name] = (...args) => encode(callback(...args.map((value, i) => decode(value, params[i]))), result);
+  }
+  const instantiated = await WebAssembly.instantiate(bytes, { ...imports, hibana_host: host });
+  instance = instantiated instanceof WebAssembly.Instance ? instantiated : instantiated.instance;
   const functions = Object.create(null);
-  for (const [name, count] of {names}) {{
-    functions[name] = (...args) => {{
-      if (args.length !== count) throw new TypeError("引数の数が違う");
-      return instance.exports[name](...args.map(value => {{
-        if (typeof value !== "number" && typeof value !== "bigint") throw new TypeError("整数が必要");
-        if (typeof value === "number" && !Number.isSafeInteger(value)) throw new RangeError("安全な整数が必要");
-        const n = BigInt(value);
-        if (n < -(1n << 63n) || n >= (1n << 63n)) throw new RangeError("64 ビット整数の範囲外");
-        return n;
-      }}));
-    }};
-  }}
+  for (const [name, params, result] of __EXPORTS__) {
+    functions[name] = (...args) => {
+      if (active) throw new Error("同じ WASM インスタンスへ再入できない");
+      if (args.length !== params.length) throw new TypeError("引数の数が違う");
+      active = true;
+      try {
+        instance.exports.__hibana_reset?.();
+        const value = instance.exports[name](...args.map((value, i) => encode(value, params[i])));
+        return decode(value, result);
+      } finally {
+        instance.exports.__hibana_reset?.();
+        active = false;
+      }
+    };
+  }
   return functions;
-}}
-"#
-    ))
+}
+"#;
+    // 挿入した関数名に含まれる文字列を、後続の置換で変更しない。
+    let (before, rest) = template.split_once("__HOSTS__").unwrap();
+    let (middle, after) = rest.split_once("__EXPORTS__").unwrap();
+    Ok(format!("{before}{hosts}{middle}{names}{after}"))
 }
 
 fn select_exports<'a>(program: &'a ir::Program, names: &[String]) -> R<Vec<&'a ir::Function>> {
     let mut seen = HashSet::new();
     let mut selected = Vec::new();
     for name in names {
+        if matches!(
+            name.as_str(),
+            "memory" | "__hibana_alloc" | "__hibana_reset"
+        ) {
+            return Err(format!("公開する関数名 {name} は WASM の内部用に予約されている").into());
+        }
         if !seen.insert(name) {
             return Err(format!("公開する関数 {name} が重複している").into());
         }

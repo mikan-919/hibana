@@ -1,5 +1,5 @@
 use crate::{error, eval, fmt, lexer, lsp, parser, pkg, typeck, wasm};
-use crate::{run, to_c, to_ir, to_js, to_js_glue, to_wasm, to_wasm_library};
+use crate::{run, to_c, to_ir, to_js, to_js_glue, to_wasm, to_wasm_library, to_web};
 use std::io::Write;
 
 // C に変換し、cc でネイティブの実行ファイル out を作る
@@ -16,6 +16,58 @@ fn build(src: &str, out: &std::path::Path) -> error::R<()> {
         .map_err(|e| format!("cc を起動できない: {e}"))?;
     if !r.success() {
         return Err(format!("cc が失敗した（{}）", c_path.display()).into());
+    }
+    Ok(())
+}
+
+// 既存の出力先をすべて調べてから書き込む。シンボリックリンクは辿らない。
+fn build_artifacts(src: &str, source: &std::path::Path, out: &std::path::Path, explicit_out: bool) -> error::R<()> {
+    let artifacts = crate::pipeline::build_artifacts(src)?;
+    if artifacts.is_empty() {
+        if explicit_out { return Err("マクロが成果物を登録していない".into()); }
+        return build(src, &source.with_extension(""));
+    }
+    let root = if out.is_absolute() { out.to_path_buf() } else {
+        std::env::current_dir().map_err(|e| e.to_string())?.join(out)
+    };
+    for artifact in &artifacts {
+        let target = root.join(&artifact.name);
+        let mut prefix = std::path::PathBuf::new();
+        let components: Vec<_> = target.components().collect();
+        for (i, component) in components.iter().enumerate() {
+            prefix.push(component.as_os_str());
+            match std::fs::symlink_metadata(&prefix) {
+                Ok(meta) => {
+                    let last = i + 1 == components.len();
+                    if meta.file_type().is_symlink() || (last && !meta.is_file()) || (!last && !meta.is_dir()) {
+                        return Err(format!("成果物の出力先に使えない: {}", prefix.display()).into());
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("{} を調べられない: {e}", prefix.display()).into()),
+            }
+        }
+    }
+    for artifact in artifacts {
+        let target = root.join(&artifact.name);
+        std::fs::create_dir_all(target.parent().unwrap()).map_err(|e| format!("出力先を作れない: {e}"))?;
+        std::fs::write(&target, artifact.contents).map_err(|e| format!("{} に書き込めない: {e}", target.display()))?;
+        eprintln!("生成: {}", target.display());
+    }
+    Ok(())
+}
+
+// 型検査と生成を終えてから、同じ名前の WASM と ES モジュールを書き出す。
+fn build_web(src: &str, source: &std::path::Path, exports: &[String], out: &std::path::Path) -> error::R<()> {
+    let output = to_web(src, exports)?;
+    let stem = source.file_stem().ok_or("入力ファイルの名前が無い")?;
+    std::fs::create_dir_all(out).map_err(|e| format!("{} を作れない: {e}", out.display()))?;
+    for (extension, bytes) in [("wasm", output.wasm.as_slice()), ("mjs", output.javascript.as_bytes())] {
+        let mut name = stem.to_os_string();
+        name.push(format!(".{extension}"));
+        let path = out.join(name);
+        std::fs::write(&path, bytes).map_err(|e| format!("{} に書き込めない: {e}", path.display()))?;
+        eprintln!("生成: {}", path.display());
     }
     Ok(())
 }
@@ -73,22 +125,42 @@ fn run_cli() {
         }
         return;
     }
+    let mut out_dir = std::path::PathBuf::from("dist");
+    let mut out_dir_seen = false;
     let (cmd, path, exports) = match args.as_slice() {
         [p] => ("eval", p.clone(), Vec::new()),
-        [cmd, p, options @ ..] if cmd == "wasm" || cmd == "glue" => {
+        [cmd, p, options @ ..] if cmd == "build" => {
+            match options {
+                [] => {}
+                [flag, dir] if flag == "--out-dir" && !dir.is_empty() && !dir.starts_with('-') => {
+                    out_dir = dir.into();
+                    out_dir_seen = true;
+                }
+                _ => {
+                    eprintln!("使い方: hibana build <ファイル> [--out-dir ディレクトリ]");
+                    std::process::exit(2);
+                }
+            }
+            (cmd.as_str(), p.clone(), Vec::new())
+        }
+        [cmd, p, options @ ..] if cmd == "wasm" || cmd == "glue" || cmd == "web" => {
             let mut exports = Vec::new();
             let mut it = options.iter();
             while let Some(option) = it.next() {
                 match (option.as_str(), it.next()) {
                     ("--export", Some(name)) if !name.is_empty() && !name.starts_with('-') => exports.push(name.clone()),
+                    ("--out-dir", Some(dir)) if cmd == "web" && !out_dir_seen && !dir.is_empty() && !dir.starts_with('-') => {
+                        out_dir = dir.into();
+                        out_dir_seen = true;
+                    }
                     _ => {
-                        eprintln!("使い方: hibana {cmd} <ファイル> [--export 関数名 ...]");
+                        eprintln!("使い方: hibana {cmd} <ファイル> --export 関数名 ...（web は --out-dir ディレクトリも指定可能）");
                         std::process::exit(2);
                     }
                 }
             }
-            if cmd == "glue" && exports.is_empty() {
-                eprintln!("glue の公開関数を --export で指定してください");
+            if (cmd == "glue" || cmd == "web") && exports.is_empty() {
+                eprintln!("{cmd} の公開関数を --export で指定してください");
                 std::process::exit(2);
             }
             (cmd.as_str(), p.clone(), exports)
@@ -96,7 +168,7 @@ fn run_cli() {
         [cmd, p] if cmd == "run" || cmd == "ir" || cmd == "js" || cmd == "c" || cmd == "build" || cmd == "fmt" => (cmd.as_str(), p.clone(), Vec::new()),
         _ => {
             eprintln!(
-                "使い方: hibana <ファイル>（実行） | hibana run <ファイル>（WASM で実行） | hibana ir <ファイル>（中間表現を出力） | hibana wasm <ファイル> [--export 関数名 ...]（WASM を出力） | hibana glue <ファイル> --export 関数名 ...（JavaScript 接続コードを出力） | hibana js <ファイル>（JavaScript を出力） | hibana c <ファイル>（C を出力） | hibana build <ファイル>（ネイティブの実行ファイルを作る） | hibana fmt <ファイル>（整形して書き戻す） | hibana lsp（Language Server を標準入出力で動かす） | hibana new <名前> | hibana add <git の URL> [tag] | hibana fetch（依存を取ってくる） | hibana test [ファイル]（test を実行する）"
+                "使い方: hibana <ファイル>（実行） | hibana run <ファイル>（WASM で実行） | hibana ir <ファイル>（中間表現を出力） | hibana wasm <ファイル> [--export 関数名 ...]（WASM を出力） | hibana glue <ファイル> --export 関数名 ...（JavaScript 接続コードを出力） | hibana web <ファイル> --export 関数名 ... [--out-dir dist]（WASM と接続コードを保存） | hibana js <ファイル>（JavaScript を出力） | hibana c <ファイル>（C を出力） | hibana build <ファイル> [--out-dir dist]（マクロの成果物を保存、登録が無ければネイティブビルド） | hibana fmt <ファイル>（整形して書き戻す） | hibana lsp（Language Server を標準入出力で動かす） | hibana new <名前> | hibana add <git の URL> [tag] | hibana fetch（依存を取ってくる） | hibana test [ファイル]（test を実行する）"
             );
             std::process::exit(2);
         }
@@ -124,6 +196,7 @@ fn run_cli() {
         "wasm" => (if exports.is_empty() { to_wasm(&src) } else { to_wasm_library(&src, &exports) })
             .and_then(|bytes| std::io::stdout().write_all(&bytes).map_err(|e| e.to_string().into())),
         "glue" => to_js_glue(&src, &exports).map(|s| print!("{s}")),
+        "web" => build_web(&src, std::path::Path::new(&path), &exports, &out_dir),
         "run" => to_wasm(&src).and_then(|bytes| wasm::run(&bytes, std::io::stdout()).map(|_| ())),
         "js" => to_js(&src).map(|s| print!("{s}")),
         "c" => to_c(&src).map(|s| print!("{s}")),
@@ -135,7 +208,7 @@ fn run_cli() {
                 });
             }
         }),
-        "build" => build(&src, &std::path::Path::new(&path).with_extension("")),
+        "build" => build_artifacts(&src, std::path::Path::new(&path), &out_dir, out_dir_seen),
         _ => run(&src, &mut std::io::stdout()).map(|_| ()),
     };
     if let Err(e) = r {
@@ -973,7 +1046,13 @@ fn main() {
                 continue;
             }
             let src = std::fs::read_to_string(&p).unwrap();
-            crate::smt::without_z3(|| super::to_js(&src)).unwrap_or_else(|e| panic!("{name}: {e}"));
+            crate::smt::without_z3(|| {
+                if name == "wasm_web.hb" {
+                    super::to_web(&src, &["echo".into(), "answer".into(), "greet".into()]).map(|_| ())
+                } else {
+                    super::to_js(&src).map(|_| ())
+                }
+            }).unwrap_or_else(|e| panic!("{name}: {e}"));
         }
     }
 

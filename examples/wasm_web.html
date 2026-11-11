@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="ja">
+<meta charset="utf-8">
+<title>hibana WASM</title>
+<label>名前 <input id="name" value="hibana"></label>
+<button id="greet" disabled>WASM を呼ぶ</button>
+<pre id="output">読み込み中</pre>
+<script type="module">
+import { instantiate } from "../dist/wasm_web.mjs";
+
+const output = document.querySelector("#output");
+const button = document.querySelector("#greet");
+try {
+  const response = await fetch("../dist/wasm_web.wasm");
+  if (!response.ok) throw new Error(`WASM の取得に失敗: ${response.status}`);
+  const api = await instantiate(await response.arrayBuffer(), {
+    hibana_host: {
+      decorate: name => `こんにちは、${name}！`,
+      show: message => { output.textContent = message; },
+    },
+  });
+  output.textContent = `answer(41) = ${api.answer(41)}`;
+  button.disabled = false;
+  button.onclick = () => {
+    try { api.greet(document.querySelector("#name").value); }
+    catch (error) { output.textContent = String(error); }
+  };
+} catch (error) {
+  output.textContent = String(error);
+}
+</script>
+</html>
