@@ -99,33 +99,11 @@ pub fn compile(source: &str, target: &str, exports: &[String]) -> R<Vec<u8>> {
 pub fn inspect_exports(source: &str, exports: &[String]) -> R<String> {
     let program = compiler_input(source, Kind::Library)?;
     let ir = exported_ir(&program, exports)?;
-    let ty = |t: &ir::ValueType| match t {
-        ir::ValueType::Int => "int",
-        ir::ValueType::Str => "str",
-        ir::ValueType::Unit => "unit",
-    };
-    let functions: Vec<_> = select_exports(&ir, exports)?
-        .into_iter()
-        .map(|f| {
-            (
-                &f.name,
-                f.param_types.iter().map(ty).collect::<Vec<_>>(),
-                ty(&f.result_type),
-            )
-        })
-        .collect();
-    let imports: Vec<_> = ir
-        .imports
-        .iter()
-        .map(|f| {
-            (
-                &f.name,
-                f.param_types.iter().map(ty).collect::<Vec<_>>(),
-                ty(&f.result_type),
-            )
-        })
-        .collect();
-    Ok(serde_json::json!({"exports": functions, "imports": imports}).to_string())
+    let signatures = boundary_signatures(&ir, exports)?;
+    Ok(
+        serde_json::json!({"exports": signatures.exports, "imports": signatures.imports})
+            .to_string(),
+    )
 }
 
 fn compiler_input(source: &str, kind: Kind) -> R<Checked> {
@@ -214,36 +192,10 @@ pub fn emit_wasm(program: &ir::Program, exports: Option<&[String]>) -> R<Vec<u8>
 /// 公開関数を JavaScript から呼ぶための ES モジュールを作る。
 /// int は BigInt、str は文字列、unit は undefined として渡す。
 pub fn emit_js_glue(program: &ir::Program, exports: &[String]) -> R<String> {
-    fn ty(t: &ir::ValueType) -> &'static str {
-        match t {
-            ir::ValueType::Int => "int",
-            ir::ValueType::Str => "str",
-            ir::ValueType::Unit => "unit",
-        }
-    }
-    let signatures: Vec<_> = select_exports(program, exports)?
-        .into_iter()
-        .map(|f| {
-            (
-                &f.name,
-                f.param_types.iter().map(ty).collect::<Vec<_>>(),
-                ty(&f.result_type),
-            )
-        })
-        .collect();
-    let hosts: Vec<_> = program
-        .imports
-        .iter()
-        .map(|f| {
-            (
-                &f.name,
-                f.param_types.iter().map(ty).collect::<Vec<_>>(),
-                ty(&f.result_type),
-            )
-        })
-        .collect();
-    let names = serde_json::to_string(&signatures).expect("関数の型を JSON に変換できる");
-    let hosts = serde_json::to_string(&hosts).expect("外部関数の型を JSON に変換できる");
+    let signatures = boundary_signatures(program, exports)?;
+    let names = serde_json::to_string(&signatures.exports).expect("関数の型を JSON に変換できる");
+    let hosts =
+        serde_json::to_string(&signatures.imports).expect("外部関数の型を JSON に変換できる");
     let template = r#"// hibana が生成した JavaScript 接続コード
 export async function instantiate(bytes, imports = {}) {
   let instance;
@@ -307,6 +259,45 @@ export async function instantiate(bytes, imports = {}) {
     let (before, rest) = template.split_once("__HOSTS__").unwrap();
     let (middle, after) = rest.split_once("__EXPORTS__").unwrap();
     Ok(format!("{before}{hosts}{middle}{names}{after}"))
+}
+
+// JSON と JS 接続コードで、境界の型名とシグネチャの並びを共有する。
+type BoundarySignature<'a> = (&'a str, Vec<&'static str>, &'static str);
+
+struct BoundarySignatures<'a> {
+    exports: Vec<BoundarySignature<'a>>,
+    imports: Vec<BoundarySignature<'a>>,
+}
+
+fn boundary_signature<'a>(
+    name: &'a str,
+    params: &[ir::ValueType],
+    result: &ir::ValueType,
+) -> BoundarySignature<'a> {
+    fn ty(t: &ir::ValueType) -> &'static str {
+        match t {
+            ir::ValueType::Int => "int",
+            ir::ValueType::Str => "str",
+            ir::ValueType::Unit => "unit",
+        }
+    }
+    (name, params.iter().map(ty).collect(), ty(result))
+}
+
+fn boundary_signatures<'a>(
+    program: &'a ir::Program,
+    exports: &[String],
+) -> R<BoundarySignatures<'a>> {
+    let exports = select_exports(program, exports)?
+        .into_iter()
+        .map(|f| boundary_signature(&f.name, &f.param_types, &f.result_type))
+        .collect();
+    let imports = program
+        .imports
+        .iter()
+        .map(|f| boundary_signature(&f.name, &f.param_types, &f.result_type))
+        .collect();
+    Ok(BoundarySignatures { exports, imports })
 }
 
 fn select_exports<'a>(program: &'a ir::Program, names: &[String]) -> R<Vec<&'a ir::Function>> {

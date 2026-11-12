@@ -64,6 +64,93 @@ try { x.twice(); throw Error('accepted missing argument'); } catch (e) { if (!(e
 }
 
 #[test]
+fn inspection_and_glue_preserve_boundary_signatures_and_order() {
+    let source = r#"
+extern "host" {
+    fn show(message: str)
+    fn decorate(message: str, n: int) -> str
+    fn count() -> int
+    fn unused_host() -> int
+}
+fn greet(message: str, n: int) -> str { decorate(message, n) }
+fn log(message: str) { show(message) }
+fn answer() -> int { count() }
+fn unused() -> int { unused_host() }
+"#;
+    // 宣言順とは違う順序で公開し、外部関数は宣言順のままであることを確かめる。
+    let exports = vec!["answer".into(), "log".into(), "greet".into()];
+    let inspected: serde_json::Value =
+        serde_json::from_str(&pipeline::inspect_exports(source, &exports).unwrap()).unwrap();
+    assert_eq!(
+        inspected,
+        serde_json::json!({
+            "exports": [
+                ["answer", [], "int"],
+                ["log", ["str"], "unit"],
+                ["greet", ["str", "int"], "str"]
+            ],
+            "imports": [
+                ["show", ["str"], "unit"],
+                ["decorate", ["str", "int"], "str"],
+                ["count", [], "int"]
+            ]
+        })
+    );
+    let checked = pipeline::check(pipeline::parse(source).unwrap(), Kind::Library).unwrap();
+    let ir = pipeline::link(
+        &pipeline::lower(&checked, Some(&exports)).unwrap(),
+        &exports,
+    )
+    .unwrap();
+    let glue = pipeline::emit_js_glue(&ir, &exports).unwrap();
+    assert!(glue.contains(&format!(
+        "for (const [name, params, result] of {})",
+        inspected["exports"]
+    )));
+    assert!(glue.contains(&format!(
+        "for (const [name, params, result] of {})",
+        inspected["imports"]
+    )));
+
+    let dir = std::env::temp_dir().join(format!("hibana-signatures-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let wasm = dir.join("signatures.wasm");
+    let js = dir.join("signatures.mjs");
+    std::fs::write(&wasm, pipeline::emit_wasm(&ir, Some(&exports)).unwrap()).unwrap();
+    std::fs::write(&js, glue).unwrap();
+    let script = r#"
+import fs from 'node:fs';
+import { pathToFileURL } from 'node:url';
+const { instantiate } = await import(pathToFileURL(process.argv[2]));
+const messages = [];
+const x = await instantiate(fs.readFileSync(process.argv[1]), { hibana_host: {
+  show: message => { messages.push(message); },
+  decorate: (message, n) => {
+    if (typeof n !== 'bigint') throw Error('host int');
+    return `${message}:${n}`;
+  },
+  count: () => 42n
+} });
+if (Object.keys(x).join(',') !== 'answer,log,greet') throw Error('export order');
+if (x.answer() !== 42n) throw Error('int result');
+if (x.greet('こんにちは', 7) !== 'こんにちは:7') throw Error('str result');
+if (x.log('記録') !== undefined || messages.join(',') !== '記録') throw Error('unit result');
+"#;
+    let output = Command::new("node")
+        .args(["--input-type=module", "-e", script])
+        .arg(&wasm)
+        .arg(&js)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn load_uses_explicit_base_directory_without_changing_caller() {
     let dir = std::env::temp_dir().join(format!("hibana-load-{}", std::process::id()));
     let a = dir.join("a");
