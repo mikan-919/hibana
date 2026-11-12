@@ -15,6 +15,7 @@ pub mod parser;
 pub mod pipeline;
 pub mod pkg;
 mod resolve;
+mod scripts;
 pub mod smt;
 mod ts;
 pub mod typeck;
