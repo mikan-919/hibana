@@ -146,7 +146,7 @@ test "join" {
 
 - `hibana fmt <ファイル>` はファイルを整形して書き戻します。設定はありません。
 - `hibana lsp` は Language Server を動かし、エディタにエラー表示・整形・hover・定義へのジャンプ・補完・色付けを渡します。VS Code と Zed の拡張機能は `editors/` にあります。
-- パッケージは git のリポジトリです。`hibana new 名前` でプロジェクトを作り、`hibana add <git の URL> [tag]` で依存を足します。`hibana fetch` が依存を取ってきて、`hibana.lock` にコミットを書きます。詳細は仕様の 3.6 節です。
+- パッケージは git のリポジトリです。`hibana new 名前` でプロジェクトを作り、`hibana add <git の URL> [tag]` で依存を足します。`hibana fetch` が依存を取ってきて、`hibana.lock` にコミットを書きます。パッケージは `${XDG_DATA_HOME:-$HOME/.local/share}/hibana/` でプロジェクト間共有し、同じ内容のファイルは共通ストアに一度だけ保存します。詳細は仕様の 3.6 節です。
 - JavaScript と TypeScript のモジュールは `use "./util.ts"` で読めます。型は TypeScript の宣言から読みます。詳細は仕様の 3.4 節です。
 
 ## 7. ビルドだけで成果物を作る

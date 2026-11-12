@@ -515,6 +515,7 @@ version = "0.1.0"
 dependencies = [
  "miette",
  "serde_json",
+ "sha2",
  "thiserror",
  "toml",
  "wasm-encoder 0.227.1",
