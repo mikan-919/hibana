@@ -17,6 +17,7 @@ pub mod pkg;
 mod resolve;
 mod scripts;
 pub mod smt;
+mod tools;
 mod ts;
 pub mod typeck;
 pub mod wasm;

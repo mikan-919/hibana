@@ -24,7 +24,7 @@ fn read(p: &Path) -> Result<Table, String> {
     s.parse().map_err(|e| format!("{}: {e}", p.display()))
 }
 
-fn data_root() -> Result<PathBuf, String> {
+pub(crate) fn data_root() -> Result<PathBuf, String> {
     let base = data_home(std::env::var_os("XDG_DATA_HOME"), std::env::var_os("HOME"))?;
     Ok(base.join("hibana"))
 }
@@ -37,6 +37,11 @@ fn data_home(xdg: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) 
         .filter(|p| p.is_absolute())
         .map(|p| p.join(".local/share"))
         .ok_or_else(|| "XDG_DATA_HOME または HOME に絶対パスが必要".into())
+}
+
+// 外部ツールも言語パッケージと同じファイルストアへ取り込む。
+pub(crate) fn import_tool_tree(source: &Path, destination: &Path, data: &Path) -> Result<(), String> {
+    store::import_tree(source, destination, data)
 }
 
 fn checkout(data: &Path, url: &str, rev: &str) -> PathBuf {

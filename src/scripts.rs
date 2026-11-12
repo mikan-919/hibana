@@ -4,21 +4,22 @@ use std::process::Command;
 
 const CONFIG: &str = "config.hibana.toml";
 
-fn find_config(start: &Path) -> Result<PathBuf, String> {
+pub(crate) fn find_config(start: &Path) -> Result<Option<PathBuf>, String> {
     for dir in start.ancestors() {
         let path = dir.join(CONFIG);
         match std::fs::symlink_metadata(&path) {
-            Ok(_) => return Ok(path),
+            Ok(_) => return Ok(Some(path)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(format!("{}: {e}", path.display())),
         }
     }
-    Err(format!("{CONFIG} が無い（[scripts] にコマンドを定義してください）"))
+    Ok(None)
 }
 
 pub(crate) fn run(name: &str, args: &[String]) -> Result<i32, String> {
     let cwd = std::env::current_dir().map_err(|e| format!("現在のディレクトリを読めない: {e}"))?;
-    let path = find_config(&cwd)?;
+    let path =
+        find_config(&cwd)?.ok_or_else(|| format!("{CONFIG} が無い（[scripts] にコマンドを定義してください）"))?;
     let source = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let config: toml::Table = source.parse().map_err(|e| format!("{}: {e}", path.display()))?;
     let scripts = config
@@ -43,8 +44,12 @@ pub(crate) fn run(name: &str, args: &[String]) -> Result<i32, String> {
     } else {
         format!("{script} \"$@\"")
     };
-    // ponytail: PATH は親プロセスを継承する。依存パッケージの bin 解決は未実装。
-    let status = Command::new("sh")
+    let tool_path = crate::tools::script_path(&config)?;
+    let mut shell = Command::new("sh");
+    if let Some((_, path)) = &tool_path {
+        shell.env("PATH", path);
+    }
+    let status = shell
         .arg("-c")
         .arg(command)
         .arg(name)
