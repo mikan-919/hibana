@@ -1,6 +1,9 @@
 // パッケージ管理。hibana.toml の [dependencies] を git から取り、hibana.lock にコミットを記録する
 // ponytail: 同じ名前のパッケージは一つの版だけ。版の範囲の解決はレジストリを作るときに足す
+mod runner;
 mod store;
+
+pub use runner::dlx;
 
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};

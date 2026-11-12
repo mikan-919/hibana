@@ -18,7 +18,9 @@ dev = "hibana src/main.hb"
 
 `hibana add npm:vite` のように外部ツールを追加すると、`config.hibana.toml` の `[dependencies]` に `"npm:vite" = "*"` が記録され、スクリプト内では `vite build` のようにコマンド名をそのまま使えます。Cargo のツールは `hibana add cargo:名前` で追加します。npm/Cargo はシステムにインストールされているものを使い、取得時にはパッケージのスクリプトやビルドも実行します。
 
-事前の追加なしで実行するには `hibana dlx npm:vite -- --help`、常用のコマンドとして追加するには `hibana add -g cargo:ripgrep` とします。グローバルの配置先 `${XDG_DATA_HOME:-$HOME/.local/share}/hibana/bin` は自分で `PATH` に追加してください。パッケージと実行コマンドの名前が違っていても扱えます。複数のコマンドから選ぶ場合は `hibana dlx npm:名前 --bin コマンド -- 引数` とします。
+事前の追加なしで実行するには `hibana dlx npm:vite --help`、常用のコマンドとして追加するには `hibana add -g cargo:ripgrep` とします。グローバルの配置先 `${XDG_DATA_HOME:-$HOME/.local/share}/hibana/bin` は自分で `PATH` に追加してください。パッケージと実行コマンドの名前が違っていても扱えます。複数のコマンドから選ぶ場合は `hibana dlx --bin コマンド npm:名前 引数` とします。Hibana 側のオプションは識別子より前に書き、後ろはすべて実行先の引数として渡します。区切りの `--` は省略できます。
+
+Hibana パッケージは `hibana dlx hibana:GitのURL`（または `hibana dlx GitのURL`）で実行します。取得元に `hibana.toml` と `src/main.hb` を用意してください。版を選ぶ場合は `hibana dlx --rev v1.0.0 hibana:GitのURL` とします。依存も共通ストアから読み込み、呼び出し元のプロジェクト設定は変更しません。現状の言語にはコマンドライン引数を読み出す API はありません。
 
 取得したツールもファイル単位の共通ストアを使います。初回取得した結果を再利用し、自動更新はしません。版は `npm:vite@6.1.0` のように指定できます。外部ツールの版の lock・更新・削除・GC はまだありません。
 

@@ -104,6 +104,52 @@ fn script_usage() -> ! {
     std::process::exit(2);
 }
 
+// 識別子の後は解釈しない。先頭の区切り -- だけを取り除き、残りを実行先へ渡す。
+fn run_dlx(args: &[String]) -> Result<i32, String> {
+    let usage = "使い方: hibana dlx [--bin コマンド | --rev Gitの版] <npm:名前|cargo:名前|hibana:GitのURL|GitのURL> [--] 引数...";
+    let mut bin = None;
+    let mut rev = None;
+    let mut i = 0;
+    while let Some(flag) = args.get(i).filter(|s| s.starts_with('-')) {
+        if flag == "--" {
+            i += 1;
+            break;
+        }
+        let slot = match flag.as_str() {
+            "--bin" => &mut bin,
+            "--rev" => &mut rev,
+            _ => return Err(format!("不明な dlx オプション: {flag}\n{usage}")),
+        };
+        if slot.is_some() {
+            return Err(format!("{flag} は一度だけ指定できます"));
+        }
+        let value = args
+            .get(i + 1)
+            .filter(|s| !s.is_empty() && !s.starts_with('-'))
+            .ok_or_else(|| format!("{flag} に値が必要\n{usage}"))?;
+        *slot = Some(value.as_str());
+        i += 2;
+    }
+    let spec = args.get(i).filter(|s| !s.is_empty()).ok_or(usage)?;
+    let rest = &args[i + 1..];
+    let rest = if rest.first().is_some_and(|s| s == "--") {
+        &rest[1..]
+    } else {
+        rest
+    };
+    if spec.starts_with("npm:") || spec.starts_with("cargo:") {
+        if rev.is_some() {
+            return Err("--rev は Hibana パッケージ専用です。npm/Cargo は 名前@版 で指定してください".into());
+        }
+        crate::tools::dlx(spec, bin, rest)
+    } else {
+        if bin.is_some() {
+            return Err("--bin は npm/Cargo パッケージ専用です。Hibana は src/main.hb を実行します".into());
+        }
+        pkg::dlx(spec, rev, rest)
+    }
+}
+
 fn run_cli() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args == ["lsp"] {
@@ -134,11 +180,7 @@ fn run_cli() {
     }
     // 外部ツールは取得元付き識別子で解決し、通常のコマンド名を実行する。
     if args.first().is_some_and(|s| s == "dlx") {
-        let code = match args.as_slice() {
-            [_, spec, rest @ ..] => crate::tools::dlx(spec, rest),
-            _ => Err("使い方: hibana dlx <npm:名前|cargo:名前> [--bin コマンド] [--] 引数...".into()),
-        }
-        .unwrap_or_else(|e| {
+        let code = run_dlx(&args[1..]).unwrap_or_else(|e| {
             eprintln!("{e}");
             1
         });
@@ -186,6 +228,7 @@ fn run_cli() {
     let mut out_dir_seen = false;
     let (cmd, path, exports) = match args.as_slice() {
         [p] => ("eval", p.clone(), Vec::new()),
+        [p, sep, _rest @ ..] if sep == "--" => ("eval", p.clone(), Vec::new()),
         [cmd, p, options @ ..] if cmd == "build" => {
             match options {
                 [] => {}
@@ -225,7 +268,7 @@ fn run_cli() {
         [cmd, p] if cmd == "run" || cmd == "ir" || cmd == "js" || cmd == "c" || cmd == "build" || cmd == "fmt" => (cmd.as_str(), p.clone(), Vec::new()),
         _ => {
             eprintln!(
-                "使い方: hibana build [-- 引数...] | hibana dev [-- 引数...] | hibana script <名前> [-- 引数...]（config.hibana.toml のスクリプト） | hibana <ファイル>（実行） | hibana run <ファイル>（WASM で実行） | hibana ir <ファイル>（中間表現を出力） | hibana wasm <ファイル> [--export 関数名 ...]（WASM を出力） | hibana glue <ファイル> --export 関数名 ...（JavaScript 接続コードを出力） | hibana web <ファイル> --export 関数名 ... [--out-dir dist]（WASM と接続コードを保存） | hibana js <ファイル>（JavaScript を出力） | hibana c <ファイル>（C を出力） | hibana build <ファイル> [--out-dir dist]（マクロの成果物を保存、登録が無ければネイティブビルド） | hibana fmt <ファイル>（整形して書き戻す） | hibana lsp（Language Server を標準入出力で動かす） | hibana new <名前> | hibana add <git の URL> [tag] | hibana add [-g] <npm:名前[@版]|cargo:名前[@版]> | hibana dlx <識別子> [--bin コマンド] [--] 引数... | hibana fetch（依存を取ってくる） | hibana test [ファイル]（test を実行する）"
+                "使い方: hibana build [-- 引数...] | hibana dev [-- 引数...] | hibana script <名前> [-- 引数...]（config.hibana.toml のスクリプト） | hibana <ファイル>（実行） | hibana run <ファイル>（WASM で実行） | hibana ir <ファイル>（中間表現を出力） | hibana wasm <ファイル> [--export 関数名 ...]（WASM を出力） | hibana glue <ファイル> --export 関数名 ...（JavaScript 接続コードを出力） | hibana web <ファイル> --export 関数名 ... [--out-dir dist]（WASM と接続コードを保存） | hibana js <ファイル>（JavaScript を出力） | hibana c <ファイル>（C を出力） | hibana build <ファイル> [--out-dir dist]（マクロの成果物を保存、登録が無ければネイティブビルド） | hibana fmt <ファイル>（整形して書き戻す） | hibana lsp（Language Server を標準入出力で動かす） | hibana new <名前> | hibana add <git の URL> [tag] | hibana add [-g] <npm:名前[@版]|cargo:名前[@版]> | hibana dlx [--bin コマンド | --rev Gitの版] <識別子> [--] 引数... | hibana fetch（依存を取ってくる） | hibana test [ファイル]（test を実行する）"
             );
             std::process::exit(2);
         }

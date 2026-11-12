@@ -266,18 +266,8 @@ pub(crate) fn script_path(config: &Table) -> Result<Option<(Temp, std::ffi::OsSt
     Ok(Some((temp, path)))
 }
 
-pub(crate) fn dlx(raw: &str, args: &[String]) -> Result<i32, String> {
+pub(crate) fn dlx(raw: &str, bin: Option<&str>, args: &[String]) -> Result<i32, String> {
     let spec = Spec::parse(raw)?;
-    let (bin, args) = match args {
-        [flag, name, rest @ ..] if flag == "--bin" => (Some(name.as_str()), rest),
-        [flag, ..] if flag == "--bin" => return Err("--bin にコマンド名が必要".into()),
-        _ => (None, args),
-    };
-    let args = if args.first().is_some_and(|s| s == "--") {
-        &args[1..]
-    } else {
-        args
-    };
     let installed = ensure(&spec)?;
     let name = select_bin(&spec, &installed.bins, bin)?;
     let mut command = Command::new(&installed.bins[&name]);

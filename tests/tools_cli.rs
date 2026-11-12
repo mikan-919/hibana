@@ -165,6 +165,50 @@ fn dlx_preserves_arguments_without_persisting_dependency() {
 }
 
 #[test]
+fn dlx_forwards_all_options_after_spec_without_separator() {
+    let f = Fixture::new();
+    assert_eq!(
+        success(&f.run(&[
+            "dlx",
+            "npm:demo",
+            "--version",
+            "--bin",
+            "second",
+            "--rev",
+            "HEAD",
+            "--",
+            "tail"
+        ])),
+        "npm-demo<--version><--bin><second><--rev><HEAD><--><tail>"
+    );
+    assert_eq!(
+        success(&f.run(&["dlx", "--bin", "second", "npm:many", "--bin", "first"])),
+        "npm-demo<--bin><first>"
+    );
+    assert_eq!(
+        success(&f.run(&["dlx", "npm:demo", "--", "--", "tail"])),
+        "npm-demo<--><tail>"
+    );
+    assert_eq!(f.run(&["dlx", "npm:demo", "--fail"]).status.code(), Some(37));
+}
+
+#[test]
+fn dlx_rejects_missing_or_provider_incompatible_options() {
+    let f = Fixture::new();
+    for args in [
+        vec!["dlx"],
+        vec!["dlx", "--bin"],
+        vec!["dlx", "--rev"],
+        vec!["dlx", "--unknown", "npm:demo"],
+        vec!["dlx", "--rev", "HEAD", "npm:demo"],
+        vec!["dlx", "--rev", "HEAD", "cargo:demo"],
+    ] {
+        error(&f.run(&args));
+    }
+    assert!(f.installs().is_empty());
+}
+
+#[test]
 fn dlx_reuses_install_and_preserves_exit_code() {
     let f = Fixture::new();
     assert_eq!(success(&f.run(&["dlx", "npm:demo"])), "npm-demo");
@@ -199,10 +243,10 @@ fn dlx_requires_selection_for_ambiguous_bins() {
     let f = Fixture::new();
     error(&f.run(&["dlx", "npm:many"]));
     assert_eq!(
-        success(&f.run(&["dlx", "npm:many", "--bin", "second", "--", "ok"])),
+        success(&f.run(&["dlx", "--bin", "second", "npm:many", "--", "ok"])),
         "npm-demo<ok>"
     );
-    error(&f.run(&["dlx", "npm:many", "--bin", "missing"]));
+    error(&f.run(&["dlx", "--bin", "missing", "npm:many"]));
     assert_eq!(f.installs().lines().count(), 1);
 }
 
