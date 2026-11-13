@@ -44,6 +44,7 @@ impl Drop for Temp {
 struct Installed {
     root: PathBuf,
     bins: BTreeMap<String, PathBuf>,
+    version: Option<String>,
 }
 
 fn safe_name(name: &str) -> bool {
@@ -87,13 +88,21 @@ fn bins(root: &Path) -> Result<BTreeMap<String, PathBuf>, String> {
 }
 
 fn ensure(spec: &Spec) -> Result<Installed, String> {
+    ensure_mode(spec, false)
+}
+
+fn ensure_mode(spec: &Spec, resolved: bool) -> Result<Installed, String> {
     let data = crate::pkg::data_root()?;
-    // ponytail: 版省略・範囲指定は初回取得結果を再利用する。更新コマンドと移植可能な lock は未実装。
+    // dlx/global の版省略・範囲指定は初回取得結果を再利用する。
+    // プロジェクト用は解決版を持つ別世代に保存し、古い CAS は書き換えない。
     let key = format!("{}\0{}\0{}", spec.key(), std::env::consts::OS, std::env::consts::ARCH);
-    let root = data.join("tools/v1").join(format!("{:x}", Sha256::digest(key)));
+    let root = data
+        .join(if resolved { "tools/v2" } else { "tools/v1" })
+        .join(format!("{:x}", Sha256::digest(key)));
     if root.is_dir() {
         return Ok(Installed {
             bins: bins(&root)?,
+            version: if resolved { Some(cached_version(&root)?) } else { None },
             root,
         });
     }
@@ -101,7 +110,13 @@ fn ensure(spec: &Spec) -> Result<Installed, String> {
     let source = temp.0.join("source");
     std::fs::create_dir(&source).map_err(|e| e.to_string())?;
     eprintln!("取得: {}", spec.key());
-    let installed = providers::install(spec, &source)?;
+    let (installed, version) = if resolved {
+        let (bins, version) = providers::install_resolved(spec, &source)?;
+        exact_version(&version)?;
+        (bins, Some(version))
+    } else {
+        (providers::install(spec, &source)?, None)
+    };
     let mut table = Table::new();
     for (name, path) in installed {
         if !safe_name(&name) || table.contains_key(&name) {
@@ -112,11 +127,27 @@ fn ensure(spec: &Spec) -> Result<Installed, String> {
     let mut meta = Table::new();
     meta.insert("spec".into(), spec.key().into());
     meta.insert("bin".into(), table.into());
+    if let Some(version) = &version {
+        meta.insert("version".into(), version.clone().into());
+    }
     if source.join(META).exists() {
         return Err(format!("予約ファイル名が含まれる: {META}"));
     }
     std::fs::write(source.join(META), meta.to_string()).map_err(|e| e.to_string())?;
     bins(&source)?;
+    // 範囲で解決した初回も正確版のキーで公開し、次回の lock 取得で再利用する。
+    let root = if let Some(version) = &version {
+        let mut exact = spec.clone();
+        exact.version = Some(if spec.source == "cargo" {
+            format!("={version}")
+        } else {
+            version.clone()
+        });
+        let key = format!("{}\0{}\0{}", exact.key(), std::env::consts::OS, std::env::consts::ARCH);
+        data.join("tools/v2").join(format!("{:x}", Sha256::digest(key)))
+    } else {
+        root
+    };
     let tree = temp.0.join("tree");
     crate::pkg::import_tool_tree(&source, &tree, &data)?;
     std::fs::create_dir_all(root.parent().unwrap()).map_err(|e| e.to_string())?;
@@ -127,8 +158,107 @@ fn ensure(spec: &Spec) -> Result<Installed, String> {
     }
     Ok(Installed {
         bins: bins(&root)?,
+        version: if resolved { Some(cached_version(&root)?) } else { None },
         root,
     })
+}
+
+// lock の版は範囲・タグではなく、取得元が返した正確な版だけを受け付ける。
+fn exact_version(version: &str) -> Result<(), String> {
+    if !providers::exact_version(version) {
+        return Err(format!("lock の正確なバージョンが不正: {version}"));
+    }
+    Ok(())
+}
+
+fn cached_version(root: &Path) -> Result<String, String> {
+    let meta = read_table(&root.join(META))?;
+    let version = meta
+        .get("version")
+        .and_then(|v| v.as_str())
+        .ok_or("ツールの解決版記録が無い")?;
+    exact_version(version)?;
+    Ok(version.into())
+}
+
+fn read_lock(path: &Path) -> Result<Table, String> {
+    let lock = match std::fs::symlink_metadata(path) {
+        Ok(_) => read_table(path)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Table::new(),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    if let Some(value) = lock.get("tools") {
+        let tools = value.as_table().ok_or("hibana.lock の [tools] はテーブルが必要")?;
+        if tools.get("git").is_some_and(|v| v.is_str()) {
+            return Err("hibana.lock の tools は Hibana 依存名と衝突しています".into());
+        }
+        for (name, entry) in tools {
+            let spec = Spec::parse(name)?;
+            if spec.version.is_some() {
+                return Err(format!("lock のキーに版を含めないでください: {name}"));
+            }
+            let requirement = entry
+                .get("requirement")
+                .and_then(|v| v.as_str())
+                .ok_or("lock の requirement は文字列が必要")?;
+            Spec::parse(&format!("{name}@{requirement}"))?;
+            let version = entry
+                .get("version")
+                .and_then(|v| v.as_str())
+                .ok_or("lock の version は文字列が必要")?;
+            exact_version(version)?;
+        }
+    }
+    Ok(lock)
+}
+
+// ponytail: 直接依存の版だけを固定する。推移依存・integrity の固定には取得元ごとの lock 保存が必要。
+fn ensure_locked(spec: &Spec, lock: &mut Table) -> Result<Installed, String> {
+    let name = identity(spec);
+    let requirement = spec.version.as_deref().unwrap_or("*");
+    let locked = lock
+        .get("tools")
+        .and_then(|t| t.get(&name))
+        .filter(|entry| entry.get("requirement").and_then(|v| v.as_str()) == Some(requirement))
+        .and_then(|entry| entry.get("version"))
+        .and_then(|v| v.as_str());
+    let installed = if let Some(version) = locked {
+        let mut exact = spec.clone();
+        exact.version = Some(if spec.source == "cargo" {
+            format!("={version}")
+        } else {
+            version.into()
+        });
+        let installed = ensure_mode(&exact, true)?;
+        if installed.version.as_deref() != Some(version) {
+            return Err(format!(
+                "{} の取得版が lock の {version} と一致しません",
+                identity(spec)
+            ));
+        }
+        installed
+    } else {
+        ensure_mode(spec, true)?
+    };
+    let mut entry = Table::new();
+    entry.insert("requirement".into(), requirement.into());
+    entry.insert(
+        "version".into(),
+        installed.version.clone().ok_or("ツールの解決版記録が無い")?.into(),
+    );
+    lock.entry("tools")
+        .or_insert(Table::new().into())
+        .as_table_mut()
+        .ok_or("[tools] はテーブルが必要")?
+        .insert(name, entry.into());
+    Ok(installed)
+}
+
+fn write_lock(path: &Path, old: &Table, lock: &Table) -> Result<(), String> {
+    if old != lock {
+        atomic_write(path, &lock.to_string())?;
+    }
+    Ok(())
 }
 
 fn identity(spec: &Spec) -> String {
@@ -203,7 +333,11 @@ pub(crate) fn add(raw: &str, global: bool) -> Result<(), String> {
     deps.insert(identity(&spec), spec.version.as_deref().unwrap_or("*").into());
     // 設定の型と識別子を先に検査し、取得失敗時には設定を書き換えない。
     dependencies(&config)?;
-    ensure(&spec)?;
+    let lock_path = path.parent().unwrap().join("hibana.lock");
+    let old = read_lock(&lock_path)?;
+    let mut lock = old.clone();
+    ensure_locked(&spec, &mut lock)?;
+    write_lock(&lock_path, &old, &lock)?;
     atomic_write(&path, &config.to_string())?;
     eprintln!("追加: {}", spec.key());
     Ok(())
@@ -241,15 +375,18 @@ fn dependencies(config: &Table) -> Result<Vec<Spec>, String> {
 }
 
 // スクリプトの実行中だけ bin ディレクトリを保持する。
-pub(crate) fn script_path(config: &Table) -> Result<Option<(Temp, std::ffi::OsString)>, String> {
+pub(crate) fn script_path(config: &Table, config_path: &Path) -> Result<Option<(Temp, std::ffi::OsString)>, String> {
     let specs = dependencies(config)?;
     if specs.is_empty() {
         return Ok(None);
     }
     let temp = Temp::new(&crate::pkg::data_root()?)?;
+    let lock_path = config_path.parent().unwrap().join("hibana.lock");
+    let old = read_lock(&lock_path)?;
+    let mut lock = old.clone();
     let mut owners = BTreeMap::new();
     for spec in specs {
-        let installed = ensure(&spec)?;
+        let installed = ensure_locked(&spec, &mut lock)?;
         for (name, target) in installed.bins {
             if let Some(other) = owners.insert(name.clone(), spec.key()) {
                 return Err(format!(
@@ -260,6 +397,7 @@ pub(crate) fn script_path(config: &Table) -> Result<Option<(Temp, std::ffi::OsSt
             shim(&temp.0.join(name), &target, &identity(&spec))?;
         }
     }
+    write_lock(&lock_path, &old, &lock)?;
     let mut paths = vec![temp.0.clone()];
     paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
     let path = std::env::join_paths(paths).map_err(|e| e.to_string())?;
@@ -339,6 +477,29 @@ mod tests {
         bins.insert("pkg".into(), PathBuf::from("cli3"));
         assert_eq!(select_bin(&spec, &bins, None).unwrap(), "pkg");
     }
+    #[test]
+    fn lock_validation_preserves_native_entries_and_rejects_non_exact_versions() {
+        let temp = Temp::in_parent(&std::env::temp_dir()).unwrap();
+        let path = temp.0.join("hibana.lock");
+        assert!(read_lock(&path).unwrap().is_empty());
+        let valid = "[lib]\ngit = 'file:///lib'\nrev = 'abc'\n[tools.\"npm:demo\"]\nrequirement = '^1.0.0'\nversion = '1.2.3-beta.1+build.2'\n";
+        std::fs::write(&path, valid).unwrap();
+        let old = read_lock(&path).unwrap();
+        write_lock(&path, &old, &old).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), valid);
+        assert_eq!(old["lib"]["rev"].as_str(), Some("abc"));
+        for version in ["latest", "^1.2.3", "1.2", "01.2.3", "1.2.3-", "1.2.3+"] {
+            std::fs::write(
+                &path,
+                format!("[tools.\"npm:demo\"]\nrequirement = '*'\nversion = {version:?}\n"),
+            )
+            .unwrap();
+            assert!(read_lock(&path).is_err(), "{version}");
+        }
+        std::fs::write(&path, "[tools]\ngit = 'file:///lib'\nrev = 'abc'\n").unwrap();
+        assert!(read_lock(&path).unwrap_err().contains("衝突"));
+    }
+
     #[test]
     fn config_dependency_validation() {
         let config: Table = "[dependencies]\n\"npm:demo\" = \"*\"\n\"cargo:demo\" = \"1.2.3\""

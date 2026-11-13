@@ -98,12 +98,17 @@ case "$package" in
   @scope/*) name=@scope/demo ;;
   *) name=demo ;;
 esac
+version="${MOCK_NPM_VERSION:-1.2.3}"
+case "$package" in
+  *@1.2.3) version=1.2.3 ;;
+  *@9.9.9) version=9.9.9 ;;
+esac
 root="$prefix/node_modules/$name"
 mkdir -p "$root"
 if [ "$name" = many ]; then
   printf '%s' '{"name":"many","version":"1.0.0","bin":{"first":"cli.js","second":"cli.js"}}' > "$root/package.json"
 else
-  printf '{"name":"%s","version":"1.2.3","bin":{"demo":"cli.js"}}' "$name" > "$root/package.json"
+  printf '{"name":"%s","version":"%s","bin":{"demo":"cli.js"}}' "$name" "$version" > "$root/package.json"
 fi
 cat > "$root/cli.js" <<'CLI'
 #!/bin/sh
@@ -118,15 +123,18 @@ chmod +x "$root/cli.js"
 const CARGO: &str = r##"#!/bin/sh
 set -eu
 root=''
+version=''
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --root) root="$2"; shift 2 ;;
+    --version) version="$2"; shift 2 ;;
     *) shift ;;
   esac
 done
 [ -n "$root" ]
-printf 'cargo:demo\n' >> "$MOCK_LOG"
+printf 'cargo:demo%s\n' "${version:+@$version}" >> "$MOCK_LOG"
 mkdir -p "$root/bin"
+printf '[v1]\n"demo 2.3.4 (registry+https://example.invalid/index)" = ["demo"]\n' > "$root/.crates.toml"
 cat > "$root/bin/demo" <<'CLI'
 #!/bin/sh
 printf cargo-demo
@@ -285,4 +293,100 @@ fn rejected_identifiers_do_not_spawn_installers() {
     }
     assert!(f.installs().is_empty());
     assert!(!f.0.join("injected").exists());
+}
+
+fn lock(f: &Fixture) -> toml::Table {
+    std::fs::read_to_string(f.0.join("hibana.lock"))
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+#[test]
+fn project_lock_pins_npm_across_data_homes_and_registry_changes() {
+    let f = Fixture::new();
+    f.write("config.hibana.toml", "[scripts]\nbuild = \"demo\"\n");
+    f.write(
+        "hibana.lock",
+        "[greet]\ngit = \"file:///preserved\"\nrev = \"abc123\"\n",
+    );
+    success(&f.run(&["add", "npm:demo"]));
+    let initial = std::fs::read_to_string(f.0.join("hibana.lock")).unwrap();
+    let saved = lock(&f);
+    assert_eq!(saved["tools"]["npm:demo"]["requirement"].as_str(), Some("*"));
+    assert_eq!(saved["tools"]["npm:demo"]["version"].as_str(), Some("1.2.3"));
+    assert_eq!(saved["greet"]["rev"].as_str(), Some("abc123"));
+    let output = f
+        .command(env!("CARGO_BIN_EXE_hibana"))
+        .env("XDG_DATA_HOME", f.0.join("other-data"))
+        .env("MOCK_NPM_VERSION", "9.9.9")
+        .arg("build")
+        .output()
+        .unwrap();
+    assert_eq!(success(&output), "npm-demo");
+    assert!(f.installs().contains("npm:demo@1.2.3"));
+    assert_eq!(std::fs::read_to_string(f.0.join("hibana.lock")).unwrap(), initial);
+    assert_eq!(f.installs().lines().count(), 2);
+}
+
+#[test]
+fn project_lock_uses_exact_cargo_requirement_on_new_machine() {
+    let f = Fixture::new();
+    f.write("config.hibana.toml", "[scripts]\nbuild = \"demo\"\n");
+    success(&f.run(&["add", "cargo:demo"]));
+    let saved = lock(&f);
+    assert_eq!(saved["tools"]["cargo:demo"]["requirement"].as_str(), Some("*"));
+    assert_eq!(saved["tools"]["cargo:demo"]["version"].as_str(), Some("2.3.4"));
+    let output = f
+        .command(env!("CARGO_BIN_EXE_hibana"))
+        .env("XDG_DATA_HOME", f.0.join("other-data"))
+        .arg("build")
+        .output()
+        .unwrap();
+    assert_eq!(success(&output), "cargo-demo");
+    assert!(f.installs().contains("cargo:demo@=2.3.4"));
+}
+
+#[test]
+fn changed_project_requirement_re_resolves_lock() {
+    let f = Fixture::new();
+    success(&f.run(&["add", "npm:demo"]));
+    f.write(
+        "config.hibana.toml",
+        "[scripts]\nbuild = \"demo\"\n[dependencies]\n\"npm:demo\" = \"9.9.9\"\n",
+    );
+    assert_eq!(success(&f.run(&["build"])), "npm-demo");
+    let saved = lock(&f);
+    assert_eq!(saved["tools"]["npm:demo"]["requirement"].as_str(), Some("9.9.9"));
+    assert_eq!(saved["tools"]["npm:demo"]["version"].as_str(), Some("9.9.9"));
+    assert_eq!(f.installs().lines().count(), 2);
+}
+
+#[test]
+fn malformed_project_lock_fails_before_script_and_install() {
+    let f = Fixture::new();
+    f.write(
+        "config.hibana.toml",
+        "[scripts]\nbuild = \"touch script-ran\"\n[dependencies]\n\"npm:demo\" = \"*\"\n",
+    );
+    for text in [
+        "not valid toml = [",
+        "[tools]\n\"npm:demo\" = { requirement = \"*\" }\n",
+        "[tools]\n\"npm:demo\" = { requirement = \"*\", version = 123 }\n",
+    ] {
+        f.write("hibana.lock", text);
+        error(&f.run(&["build"]));
+        assert!(!f.0.join("script-ran").exists());
+        assert!(f.installs().is_empty());
+        assert_eq!(std::fs::read_to_string(f.0.join("hibana.lock")).unwrap(), text);
+    }
+}
+
+#[test]
+fn project_add_rejects_native_tools_name_collision_without_overwriting_lock() {
+    let f = Fixture::new();
+    let old = "[tools]\ngit = \"file:///native-tools\"\nrev = \"abc\"\n";
+    f.write("hibana.lock", old);
+    error(&f.run(&["add", "npm:demo"]));
+    assert_eq!(std::fs::read_to_string(f.0.join("hibana.lock")).unwrap(), old);
 }

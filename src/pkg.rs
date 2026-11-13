@@ -150,9 +150,19 @@ fn fetch_in(root: &Path, data: &Path) -> Result<(), String> {
         Table::new()
     };
     let mut lock = Table::new();
+    // 外部ツールのロックはHibana依存の再取得で消さない。
+    if let Some(tools) = old
+        .get("tools")
+        .filter(|t| t.get("git").and_then(|g| g.as_str()).is_none())
+    {
+        lock.insert("tools".into(), tools.clone());
+    }
     let mut todo = deps(&read(&root.join(MANIFEST))?);
     while let Some((name, url, rev)) = todo.pop() {
         if let Some(t) = lock.get(&name) {
+            if name == "tools" && t.get("git").and_then(|g| g.as_str()).is_none() {
+                return Err("Hibana依存名 tools は外部ツールの hibana.lock [tools] と衝突します".into());
+            }
             if t.get("git").and_then(|g| g.as_str()) != Some(&url) {
                 return Err(format!("パッケージ {name} が別の git から二つ要る（{url}）"));
             }
@@ -295,7 +305,13 @@ mod tests {
         let url = format!("file://{}", lib.display());
         app(&first, &url);
         app(&second, &url);
+        let tools = "[tools.\"npm:demo\"]\nrequirement = \"*\"\nversion = \"1.2.3\"\n";
+        std::fs::write(first.join(LOCK), tools).unwrap();
         fetch_in(&first, &data).unwrap();
+        assert_eq!(
+            read(&first.join(LOCK)).unwrap()["tools"],
+            tools.parse::<Table>().unwrap()["tools"]
+        );
         fetch_in(&second, &data).unwrap();
         let e1 = entry_in(&first.join("src"), "greet", &data).unwrap();
         assert_eq!(e1, entry_in(&second, "greet", &data).unwrap());
@@ -325,6 +341,31 @@ mod tests {
         fetch_in(&first, &data).unwrap();
         assert_eq!(std::fs::read_to_string(first.join(LOCK)).unwrap(), lock);
         assert_eq!(std::fs::read_dir(data.join("tmp")).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn fetch_rejects_external_tools_collision_and_keeps_native_tools_compatible() {
+        let t = TempDir::new(&std::env::temp_dir().join("hibana-pkg-tests")).unwrap();
+        let data = t.0.join("data");
+        let root = t.0.join("app");
+        std::fs::create_dir(&root).unwrap();
+        let url = "file:///unused-native-tools";
+        let sha = "abc123";
+        std::fs::write(
+            root.join(MANIFEST),
+            format!("[dependencies]\ntools = {{ git = {url:?} }}\n"),
+        )
+        .unwrap();
+        let external = "[tools.\"npm:demo\"]\nrequirement = \"*\"\nversion = \"1.2.3\"\n";
+        std::fs::write(root.join(LOCK), external).unwrap();
+        assert!(fetch_in(&root, &data).unwrap_err().contains("衝突"));
+        assert_eq!(std::fs::read_to_string(root.join(LOCK)).unwrap(), external);
+        // 以前からあるHibana依存名toolsだけのロックはそのまま扱う。
+        std::fs::create_dir_all(checkout(&data, url, sha)).unwrap();
+        let native = format!("[tools]\ngit = {url:?}\nrev = {sha:?}\n");
+        std::fs::write(root.join(LOCK), &native).unwrap();
+        fetch_in(&root, &data).unwrap();
+        assert_eq!(std::fs::read_to_string(root.join(LOCK)).unwrap(), native);
     }
 
     #[test]

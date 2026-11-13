@@ -63,10 +63,14 @@ fn segment(name: &str) -> bool {
 }
 
 pub fn install(spec: &Spec, dest: &Path) -> Result<Vec<(String, PathBuf)>, String> {
+    install_resolved(spec, dest).map(|(bins, _)| bins)
+}
+
+pub fn install_resolved(spec: &Spec, dest: &Path) -> Result<(Vec<(String, PathBuf)>, String), String> {
     install_with_program(spec, dest, Path::new(&spec.source))
 }
 
-fn install_with_program(spec: &Spec, dest: &Path, program: &Path) -> Result<Vec<(String, PathBuf)>, String> {
+fn install_with_program(spec: &Spec, dest: &Path, program: &Path) -> Result<(Vec<(String, PathBuf)>, String), String> {
     // 公開構造体を直接生成した場合もコマンド引数に渡す前に検証する。
     Spec::parse(&spec.key())?;
     let dest = fs::canonicalize(dest).map_err(|e| format!("保存先を開けません: {e}"))?;
@@ -103,8 +107,19 @@ fn install_with_program(spec: &Spec, dest: &Path, program: &Path) -> Result<Vec<
         return Err(format!("{}のインストールに失敗しました: {status}", spec.key()));
     }
     if spec.source == "npm" {
-        npm_bins(spec, &dest)
+        let text = fs::read_to_string(dest.join("node_modules").join(&spec.name).join("package.json"))
+            .map_err(|e| format!("package.jsonを読めません: {e}"))?;
+        let package: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| format!("package.jsonが不正です: {e}"))?;
+        let version = package
+            .get("version")
+            .and_then(|value| value.as_str())
+            .filter(|version| exact_version(version))
+            .ok_or("package.jsonに正確なversionがありません")?
+            .to_owned();
+        Ok((npm_bins(spec, &dest)?, version))
     } else {
+        let version = cargo_version(spec, &dest)?;
         let build = dest.join(".build");
         if build.exists() {
             fs::remove_dir_all(build).map_err(|e| format!("ビルド用一時ファイルを削除できません: {e}"))?;
@@ -115,8 +130,52 @@ fn install_with_program(spec: &Spec, dest: &Path, program: &Path) -> Result<Vec<
                 fs::remove_file(path).map_err(|e| format!("Cargoの管理ファイルを削除できません: {e}"))?;
             }
         }
-        cargo_bins(&dest)
+        Ok((cargo_bins(&dest)?, version))
     }
+}
+
+// 範囲やタグではなく、取得済みパッケージの版だけを受け入れる。
+pub(super) fn exact_version(version: &str) -> bool {
+    fn numeric(part: &str) -> bool {
+        !part.is_empty() && part.bytes().all(|c| c.is_ascii_digit()) && (part.len() == 1 || !part.starts_with('0'))
+    }
+    fn suffix(text: &str, prerelease: bool) -> bool {
+        text.split('.').all(|part| {
+            !part.is_empty()
+                && part.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+                && (!prerelease || !part.bytes().all(|c| c.is_ascii_digit()) || numeric(part))
+        })
+    }
+    let (version, build) = version.split_once('+').map_or((version, None), |(v, b)| (v, Some(b)));
+    let (core, pre) = version.split_once('-').map_or((version, None), |(v, p)| (v, Some(p)));
+    let parts: Vec<_> = core.split('.').collect();
+    parts.len() == 3
+        && parts.iter().all(|part| numeric(part))
+        && build.is_none_or(|build| suffix(build, false))
+        && pre.is_none_or(|pre| suffix(pre, true))
+}
+
+fn cargo_version(spec: &Spec, dest: &Path) -> Result<String, String> {
+    let text =
+        fs::read_to_string(dest.join(".crates.toml")).map_err(|e| format!("Cargoの管理ファイルを読めません: {e}"))?;
+    let table: toml::Table = toml::from_str(&text).map_err(|e| format!("Cargoの管理ファイルが不正です: {e}"))?;
+    let entries = table
+        .get("v1")
+        .and_then(|value| value.as_table())
+        .ok_or("Cargoの管理ファイルにv1がありません")?;
+    let mut versions = entries.keys().filter_map(|key| {
+        let mut parts = key.split_whitespace();
+        let name = parts.next()?;
+        let version = parts.next()?;
+        (name == spec.name && exact_version(version)).then_some(version)
+    });
+    let version = versions
+        .next()
+        .ok_or("Cargoの管理ファイルに対象パッケージの版がありません")?;
+    if versions.next().is_some() {
+        return Err("Cargoの管理ファイルに対象パッケージの版が複数あります".into());
+    }
+    Ok(version.to_owned())
 }
 
 fn npm_bins(spec: &Spec, dest: &Path) -> Result<Vec<(String, PathBuf)>, String> {
@@ -286,6 +345,43 @@ mod tests {
     }
 
     #[test]
+    fn resolved_version_validation() {
+        for version in ["1.2.3", "0.0.0", "1.2.3-rc.1+build.42"] {
+            assert!(exact_version(version), "{version}");
+        }
+        for version in [
+            "latest",
+            "^1.2.3",
+            "1.2",
+            "01.2.3",
+            "1.2.3-",
+            "1.2.3+",
+            "1.2.3-01",
+            "1.2.3+a+b",
+        ] {
+            assert!(!exact_version(version), "{version}");
+        }
+    }
+
+    #[test]
+    fn cargo_version_requires_unique_matching_package() {
+        let temp = Temp::new();
+        let spec = Spec::parse("cargo:tool").unwrap();
+        assert!(cargo_version(&spec, &temp.0).is_err());
+        for text in [
+            "[v1]\n",
+            "[v1]\n\"other 1.2.3 (registry+x)\"=[]\n",
+            "[v1]\n\"tool latest (registry+x)\"=[]\n",
+            "[v1]\n\"tool 1.2.3 (registry+x)\"=[]\n\"tool 2.0.0 (registry+x)\"=[]\n",
+        ] {
+            temp.write(".crates.toml", text);
+            assert!(cargo_version(&spec, &temp.0).is_err());
+        }
+        temp.write(".crates.toml", "[v1]\n\"tool 1.2.3-rc.1 (registry+x)\"=[]\n");
+        assert_eq!(cargo_version(&spec, &temp.0).unwrap(), "1.2.3-rc.1");
+    }
+
+    #[test]
     fn cargo_multiple_bins() {
         let temp = Temp::new();
         temp.write("bin/second", "binary2");
@@ -304,16 +400,17 @@ mod tests {
     fn npm_mock_install_arguments() {
         use std::os::unix::fs::PermissionsExt;
         let temp = Temp::new();
-        temp.write("mock", "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$3/args\"\nmkdir -p \"$3/node_modules/@scope/tool\"\nprintf '{\"bin\":{\"tool\":\"cli.js\"}}' > \"$3/node_modules/@scope/tool/package.json\"\nprintf '#!/bin/sh\\n' > \"$3/node_modules/@scope/tool/cli.js\"\n");
+        temp.write("mock", "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$3/args\"\nmkdir -p \"$3/node_modules/@scope/tool\"\nprintf '{\"version\":\"1.2.3\",\"bin\":{\"tool\":\"cli.js\"}}' > \"$3/node_modules/@scope/tool/package.json\"\nprintf '#!/bin/sh\\n' > \"$3/node_modules/@scope/tool/cli.js\"\n");
         fs::set_permissions(temp.0.join("mock"), fs::Permissions::from_mode(0o755)).unwrap();
         let dest = temp.0.join("dest");
         fs::create_dir(&dest).unwrap();
-        let bins = install_with_program(
+        let (bins, version) = install_with_program(
             &Spec::parse("npm:@scope/tool@1.2.3").unwrap(),
             &dest,
             &temp.0.join("mock"),
         )
         .unwrap();
+        assert_eq!(version, "1.2.3");
         assert_eq!(bins, vec![("tool".into(), "node_modules/@scope/tool/cli.js".into())]);
         let args = fs::read_to_string(dest.join("args")).unwrap();
         assert!(args.ends_with("--no-audit\n--no-fund\n--\n@scope/tool@1.2.3\n"));
@@ -336,17 +433,16 @@ mod tests {
     fn cargo_mock_install_arguments_and_cleanup() {
         use std::os::unix::fs::PermissionsExt;
         let temp = Temp::new();
-        temp.write("mock", "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$3/args\"\nmkdir -p \"$3/bin\" \"$3/.build\"\nprintf binary > \"$3/bin/tool\"\nprintf metadata > \"$3/.crates.toml\"\n");
+        temp.write("mock", "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$3/args\"\nmkdir -p \"$3/bin\" \"$3/.build\"\nprintf binary > \"$3/bin/tool\"\nprintf '[v1]\\n\"tool 1.2.3 (registry+https://example.invalid/index)\" = [\"tool\"]\\n' > \"$3/.crates.toml\"\n");
         fs::set_permissions(temp.0.join("mock"), fs::Permissions::from_mode(0o755)).unwrap();
         let dest = temp.0.join("dest");
         fs::create_dir(&dest).unwrap();
-        let spec = Spec::parse("cargo:tool@1.2.3").unwrap();
-        assert_eq!(
-            install_with_program(&spec, &dest, &temp.0.join("mock")).unwrap().len(),
-            1
-        );
+        let spec = Spec::parse("cargo:tool@=1.2.3").unwrap();
+        let (bins, version) = install_with_program(&spec, &dest, &temp.0.join("mock")).unwrap();
+        assert_eq!(bins.len(), 1);
+        assert_eq!(version, "1.2.3");
         let args = fs::read_to_string(dest.join("args")).unwrap();
-        assert!(args.ends_with("--version\n1.2.3\n--\ntool\n"));
+        assert!(args.ends_with("--version\n=1.2.3\n--\ntool\n"));
         assert!(!dest.join(".build").exists());
         assert!(!dest.join(".crates.toml").exists());
     }

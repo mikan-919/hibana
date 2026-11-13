@@ -44,7 +44,7 @@ pub(crate) fn run(name: &str, args: &[String]) -> Result<i32, String> {
     } else {
         format!("{script} \"$@\"")
     };
-    let tool_path = crate::tools::script_path(&config)?;
+    let tool_path = crate::tools::script_path(&config, &path)?;
     let mut shell = Command::new("sh");
     if let Some((_, path)) = &tool_path {
         shell.env("PATH", path);
