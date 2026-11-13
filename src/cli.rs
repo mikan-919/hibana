@@ -209,6 +209,9 @@ fn run_cli() {
     let r = match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["new", name] => Some(pkg::new(name)),
         ["fetch"] => Some(here().and_then(|r| pkg::fetch(&r))),
+        ["install"] => Some(crate::tools::install(false)),
+        ["install", "--frozen-lockfile"] => Some(crate::tools::install(true)),
+        ["install", ..] => Some(Err("使い方: hibana install [--frozen-lockfile]".into())),
         ["test", files @ ..] => Some(test_cmd(files).and_then(|ok| if ok { Ok(()) } else { Err(String::new()) })),
         ["add", url, tag @ ..] if tag.len() <= 1 => {
             Some(here().and_then(|r| pkg::add(&r, url, tag.first().copied())).map(|n| eprintln!("追加: use {n}")))
@@ -268,7 +271,7 @@ fn run_cli() {
         [cmd, p] if cmd == "run" || cmd == "ir" || cmd == "js" || cmd == "c" || cmd == "build" || cmd == "fmt" => (cmd.as_str(), p.clone(), Vec::new()),
         _ => {
             eprintln!(
-                "使い方: hibana build [-- 引数...] | hibana dev [-- 引数...] | hibana script <名前> [-- 引数...]（config.hibana.toml のスクリプト） | hibana <ファイル>（実行） | hibana run <ファイル>（WASM で実行） | hibana ir <ファイル>（中間表現を出力） | hibana wasm <ファイル> [--export 関数名 ...]（WASM を出力） | hibana glue <ファイル> --export 関数名 ...（JavaScript 接続コードを出力） | hibana web <ファイル> --export 関数名 ... [--out-dir dist]（WASM と接続コードを保存） | hibana js <ファイル>（JavaScript を出力） | hibana c <ファイル>（C を出力） | hibana build <ファイル> [--out-dir dist]（マクロの成果物を保存、登録が無ければネイティブビルド） | hibana fmt <ファイル>（整形して書き戻す） | hibana lsp（Language Server を標準入出力で動かす） | hibana new <名前> | hibana add <git の URL> [tag] | hibana add [-g] <npm:名前[@版]|cargo:名前[@版]> | hibana dlx [--bin コマンド | --rev Gitの版] <識別子> [--] 引数... | hibana fetch（依存を取ってくる） | hibana test [ファイル]（test を実行する）"
+                "使い方: hibana install [--frozen-lockfile]（依存を取得） | hibana build [-- 引数...] | hibana dev [-- 引数...] | hibana script <名前> [-- 引数...]（config.hibana.toml のスクリプト） | hibana <ファイル>（実行） | hibana run <ファイル>（WASM で実行） | hibana ir <ファイル>（中間表現を出力） | hibana wasm <ファイル> [--export 関数名 ...]（WASM を出力） | hibana glue <ファイル> --export 関数名 ...（JavaScript 接続コードを出力） | hibana web <ファイル> --export 関数名 ... [--out-dir dist]（WASM と接続コードを保存） | hibana js <ファイル>（JavaScript を出力） | hibana c <ファイル>（C を出力） | hibana build <ファイル> [--out-dir dist]（マクロの成果物を保存、登録が無ければネイティブビルド） | hibana fmt <ファイル>（整形して書き戻す） | hibana lsp（Language Server を標準入出力で動かす） | hibana new <名前> | hibana add <git の URL> [tag] | hibana add [-g] <npm:名前[@版]|cargo:名前[@版]> | hibana dlx [--bin コマンド | --rev Gitの版] <識別子> [--] 引数... | hibana fetch（依存を取ってくる） | hibana test [ファイル]（test を実行する）"
             );
             std::process::exit(2);
         }

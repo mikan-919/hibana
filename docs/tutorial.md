@@ -24,6 +24,15 @@ Hibana パッケージは `hibana dlx hibana:GitのURL`（または `hibana dlx 
 
 取得したツールもファイル単位の共通ストアを使います。版は `npm:vite@6.1.0` のように指定できます。プロジェクトに追加すると、設定ファイルの隣の `config.hibana.lock.toml` に取得した正確な版を記録します。設定と lock を共有すれば、別環境のスクリプト実行でもその版を取得します。直接のツールの版だけを固定し、npm/Cargo の推移依存までは固定しません。`dlx`・グローバル追加はプロジェクトの lock を使わず初回取得結果を再利用します。自動更新・更新コマンド・削除・GC はまだありません。
 
+リポジトリを取得した後は `hibana install` で、設定された外部ツールと `hibana.toml` の Git 依存をまとめて取得できます。既存の lock を使い、依存の追加や条件変更があれば更新します。CI では次のように実行します。
+
+```sh
+hibana install --frozen-lockfile
+hibana build
+```
+
+`--frozen-lockfile` は `config.hibana.lock.toml` が無い場合や設定と食い違う場合に失敗し、lock は書き換えません。事前に通常の `hibana install` を実行して、設定と lock を一緒にコミットしてください。子ディレクトリからでも実行でき、最も近い `config.hibana.toml` または `hibana.toml` があるディレクトリだけを対象にします。
+
 ファイルを直接指定する既存コマンドも使えます。
 
 `hibana <ファイル>` でインタプリタが実行します。`hibana js <ファイル>` は JavaScript を標準出力に書き、`hibana build <ファイル>` は C を経由してネイティブの実行ファイルを作ります（`cc` と Boehm GC の `libgc` が要ります）。

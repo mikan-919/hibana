@@ -188,7 +188,9 @@ fn read_lock(path: &Path) -> Result<Table, String> {
         Err(e) => return Err(format!("{}: {e}", path.display())),
     };
     if let Some(value) = lock.get("tools") {
-        let tools = value.as_table().ok_or("config.hibana.lock.toml の [tools] はテーブルが必要")?;
+        let tools = value
+            .as_table()
+            .ok_or("config.hibana.lock.toml の [tools] はテーブルが必要")?;
         if tools.get("git").is_some_and(|v| v.is_str()) {
             return Err("config.hibana.lock.toml の tools は Hibana 依存名と衝突しています".into());
         }
@@ -252,6 +254,86 @@ fn ensure_locked(spec: &Spec, lock: &mut Table) -> Result<Installed, String> {
         .ok_or("[tools] はテーブルが必要")?
         .insert(name, entry.into());
     Ok(installed)
+}
+
+// 最も近い設定のディレクトリだけを対象にし、親プロジェクトの依存を混ぜない。
+pub(crate) fn install(frozen: bool) -> Result<(), String> {
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let root = cwd
+        .ancestors()
+        .find(|dir| dir.join(CONFIG).is_file() || dir.join(crate::pkg::MANIFEST).is_file())
+        .ok_or("config.hibana.toml または hibana.toml が無い")?;
+    let config_path = root.join(CONFIG);
+    let specs = dependencies(&if config_path.exists() {
+        read_table(&config_path)?
+    } else {
+        Table::new()
+    })?;
+    let lock_path = root.join("config.hibana.lock.toml");
+    if frozen && !lock_path.is_file() {
+        return Err("--frozen-lockfile には config.hibana.lock.toml が必要です".into());
+    }
+    let raw = if lock_path.exists() {
+        read_table(&lock_path)?
+    } else {
+        Table::new()
+    };
+    let native_tools = raw.get("tools").and_then(|t| t.get("git")).is_some_and(|v| v.is_str());
+    // 従来の Hibana 依存名 tools は、外部ツールが無いときだけそのまま扱う。
+    let old = if native_tools && specs.is_empty() {
+        raw
+    } else {
+        read_lock(&lock_path)?
+    };
+    if frozen && !native_tools {
+        let tools = old.get("tools").and_then(|v| v.as_table());
+        for spec in &specs {
+            let name = identity(spec);
+            let entry = tools
+                .and_then(|t| t.get(&name))
+                .ok_or_else(|| format!("lock に {name} がありません（hibana install を実行してください）"))?;
+            if entry.get("requirement").and_then(|v| v.as_str()) != Some(spec.version.as_deref().unwrap_or("*")) {
+                return Err(format!("{name} の設定と lock が一致しません（--frozen-lockfile）"));
+            }
+        }
+        if let Some(tools) = tools {
+            for name in tools.keys() {
+                if !specs.iter().any(|spec| identity(spec) == *name) {
+                    return Err(format!("lock の {name} は設定にありません（--frozen-lockfile）"));
+                }
+            }
+        }
+    }
+    crate::pkg::install(root, frozen)?;
+    // native install が更新した表を保持する。
+    let raw = if lock_path.exists() {
+        read_table(&lock_path)?
+    } else {
+        Table::new()
+    };
+    let native_tools = raw.get("tools").and_then(|t| t.get("git")).is_some_and(|v| v.is_str());
+    let old = if native_tools && specs.is_empty() {
+        raw
+    } else {
+        read_lock(&lock_path)?
+    };
+    let mut lock = old.clone();
+    if !native_tools {
+        if let Some(tools) = lock.get_mut("tools").and_then(|v| v.as_table_mut()) {
+            tools.retain(|name, _| specs.iter().any(|spec| identity(spec) == *name));
+        }
+        for spec in &specs {
+            ensure_locked(spec, &mut lock)?;
+        }
+    }
+    if !frozen {
+        if !lock_path.exists() {
+            atomic_write(&lock_path, &lock.to_string())?;
+        } else {
+            write_lock(&lock_path, &old, &lock)?;
+        }
+    }
+    Ok(())
 }
 
 fn write_lock(path: &Path, old: &Table, lock: &Table) -> Result<(), String> {
