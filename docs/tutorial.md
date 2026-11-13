@@ -22,7 +22,7 @@ dev = "hibana src/main.hb"
 
 Hibana パッケージは `hibana dlx hibana:GitのURL`（または `hibana dlx GitのURL`）で実行します。取得元に `hibana.toml` と `src/main.hb` を用意してください。版を選ぶ場合は `hibana dlx --rev v1.0.0 hibana:GitのURL` とします。依存も共通ストアから読み込み、呼び出し元のプロジェクト設定は変更しません。現状の言語にはコマンドライン引数を読み出す API はありません。
 
-取得したツールもファイル単位の共通ストアを使います。版は `npm:vite@6.1.0` のように指定できます。プロジェクトに追加すると、設定ファイルの隣の `hibana.lock` に取得した正確な版を記録します。設定と lock を共有すれば、別環境のスクリプト実行でもその版を取得します。直接のツールの版だけを固定し、npm/Cargo の推移依存までは固定しません。`dlx`・グローバル追加はプロジェクトの lock を使わず初回取得結果を再利用します。自動更新・更新コマンド・削除・GC はまだありません。
+取得したツールもファイル単位の共通ストアを使います。版は `npm:vite@6.1.0` のように指定できます。プロジェクトに追加すると、設定ファイルの隣の `config.hibana.lock.toml` に取得した正確な版を記録します。設定と lock を共有すれば、別環境のスクリプト実行でもその版を取得します。直接のツールの版だけを固定し、npm/Cargo の推移依存までは固定しません。`dlx`・グローバル追加はプロジェクトの lock を使わず初回取得結果を再利用します。自動更新・更新コマンド・削除・GC はまだありません。
 
 ファイルを直接指定する既存コマンドも使えます。
 
@@ -168,7 +168,7 @@ test "join" {
 
 - `hibana fmt <ファイル>` はファイルを整形して書き戻します。設定はありません。
 - `hibana lsp` は Language Server を動かし、エディタにエラー表示・整形・hover・定義へのジャンプ・補完・色付けを渡します。VS Code と Zed の拡張機能は `editors/` にあります。
-- パッケージは git のリポジトリです。`hibana new 名前` でプロジェクトを作り、`hibana add <git の URL> [tag]` で依存を足します。`hibana fetch` が依存を取ってきて、`hibana.lock` にコミットを書きます。パッケージは `${XDG_DATA_HOME:-$HOME/.local/share}/hibana/` でプロジェクト間共有し、同じ内容のファイルは共通ストアに一度だけ保存します。詳細は仕様の 3.6 節です。
+- パッケージは git のリポジトリです。`hibana new 名前` でプロジェクトを作り、`hibana add <git の URL> [tag]` で依存を足します。`hibana fetch` が依存を取ってきて、`config.hibana.lock.toml` にコミットを書きます。パッケージは `${XDG_DATA_HOME:-$HOME/.local/share}/hibana/` でプロジェクト間共有し、同じ内容のファイルは共通ストアに一度だけ保存します。詳細は仕様の 3.6 節です。
 - JavaScript と TypeScript のモジュールは `use "./util.ts"` で読めます。型は TypeScript の宣言から読みます。詳細は仕様の 3.4 節です。
 
 ## 7. ビルドだけで成果物を作る

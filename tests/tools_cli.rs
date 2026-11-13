@@ -296,7 +296,7 @@ fn rejected_identifiers_do_not_spawn_installers() {
 }
 
 fn lock(f: &Fixture) -> toml::Table {
-    std::fs::read_to_string(f.0.join("hibana.lock"))
+    std::fs::read_to_string(f.0.join("config.hibana.lock.toml"))
         .unwrap()
         .parse()
         .unwrap()
@@ -307,11 +307,11 @@ fn project_lock_pins_npm_across_data_homes_and_registry_changes() {
     let f = Fixture::new();
     f.write("config.hibana.toml", "[scripts]\nbuild = \"demo\"\n");
     f.write(
-        "hibana.lock",
+        "config.hibana.lock.toml",
         "[greet]\ngit = \"file:///preserved\"\nrev = \"abc123\"\n",
     );
     success(&f.run(&["add", "npm:demo"]));
-    let initial = std::fs::read_to_string(f.0.join("hibana.lock")).unwrap();
+    let initial = std::fs::read_to_string(f.0.join("config.hibana.lock.toml")).unwrap();
     let saved = lock(&f);
     assert_eq!(saved["tools"]["npm:demo"]["requirement"].as_str(), Some("*"));
     assert_eq!(saved["tools"]["npm:demo"]["version"].as_str(), Some("1.2.3"));
@@ -325,7 +325,7 @@ fn project_lock_pins_npm_across_data_homes_and_registry_changes() {
         .unwrap();
     assert_eq!(success(&output), "npm-demo");
     assert!(f.installs().contains("npm:demo@1.2.3"));
-    assert_eq!(std::fs::read_to_string(f.0.join("hibana.lock")).unwrap(), initial);
+    assert_eq!(std::fs::read_to_string(f.0.join("config.hibana.lock.toml")).unwrap(), initial);
     assert_eq!(f.installs().lines().count(), 2);
 }
 
@@ -374,11 +374,11 @@ fn malformed_project_lock_fails_before_script_and_install() {
         "[tools]\n\"npm:demo\" = { requirement = \"*\" }\n",
         "[tools]\n\"npm:demo\" = { requirement = \"*\", version = 123 }\n",
     ] {
-        f.write("hibana.lock", text);
+        f.write("config.hibana.lock.toml", text);
         error(&f.run(&["build"]));
         assert!(!f.0.join("script-ran").exists());
         assert!(f.installs().is_empty());
-        assert_eq!(std::fs::read_to_string(f.0.join("hibana.lock")).unwrap(), text);
+        assert_eq!(std::fs::read_to_string(f.0.join("config.hibana.lock.toml")).unwrap(), text);
     }
 }
 
@@ -386,7 +386,7 @@ fn malformed_project_lock_fails_before_script_and_install() {
 fn project_add_rejects_native_tools_name_collision_without_overwriting_lock() {
     let f = Fixture::new();
     let old = "[tools]\ngit = \"file:///native-tools\"\nrev = \"abc\"\n";
-    f.write("hibana.lock", old);
+    f.write("config.hibana.lock.toml", old);
     error(&f.run(&["add", "npm:demo"]));
-    assert_eq!(std::fs::read_to_string(f.0.join("hibana.lock")).unwrap(), old);
+    assert_eq!(std::fs::read_to_string(f.0.join("config.hibana.lock.toml")).unwrap(), old);
 }

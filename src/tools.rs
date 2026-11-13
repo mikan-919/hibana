@@ -188,9 +188,9 @@ fn read_lock(path: &Path) -> Result<Table, String> {
         Err(e) => return Err(format!("{}: {e}", path.display())),
     };
     if let Some(value) = lock.get("tools") {
-        let tools = value.as_table().ok_or("hibana.lock の [tools] はテーブルが必要")?;
+        let tools = value.as_table().ok_or("config.hibana.lock.toml の [tools] はテーブルが必要")?;
         if tools.get("git").is_some_and(|v| v.is_str()) {
-            return Err("hibana.lock の tools は Hibana 依存名と衝突しています".into());
+            return Err("config.hibana.lock.toml の tools は Hibana 依存名と衝突しています".into());
         }
         for (name, entry) in tools {
             let spec = Spec::parse(name)?;
@@ -333,7 +333,7 @@ pub(crate) fn add(raw: &str, global: bool) -> Result<(), String> {
     deps.insert(identity(&spec), spec.version.as_deref().unwrap_or("*").into());
     // 設定の型と識別子を先に検査し、取得失敗時には設定を書き換えない。
     dependencies(&config)?;
-    let lock_path = path.parent().unwrap().join("hibana.lock");
+    let lock_path = path.parent().unwrap().join("config.hibana.lock.toml");
     let old = read_lock(&lock_path)?;
     let mut lock = old.clone();
     ensure_locked(&spec, &mut lock)?;
@@ -381,7 +381,7 @@ pub(crate) fn script_path(config: &Table, config_path: &Path) -> Result<Option<(
         return Ok(None);
     }
     let temp = Temp::new(&crate::pkg::data_root()?)?;
-    let lock_path = config_path.parent().unwrap().join("hibana.lock");
+    let lock_path = config_path.parent().unwrap().join("config.hibana.lock.toml");
     let old = read_lock(&lock_path)?;
     let mut lock = old.clone();
     let mut owners = BTreeMap::new();
@@ -480,7 +480,7 @@ mod tests {
     #[test]
     fn lock_validation_preserves_native_entries_and_rejects_non_exact_versions() {
         let temp = Temp::in_parent(&std::env::temp_dir()).unwrap();
-        let path = temp.0.join("hibana.lock");
+        let path = temp.0.join("config.hibana.lock.toml");
         assert!(read_lock(&path).unwrap().is_empty());
         let valid = "[lib]\ngit = 'file:///lib'\nrev = 'abc'\n[tools.\"npm:demo\"]\nrequirement = '^1.0.0'\nversion = '1.2.3-beta.1+build.2'\n";
         std::fs::write(&path, valid).unwrap();

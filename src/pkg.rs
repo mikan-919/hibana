@@ -1,4 +1,4 @@
-// パッケージ管理。hibana.toml の [dependencies] を git から取り、hibana.lock にコミットを記録する
+// パッケージ管理。hibana.toml の [dependencies] を git から取り、config.hibana.lock.toml にコミットを記録する
 // ponytail: 同じ名前のパッケージは一つの版だけ。版の範囲の解決はレジストリを作るときに足す
 mod runner;
 mod store;
@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use toml::Table;
 
 pub const MANIFEST: &str = "hibana.toml";
-const LOCK: &str = "hibana.lock";
+const LOCK: &str = "config.hibana.lock.toml";
 
 // dir から上へたどって hibana.toml のあるディレクトリ
 pub fn root(dir: &Path) -> Option<PathBuf> {
@@ -137,7 +137,7 @@ fn clone(data: &Path, url: &str, rev: Option<&str>) -> Result<String, String> {
     Ok(sha)
 }
 
-// root の依存を（依存の依存も）取ってきて、hibana.lock を書く。ロックにあるコミットはそのまま使う
+// root の依存を（依存の依存も）取ってきて、config.hibana.lock.toml を書く。ロックにあるコミットはそのまま使う
 pub fn fetch(root: &Path) -> Result<(), String> {
     fetch_in(root, &data_root()?)
 }
@@ -161,7 +161,7 @@ fn fetch_in(root: &Path, data: &Path) -> Result<(), String> {
     while let Some((name, url, rev)) = todo.pop() {
         if let Some(t) = lock.get(&name) {
             if name == "tools" && t.get("git").and_then(|g| g.as_str()).is_none() {
-                return Err("Hibana依存名 tools は外部ツールの hibana.lock [tools] と衝突します".into());
+                return Err("Hibana依存名 tools は外部ツールの config.hibana.lock.toml [tools] と衝突します".into());
             }
             if t.get("git").and_then(|g| g.as_str()) != Some(&url) {
                 return Err(format!("パッケージ {name} が別の git から二つ要る（{url}）"));

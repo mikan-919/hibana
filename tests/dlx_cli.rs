@@ -40,7 +40,7 @@ impl Fixture {
     }
 
     fn check_clean(&self) {
-        assert!(!self.0.join("cwd/hibana.lock").exists());
+        assert!(!self.0.join("cwd/config.hibana.lock.toml").exists());
         assert!(!self.0.join("cwd/hibana.toml").exists());
         assert!(!self.0.join("cwd/config.hibana.toml").exists());
         let tmp = self.0.join("data/hibana/tmp");
@@ -52,7 +52,7 @@ impl Fixture {
             for tree in std::fs::read_dir(packages).unwrap() {
                 let tree = tree.unwrap().path();
                 assert!(
-                    !tree.join("hibana.lock").exists(),
+                    !tree.join("config.hibana.lock.toml").exists(),
                     "ストアへlockを書いた: {}",
                     tree.display()
                 );

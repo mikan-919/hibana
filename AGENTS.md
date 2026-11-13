@@ -25,7 +25,7 @@ nix develop -c cargo run -q -- <ファイル>   # 実行（js / c / build / fmt 
 | `src/smt.rs` | Z3 の FFI。証明器は Z3 なしでも多くの条件を示せる |
 | `src/eval.rs` `src/js.rs` `src/c.rs` | インタプリタ、JavaScript、C のバックエンド。3 つは同じ出力になる |
 | `src/fmt.rs` `src/lsp.rs` `src/index.rs` | フォーマッタ（設定なし）、Language Server、シンボルの索引 |
-| `src/pkg.rs` | パッケージ管理（`hibana.toml`・`hibana.lock`） |
+| `src/pkg.rs` | パッケージ管理（`hibana.toml`・`config.hibana.lock.toml`） |
 | `src/main.rs` `src/cli.rs` | CLI の入口と、全体のテスト（`mod tests`） |
 | `src/lib.rs` `src/pipeline.rs` | コンパイラーのライブラリと、ビルドの各段階 |
 | `lib/` | 標準ライブラリ（`std.hb`）と web ライブラリ（`web.hb`）。hibana で書いてある |
