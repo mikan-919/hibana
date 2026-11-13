@@ -70,6 +70,255 @@ pub fn install_resolved(spec: &Spec, dest: &Path) -> Result<(Vec<(String, PathBu
     install_with_program(spec, dest, Path::new(&spec.source))
 }
 
+pub(super) fn install_cargo_locked(
+    spec: &Spec,
+    dest: &Path,
+    lock: Option<&str>,
+) -> Result<(Vec<(String, PathBuf)>, String, String), String> {
+    install_cargo_locked_with_program(spec, dest, lock, Path::new("cargo"))
+}
+
+const CRATES_IO: &str = "registry+https://github.com/rust-lang/crates.io-index";
+
+pub(super) fn validate_cargo_lock(spec: &Spec, version: &str, raw: &str) -> Result<(), String> {
+    if spec.source != "cargo" || !exact_version(version) {
+        return Err("Cargo lockの取得元またはversionが不正です".into());
+    }
+    let table: toml::Table = toml::from_str(raw).map_err(|e| format!("Cargo lockが不正です: {e}"))?;
+    if !matches!(table.get("version").and_then(|v| v.as_integer()), Some(3 | 4)) {
+        return Err("Cargo lockはversion 3または4が必要です".into());
+    }
+    let packages = table
+        .get("package")
+        .and_then(|v| v.as_array())
+        .ok_or("Cargo lockにpackageがありません")?;
+    let mut roots = 0;
+    let mut seen = std::collections::HashSet::new();
+    for value in packages {
+        let package = value.as_table().ok_or("Cargo lockのpackageが不正です")?;
+        let name = package
+            .get("name")
+            .and_then(|v| v.as_str())
+            .filter(|s| segment(s))
+            .ok_or("Cargo lockのnameが不正です")?;
+        let resolved = package
+            .get("version")
+            .and_then(|v| v.as_str())
+            .filter(|s| exact_version(s))
+            .ok_or("Cargo lockのversionが不正です")?;
+        let source = package.get("source");
+        if !seen.insert((name, resolved, source.and_then(|v| v.as_str()))) {
+            return Err("Cargo lockのpackageが重複しています".into());
+        }
+        if name == spec.name && resolved == version && source.is_none() {
+            roots += 1;
+            if package.contains_key("checksum") {
+                return Err("Cargo lockのrootにchecksumは指定できません".into());
+            }
+        } else {
+            if source.and_then(|v| v.as_str()) != Some(CRATES_IO) {
+                return Err("Cargo lockの依存はcrates.io registryである必要があります".into());
+            }
+            let checksum = package
+                .get("checksum")
+                .and_then(|v| v.as_str())
+                .ok_or("Cargo lockにchecksumがありません")?;
+            if checksum.len() != 64 || !checksum.bytes().all(|c| c.is_ascii_hexdigit()) {
+                return Err("Cargo lockのchecksumが不正です".into());
+            }
+        }
+    }
+    if roots != 1 {
+        return Err("Cargo lockに対象パッケージの正確な版がありません".into());
+    }
+    Ok(())
+}
+
+fn install_cargo_locked_with_program(
+    spec: &Spec,
+    dest: &Path,
+    lock: Option<&str>,
+    program: &Path,
+) -> Result<(Vec<(String, PathBuf)>, String, String), String> {
+    Spec::parse(&spec.key())?;
+    if spec.source != "cargo" {
+        return Err("Cargo lockはcargoパッケージにのみ使えます".into());
+    }
+    // 保存済みlockは外部コマンドの実行前に検査する。
+    let pinned = lock.map(|raw| cargo_lock_version(spec, raw)).transpose()?;
+    let dest = fs::canonicalize(dest).map_err(|e| format!("保存先を開けません: {e}"))?;
+    let probe = dest.join(".resolve");
+    fs::create_dir_all(probe.join("src")).map_err(|e| e.to_string())?;
+    let requirement = pinned
+        .as_ref()
+        .map(|v| format!("={v}"))
+        .unwrap_or_else(|| spec.version.clone().unwrap_or_else(|| "*".into()));
+    let mut dependency = toml::Table::new();
+    dependency.insert("package".into(), spec.name.clone().into());
+    dependency.insert("version".into(), requirement.into());
+    let mut dependencies = toml::Table::new();
+    dependencies.insert("hibana_tool".into(), dependency.into());
+    let mut manifest: toml::Table =
+        toml::from_str("[package]\nname = 'hibana-tool-resolve'\nversion = '0.0.0'\nedition = '2021'\n[workspace]\n")
+            .map_err(|e| e.to_string())?;
+    manifest.insert("dependencies".into(), dependencies.into());
+    fs::write(
+        probe.join("Cargo.toml"),
+        toml::to_string(&manifest).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    fs::write(probe.join("src/lib.rs"), "").map_err(|e| e.to_string())?;
+    let output = Command::new(program)
+        .current_dir(&probe)
+        .args(["metadata", "--manifest-path"])
+        .arg(probe.join("Cargo.toml"))
+        .args(["--format-version", "1"])
+        .output()
+        .map_err(|e| format!("cargo metadataを起動できません: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Cargoソースの取得に失敗しました: {}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&output.stdout).map_err(|e| format!("Cargo metadataが不正です: {e}"))?;
+    let root = metadata["resolve"]["root"]
+        .as_str()
+        .ok_or("Cargo metadataにrootがありません")?;
+    let node = metadata["resolve"]["nodes"]
+        .as_array()
+        .and_then(|nodes| nodes.iter().find(|n| n["id"].as_str() == Some(root)))
+        .ok_or("Cargo metadataにroot nodeがありません")?;
+    let id = node["deps"]
+        .as_array()
+        .and_then(|deps| deps.iter().find(|d| d["name"] == "hibana_tool"))
+        .and_then(|d| d["pkg"].as_str())
+        .ok_or("Cargo metadataに対象依存がありません")?;
+    let package = metadata["packages"]
+        .as_array()
+        .and_then(|packages| packages.iter().find(|p| p["id"].as_str() == Some(id)))
+        .ok_or("Cargo metadataに対象packageがありません")?;
+    if package["name"].as_str() != Some(&spec.name) || package["source"].as_str() != Some(CRATES_IO) {
+        return Err("Cargoソースが対象のcrates.io packageではありません".into());
+    }
+    let version = package["version"]
+        .as_str()
+        .filter(|v| exact_version(v))
+        .ok_or("Cargo metadataのversionが不正です")?
+        .to_owned();
+    if pinned.as_ref().is_some_and(|p| p != &version) {
+        return Err("Cargoソースのversionがlockと一致しません".into());
+    }
+    let source_manifest = Path::new(
+        package["manifest_path"]
+            .as_str()
+            .ok_or("Cargo metadataにmanifest_pathがありません")?,
+    );
+    let source = dest.join(".source");
+    copy_cargo_source(source_manifest.parent().ok_or("Cargoソースのパスが不正です")?, &source)?;
+    let manifest = source.join("Cargo.toml");
+    if let Some(raw) = lock {
+        fs::write(source.join("Cargo.lock"), raw).map_err(|e| e.to_string())?;
+    } else {
+        let status = Command::new(program)
+            .current_dir(&source)
+            .args(["generate-lockfile", "--manifest-path"])
+            .arg(&manifest)
+            .status()
+            .map_err(|e| format!("cargo generate-lockfileを起動できません: {e}"))?;
+        if !status.success() {
+            return Err(format!("Cargo lockの生成に失敗しました: {status}"));
+        }
+    }
+    let raw = fs::read_to_string(source.join("Cargo.lock")).map_err(|e| format!("Cargo lockを読めません: {e}"))?;
+    validate_cargo_lock(spec, &version, &raw)?;
+    let status = Command::new(program)
+        .current_dir(&source)
+        .args(["install", "--root"])
+        .arg(&dest)
+        .arg("--target-dir")
+        .arg(dest.join(".build"))
+        .arg("--path")
+        .arg(&source)
+        .arg("--locked")
+        .status()
+        .map_err(|e| format!("cargo installを起動できません: {e}"))?;
+    if !status.success() {
+        return Err(format!("{}のlocked buildに失敗しました: {status}", spec.key()));
+    }
+    if fs::read_to_string(source.join("Cargo.lock")).map_err(|e| e.to_string())? != raw {
+        return Err("Cargoのビルド中にlockが変更されました".into());
+    }
+    let bins = cargo_bins(&dest)?;
+    for name in [".resolve", ".source", ".build"] {
+        let path = dest.join(name);
+        if path.exists() {
+            fs::remove_dir_all(path).map_err(|e| e.to_string())?;
+        }
+    }
+    for name in [".crates.toml", ".crates2.json"] {
+        let path = dest.join(name);
+        if path.exists() {
+            fs::remove_file(path).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok((bins, version, raw))
+}
+
+fn cargo_lock_version(spec: &Spec, raw: &str) -> Result<String, String> {
+    let table: toml::Table = toml::from_str(raw).map_err(|e| format!("Cargo lockが不正です: {e}"))?;
+    let version = table
+        .get("package")
+        .and_then(|v| v.as_array())
+        .and_then(|packages| {
+            packages
+                .iter()
+                .find(|p| p.get("name").and_then(|v| v.as_str()) == Some(&spec.name) && p.get("source").is_none())
+        })
+        .and_then(|p| p.get("version"))
+        .and_then(|v| v.as_str())
+        .ok_or("Cargo lockに対象パッケージがありません")?;
+    validate_cargo_lock(spec, version, raw)?;
+    if spec
+        .version
+        .as_deref()
+        .and_then(|v| v.strip_prefix('=').or(Some(v)))
+        .is_some_and(|v| exact_version(v) && v != version)
+    {
+        return Err("Cargo lockのversionが指定版と一致しません".into());
+    }
+    Ok(version.into())
+}
+
+fn copy_cargo_source(from: &Path, to: &Path) -> Result<(), String> {
+    fs::create_dir(to).map_err(|e| format!("Cargoソースを保存できません: {e}"))?;
+    for entry in fs::read_dir(from).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let kind = entry.file_type().map_err(|e| e.to_string())?;
+        let target = to.join(entry.file_name());
+        if kind.is_dir() {
+            copy_cargo_source(&entry.path(), &target)?;
+        } else if kind.is_file() {
+            fs::copy(entry.path(), &target).map_err(|e| e.to_string())?;
+            // registryソースはreadonlyの場合がある。コピー側だけ書込可能にする。
+            let mut permissions = fs::metadata(&target).map_err(|e| e.to_string())?.permissions();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                permissions.set_mode(permissions.mode() | 0o200);
+            }
+            #[cfg(not(unix))]
+            permissions.set_readonly(false);
+            fs::set_permissions(target, permissions).map_err(|e| e.to_string())?;
+        } else {
+            return Err("Cargoソースに通常ファイル以外が含まれています".into());
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn install_npm_locked(
     spec: &Spec,
     dest: &Path,

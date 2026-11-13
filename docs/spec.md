@@ -580,7 +580,7 @@ build = "vite build"
 
 `add` は最も近い `config.hibana.toml` を更新し、無ければ現在のディレクトリに作ります。値は版の文字列（省略時 `"*"`）です。コメントや書式は保持しません。Git ベースの言語パッケージは引き続き `hibana.toml` で管理します。
 
-npm はシステムの `npm install`、Cargo は `cargo install` を使います。npm ツールの実行には Node.js、Cargo の初回取得にはビルド環境が必要です。取得・ビルド時にはパッケージ由来のスクリプトも実行されるため、信頼できるパッケージだけを指定してください。取得結果は `${XDG_DATA_HOME:-$HOME/.local/share}/hibana/` 内の `tools/v2/`（プロジェクト）または `tools/v1/`（dlx・global）に保存し、言語パッケージと同じファイル単位 CAS を使います。Cargo の一時ビルド成果物は公開前に除きますが、npm/Cargo 自身のキャッシュはそれぞれ残ります。
+npm はシステムの `npm install`、Cargo は `cargo install` を使います。npm ツールの実行には Node.js、Cargo の初回取得にはビルド環境が必要です。取得・ビルド時にはパッケージ由来のスクリプトも実行されるため、信頼できるパッケージだけを指定してください。取得結果は `${XDG_DATA_HOME:-$HOME/.local/share}/hibana/` 内の `tools/v3/`（プロジェクト npm）、`tools/v4/`（プロジェクト Cargo）または `tools/v1/`（dlx・global）に保存し、言語パッケージと同じファイル単位 CAS を使います。Cargo の一時ビルド成果物は公開前に除きますが、npm/Cargo 自身のキャッシュはそれぞれ残ります。
 
 `add -g` のコマンド配置先は同じデータディレクトリの `bin/` です。利用するにはそのパスをシェルの `PATH` に追加してください。別パッケージや手動配置の同名ファイルは上書きしません。`dlx` はパッケージ内の唯一のコマンド、またはパッケージ名と同名のコマンドを選び、それ以外は `--bin` を要求します。作業ディレクトリと標準入出力を継承し、終了コードも返します。
 
@@ -610,7 +610,7 @@ version = "6.1.0"
 
 既存の Git 依存の記録は保持します。ただし従来形式の Hibana 依存名 `tools` はこの表と衝突するため併用できません。破損した lock は自動的に無視せずエラーにします。設定・lock のコメントや書式は保持しません。
 
-npm ツールは各記録の `npm_lock` に npm の package-lock JSON（lockfileVersion 2/3）を文字列として保存します。推移依存の版・取得 URL・integrity を含み、別環境での再取得には `npm ci` を使います。同じ直接版でも異なる依存ツリーは別キャッシュとして扱い、ファイル内容の重複は共通 CAS で排除します。registry の HTTP(S) 配布だけを対象とし、local/git/link 依存や不正な integrity はエラーにします。ハッシュと取得内容の照合は npm が行います。旧形式で `npm_lock` が無い場合、通常の `install`・`add`・スクリプト実行で補完しますが、`--frozen-lockfile` は拒否します。Cargo は直接指定したツールの版だけを固定し、推移依存・ビルド環境はまだ固定しません。npm の install scripts や OS 別依存、ビルド環境による差まで含めた同一バイナリは保証しません。`dlx` と `add -g` はプロジェクトの lock を読み書きせず、識別子・OS・CPU ごとに初回取得結果を再利用します。自動更新・更新コマンド・削除・GC は未実装です。
+npm ツールは各記録の `npm_lock` に npm の package-lock JSON（lockfileVersion 2/3）を文字列として保存します。推移依存の版・取得 URL・integrity を含み、別環境での再取得には `npm ci` を使います。同じ直接版でも異なる依存ツリーは別キャッシュとして扱い、ファイル内容の重複は共通 CAS で排除します。registry の HTTP(S) 配布だけを対象とし、local/git/link 依存や不正な integrity はエラーにします。ハッシュと取得内容の照合は npm が行います。旧形式で `npm_lock` が無い場合、通常の `install`・`add`・スクリプト実行で補完しますが、`--frozen-lockfile` は拒否します。Cargo ツールは `cargo_lock` に Cargo.lock の TOML を文字列として保存します。再取得時は crate ソースへ lock を復元し、`--locked` でビルドします。直接版・推移依存と registry checksum を検査し、異なる lock は別キャッシュに保存します。Cargo.lock は version 3/4 に対応し、依存の取得元は crates.io に限定します（git・path・別 registry は非対応）。`cargo_lock` の無い旧記録は通常の install・add・スクリプト実行で補完し、frozen は拒否します。Cargo のビルド環境は固定しません。npm の install scripts や OS 別依存、ビルド環境による差まで含めた同一バイナリは保証しません。`dlx` と `add -g` はプロジェクトの lock を読み書きせず、識別子・OS・CPU ごとに初回取得結果を再利用します。自動更新・更新コマンド・削除・GC は未実装です。
 
 ### 11.2 ファイルを指定する既存コマンド
 

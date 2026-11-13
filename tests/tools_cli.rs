@@ -140,21 +140,62 @@ chmod +x "$root/cli.js"
 // Cargoのビルド成果物はnpmと同名でも別の内容にする。
 const CARGO: &str = r##"#!/bin/sh
 set -eu
+mode="$1"
 root=''
 version=''
+manifest=''
+source=''
+locked=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --root) root="$2"; shift 2 ;;
     --version) version="$2"; shift 2 ;;
+    --manifest-path) manifest="$2"; shift 2 ;;
+    --path) source="$2"; shift 2 ;;
+    --locked) locked=1; shift ;;
     *) shift ;;
   esac
 done
+if [ "$mode" = metadata ]; then
+  node - "$manifest" <<'METADATA'
+const fs = require('fs'), path = require('path');
+const manifest = process.argv[2];
+const dir = path.join(path.dirname(manifest), 'mock-registry', 'demo-2.3.4');
+fs.mkdirSync(path.join(dir, 'src'), {recursive:true});
+fs.writeFileSync(path.join(dir,'Cargo.toml'), '[package]\nname = "demo"\nversion = "2.3.4"\nedition = "2021"\n[dependencies]\ntransitive = "*"\n');
+fs.writeFileSync(path.join(dir,'src/main.rs'), 'fn main() {}');
+const id='registry+https://github.com/rust-lang/crates.io-index#demo@2.3.4';
+console.log(JSON.stringify({packages:[{id,name:'demo',version:'2.3.4',source:'registry+https://github.com/rust-lang/crates.io-index',manifest_path:path.join(dir,'Cargo.toml')}],resolve:{root:'probe',nodes:[{id:'probe',deps:[{name:'hibana_tool',pkg:id}],dependencies:[id]}]}}));
+METADATA
+  exit
+fi
+if [ "$mode" = generate-lockfile ]; then
+  node - "$manifest" <<'LOCK'
+const fs=require('fs'), path=require('path');
+const version=process.env.MOCK_CARGO_TRANSITIVE_VERSION || '4.5.6';
+fs.writeFileSync(path.join(path.dirname(process.argv[2]),'Cargo.lock'), 'version = 4\n\n[[package]]\nname = "demo"\nversion = "2.3.4"\ndependencies = ["transitive"]\n\n[[package]]\nname = "transitive"\nversion = "'+version+'"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\nchecksum = "'+'a'.repeat(64)+'"\n');
+LOCK
+  exit
+fi
 [ -n "$root" ]
+transitive=''
+if [ -n "$source" ]; then
+  [ "$locked" = 1 ]
+  [ -f "$source/Cargo.lock" ]
+  transitive=$(node - "$source/Cargo.lock" <<'VERSION'
+const fs=require('fs');
+const text=fs.readFileSync(process.argv[2],'utf8');
+const entry=text.split('[[package]]').find(p=>/name\s*=\s*"transitive"/.test(p));
+console.log(entry.match(/version\s*=\s*"([^"]+)"/)[1]);
+VERSION
+)
+  version='=2.3.4'
+fi
 printf 'cargo:demo%s\n' "${version:+@$version}" >> "$MOCK_LOG"
 mkdir -p "$root/bin"
 printf '[v1]\n"demo 2.3.4 (registry+https://example.invalid/index)" = ["demo"]\n' > "$root/.crates.toml"
-cat > "$root/bin/demo" <<'CLI'
-#!/bin/sh
+printf '#!/bin/sh\nif [ "${1-}" = --transitive ]; then printf "%%s" "%s"; exit; fi\n' "$transitive" > "$root/bin/demo"
+cat >> "$root/bin/demo" <<'CLI'
 printf cargo-demo
 for arg in "$@"; do printf '<%s>' "$arg"; done
 CLI
@@ -454,6 +495,61 @@ fn distinct_npm_trees_with_same_direct_version_do_not_share_cache() {
     let raw = changed["tools"]["npm:demo"]["npm_lock"].as_str().unwrap();
     let new_raw = raw.replace("4.5.6", "7.8.9");
     changed["tools"]["npm:demo"]["npm_lock"] = toml::Value::String(new_raw);
+    f.write("config.hibana.lock.toml", &toml::to_string(&changed).unwrap());
+    assert_eq!(success(&f.run(&["build"])), "7.8.9");
+    f.write("config.hibana.lock.toml", &toml::to_string(&original).unwrap());
+    assert_eq!(success(&f.run(&["build"])), "4.5.6");
+    assert_eq!(f.installs().lines().count(), 2);
+}
+
+#[test]
+fn cargo_tree_lock_restores_transitive_version_with_locked_build() {
+    let f = Fixture::new();
+    f.write("config.hibana.toml", "[scripts]\nbuild = \"demo --transitive\"\n");
+    success(&f.run(&["add", "cargo:demo"]));
+    let before = std::fs::read_to_string(f.0.join("config.hibana.lock.toml")).unwrap();
+    let saved = lock(&f);
+    let raw = saved["tools"]["cargo:demo"]["cargo_lock"].as_str().unwrap();
+    let tree: toml::Table = raw.parse().unwrap();
+    assert!(
+        tree["package"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["name"].as_str() == Some("transitive") && p["version"].as_str() == Some("4.5.6"))
+    );
+    success(
+        &f.command(env!("CARGO_BIN_EXE_hibana"))
+            .env("XDG_DATA_HOME", f.0.join("fresh-data"))
+            .env("MOCK_CARGO_TRANSITIVE_VERSION", "9.9.9")
+            .args(["install", "--frozen-lockfile"])
+            .output()
+            .unwrap(),
+    );
+    let output = f
+        .command(env!("CARGO_BIN_EXE_hibana"))
+        .env("XDG_DATA_HOME", f.0.join("fresh-data"))
+        .env("MOCK_CARGO_TRANSITIVE_VERSION", "9.9.9")
+        .arg("build")
+        .output()
+        .unwrap();
+    assert_eq!(success(&output), "4.5.6");
+    assert_eq!(
+        std::fs::read_to_string(f.0.join("config.hibana.lock.toml")).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn distinct_cargo_trees_with_same_direct_version_do_not_share_cache() {
+    let f = Fixture::new();
+    f.write("config.hibana.toml", "[scripts]\nbuild = \"demo --transitive\"\n");
+    success(&f.run(&["add", "cargo:demo"]));
+    assert_eq!(success(&f.run(&["build"])), "4.5.6");
+    let original = lock(&f);
+    let mut changed = original.clone();
+    let raw = changed["tools"]["cargo:demo"]["cargo_lock"].as_str().unwrap();
+    changed["tools"]["cargo:demo"]["cargo_lock"] = toml::Value::String(raw.replace("4.5.6", "7.8.9"));
     f.write("config.hibana.lock.toml", &toml::to_string(&changed).unwrap());
     assert_eq!(success(&f.run(&["build"])), "7.8.9");
     f.write("config.hibana.lock.toml", &toml::to_string(&original).unwrap());

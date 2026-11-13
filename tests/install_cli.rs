@@ -133,21 +133,62 @@ chmod +x "$root/cli.js"
 // Cargoのビルド成果物はnpmと同名でも別の内容にする。
 const CARGO: &str = r##"#!/bin/sh
 set -eu
+mode="$1"
 root=''
 version=''
+manifest=''
+source=''
+locked=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --root) root="$2"; shift 2 ;;
     --version) version="$2"; shift 2 ;;
+    --manifest-path) manifest="$2"; shift 2 ;;
+    --path) source="$2"; shift 2 ;;
+    --locked) locked=1; shift ;;
     *) shift ;;
   esac
 done
+if [ "$mode" = metadata ]; then
+  node - "$manifest" <<'METADATA'
+const fs = require('fs'), path = require('path');
+const manifest = process.argv[2];
+const dir = path.join(path.dirname(manifest), 'mock-registry', 'demo-2.3.4');
+fs.mkdirSync(path.join(dir, 'src'), {recursive:true});
+fs.writeFileSync(path.join(dir,'Cargo.toml'), '[package]\nname = "demo"\nversion = "2.3.4"\nedition = "2021"\n[dependencies]\ntransitive = "*"\n');
+fs.writeFileSync(path.join(dir,'src/main.rs'), 'fn main() {}');
+const id='registry+https://github.com/rust-lang/crates.io-index#demo@2.3.4';
+console.log(JSON.stringify({packages:[{id,name:'demo',version:'2.3.4',source:'registry+https://github.com/rust-lang/crates.io-index',manifest_path:path.join(dir,'Cargo.toml')}],resolve:{root:'probe',nodes:[{id:'probe',deps:[{name:'hibana_tool',pkg:id}],dependencies:[id]}]}}));
+METADATA
+  exit
+fi
+if [ "$mode" = generate-lockfile ]; then
+  node - "$manifest" <<'LOCK'
+const fs=require('fs'), path=require('path');
+const version=process.env.MOCK_CARGO_TRANSITIVE_VERSION || '4.5.6';
+fs.writeFileSync(path.join(path.dirname(process.argv[2]),'Cargo.lock'), 'version = 4\n\n[[package]]\nname = "demo"\nversion = "2.3.4"\ndependencies = ["transitive"]\n\n[[package]]\nname = "transitive"\nversion = "'+version+'"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\nchecksum = "'+'a'.repeat(64)+'"\n');
+LOCK
+  exit
+fi
 [ -n "$root" ]
+transitive=''
+if [ -n "$source" ]; then
+  [ "$locked" = 1 ]
+  [ -f "$source/Cargo.lock" ]
+  transitive=$(node - "$source/Cargo.lock" <<'VERSION'
+const fs=require('fs');
+const text=fs.readFileSync(process.argv[2],'utf8');
+const entry=text.split('[[package]]').find(p=>/name\s*=\s*"transitive"/.test(p));
+console.log(entry.match(/version\s*=\s*"([^"]+)"/)[1]);
+VERSION
+)
+  version='=2.3.4'
+fi
 printf 'cargo:demo%s\n' "${version:+@$version}" >> "$MOCK_LOG"
 mkdir -p "$root/bin"
 printf '[v1]\n"demo 2.3.4 (registry+https://example.invalid/index)" = ["demo"]\n' > "$root/.crates.toml"
-cat > "$root/bin/demo" <<'CLI'
-#!/bin/sh
+printf '#!/bin/sh\nif [ "${1-}" = --transitive ]; then printf "%%s" "%s"; exit; fi\n' "$transitive" > "$root/bin/demo"
+cat >> "$root/bin/demo" <<'CLI'
 printf cargo-demo
 for arg in "$@"; do printf '<%s>' "$arg"; done
 CLI
@@ -436,5 +477,62 @@ fn invalid_npm_integrity_fails_before_install_and_preserves_lock() {
         error(&f.run(&args));
         assert_eq!(lock(&f), before);
         assert_eq!(f.installs().lines().count(), 1);
+    }
+}
+
+#[test]
+fn frozen_rejects_legacy_cargo_lock_then_normal_install_upgrades() {
+    let f = Fixture::new();
+    f.write("config.hibana.toml", "[dependencies]\n\"cargo:demo\" = \"*\"\n");
+    let old = "# 旧形式\n[tools.\"cargo:demo\"]\nrequirement = \"*\"\nversion = \"2.3.4\"\n";
+    f.write(LOCK, old);
+    error(&f.run(&["install", "--frozen-lockfile"]));
+    assert_eq!(lock(&f), old.as_bytes());
+    assert!(f.installs().is_empty());
+    success(&f.run(&["install"]));
+    let saved: toml::Table = String::from_utf8(lock(&f)).unwrap().parse().unwrap();
+    assert!(saved["tools"]["cargo:demo"]["cargo_lock"].as_str().is_some());
+    success(&f.run(&["install", "--frozen-lockfile"]));
+}
+
+#[test]
+fn invalid_cargo_lock_fails_before_install_and_preserves_bytes() {
+    let f = Fixture::new();
+    f.write("config.hibana.toml", "[dependencies]\n\"cargo:demo\" = \"*\"\n");
+    success(&f.run(&["install"]));
+    let original: toml::Table = String::from_utf8(lock(&f)).unwrap().parse().unwrap();
+    let raw = original["tools"]["cargo:demo"]["cargo_lock"].as_str().unwrap();
+    let tree: toml::Table = raw.parse().unwrap();
+    let mut bad_checksum = tree.clone();
+    let package = bad_checksum["package"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|p| p["name"].as_str() == Some("transitive"))
+        .unwrap();
+    package["checksum"] = "not-a-checksum".into();
+    let mut bad_source = tree.clone();
+    let package = bad_source["package"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|p| p["name"].as_str() == Some("transitive"))
+        .unwrap();
+    package["source"] = "git+https://example.invalid/repo".into();
+    for raw in [
+        "invalid [ toml".to_owned(),
+        toml::to_string(&bad_checksum).unwrap(),
+        toml::to_string(&bad_source).unwrap(),
+    ] {
+        let mut table = original.clone();
+        table["tools"]["cargo:demo"]["cargo_lock"] = raw.into();
+        f.write(LOCK, &toml::to_string(&table).unwrap());
+        let before = lock(&f);
+        let log = f.installs();
+        for args in [vec!["install"], vec!["install", "--frozen-lockfile"]] {
+            error(&f.run(&args));
+            assert_eq!(lock(&f), before);
+            assert_eq!(f.installs(), log);
+        }
     }
 }
