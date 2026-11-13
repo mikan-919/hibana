@@ -209,51 +209,143 @@ fn read_lock(path: &Path) -> Result<Table, String> {
                 .and_then(|v| v.as_str())
                 .ok_or("lock の version は文字列が必要")?;
             exact_version(version)?;
+            if let Some(raw) = entry.get("npm_lock") {
+                if spec.source != "npm" {
+                    return Err("npm_lock は npm 依存にだけ指定できます".into());
+                }
+                let raw = raw.as_str().ok_or("npm_lock は JSON 文字列が必要です")?;
+                providers::validate_npm_lock(&spec, version, raw)?;
+            }
         }
     }
     Ok(lock)
 }
 
-// ponytail: 直接依存の版だけを固定する。推移依存・integrity の固定には取得元ごとの lock 保存が必要。
+// npm は依存ツリー全体、Cargo は直接依存の版を固定する。
 fn ensure_locked(spec: &Spec, lock: &mut Table) -> Result<Installed, String> {
     let name = identity(spec);
     let requirement = spec.version.as_deref().unwrap_or("*");
-    let locked = lock
+    let entry = lock
         .get("tools")
         .and_then(|t| t.get(&name))
-        .filter(|entry| entry.get("requirement").and_then(|v| v.as_str()) == Some(requirement))
-        .and_then(|entry| entry.get("version"))
-        .and_then(|v| v.as_str());
-    let installed = if let Some(version) = locked {
-        let mut exact = spec.clone();
+        .filter(|entry| entry.get("requirement").and_then(|v| v.as_str()) == Some(requirement));
+    let locked = entry.and_then(|entry| entry.get("version")).and_then(|v| v.as_str());
+    let mut exact = spec.clone();
+    if let Some(version) = locked {
         exact.version = Some(if spec.source == "cargo" {
             format!("={version}")
         } else {
             version.into()
         });
-        let installed = ensure_mode(&exact, true)?;
+    }
+    let (installed, npm_lock) = if spec.source == "npm" {
+        let raw = entry.and_then(|entry| entry.get("npm_lock")).and_then(|v| v.as_str());
+        let (installed, raw) = ensure_npm(&exact, locked, raw)?;
+        (installed, Some(raw))
+    } else {
+        (ensure_mode(&exact, true)?, None)
+    };
+    if let Some(version) = locked {
         if installed.version.as_deref() != Some(version) {
             return Err(format!(
                 "{} の取得版が lock の {version} と一致しません",
                 identity(spec)
             ));
         }
-        installed
-    } else {
-        ensure_mode(spec, true)?
-    };
+    }
     let mut entry = Table::new();
     entry.insert("requirement".into(), requirement.into());
     entry.insert(
         "version".into(),
         installed.version.clone().ok_or("ツールの解決版記録が無い")?.into(),
     );
+    if let Some(raw) = npm_lock {
+        entry.insert("npm_lock".into(), raw.into());
+    }
     lock.entry("tools")
         .or_insert(Table::new().into())
         .as_table_mut()
         .ok_or("[tools] はテーブルが必要")?
         .insert(name, entry.into());
     Ok(installed)
+}
+
+fn npm_root(data: &Path, spec: &Spec, raw: &str) -> PathBuf {
+    let key = format!(
+        "{}\0{}\0{}\0{raw}",
+        identity(spec),
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
+    data.join("tools/v3").join(format!("{:x}", Sha256::digest(key)))
+}
+
+fn ensure_npm(spec: &Spec, version: Option<&str>, raw: Option<&str>) -> Result<(Installed, String), String> {
+    let data = crate::pkg::data_root()?;
+    if let Some(raw) = raw {
+        let version = version.ok_or("npm lock の正確版がありません")?;
+        providers::validate_npm_lock(spec, version, raw)?;
+        let root = npm_root(&data, spec, raw);
+        if root.is_dir() {
+            let cached = cached_version(&root)?;
+            if cached != version {
+                return Err("npm キャッシュの版が lock と一致しません".into());
+            }
+            return Ok((
+                Installed {
+                    bins: bins(&root)?,
+                    root,
+                    version: Some(cached),
+                },
+                raw.into(),
+            ));
+        }
+    }
+    let temp = Temp::new(&data)?;
+    let source = temp.0.join("source");
+    std::fs::create_dir(&source).map_err(|e| e.to_string())?;
+    eprintln!("取得: {}", spec.key());
+    let (installed, actual, generated) = providers::install_npm_locked(spec, &source, raw)?;
+    exact_version(&actual)?;
+    if version.is_some_and(|version| version != actual) {
+        return Err("npm の取得版が lock と一致しません".into());
+    }
+    // npm ci が lock を再整形しても、入力された依存ツリーの記録を保持する。
+    let raw = raw.unwrap_or(&generated);
+    providers::validate_npm_lock(spec, &actual, raw)?;
+    let mut table = Table::new();
+    for (name, path) in installed {
+        if !safe_name(&name) || table.contains_key(&name) {
+            return Err(format!("不正または重複したコマンド名: {name}"));
+        }
+        table.insert(name, path.to_str().ok_or("実行パスが UTF-8 ではない")?.into());
+    }
+    let mut meta = Table::new();
+    meta.insert("spec".into(), spec.key().into());
+    meta.insert("version".into(), actual.into());
+    meta.insert("bin".into(), table.into());
+    if source.join(META).exists() {
+        return Err(format!("予約ファイル名が含まれる: {META}"));
+    }
+    std::fs::write(source.join(META), meta.to_string()).map_err(|e| e.to_string())?;
+    bins(&source)?;
+    let root = npm_root(&data, spec, raw);
+    let tree = temp.0.join("tree");
+    crate::pkg::import_tool_tree(&source, &tree, &data)?;
+    std::fs::create_dir_all(root.parent().unwrap()).map_err(|e| e.to_string())?;
+    if let Err(e) = std::fs::rename(&tree, &root) {
+        if !root.is_dir() {
+            return Err(format!("{}: {e}", root.display()));
+        }
+    }
+    Ok((
+        Installed {
+            bins: bins(&root)?,
+            version: Some(cached_version(&root)?),
+            root,
+        },
+        raw.into(),
+    ))
 }
 
 // 最も近い設定のディレクトリだけを対象にし、親プロジェクトの依存を混ぜない。
@@ -294,6 +386,11 @@ pub(crate) fn install(frozen: bool) -> Result<(), String> {
                 .ok_or_else(|| format!("lock に {name} がありません（hibana install を実行してください）"))?;
             if entry.get("requirement").and_then(|v| v.as_str()) != Some(spec.version.as_deref().unwrap_or("*")) {
                 return Err(format!("{name} の設定と lock が一致しません（--frozen-lockfile）"));
+            }
+            if spec.source == "npm" && entry.get("npm_lock").and_then(|v| v.as_str()).is_none() {
+                return Err(format!(
+                    "{name} の npm_lock がありません（hibana install を実行してください）"
+                ));
             }
         }
         if let Some(tools) = tools {

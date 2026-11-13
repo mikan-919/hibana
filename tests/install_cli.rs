@@ -77,15 +77,20 @@ const NPM: &str = r##"#!/bin/sh
 set -eu
 prefix=''
 package='demo'
+mode=install
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    ci) mode=ci; shift ;;
     --prefix) prefix="$2"; shift 2 ;;
     demo|demo@*|many|many@*|@scope/demo|@scope/demo@*) package="$1"; shift ;;
     *) shift ;;
   esac
 done
 [ -n "$prefix" ]
-printf 'npm:%s\n' "$package" >> "$MOCK_LOG"
+if [ "$mode" = ci ]; then
+  package=$(node -p 'const p=require(process.argv[1]).packages; const n=Object.keys(p[""].dependencies)[0]; n+"@"+p["node_modules/"+n].version' "$prefix/package-lock.json")
+fi
+printf 'npm:%s:%s\n' "$package" "$mode" >> "$MOCK_LOG"
 case "$package" in
   many*) name=many ;;
   @scope/*) name=@scope/demo ;;
@@ -96,8 +101,20 @@ case "$package" in
   *@1.2.3) version=1.2.3 ;;
   *@9.9.9) version=9.9.9 ;;
 esac
+[ "$name" != many ] || version=1.0.0
+if [ "$mode" != ci ]; then
+  node - "$prefix" "$name" "$version" <<'LOCK'
+const fs = require('fs');
+const [prefix, name, version] = process.argv.slice(2);
+const dep = process.env.MOCK_TRANSITIVE_VERSION || '4.5.6';
+const entry = (n, v) => ({version:v, resolved:'https://registry.example.invalid/'+n+'/-/'+v+'.tgz', integrity:'sha512-'+Buffer.alloc(64).toString('base64')});
+fs.writeFileSync(prefix+'/package-lock.json', JSON.stringify({name:'hibana-tools', version:'1.0.0', lockfileVersion:3, packages:{'':{name:'hibana-tools', version:'1.0.0', dependencies:{[name]:version}}, ['node_modules/'+name]:{...entry(name,version), dependencies:{transitive:dep}}, 'node_modules/transitive':entry('transitive',dep)}}));
+LOCK
+fi
+transitive=$(node -p 'require(process.argv[1]).packages["node_modules/transitive"].version' "$prefix/package-lock.json")
 root="$prefix/node_modules/$name"
 mkdir -p "$root"
+printf '%s' "$transitive" > "$root/transitive-version"
 if [ "$name" = many ]; then
   printf '%s' '{"name":"many","version":"1.0.0","bin":{"first":"cli.js","second":"cli.js"}}' > "$root/package.json"
 else
@@ -106,6 +123,7 @@ fi
 cat > "$root/cli.js" <<'CLI'
 #!/bin/sh
 if [ "${1-}" = --fail ]; then exit 37; fi
+if [ "${1-}" = --transitive ]; then cat "$(dirname "$0")/transitive-version"; exit; fi
 printf npm-demo
 for arg in "$@"; do printf '<%s>' "$arg"; done
 CLI
@@ -385,4 +403,38 @@ fn frozen_rejects_native_revision_url_changes_and_missing_entries() {
     assert_ne!(updated, bytes);
     success(&f.run(&["install", "--frozen-lockfile"]));
     assert_eq!(lock(&f), updated);
+}
+
+#[test]
+fn frozen_rejects_legacy_npm_lock_then_normal_install_upgrades() {
+    let f = Fixture::new();
+    f.write("config.hibana.toml", "[dependencies]\n\"npm:demo\" = \"*\"\n");
+    let old = "# 旧形式\n[tools.\"npm:demo\"]\nrequirement = \"*\"\nversion = \"1.2.3\"\n";
+    f.write(LOCK, old);
+    error(&f.run(&["install", "--frozen-lockfile"]));
+    assert_eq!(lock(&f), old.as_bytes());
+    assert!(f.installs().is_empty());
+    success(&f.run(&["install"]));
+    let saved: toml::Table = String::from_utf8(lock(&f)).unwrap().parse().unwrap();
+    assert!(saved["tools"]["npm:demo"]["npm_lock"].as_str().is_some());
+    success(&f.run(&["install", "--frozen-lockfile"]));
+}
+
+#[test]
+fn invalid_npm_integrity_fails_before_install_and_preserves_lock() {
+    let f = Fixture::new();
+    f.write("config.hibana.toml", "[dependencies]\n\"npm:demo\" = \"*\"\n");
+    success(&f.run(&["install"]));
+    let mut table: toml::Table = String::from_utf8(lock(&f)).unwrap().parse().unwrap();
+    let raw = table["tools"]["npm:demo"]["npm_lock"].as_str().unwrap();
+    let mut json: serde_json::Value = serde_json::from_str(raw).unwrap();
+    json["packages"]["node_modules/transitive"]["integrity"] = serde_json::json!("sha512-not-an-integrity!");
+    table["tools"]["npm:demo"]["npm_lock"] = toml::Value::String(json.to_string());
+    f.write(LOCK, &toml::to_string(&table).unwrap());
+    let before = lock(&f);
+    for args in [vec!["install"], vec!["install", "--frozen-lockfile"]] {
+        error(&f.run(&args));
+        assert_eq!(lock(&f), before);
+        assert_eq!(f.installs().lines().count(), 1);
+    }
 }

@@ -70,6 +70,174 @@ pub fn install_resolved(spec: &Spec, dest: &Path) -> Result<(Vec<(String, PathBu
     install_with_program(spec, dest, Path::new(&spec.source))
 }
 
+pub(super) fn install_npm_locked(
+    spec: &Spec,
+    dest: &Path,
+    lock: Option<&str>,
+) -> Result<(Vec<(String, PathBuf)>, String, String), String> {
+    install_npm_locked_with_program(spec, dest, lock, Path::new("npm"))
+}
+
+fn install_npm_locked_with_program(
+    spec: &Spec,
+    dest: &Path,
+    lock: Option<&str>,
+    program: &Path,
+) -> Result<(Vec<(String, PathBuf)>, String, String), String> {
+    Spec::parse(&spec.key())?;
+    if spec.source != "npm" {
+        return Err("npm lockはnpmパッケージにのみ使えます".into());
+    }
+    let dest = fs::canonicalize(dest).map_err(|e| format!("保存先を開けません: {e}"))?;
+    if let Some(raw) = lock {
+        let json: serde_json::Value = serde_json::from_str(raw).map_err(|e| format!("npm lockが不正です: {e}"))?;
+        let version = json["packages"][format!("node_modules/{}", spec.name)]["version"]
+            .as_str()
+            .ok_or("npm lockに対象versionがありません")?;
+        validate_npm_lock(spec, version, raw)?;
+        if spec
+            .version
+            .as_deref()
+            .is_some_and(|expected| exact_version(expected) && expected != version)
+        {
+            return Err("npm lockのversionが指定版と一致しません".into());
+        }
+        let root = &json["packages"][""];
+        // lock内のroot scriptsなどを実行対象のmanifestへ持ち込まない。
+        let manifest = serde_json::json!({ "dependencies": root["dependencies"] });
+        fs::write(
+            dest.join("package.json"),
+            serde_json::to_vec(&manifest).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| format!("package.jsonを書けません: {e}"))?;
+        fs::write(dest.join("package-lock.json"), raw).map_err(|e| format!("npm lockを書けません: {e}"))?;
+        let status = Command::new(program)
+            .args(["ci", "--prefix"])
+            .arg(&dest)
+            .args(["--no-audit", "--no-fund"])
+            .status()
+            .map_err(|e| format!("npmを起動できません（PATHを確認してください）: {e}"))?;
+        if !status.success() {
+            return Err(format!("{}のnpm ciに失敗しました: {status}", spec.key()));
+        }
+        let actual = npm_version(spec, &dest)?;
+        if actual != version {
+            return Err("npm ciで取得したversionがnpm lockと一致しません".into());
+        }
+        Ok((npm_bins(spec, &dest)?, actual, raw.to_owned()))
+    } else {
+        let (bins, version) = install_with_program(spec, &dest, program)?;
+        let raw =
+            fs::read_to_string(dest.join("package-lock.json")).map_err(|e| format!("npm lockを読めません: {e}"))?;
+        validate_npm_lock(spec, &version, &raw)?;
+        Ok((bins, version, raw))
+    }
+}
+
+pub(super) fn validate_npm_lock(spec: &Spec, version: &str, raw: &str) -> Result<(), String> {
+    let fail = |reason: &str| format!("npm lockが不正です: {reason}");
+    if spec.source != "npm" || !exact_version(version) {
+        return Err(fail("対象パッケージまたはversion"));
+    }
+    let json: serde_json::Value = serde_json::from_str(raw).map_err(|e| fail(&e.to_string()))?;
+    if !matches!(json["lockfileVersion"].as_u64(), Some(2 | 3)) {
+        return Err(fail("lockfileVersionは2または3が必要です"));
+    }
+    let packages = json["packages"]
+        .as_object()
+        .ok_or_else(|| fail("packagesがありません"))?;
+    let root = packages
+        .get("")
+        .and_then(|value| value.as_object())
+        .ok_or_else(|| fail("rootがありません"))?;
+    let deps = root
+        .get("dependencies")
+        .and_then(|value| value.as_object())
+        .ok_or_else(|| fail("root dependenciesがありません"))?;
+    if deps.len() != 1 || !deps.contains_key(&spec.name) {
+        return Err(fail("root dependenciesが対象の単一依存ではありません"));
+    }
+    let requirement = deps[&spec.name]
+        .as_str()
+        .ok_or_else(|| fail("root依存の版が文字列ではありません"))?;
+    Spec::parse(&format!("npm:{}@{requirement}", spec.name)).map_err(|_| fail("local/git依存には対応していません"))?;
+    for field in ["devDependencies", "optionalDependencies", "peerDependencies"] {
+        if root
+            .get(field)
+            .is_some_and(|value| value.as_object().is_none_or(|deps| !deps.is_empty()))
+        {
+            return Err(fail("rootに追加の依存があります"));
+        }
+    }
+    let target = format!("node_modules/{}", spec.name);
+    if packages.get(&target).and_then(|package| package["version"].as_str()) != Some(version) {
+        return Err(fail("対象versionが一致しません"));
+    }
+    for (path, package) in packages {
+        if path.is_empty() {
+            continue;
+        }
+        if !path.starts_with("node_modules/") || !safe_relative(Path::new(path)) || path.contains('\\') {
+            return Err(fail("packageのパスが不正です"));
+        }
+        if package.get("link").is_some_and(|link| link != false) {
+            return Err(fail("link依存には対応していません"));
+        }
+        if !package["version"].as_str().is_some_and(exact_version) {
+            return Err(fail("packageの正確なversionがありません"));
+        }
+        let resolved = package["resolved"]
+            .as_str()
+            .ok_or_else(|| fail("resolvedがありません"))?;
+        let address = resolved
+            .strip_prefix("https://")
+            .or_else(|| resolved.strip_prefix("http://"));
+        if !address.is_some_and(|address| {
+            !address.is_empty() && !address.starts_with('/') && !address.chars().any(char::is_whitespace)
+        }) {
+            return Err(fail("local/git依存には対応していません（resolved）"));
+        }
+        if !package["integrity"].as_str().is_some_and(valid_integrity) {
+            return Err(fail("integrityが不正です"));
+        }
+    }
+    Ok(())
+}
+
+fn valid_integrity(raw: &str) -> bool {
+    raw.split_whitespace().next().is_some()
+        && raw.split_whitespace().all(|entry| {
+            let Some((algorithm, hash)) = entry.split_once('-') else {
+                return false;
+            };
+            let bytes = match algorithm {
+                "sha1" => 20,
+                "sha256" => 32,
+                "sha384" => 48,
+                "sha512" => 64,
+                _ => return false,
+            };
+            let encoded = (bytes + 2) / 3 * 4;
+            let padding = (3 - bytes % 3) % 3;
+            hash.len() == encoded
+                && hash.as_bytes()[..encoded - padding]
+                    .iter()
+                    .all(|c| c.is_ascii_alphanumeric() || b"+/".contains(c))
+                && hash.as_bytes()[encoded - padding..].iter().all(|c| *c == b'=')
+        })
+}
+
+fn npm_version(spec: &Spec, dest: &Path) -> Result<String, String> {
+    let text = fs::read_to_string(dest.join("node_modules").join(&spec.name).join("package.json"))
+        .map_err(|e| format!("package.jsonを読めません: {e}"))?;
+    let package: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("package.jsonが不正です: {e}"))?;
+    package["version"]
+        .as_str()
+        .filter(|version| exact_version(version))
+        .map(str::to_owned)
+        .ok_or_else(|| "package.jsonに正確なversionがありません".into())
+}
+
 fn install_with_program(spec: &Spec, dest: &Path, program: &Path) -> Result<(Vec<(String, PathBuf)>, String), String> {
     // 公開構造体を直接生成した場合もコマンド引数に渡す前に検証する。
     Spec::parse(&spec.key())?;
@@ -361,6 +529,103 @@ mod tests {
         ] {
             assert!(!exact_version(version), "{version}");
         }
+    }
+
+    fn npm_lock_fixture() -> serde_json::Value {
+        let integrity = format!("sha512-{}==", "A".repeat(86));
+        serde_json::json!({
+            "lockfileVersion": 3,
+            "packages": {
+                "": { "dependencies": { "tool": "^1.0.0" } },
+                "node_modules/tool": { "version": "1.2.3", "resolved": "https://registry.npmjs.org/tool/-/tool-1.2.3.tgz", "integrity": integrity },
+                "node_modules/dep": { "version": "4.5.6", "resolved": "https://registry.npmjs.org/dep/-/dep-4.5.6.tgz", "integrity": integrity }
+            }
+        })
+    }
+
+    #[test]
+    fn npm_lock_validation() {
+        let spec = Spec::parse("npm:tool@1.2.3").unwrap();
+        for format in [2, 3] {
+            let mut lock = npm_lock_fixture();
+            lock["lockfileVersion"] = format.into();
+            validate_npm_lock(&spec, "1.2.3", &lock.to_string()).unwrap();
+        }
+        let cases = [
+            ("lockfileVersion", serde_json::json!(1)),
+            ("packages", serde_json::json!({})),
+        ];
+        for (key, value) in cases {
+            let mut lock = npm_lock_fixture();
+            lock[key] = value;
+            assert!(validate_npm_lock(&spec, "1.2.3", &lock.to_string()).is_err());
+        }
+        for (key, value) in [
+            ("version", serde_json::json!("latest")),
+            ("resolved", serde_json::json!("file:../dep")),
+            ("resolved", serde_json::json!("git+https://example.com/dep")),
+            ("integrity", serde_json::json!("sha512-bogus")),
+            ("integrity", serde_json::Value::Null),
+            ("link", serde_json::json!(true)),
+        ] {
+            let mut lock = npm_lock_fixture();
+            lock["packages"]["node_modules/dep"][key] = value;
+            assert!(validate_npm_lock(&spec, "1.2.3", &lock.to_string()).is_err(), "{key}");
+        }
+        let mut lock = npm_lock_fixture();
+        lock["packages"][""]["dependencies"]["tool"] = "file:../tool".into();
+        assert!(validate_npm_lock(&spec, "1.2.3", &lock.to_string()).is_err());
+        assert!(validate_npm_lock(&spec, "9.9.9", &npm_lock_fixture().to_string()).is_err());
+        assert!(validate_npm_lock(&spec, "1.2.3", "not json").is_err());
+    }
+
+    #[test]
+    fn npm_integrity_validation() {
+        for (algorithm, chars, padding) in [
+            ("sha1", 27, "="),
+            ("sha256", 43, "="),
+            ("sha384", 64, ""),
+            ("sha512", 86, "=="),
+        ] {
+            assert!(valid_integrity(&format!("{algorithm}-{}{padding}", "A".repeat(chars))));
+        }
+        for raw in ["", " \n\t", "sha512-no", "sha0-AAAA", "sha512-", "sha512-💥"] {
+            assert!(!valid_integrity(raw), "{raw}");
+        }
+        assert!(!valid_integrity(&format!("sha512-{}é", "A".repeat(86))));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn npm_locked_install_and_ci() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = Temp::new();
+        let raw = npm_lock_fixture().to_string();
+        temp.write("fixture.json", &raw);
+        temp.write("mock", "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$3/args\"\nmkdir -p \"$3/node_modules/tool\"\nprintf '{\"version\":\"1.2.3\",\"bin\":\"cli.js\"}' > \"$3/node_modules/tool/package.json\"\nprintf '#!/bin/sh\\n' > \"$3/node_modules/tool/cli.js\"\nif [ \"$1\" = install ]; then cp \"$(dirname \"$0\")/fixture.json\" \"$3/package-lock.json\"; fi\n");
+        fs::set_permissions(temp.0.join("mock"), fs::Permissions::from_mode(0o755)).unwrap();
+        let spec = Spec::parse("npm:tool@1.2.3").unwrap();
+        let dest = temp.0.join("first");
+        fs::create_dir(&dest).unwrap();
+        let (_, version, saved) = install_npm_locked_with_program(&spec, &dest, None, &temp.0.join("mock")).unwrap();
+        assert_eq!(version, "1.2.3");
+        assert_eq!(saved, raw);
+        assert!(fs::read_to_string(dest.join("args")).unwrap().starts_with("install\n"));
+        let dest = temp.0.join("second");
+        fs::create_dir(&dest).unwrap();
+        let (_, version, saved) =
+            install_npm_locked_with_program(&spec, &dest, Some(&raw), &temp.0.join("mock")).unwrap();
+        assert_eq!(version, "1.2.3");
+        assert_eq!(saved, raw);
+        assert!(fs::read_to_string(dest.join("args")).unwrap().starts_with("ci\n"));
+        assert_eq!(fs::read_to_string(dest.join("package-lock.json")).unwrap(), raw);
+        let mut invalid = npm_lock_fixture();
+        invalid["packages"]["node_modules/dep"]["integrity"] = "invalid".into();
+        fs::remove_file(dest.join("args")).unwrap();
+        assert!(
+            install_npm_locked_with_program(&spec, &dest, Some(&invalid.to_string()), &temp.0.join("mock")).is_err()
+        );
+        assert!(!dest.join("args").exists());
     }
 
     #[test]

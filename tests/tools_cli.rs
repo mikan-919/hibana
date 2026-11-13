@@ -84,15 +84,20 @@ const NPM: &str = r##"#!/bin/sh
 set -eu
 prefix=''
 package='demo'
+mode=install
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    ci) mode=ci; shift ;;
     --prefix) prefix="$2"; shift 2 ;;
     demo|demo@*|many|many@*|@scope/demo|@scope/demo@*) package="$1"; shift ;;
     *) shift ;;
   esac
 done
 [ -n "$prefix" ]
-printf 'npm:%s\n' "$package" >> "$MOCK_LOG"
+if [ "$mode" = ci ]; then
+  package=$(node -p 'const p=require(process.argv[1]).packages; const n=Object.keys(p[""].dependencies)[0]; n+"@"+p["node_modules/"+n].version' "$prefix/package-lock.json")
+fi
+printf 'npm:%s:%s\n' "$package" "$mode" >> "$MOCK_LOG"
 case "$package" in
   many*) name=many ;;
   @scope/*) name=@scope/demo ;;
@@ -103,8 +108,20 @@ case "$package" in
   *@1.2.3) version=1.2.3 ;;
   *@9.9.9) version=9.9.9 ;;
 esac
+[ "$name" != many ] || version=1.0.0
+if [ "$mode" != ci ]; then
+  node - "$prefix" "$name" "$version" <<'LOCK'
+const fs = require('fs');
+const [prefix, name, version] = process.argv.slice(2);
+const dep = process.env.MOCK_TRANSITIVE_VERSION || '4.5.6';
+const entry = (n, v) => ({version:v, resolved:'https://registry.example.invalid/'+n+'/-/'+v+'.tgz', integrity:'sha512-'+Buffer.alloc(64).toString('base64')});
+fs.writeFileSync(prefix+'/package-lock.json', JSON.stringify({name:'hibana-tools', version:'1.0.0', lockfileVersion:3, packages:{'':{name:'hibana-tools', version:'1.0.0', dependencies:{[name]:version}}, ['node_modules/'+name]:{...entry(name,version), dependencies:{transitive:dep}}, 'node_modules/transitive':entry('transitive',dep)}}));
+LOCK
+fi
+transitive=$(node -p 'require(process.argv[1]).packages["node_modules/transitive"].version' "$prefix/package-lock.json")
 root="$prefix/node_modules/$name"
 mkdir -p "$root"
+printf '%s' "$transitive" > "$root/transitive-version"
 if [ "$name" = many ]; then
   printf '%s' '{"name":"many","version":"1.0.0","bin":{"first":"cli.js","second":"cli.js"}}' > "$root/package.json"
 else
@@ -113,6 +130,7 @@ fi
 cat > "$root/cli.js" <<'CLI'
 #!/bin/sh
 if [ "${1-}" = --fail ]; then exit 37; fi
+if [ "${1-}" = --transitive ]; then cat "$(dirname "$0")/transitive-version"; exit; fi
 printf npm-demo
 for arg in "$@"; do printf '<%s>' "$arg"; done
 CLI
@@ -325,7 +343,10 @@ fn project_lock_pins_npm_across_data_homes_and_registry_changes() {
         .unwrap();
     assert_eq!(success(&output), "npm-demo");
     assert!(f.installs().contains("npm:demo@1.2.3"));
-    assert_eq!(std::fs::read_to_string(f.0.join("config.hibana.lock.toml")).unwrap(), initial);
+    assert_eq!(
+        std::fs::read_to_string(f.0.join("config.hibana.lock.toml")).unwrap(),
+        initial
+    );
     assert_eq!(f.installs().lines().count(), 2);
 }
 
@@ -378,7 +399,10 @@ fn malformed_project_lock_fails_before_script_and_install() {
         error(&f.run(&["build"]));
         assert!(!f.0.join("script-ran").exists());
         assert!(f.installs().is_empty());
-        assert_eq!(std::fs::read_to_string(f.0.join("config.hibana.lock.toml")).unwrap(), text);
+        assert_eq!(
+            std::fs::read_to_string(f.0.join("config.hibana.lock.toml")).unwrap(),
+            text
+        );
     }
 }
 
@@ -388,5 +412,51 @@ fn project_add_rejects_native_tools_name_collision_without_overwriting_lock() {
     let old = "[tools]\ngit = \"file:///native-tools\"\nrev = \"abc\"\n";
     f.write("config.hibana.lock.toml", old);
     error(&f.run(&["add", "npm:demo"]));
-    assert_eq!(std::fs::read_to_string(f.0.join("config.hibana.lock.toml")).unwrap(), old);
+    assert_eq!(
+        std::fs::read_to_string(f.0.join("config.hibana.lock.toml")).unwrap(),
+        old
+    );
+}
+
+#[test]
+fn npm_tree_lock_restores_transitive_version_with_ci() {
+    let f = Fixture::new();
+    f.write("config.hibana.toml", "[scripts]\nbuild = \"demo --transitive\"\n");
+    success(&f.run(&["add", "npm:demo"]));
+    let before = std::fs::read_to_string(f.0.join("config.hibana.lock.toml")).unwrap();
+    let saved = lock(&f);
+    let raw = saved["tools"]["npm:demo"]["npm_lock"].as_str().unwrap();
+    let json: serde_json::Value = serde_json::from_str(raw).unwrap();
+    assert_eq!(json["packages"]["node_modules/transitive"]["version"], "4.5.6");
+    let out = f
+        .command(env!("CARGO_BIN_EXE_hibana"))
+        .env("XDG_DATA_HOME", f.0.join("fresh-data"))
+        .env("MOCK_TRANSITIVE_VERSION", "9.9.9")
+        .arg("build")
+        .output()
+        .unwrap();
+    assert_eq!(success(&out), "4.5.6");
+    assert!(f.installs().contains("npm:demo@1.2.3:ci"));
+    assert_eq!(
+        std::fs::read_to_string(f.0.join("config.hibana.lock.toml")).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn distinct_npm_trees_with_same_direct_version_do_not_share_cache() {
+    let f = Fixture::new();
+    f.write("config.hibana.toml", "[scripts]\nbuild = \"demo --transitive\"\n");
+    success(&f.run(&["add", "npm:demo"]));
+    assert_eq!(success(&f.run(&["build"])), "4.5.6");
+    let original = lock(&f);
+    let mut changed = original.clone();
+    let raw = changed["tools"]["npm:demo"]["npm_lock"].as_str().unwrap();
+    let new_raw = raw.replace("4.5.6", "7.8.9");
+    changed["tools"]["npm:demo"]["npm_lock"] = toml::Value::String(new_raw);
+    f.write("config.hibana.lock.toml", &toml::to_string(&changed).unwrap());
+    assert_eq!(success(&f.run(&["build"])), "7.8.9");
+    f.write("config.hibana.lock.toml", &toml::to_string(&original).unwrap());
+    assert_eq!(success(&f.run(&["build"])), "4.5.6");
+    assert_eq!(f.installs().lines().count(), 2);
 }
