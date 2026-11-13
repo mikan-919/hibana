@@ -22,7 +22,7 @@ dev = "hibana src/main.hb"
 
 Hibana パッケージは `hibana dlx hibana:GitのURL`（または `hibana dlx GitのURL`）で実行します。取得元に `hibana.toml` と `src/main.hb` を用意してください。版を選ぶ場合は `hibana dlx --rev v1.0.0 hibana:GitのURL` とします。依存も共通ストアから読み込み、呼び出し元のプロジェクト設定は変更しません。現状の言語にはコマンドライン引数を読み出す API はありません。
 
-取得したツールもファイル単位の共通ストアを使います。版は `npm:vite@6.1.0` のように指定できます。プロジェクトに追加すると、設定ファイルの隣の `config.hibana.lock.toml` に取得した正確な版を記録します。設定と lock を共有すれば、別環境のスクリプト実行でもその版を取得します。npm は `npm_lock` に推移依存の版・取得 URL・整合性ハッシュも保存し、再取得は `npm ci` で行います。古い lock は通常の `hibana install` で補完してください（`--frozen-lockfile` は `npm_lock` の無い npm 記録を拒否します）。Cargo は `cargo_lock` に Cargo.lock を保存し、取得した crate ソースへ復元して `--locked` でビルドします。`cargo_lock` の無い旧記録も通常の install で補完し、frozen では拒否します。ビルド環境や生成バイナリの同一性までは保証しません。`dlx`・グローバル追加はプロジェクトの lock を使わず初回取得結果を再利用します。自動更新・更新コマンド・削除・GC はまだありません。
+取得したツールもファイル単位の共通ストアを使います。版は `npm:vite@6.1.0` のように指定できます。プロジェクトに追加すると、設定ファイルの隣の `config.hibana.lock.toml` に取得した正確な版を記録します。設定と lock を共有すれば、別環境のスクリプト実行でもその版を取得します。npm は `npm_lock` に推移依存の版・取得 URL・整合性ハッシュも保存し、再取得は `npm ci` で行います。古い lock は通常の `hibana install` で補完してください（`--frozen-lockfile` は `npm_lock` の無い npm 記録を拒否します）。Cargo は `cargo_lock` に Cargo.lock を保存し、取得した crate ソースへ復元して `--locked` でビルドします。`cargo_lock` の無い旧記録も通常の install で補完し、frozen では拒否します。ビルド環境や生成バイナリの同一性までは保証しません。`dlx`・グローバル追加はプロジェクトの lock を使わず初回取得結果を再利用します。外部ツールの更新コマンド・自動更新・削除・GC はまだありません。
 
 リポジトリを取得した後は `hibana install` で、設定された外部ツールと `hibana.toml` の Git 依存をまとめて取得できます。既存の lock を使い、依存の追加や条件変更があれば更新します。CI では次のように実行します。
 
@@ -32,6 +32,8 @@ hibana build
 ```
 
 `--frozen-lockfile` は `config.hibana.lock.toml` が無い場合や設定と食い違う場合に失敗し、lock は書き換えません。事前に通常の `hibana install` を実行して、設定と lock を一緒にコミットしてください。子ディレクトリからでも実行でき、最も近い `config.hibana.toml` または `hibana.toml` があるディレクトリだけを対象にします。
+
+Hibana の Git 依存を更新するには `hibana update` を実行します。引数なしで推移依存を含むすべての Git 依存を更新し、`hibana update 依存名` なら指定した依存だけを更新します。`hibana.toml` の指定範囲内で Git の版を解決し直して lock に記録します。固定コミットの指定はそのままで、ブランチやタグは現在の参照先を取得します。名前指定の場合、他の依存は設定と一致する lock の版を維持します。存在しない依存名や取得に失敗した場合、lock は書き換えません。npm/Cargo の外部ツールは更新せず、既存の lock 記録を保持します。
 
 ファイルを直接指定する既存コマンドも使えます。
 

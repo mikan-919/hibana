@@ -189,7 +189,26 @@ fn requirements(manifest: &Table) -> Result<Vec<(String, String, Option<String>,
         .collect())
 }
 
+// 引数なしは推移依存も更新し、名前指定はその依存だけロックの再利用を止める。
+pub fn update(root: &Path, name: Option<&str>) -> Result<(), String> {
+    update_in(root, &data_root()?, name)
+}
+
+fn update_in(root: &Path, data: &Path, name: Option<&str>) -> Result<(), String> {
+    resolve_in(root, data, false, Some(name))
+}
+
 fn install_in(root: &Path, data: &Path, frozen: bool) -> Result<(), String> {
+    resolve_in(root, data, frozen, None)
+}
+
+// update: None は通常の取得、Some(None) は全更新、Some(Some(name)) は指定更新。
+fn resolve_in(
+    root: &Path,
+    data: &Path,
+    frozen: bool,
+    update: Option<Option<&str>>,
+) -> Result<(), String> {
     let lock_path = root.join(LOCK);
     if frozen && !lock_path.is_file() {
         return Err(format!("--frozen-lockfile には {} が必要", lock_path.display()));
@@ -225,8 +244,13 @@ fn install_in(root: &Path, data: &Path, frozen: bool) -> Result<(), String> {
             }
             continue;
         }
+        let refresh = match update {
+            Some(None) => true,
+            Some(Some(target)) => target == name,
+            None => false,
+        };
         let previous = old.get(&name).filter(|t| {
-            t.get("git").and_then(|g| g.as_str()) == Some(&url)
+            !refresh && t.get("git").and_then(|g| g.as_str()) == Some(&url)
                 && match t.get("requirement") {
                     Some(r) => r == &requirement,
                     // 旧形式でも版指定なしならURLだけで一致を確認できる。
@@ -270,6 +294,11 @@ fn install_in(root: &Path, data: &Path, frozen: bool) -> Result<(), String> {
             t.insert("requirement".into(), requirement);
         }
         lock.insert(name, t.into());
+    }
+    if let Some(Some(name)) = update {
+        if !lock.get(name).is_some_and(|t| t.get("git").is_some()) {
+            return Err(format!("依存 {name} は {MANIFEST} の依存関係にない"));
+        }
     }
     if frozen {
         // 削除された依存も設定との食い違いとして扱う。
@@ -536,6 +565,128 @@ mod tests {
         std::fs::write(root.join(MANIFEST), "[dependencies]\ngreet = {git=42}\n").unwrap();
         assert!(install_in(&root, &data, true).unwrap_err().contains("git"));
         assert_eq!(std::fs::read_to_string(root.join(LOCK)).unwrap(), complete);
+    }
+
+    fn repository(path: &Path) -> (String, String) {
+        std::fs::create_dir_all(path.join("src")).unwrap();
+        std::fs::write(path.join("src/lib.hb"), "fn value() -> int { 1 }\n").unwrap();
+        git(path, &["init", "-q"]).unwrap();
+        (format!("file://{}", path.display()), commit(path))
+    }
+
+    #[test]
+    fn update_all_and_named_keep_other_locks_and_external_tools() {
+        let t = TempDir::new(&std::env::temp_dir().join("hibana-pkg-tests")).unwrap();
+        let data = t.0.join("data");
+        let root = t.0.join("app");
+        let a = t.0.join("a");
+        let b = t.0.join("b");
+        let (a_url, a_first) = repository(&a);
+        let (b_url, b_first) = repository(&b);
+        app(&root, &a_url);
+        std::fs::write(root.join(MANIFEST), format!(
+            "[dependencies]\na = {{git = {a_url:?}}}\nb = {{git = {b_url:?}}}\n"
+        )).unwrap();
+        let tools: Table = "[tools.\"npm:demo\"]\nrequirement = '*'\nversion = '1.2.3'\n".parse().unwrap();
+        std::fs::write(root.join(LOCK), tools.to_string()).unwrap();
+        install_in(&root, &data, false).unwrap();
+        std::fs::write(a.join("README"), "second").unwrap();
+        let a_second = commit(&a);
+        std::fs::write(b.join("README"), "second").unwrap();
+        let b_second = commit(&b);
+        install_in(&root, &data, false).unwrap();
+        let locked = read(&root.join(LOCK)).unwrap();
+        assert_eq!(locked["a"]["rev"].as_str(), Some(a_first.as_str()));
+        assert_eq!(locked["b"]["rev"].as_str(), Some(b_first.as_str()));
+        update_in(&root, &data, Some("a")).unwrap();
+        let named = read(&root.join(LOCK)).unwrap();
+        assert_eq!(named["a"]["rev"].as_str(), Some(a_second.as_str()));
+        assert_eq!(named["b"], locked["b"]);
+        assert_eq!(named["tools"], tools["tools"]);
+        update_in(&root, &data, None).unwrap();
+        let all = read(&root.join(LOCK)).unwrap();
+        assert_eq!(all["a"]["rev"].as_str(), Some(a_second.as_str()));
+        assert_eq!(all["b"]["rev"].as_str(), Some(b_second.as_str()));
+        assert_eq!(all["tools"], tools["tools"]);
+        let bytes = std::fs::read(root.join(LOCK)).unwrap();
+        install_in(&root, &data, true).unwrap();
+        assert_eq!(std::fs::read(root.join(LOCK)).unwrap(), bytes);
+    }
+
+    #[test]
+    fn update_transitive_dependencies_and_respects_selectors() {
+        let t = TempDir::new(&std::env::temp_dir().join("hibana-pkg-tests")).unwrap();
+        let data = t.0.join("data");
+        let root = t.0.join("app");
+        let child = t.0.join("child");
+        let parent = t.0.join("parent");
+        let (child_url, _) = repository(&child);
+        let (parent_url, _) = repository(&parent);
+        std::fs::write(parent.join(MANIFEST), format!(
+            "[dependencies]\nchild = {{git = {child_url:?}}}\n"
+        )).unwrap();
+        let parent_first = commit(&parent);
+        git(&parent, &["tag", "fixed"]).unwrap();
+        let branch = git(&parent, &["branch", "--show-current"]).unwrap();
+        app(&root, &parent_url);
+        install_in(&root, &data, false).unwrap();
+        std::fs::write(child.join("README"), "second").unwrap();
+        let child_second = commit(&child);
+        std::fs::write(parent.join("README"), "second").unwrap();
+        let parent_second = commit(&parent);
+        // 親を固定したまま推移依存の名前だけでも更新できる。
+        update_in(&root, &data, Some("child")).unwrap();
+        let named = read(&root.join(LOCK)).unwrap();
+        assert_eq!(named["greet"]["rev"].as_str(), Some(parent_first.as_str()));
+        assert_eq!(named["child"]["rev"].as_str(), Some(child_second.as_str()));
+        for (selector, value, expected) in [
+            ("tag", "fixed", parent_first.as_str()),
+            ("rev", parent_first.as_str(), parent_first.as_str()),
+            ("branch", branch.as_str(), parent_second.as_str()),
+        ] {
+            std::fs::write(root.join(MANIFEST), format!(
+                "[dependencies]\ngreet = {{git = {parent_url:?}, {selector} = {value:?}}}\n"
+            )).unwrap();
+            update_in(&root, &data, None).unwrap();
+            let lock = read(&root.join(LOCK)).unwrap();
+            assert_eq!(lock["greet"]["rev"].as_str(), Some(expected));
+            assert_eq!(lock["child"]["rev"].as_str(), Some(child_second.as_str()));
+        }
+        // 更新した親の新しい推移依存を解決し、不要になった依存は消す。
+        let extra = t.0.join("extra");
+        let (extra_url, extra_rev) = repository(&extra);
+        std::fs::write(parent.join(MANIFEST), format!(
+            "[dependencies]\nextra = {{git = {extra_url:?}}}\n"
+        )).unwrap();
+        commit(&parent);
+        update_in(&root, &data, None).unwrap();
+        let lock = read(&root.join(LOCK)).unwrap();
+        assert!(!lock.contains_key("child"));
+        assert_eq!(lock["extra"]["rev"].as_str(), Some(extra_rev.as_str()));
+    }
+
+    #[test]
+    fn update_failures_preserve_lock_and_can_start_without_one() {
+        let t = TempDir::new(&std::env::temp_dir().join("hibana-pkg-tests")).unwrap();
+        let data = t.0.join("data");
+        let root = t.0.join("app");
+        let lib = t.0.join("lib");
+        let (url, _) = repository(&lib);
+        app(&root, &url);
+        assert!(update_in(&root, &data, Some("missing")).unwrap_err().contains("missing"));
+        assert!(!root.join(LOCK).exists());
+        update_in(&root, &data, None).unwrap();
+        let bytes = std::fs::read(root.join(LOCK)).unwrap();
+        assert!(update_in(&root, &data, Some("missing")).is_err());
+        assert_eq!(std::fs::read(root.join(LOCK)).unwrap(), bytes);
+        // 親の取得成功後、推移依存の取得失敗でも部分的なlockは書かない。
+        std::fs::write(lib.join(MANIFEST),
+            "[dependencies]\nbroken = {git = '/nonexistent/hibana-update-test'}\n"
+        ).unwrap();
+        commit(&lib);
+        assert!(update_in(&root, &data, None).is_err());
+        assert_eq!(std::fs::read(root.join(LOCK)).unwrap(), bytes);
+        assert_eq!(std::fs::read_dir(data.join("tmp")).unwrap().count(), 0);
     }
 
     #[test]
