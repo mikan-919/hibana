@@ -556,3 +556,111 @@ fn distinct_cargo_trees_with_same_direct_version_do_not_share_cache() {
     assert_eq!(success(&f.run(&["build"])), "4.5.6");
     assert_eq!(f.installs().lines().count(), 2);
 }
+
+#[test]
+fn update_refreshes_only_named_project_tool_trees() {
+    let f = Fixture::new();
+    f.write(
+        "config.hibana.toml",
+        "[dependencies]\n\"npm:demo\" = \"*\"\n\"cargo:demo\" = \"*\"\n",
+    );
+    success(&f.run(&["install"]));
+    let mut original = lock(&f);
+    let mut native = toml::Table::new();
+    native.insert("git".into(), "file:///preserved".into());
+    native.insert("rev".into(), "abc123".into());
+    original.insert("greet".into(), native.into());
+    f.write("config.hibana.lock.toml", &toml::to_string(&original).unwrap());
+
+    let npm = f
+        .command(env!("CARGO_BIN_EXE_hibana"))
+        .env("MOCK_NPM_VERSION", "9.9.9")
+        .env("MOCK_TRANSITIVE_VERSION", "8.8.8")
+        .args(["update", "npm:demo"])
+        .output()
+        .unwrap();
+    success(&npm);
+    let after_npm = lock(&f);
+    assert_eq!(
+        after_npm["tools"]["npm:demo"]["version"].as_str(),
+        Some("9.9.9")
+    );
+    let npm_tree: serde_json::Value = serde_json::from_str(
+        after_npm["tools"]["npm:demo"]["npm_lock"].as_str().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        npm_tree["packages"]["node_modules/transitive"]["version"],
+        "8.8.8"
+    );
+    assert_eq!(
+        after_npm["tools"]["cargo:demo"],
+        original["tools"]["cargo:demo"]
+    );
+    assert_eq!(after_npm["greet"], original["greet"]);
+
+    let cargo = f
+        .command(env!("CARGO_BIN_EXE_hibana"))
+        .env("MOCK_CARGO_TRANSITIVE_VERSION", "7.7.7")
+        .args(["update", "cargo:demo"])
+        .output()
+        .unwrap();
+    success(&cargo);
+    let after_cargo = lock(&f);
+    assert_eq!(
+        after_cargo["tools"]["npm:demo"],
+        after_npm["tools"]["npm:demo"]
+    );
+    assert_eq!(after_cargo["greet"], original["greet"]);
+    let cargo_tree: toml::Table = after_cargo["tools"]["cargo:demo"]["cargo_lock"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(cargo_tree["package"].as_array().unwrap().iter().any(|package| {
+        package["name"].as_str() == Some("transitive")
+            && package["version"].as_str() == Some("7.7.7")
+    }));
+}
+
+#[test]
+fn failed_project_tool_update_preserves_lock_bytes() {
+    let f = Fixture::new();
+    f.write(
+        "config.hibana.toml",
+        "[dependencies]\n\"npm:demo\" = \"*\"\n\"cargo:demo\" = \"*\"\n",
+    );
+    success(&f.run(&["install"]));
+    let before = std::fs::read(f.0.join("config.hibana.lock.toml")).unwrap();
+    f.write("mock-bin/npm", "#!/bin/sh\nexit 23\n");
+    error(&f.run(&["update", "npm:demo"]));
+    assert_eq!(
+        std::fs::read(f.0.join("config.hibana.lock.toml")).unwrap(),
+        before
+    );
+    f.write("mock-bin/cargo", "#!/bin/sh\nexit 24\n");
+    error(&f.run(&["update", "cargo:demo"]));
+    assert_eq!(
+        std::fs::read(f.0.join("config.hibana.lock.toml")).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn project_tool_update_requires_declared_unversioned_identifier() {
+    let f = Fixture::new();
+    f.write("config.hibana.toml", "[dependencies]\n\"npm:demo\" = \"*\"\n");
+    success(&f.run(&["install"]));
+    let before = std::fs::read(f.0.join("config.hibana.lock.toml")).unwrap();
+    for args in [
+        vec!["update", "npm:missing"],
+        vec!["update", "npm:demo@1.2.3"],
+        vec!["update", "npm:../demo"],
+    ] {
+        error(&f.run(&args));
+        assert_eq!(
+            std::fs::read(f.0.join("config.hibana.lock.toml")).unwrap(),
+            before
+        );
+    }
+}

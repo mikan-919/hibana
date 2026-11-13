@@ -33,7 +33,9 @@ hibana build
 
 `--frozen-lockfile` は `config.hibana.lock.toml` が無い場合や設定と食い違う場合に失敗し、lock は書き換えません。事前に通常の `hibana install` を実行して、設定と lock を一緒にコミットしてください。子ディレクトリからでも実行でき、最も近い `config.hibana.toml` または `hibana.toml` があるディレクトリだけを対象にします。
 
-Hibana の Git 依存を更新するには `hibana update` を実行します。引数なしで推移依存を含むすべての Git 依存を更新し、`hibana update 依存名` なら指定した依存だけを更新します。`hibana.toml` の指定範囲内で Git の版を解決し直して lock に記録します。固定コミットの指定はそのままで、ブランチやタグは現在の参照先を取得します。名前指定の場合、他の依存は設定と一致する lock の版を維持します。存在しない依存名や取得に失敗した場合、lock は書き換えません。npm/Cargo の外部ツールは更新せず、既存の lock 記録を保持します。
+Hibana の Git 依存を更新するには `hibana update` を実行します。引数なしで推移依存を含むすべての Git 依存を更新し、`hibana update 依存名` なら指定した依存だけを更新します。`hibana.toml` の指定範囲内で Git の版を解決し直して lock に記録します。固定コミットの指定はそのままで、ブランチやタグは現在の参照先を取得します。名前指定の場合、他の依存は設定と一致する lock の版を維持します。
+
+プロジェクトの npm/Cargo ツールは `hibana update npm:vite` や `hibana update cargo:clap` のように指定して更新できます。対象は `config.hibana.toml` の `[dependencies]` に登録したツールに限り、設定した版の範囲内で直接・推移依存を解決し直して lock に記録します。他の依存の lock は維持します。依存名が見つからない場合や取得に失敗した場合、lock は書き換えません。引数なし・通常の依存名での更新は従来どおり Git 依存だけを対象にします。
 
 ファイルを直接指定する既存コマンドも使えます。
 

@@ -230,12 +230,19 @@ fn read_lock(path: &Path) -> Result<Table, String> {
 
 // npm と Cargo の依存ツリー全体を固定する。
 fn ensure_locked(spec: &Spec, lock: &mut Table) -> Result<Installed, String> {
+    ensure_project_tool(spec, lock, false)
+}
+
+fn ensure_project_tool(spec: &Spec, lock: &mut Table, refresh: bool) -> Result<Installed, String> {
     let name = identity(spec);
     let requirement = spec.version.as_deref().unwrap_or("*");
-    let entry = lock
-        .get("tools")
-        .and_then(|t| t.get(&name))
-        .filter(|entry| entry.get("requirement").and_then(|v| v.as_str()) == Some(requirement));
+    let entry = if refresh {
+        None
+    } else {
+        lock.get("tools")
+            .and_then(|t| t.get(&name))
+            .filter(|entry| entry.get("requirement").and_then(|v| v.as_str()) == Some(requirement))
+    };
     let locked = entry.and_then(|entry| entry.get("version")).and_then(|v| v.as_str());
     let mut exact = spec.clone();
     if let Some(version) = locked {
@@ -363,12 +370,16 @@ fn ensure_tree(spec: &Spec, version: Option<&str>, raw: Option<&str>) -> Result<
 }
 
 // 最も近い設定のディレクトリだけを対象にし、親プロジェクトの依存を混ぜない。
-pub(crate) fn install(frozen: bool) -> Result<(), String> {
+fn project_root() -> Result<PathBuf, String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    let root = cwd
-        .ancestors()
+    cwd.ancestors()
         .find(|dir| dir.join(CONFIG).is_file() || dir.join(crate::pkg::MANIFEST).is_file())
-        .ok_or("config.hibana.toml または hibana.toml が無い")?;
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "config.hibana.toml または hibana.toml が無い".into())
+}
+
+pub(crate) fn install(frozen: bool) -> Result<(), String> {
+    let root = project_root()?;
     let config_path = root.join(CONFIG);
     let specs = dependencies(&if config_path.exists() {
         read_table(&config_path)?
@@ -416,7 +427,7 @@ pub(crate) fn install(frozen: bool) -> Result<(), String> {
             }
         }
     }
-    crate::pkg::install(root, frozen)?;
+    crate::pkg::install(&root, frozen)?;
     // native install が更新した表を保持する。
     let raw = if lock_path.exists() {
         read_table(&lock_path)?
@@ -445,6 +456,37 @@ pub(crate) fn install(frozen: bool) -> Result<(), String> {
             write_lock(&lock_path, &old, &lock)?;
         }
     }
+    Ok(())
+}
+
+// 明示 update は config の requirement 内で指定された外部ツールだけ再解決する。
+pub(crate) fn update(raw: &str) -> Result<(), String> {
+    let requested = Spec::parse(raw)?;
+    if requested.version.is_some() {
+        return Err("hibana update では npm:名前 または cargo:名前 を指定してください".into());
+    }
+    let root = project_root()?;
+    let config_path = root.join(CONFIG);
+    let config = if config_path.is_file() {
+        read_table(&config_path)?
+    } else {
+        Table::new()
+    };
+    let spec = dependencies(&config)?
+        .into_iter()
+        .find(|spec| identity(spec) == identity(&requested))
+        .ok_or_else(|| {
+            format!(
+                "依存 {} は {CONFIG} の [dependencies] にありません",
+                identity(&requested)
+            )
+        })?;
+    let lock_path = root.join("config.hibana.lock.toml");
+    let old = read_lock(&lock_path)?;
+    let mut lock = old.clone();
+    ensure_project_tool(&spec, &mut lock, true)?;
+    write_lock(&lock_path, &old, &lock)?;
+    eprintln!("更新: {}", identity(&spec));
     Ok(())
 }
 

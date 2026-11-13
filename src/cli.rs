@@ -154,7 +154,7 @@ fn update_target<'a>(args: &[&'a str]) -> Result<Option<&'a str>, String> {
     match args {
         [] => Ok(None),
         [name] if !name.is_empty() && !name.starts_with('-') => Ok(Some(*name)),
-        _ => Err("使い方: hibana update [依存名]".into()),
+        _ => Err("使い方: hibana update [依存名|npm:名前|cargo:名前]".into()),
     }
 }
 
@@ -220,7 +220,12 @@ fn run_cli() {
         ["install"] => Some(crate::tools::install(false)),
         ["install", "--frozen-lockfile"] => Some(crate::tools::install(true)),
         ["install", ..] => Some(Err("使い方: hibana install [--frozen-lockfile]".into())),
-        ["update", rest @ ..] => Some(update_target(rest).and_then(|name| here().and_then(|r| pkg::update(&r, name)))),
+        ["update", rest @ ..] => Some(update_target(rest).and_then(|name| match name {
+            Some(name) if name.starts_with("npm:") || name.starts_with("cargo:") => {
+                crate::tools::update(name)
+            }
+            name => here().and_then(|r| pkg::update(&r, name)),
+        })),
         ["test", files @ ..] => Some(test_cmd(files).and_then(|ok| if ok { Ok(()) } else { Err(String::new()) })),
         ["add", url, tag @ ..] if tag.len() <= 1 => {
             Some(here().and_then(|r| pkg::add(&r, url, tag.first().copied())).map(|n| eprintln!("追加: use {n}")))
@@ -280,7 +285,7 @@ fn run_cli() {
         [cmd, p] if cmd == "run" || cmd == "ir" || cmd == "js" || cmd == "c" || cmd == "build" || cmd == "fmt" => (cmd.as_str(), p.clone(), Vec::new()),
         _ => {
             eprintln!(
-                "使い方: hibana install [--frozen-lockfile]（依存を取得） | hibana update [依存名]（Git 依存を更新） | hibana build [-- 引数...] | hibana dev [-- 引数...] | hibana script <名前> [-- 引数...]（config.hibana.toml のスクリプト） | hibana <ファイル>（実行） | hibana run <ファイル>（WASM で実行） | hibana ir <ファイル>（中間表現を出力） | hibana wasm <ファイル> [--export 関数名 ...]（WASM を出力） | hibana glue <ファイル> --export 関数名 ...（JavaScript 接続コードを出力） | hibana web <ファイル> --export 関数名 ... [--out-dir dist]（WASM と接続コードを保存） | hibana js <ファイル>（JavaScript を出力） | hibana c <ファイル>（C を出力） | hibana build <ファイル> [--out-dir dist]（マクロの成果物を保存、登録が無ければネイティブビルド） | hibana fmt <ファイル>（整形して書き戻す） | hibana lsp（Language Server を標準入出力で動かす） | hibana new <名前> | hibana add <git の URL> [tag] | hibana add [-g] <npm:名前[@版]|cargo:名前[@版]> | hibana dlx [--bin コマンド | --rev Gitの版] <識別子> [--] 引数... | hibana fetch（依存を取ってくる） | hibana test [ファイル]（test を実行する）"
+                "使い方: hibana install [--frozen-lockfile]（依存を取得） | hibana update [依存名|npm:名前|cargo:名前]（依存を更新） | hibana build [-- 引数...] | hibana dev [-- 引数...] | hibana script <名前> [-- 引数...]（config.hibana.toml のスクリプト） | hibana <ファイル>（実行） | hibana run <ファイル>（WASM で実行） | hibana ir <ファイル>（中間表現を出力） | hibana wasm <ファイル> [--export 関数名 ...]（WASM を出力） | hibana glue <ファイル> --export 関数名 ...（JavaScript 接続コードを出力） | hibana web <ファイル> --export 関数名 ... [--out-dir dist]（WASM と接続コードを保存） | hibana js <ファイル>（JavaScript を出力） | hibana c <ファイル>（C を出力） | hibana build <ファイル> [--out-dir dist]（マクロの成果物を保存、登録が無ければネイティブビルド） | hibana fmt <ファイル>（整形して書き戻す） | hibana lsp（Language Server を標準入出力で動かす） | hibana new <名前> | hibana add <git の URL> [tag] | hibana add [-g] <npm:名前[@版]|cargo:名前[@版]> | hibana dlx [--bin コマンド | --rev Gitの版] <識別子> [--] 引数... | hibana fetch（依存を取ってくる） | hibana test [ファイル]（test を実行する）"
             );
             std::process::exit(2);
         }
@@ -413,8 +418,24 @@ mod tests {
     fn update_arguments() {
         assert_eq!(super::update_target(&[]).unwrap(), None);
         assert_eq!(super::update_target(&["foo"]).unwrap(), Some("foo"));
-        for args in [vec!["foo", "bar"], vec!["--frozen-lockfile"], vec!["--"], vec![""]] {
-            assert_eq!(super::update_target(&args).unwrap_err(), "使い方: hibana update [依存名]");
+        assert_eq!(
+            super::update_target(&["npm:vite"]).unwrap(),
+            Some("npm:vite")
+        );
+        assert_eq!(
+            super::update_target(&["cargo:clap"]).unwrap(),
+            Some("cargo:clap")
+        );
+        for args in [
+            vec!["foo", "bar"],
+            vec!["--frozen-lockfile"],
+            vec!["--"],
+            vec![""],
+        ] {
+            assert_eq!(
+                super::update_target(&args).unwrap_err(),
+                "使い方: hibana update [依存名|npm:名前|cargo:名前]"
+            );
         }
     }
 
