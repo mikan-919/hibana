@@ -193,7 +193,9 @@ version = "0.1.0"
 greet = { git = "https://github.com/someone/hibana-greet", tag = "v0.1.0" }   # tag の代わりに branch か rev も書ける。無ければ既定のブランチ
 ```
 
-- `hibana fetch` は依存（依存の依存も）を `~/.cache/hibana/名前-コミット`（`XDG_CACHE_HOME` があればその下）に取ってきて、`hibana.lock` にコミットの SHA を書きます。ロックにある依存はそのコミットを使います。版を上げるときは `hibana.lock` から消して取り直します。
+- `hibana fetch` は依存（依存の依存も）を `${XDG_DATA_HOME:-$HOME/.local/share}/hibana/` に保存し、`config.hibana.lock.toml` にコミットの SHA を書きます。`XDG_DATA_HOME` は絶対パスのみ有効です。ロックにある依存はそのコミットを使います。版を上げるときは `config.hibana.lock.toml` から消して取り直します。
+- ファイルは内容の SHA-256 と実行属性で識別して共通ストアに一度だけ保存し、パッケージのツリーへハードリンクします。同じ内容・実行属性なら、プロジェクト・版・取得元をまたいで共有します。プロジェクトにはコピーせず、共通のツリーを直接参照します。保存したファイルは読み取り専用です。
+- 取得用の git 履歴は一時領域だけに置き、保存時に `.git` を除きます。パッケージ内に収まる相対シンボリックリンクのみ使えます。ハードリンクできない環境ではコピーせずエラーにします。旧 `XDG_CACHE_HOME` のキャッシュは移行・削除せず、新しい保存先に再取得します。ストアの自動削除・GC はまだありません。
 - `hibana.toml` のあるディレクトリの下のファイルを実行・変換すると、取ってきていない依存を先に取ってきます。
 - パッケージの中の `use "x.hb"` は、そのファイルのディレクトリから探します。
 - 同じ名前のパッケージは一つの版だけ使えます。違う git の URL で二つ要るとエラーです。版の範囲（semver）の解決とレジストリはまだありません。
@@ -410,6 +412,44 @@ enum Shape { Circle(r: int), Rect(w: int, h: int), Dot }
 - 型引数を持つ型では `impl<A, B> Eq<Pair<A, B>>` を作ります。型引数に制約は付けないので、型引数の型の値は組み込みの比較と文字列化になります。
 - 添字付きの型族（構築子に `-> 型` を書く型）、`struct Name(型)` の構造体、`Ord` の derive はできません。
 
+### 8.5 ビルド時の成果物
+
+マクロから通常の hibana 関数を呼べます。読み込んだライブラリの関数や、マクロ呼び出しより後に定義した関数も使えます。関数本体は型検査されます。次のビルド時 API を直接・間接に使う関数はビルド時専用となり、実行時のプログラムには残りません。実行時から呼ぶとエラーになります。
+
+| 関数 | 内容 |
+|---|---|
+| `artifact(path, contents)` | `(str, Vec<int>) -> unit`。バイト列を成果物に登録する。各要素は 0〜255 |
+| `utf8(text)` | `str -> Vec<int>`。UTF-8 のバイト列を作る |
+| `compile(source, target, exports)` | `(str, str, Vec<str>) -> Vec<int>`。明示したソースをコンパイルする |
+| `inspect_exports(source, exports)` | `(str, Vec<str>) -> str`。公開関数と外部関数の ABI 情報を JSON 文字列で返す |
+
+`compile` の target は `"wasm"`・`"js"`・`"c"` です。WASM は空でない exports を受け取り、指定した関数を公開するライブラリを返します。JS と C は exports を空にし、`main` を持つプログラムを渡します（ライブラリ出力は未対応）。コンパイル対象ソースがさらに成果物を登録することはできません。
+
+`inspect_exports` は `{"exports":[[名前,[引数型,...],戻り型],...],"imports":[...]}` の形式です。型名は現在の WASM ABI の `"int"`・`"str"`・`"unit"` です。任意の型付き構文木を読むリフレクションではありません。
+
+```
+fn emit_text(path: str, text: str) {
+    artifact(path, utf8(text))
+}
+
+macro page ("page" path:String text:String) -> Decl {
+    emit_text(str_of(path), str_of(text))
+    quote {}
+}
+
+page "index.html" "<h1>hello</h1>"
+```
+
+このマクロは空の宣言列を返します。実行時の処理も `main` も残さず、成果物だけを作れます。生成処理は通常の関数で組み合わせ、ビルド側には名前とバイト列だけを登録します。WASM や JS 接続コード専用の成果物登録関数はありません。
+
+`artifact` は呼び出した時点ではファイルを書きません。`hibana build <ファイル> --out-dir <ディレクトリ>` は、展開後のプログラム全体の型検査と生成・出力先の検査を済ませてから書き出します。成果物を受け取るビルド処理の外で登録しようとするとエラーになります。`pipeline::build_artifacts` はファイルを書かず、名前とバイト列の一覧を返す Rust API です。
+
+出力先は `--out-dir` からの相対パスです。絶対パス、`.`・`..`、重複する名前、ファイルとディレクトリが衝突する名前、シンボリックリンクを通る出力先は拒否します。型検査・生成・出力先検査の失敗では書き出しません。ただし、書き出し途中の OS の I/O エラーを巻き戻す仕組みではありません。
+
+`lib/build_web.hb` は通常の関数 `build_text`・`build_web`・`web_javascript` と、呼び出し用のマクロ `web_build`・`build_asset` を提供します。JS の生成処理はこの hibana ライブラリにあり、コンパイラの専用組み込みではありません。ライブラリを読むだけでは成果物を登録しません。
+
+現在はコンパイル対象を明示的なソース文字列として渡します。現在のファイルの型検査済み宣言を暗黙に参照する機能はありません。JS は `instantiate(wasm, imports)` を公開し、整数には `bigint`、文字列には JS の文字列を使います。構造体の自動変換、任意のビルド依存グラフ、外部コマンド実行はまだありません。
+
 ## 9. 組み込み関数
 
 | 関数 | 型 |
@@ -501,20 +541,151 @@ web.serve(8080, app)    // hibana js examples/server.hb > server.mjs && node ser
 
 目標は Web とネイティブの両方です。型検査を通ったプログラムから型を消し、出力先ごとのバックエンドでコードを作ります。依存型の型と証明は実行に影響しないので、どのバックエンドも普通の値と関数だけを扱います。
 
+### 11.1 プロジェクトのスクリプト
+
+`config.hibana.toml` の `[scripts]` に、実行するシェルコマンドを文字列で定義します。パッケージと依存を記述する `hibana.toml` とは別のファイルです。
+
+```toml
+[scripts]
+build = "my-builder src/main.hb"
+dev = "my-dev-server"
+check = "my-checker src"
+```
+
+`hibana build` と `hibana dev` は同名のスクリプトを呼びます。任意の名前は `hibana script check` の形で実行します。現在のディレクトリから親へ探し、最初に見つかった `config.hibana.toml` だけを読みます。そのファイルにスクリプトが無くても、さらに親の設定には戻りません。設定ファイルのあるディレクトリを作業ディレクトリとして、`sh -c` で実行します。標準入出力と環境変数（`PATH` を含む）は親プロセスから継承します。コマンドは信頼できる設定からだけ実行してください。
+
+追加引数は `hibana build -- --release` や `hibana script check -- "src with spaces"` のように `--` の後へ書きます。引数がある場合、コマンド文字列の末尾に `"$@"` を付け、引数の値自体はシェルの位置引数として渡します。空白やシェルのメタ文字を含む値も一つの引数として保ちます。複数のコマンドをつないだスクリプトでは、末尾のコマンドへの追加になります。
+
+スクリプトの終了コードを CLI の終了コードにします。Unix でシェルがシグナルにより終了した場合は `128 + シグナル番号` にします。設定が無い・不正な TOML・`[scripts]` がテーブルでない・値が文字列でない・名前が未定義の場合は診断を出し、終了コード 1 にします。CLI の引数の書式が不正なら終了コード 2 です。
+
+`[dependencies]` に記録した外部ツールのコマンドを、スクリプト実行時の `PATH` の先頭へ追加します。それ以外は継承した `PATH` から解決します。異なる依存が同じコマンド名を公開した場合は診断を出します。その場合はスクリプトに `hibana dlx --bin コマンド npm:名前` のように識別子を書いて区別してください。`hibana new` はこの設定ファイルを作りません。
+
+外部ツールは取得元を含む `npm:名前[@版]` または `cargo:名前[@版]` で指定します。npm の scoped package は `npm:@scope/名前[@版]` です。パッケージの識別子と、そのパッケージが公開するコマンド名は別です。
+
+```sh
+hibana add npm:vite@6.1.0      # プロジェクトの設定に追加して取得
+hibana add -g cargo:ripgrep   # ユーザー共通の bin にコマンドを公開
+hibana dlx npm:vite --help # 設定には追加せず取得・実行
+hibana dlx --bin コマンド npm:パッケージ 引数
+```
+
+```toml
+[dependencies]
+"npm:vite" = "6.1.0"
+"cargo:ripgrep" = "*"
+
+[scripts]
+build = "vite build"
+```
+
+`add` は最も近い `config.hibana.toml` を更新し、無ければ現在のディレクトリに作ります。値は版の文字列（省略時 `"*"`）です。コメントや書式は保持しません。Git ベースの言語パッケージは引き続き `hibana.toml` で管理します。
+
+npm はシステムの `npm install`、Cargo は `cargo install` を使います。npm ツールの実行には Node.js、Cargo の初回取得にはビルド環境が必要です。取得・ビルド時にはパッケージ由来のスクリプトも実行されるため、信頼できるパッケージだけを指定してください。取得結果は `${XDG_DATA_HOME:-$HOME/.local/share}/hibana/` 内の `tools/v2/`（プロジェクト）または `tools/v1/`（dlx・global）に保存し、言語パッケージと同じファイル単位 CAS を使います。Cargo の一時ビルド成果物は公開前に除きますが、npm/Cargo 自身のキャッシュはそれぞれ残ります。
+
+`add -g` のコマンド配置先は同じデータディレクトリの `bin/` です。利用するにはそのパスをシェルの `PATH` に追加してください。別パッケージや手動配置の同名ファイルは上書きしません。`dlx` はパッケージ内の唯一のコマンド、またはパッケージ名と同名のコマンドを選び、それ以外は `--bin` を要求します。作業ディレクトリと標準入出力を継承し、終了コードも返します。
+
+`dlx` の Hibana 側オプションは識別子より前に指定します。識別子の後ろは、先頭にある任意の `--` 一つだけを除き、すべて実行先への引数です。たとえば `hibana dlx cargo:bottom --version` は `--version` を bottom へ渡します。後ろの `--bin` や `--rev` も実行先への引数になり、Hibana は解釈しません。
+
+Git ベースの Hibana パッケージも `dlx` で取得・実行できます。
+
+```sh
+hibana dlx hibana:https://example.com/hibana-tool.git
+hibana dlx https://example.com/hibana-tool.git
+hibana dlx --rev v1.0.0 hibana:https://example.com/hibana-tool.git
+```
+
+`hibana:` は省略できます。パッケージには `hibana.toml` と実行入口の `src/main.hb` が必要です。Git の取得結果は言語パッケージと同じ共通 CAS に保存し、URL と指定した版ごとに初回の解決結果を再利用します。実行時は一時ツリーを作り、依存を取得してからインタプリタで実行します。共通ストア内のファイルは変更せず、呼び出し元の設定や lock にも追加しません。作業ディレクトリ・標準入出力・終了コードは継承します。`--rev` は Hibana 専用、`--bin` は npm/Cargo 専用です。追加引数は子プロセスへ渡しますが、現状の Hibana 言語には引数を読み出す API がありません。Git 取得とプログラム実行は信頼できる取得元に限ってください。
+
+`hibana install` は現在のディレクトリから祖先へたどり、最も近い `config.hibana.toml` または `hibana.toml` のディレクトリをプロジェクトとして選びます。そのディレクトリの npm/Cargo ツールと Hibana の Git 依存をまとめて取得します。既存の lock と設定の条件が同じ依存は固定版を使い、新規・条件を変更した依存は解決して `config.hibana.lock.toml` を更新します。設定から削除したツールの lock 記録は取り除きます。依存が無いプロジェクトでも空の lock を作れます。
+
+`hibana install --frozen-lockfile` は lock の存在を必須とし、依存の記録不足・設定条件の変更・設定に無いツールの記録をエラーにします。保存先が空でも lock の固定版を取得しますが、成功・失敗にかかわらず lock の内容や書式は変更しません。CI ではこの形式を使えます。Hibana の Git 依存は URL と tag/branch/rev の指定も照合します。古い lock に指定条件が記録されていない場合、版指定のある依存は通常の `install` で再解決してから共有してください。
+
+プロジェクトの `add` は設定ファイルと同じディレクトリの `config.hibana.lock.toml` に、指定した条件と取得した正確な版を記録します。スクリプト実行時もこの版を使い、別環境で保存済みツールが無い場合はその版を取得します。lock が無い依存は実行前に解決・記録します。条件を変更した依存だけ再解決し、同じ条件での `add` は既存の lock を使います。
+
+```toml
+[tools."npm:vite"]
+requirement = "^6.0.0"
+version = "6.1.0"
+```
+
+既存の Git 依存の記録は保持します。ただし従来形式の Hibana 依存名 `tools` はこの表と衝突するため併用できません。破損した lock は自動的に無視せずエラーにします。設定・lock のコメントや書式は保持しません。
+
+この lock は直接指定したツールの版を固定します。npm の推移依存・integrity や Cargo の依存グラフ・ビルド環境までは固定せず、同一バイナリや依存全体の再現性を保証するものではありません。`dlx` と `add -g` はプロジェクトの lock を読み書きせず、識別子・OS・CPU ごとに初回取得結果を再利用します。自動更新・更新コマンド・削除・GC は未実装です。
+
+### 11.2 ファイルを指定する既存コマンド
+
+`hibana build <ファイル>` など、ファイルを明示する既存コマンドは維持しています。引数なしの `hibana build` とは異なり、`[scripts]` を読みません。
+
 | コマンド | 出力 | 用途 |
 |---|---|---|
 | `hibana <ファイル>` | 構文木を直接評価して実行 | 開発中の確認。マクロと型の計算もこの評価器で行う |
+| `hibana run <ファイル>` | WASM に変換し、組み込んだ Wasmtime で実行 | WASM 出力が対応するプログラムの実行 |
+| `hibana ir <ファイル>` | 型検査後の中間表現を標準出力に書く | コンパイラーの開発。整数の定数・算術演算・不変変数・整数を返す関数の呼び出しに対応し、それ以外はエラーにする |
+| `hibana wasm <ファイル> [--export 関数名 ...]` | WebAssembly のバイナリを標準出力に書く | 整数を扱う IR に対応。`--export` で公開関数を選べる |
+| `hibana glue <ファイル> --export 関数名 ...` | WASM に接続する JavaScript の ES モジュールを標準出力に書く | 同じ公開関数を指定して生成し、整数の引数を変換する |
 | `hibana js <ファイル>` | JavaScript を標準出力に書く | Web（ブラウザ・Node.js・Cloudflare Workers など） |
 | `hibana c <ファイル>` | C を標準出力に書く | ネイティブ（出力だけ欲しい時） |
 | `hibana build <ファイル>` | C を作って `cc -O2 ... -lgc` でビルドし（ヒープは Boehm GC が回収する）、拡張子を除いた名前の実行ファイルを作る | ネイティブ |
 | `hibana fmt <ファイル>` | ファイルを整形して書き戻す | 整形。トークンの並びと改行の位置は変えず、字下げ（空白4つ）・行内の空白（`,` の後、`=` `==` `&&` `=>` `->` などの前後、`{ }` の内側）・空行（続く空行は1行、括弧の直後と閉じ括弧の前は無し）・コメントの位置を整える。設定は無い。JSX の要素と `$( )` `${ }` の中は元のまま（JSX の本文は空白も文字列になるため）。`+ - * /` の前後は元の空白のまま。行の長さで改行の位置は変えない |
 | `hibana new <名前>` | `hibana.toml` と `src/main.hb` のディレクトリを作る | パッケージ（3.6 節） |
 | `hibana add <git の URL> [tag]` | `hibana.toml` に依存を足して取ってくる。名前は URL の最後の部分（`hibana-` は除く） | パッケージ（3.6 節） |
-| `hibana fetch` | 依存を取ってきて `hibana.lock` を書く | パッケージ（3.6 節） |
+| `hibana install [--frozen-lockfile]` | 設定の全依存を取得。frozen は lock を変更せず検証 | パッケージ・外部ツール |
+| `hibana fetch` | Hibana の Git 依存を取ってきて `config.hibana.lock.toml` を書く | パッケージ（3.6 節） |
 | `hibana test [ファイル...]` | `test` をインタプリタで実行し、成功した数を表示する。失敗があれば終了コード 1。ファイルを省くと、`hibana.toml` のあるディレクトリの `src` と `tests` の `.hb` すべて | テスト（3.8 節） |
 | `hibana lsp` | Language Server を標準入出力で動かす | エディタ（エラーの表示・整形・hover・定義へのジャンプ・補完・色付け）。VS Code と Zed の拡張機能は `editors/`（`editors/README.md`） |
 
-値の表し方:
+WASM 出力は関数を名前で公開します。整数は符号付き 64 ビットで、JavaScript からは `BigInt` で渡します。整数の `print` がある場合、取り込み `hibana.print` に `i64` 引数の関数を渡します。整数の範囲外や 0 による除算では WASM の実行を停止します。文字列・分岐・外部関数など、IR が扱えない構文はコンパイル時にエラーになります。
+
+ライブラリは `--export` に公開する関数を指定します。`--export` は複数回指定でき、`main` は必要ありません。型検査はライブラリ全体に行い、WASM には公開関数と、そこから呼ぶ関数だけを含めます。未使用の関数や型が IR に未対応でも、型検査を通れば含めません。
+
+```text
+// math.hb
+fn add(a: int, b: int) -> int { a + b }
+fn twice(n: int) -> int { add(n, n) }
+```
+
+```sh
+hibana wasm math.hb --export twice > math.wasm
+node -e 'const fs = require("fs"); const m = new WebAssembly.Module(fs.readFileSync("math.wasm")); console.log(new WebAssembly.Instance(m).exports.twice(21n))'
+```
+
+この例で公開されるのは `twice` だけです。`add` は内部の呼び出しに必要なので含まれます。`--export` を省いた場合は、これまでどおり `main` が必要で、すべての関数を公開します。
+
+JavaScript の接続コードは WASM と別に生成できます。`instantiate` の引数には WASM のバイト列と、必要な外部関数を渡します。公開関数には安全に表せる JavaScript の整数か `BigInt` を渡し、整数の結果は `BigInt` で受け取ります。
+
+```sh
+hibana glue math.hb --export twice > math.mjs
+node --input-type=module -e 'import fs from "node:fs"; import { instantiate } from "./math.mjs"; const math = await instantiate(fs.readFileSync("math.wasm")); console.log(math.twice(21))'
+```
+
+Rust のライブラリからは、`hibana::pipeline` の各関数を組み合わせられます。`load` は `use` のファイルを読み、`parse` は構文木を作り、`check` は型検査します。`lower` は IR を作り、`link` は IR から公開関数とその呼び出し先を選びます。`emit_wasm` と `emit_js_glue` はそれぞれバイト列と文字列を返すため、書き込みや外部ツールの起動は呼び出し側で決められます。
+
+```rust
+use hibana::pipeline::{self, Kind};
+use std::path::Path;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let source = "fn twice(n: int) -> int { n + n }";
+    let loaded = pipeline::load(source, Path::new("."))?;
+    let parsed = pipeline::parse(&loaded)?;
+    let checked = pipeline::check(parsed, Kind::Library)?;
+    let ir = pipeline::lower(&checked, None)?;
+    let exports = vec!["twice".to_string()];
+    let linked = pipeline::link(&ir, &exports)?;
+    let wasm = pipeline::emit_wasm(&linked, Some(&exports))?;
+    let glue = pipeline::emit_js_glue(&linked, &exports)?;
+    Ok(())
+}
+```
+
+現在の IR は整数の演算と呼び出しに限ります。全関数が IR に対応していない場合は、`lower(&checked, Some(&exports))` に公開関数を渡すと、使う関数だけを変換できます。任意の外部関数、文字列や配列の受け渡し、WASM モジュール同士のリンクには未対応です。
+
+```sh
+hibana wasm input.hb > input.wasm
+node -e 'const fs = require("fs"); const m = new WebAssembly.Module(fs.readFileSync("input.wasm")); new WebAssembly.Instance(m, { hibana: { print: n => console.log(n.toString()) } }).exports.main()'
+```
+
+JavaScript と C の値の表し方:
 
 | 値 | JavaScript | C |
 |---|---|---|

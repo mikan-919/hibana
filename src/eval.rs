@@ -67,6 +67,7 @@ struct Interp<'a> {
     err_at: Option<Span>,
     // ソースのこの位置より後（読み込んだライブラリ）で起きたエラーは、ここより前の、呼び出した側の位置にする
     user_end: usize,
+    in_macro: bool,
 }
 
 // 型検査を通ったプログラムを前提とする
@@ -75,7 +76,12 @@ pub fn run(prog: &Program, out: &mut dyn Write) -> Result<Value, Error> {
 }
 
 // 引数の無い関数 entry を実行する（main と hibana test のテスト）
-pub fn run_fn(prog: &Program, entry: &str, user_end: usize, out: &mut dyn Write) -> Result<Value, Error> {
+pub fn run_fn(
+    prog: &Program,
+    entry: &str,
+    user_end: usize,
+    out: &mut dyn Write,
+) -> Result<Value, Error> {
     let mut it = Interp {
         fns: prog.fns.iter().map(|f| (f.name.as_str(), f)).collect(),
         ctors: prog
@@ -94,6 +100,7 @@ pub fn run_fn(prog: &Program, entry: &str, user_end: usize, out: &mut dyn Write)
         next_h: 0,
         err_at: None,
         user_end,
+        in_macro: false,
     };
     match it.call(entry, vec![]) {
         Ok(v) | Err(Flow::Return(v)) => Ok(v),
@@ -109,16 +116,27 @@ pub fn run_fn(prog: &Program, entry: &str, user_end: usize, out: &mut dyn Write)
 }
 
 // マクロ本体を実行する。print はコンパイル時の出力として標準エラーに書く
-pub fn run_macro(b: &Block, vars: Vec<(String, Value)>) -> Result<Value, String> {
+pub fn run_macro(b: &Block, vars: Vec<(String, Value)>, prog: &Program) -> Result<Value, String> {
     let mut err = std::io::stderr();
     let mut it = Interp {
-        fns: HashMap::new(),
-        ctors: HashMap::new(),
+        fns: prog.fns.iter().map(|f| (f.name.as_str(), f)).collect(),
+        ctors: prog
+            .datas
+            .iter()
+            .flat_map(|d| &d.ctors)
+            .map(|c| {
+                (
+                    c.name.as_str(),
+                    c.fields.iter().map(|f| f.0.as_str()).collect(),
+                )
+            })
+            .collect(),
         out: &mut err,
         handlers: Vec::new(),
         next_h: 0,
         err_at: None,
         user_end: usize::MAX,
+        in_macro: true,
     };
     match it.block(b, &mut vec![vars.into_iter().collect()]) {
         Ok(v) | Err(Flow::Return(v)) => Ok(v),
@@ -241,9 +259,15 @@ impl Interp<'_> {
                 )));
             }
             ("chars", Value::Str(s)) => {
-                return Ok(Some(Value::Arr(Rc::new(s.chars().map(|c| Value::Str(c.to_string().into())).collect()))));
+                return Ok(Some(Value::Arr(Rc::new(
+                    s.chars()
+                        .map(|c| Value::Str(c.to_string().into()))
+                        .collect(),
+                ))));
             }
-            ("code", Value::Str(s)) => return Ok(Some(Value::Int(s.chars().next().map_or(-1, |c| c as i64)))),
+            ("code", Value::Str(s)) => {
+                return Ok(Some(Value::Int(s.chars().next().map_or(-1, |c| c as i64))));
+            }
             ("ident", Value::Str(s)) => {
                 let tok = Token {
                     tok: Tok::Ident(s.to_string()),
@@ -590,6 +614,71 @@ impl Interp<'_> {
                 {
                     // 型を作る呼び出し（Option(int) など）。実行時には名前だけを持つ
                     Value::Ty(name.as_str().into())
+                } else if matches!(
+                    name.as_str(),
+                    "artifact" | "compile" | "inspect_exports" | "utf8"
+                ) {
+                    if !self.in_macro {
+                        return Err(Flow::Error(format!("{name} はコンパイル時だけ使えます")));
+                    }
+                    let str_arg = |i: usize| -> R<String> {
+                        match vs.get(i) {
+                            Some(Value::Str(s)) => Ok(s.to_string()),
+                            _ => Err(Flow::Error(format!("{name} の引数は str"))),
+                        }
+                    };
+                    let bytes_value = |bytes: Vec<u8>| {
+                        Value::Arr(Rc::new(
+                            bytes.into_iter().map(|b| Value::Int(b as i64)).collect(),
+                        ))
+                    };
+                    match name.as_str() {
+                        "utf8" => bytes_value(str_arg(0)?.into_bytes()),
+                        "artifact" => {
+                            let path = str_arg(0)?;
+                            let Some(Value::Arr(values)) = vs.get(1) else {
+                                return Err(Flow::Error("artifact の内容は Vec<int>".into()));
+                            };
+                            let contents = values
+                                .iter()
+                                .map(|v| match v {
+                                    Value::Int(n) => u8::try_from(*n).map_err(|_| {
+                                        Flow::Error("artifact のバイトは0..255".into())
+                                    }),
+                                    _ => Err(Flow::Error("artifact の内容は Vec<int>".into())),
+                                })
+                                .collect::<R<Vec<u8>>>()?;
+                            crate::build::register(crate::build::Request { path, contents })
+                                .map_err(Flow::Error)?;
+                            Value::Unit
+                        }
+                        _ => {
+                            let source = str_arg(0)?;
+                            let index = if name == "compile" { 2 } else { 1 };
+                            let Some(Value::Arr(values)) = vs.get(index) else {
+                                return Err(Flow::Error(format!("{name} の公開名は Vec<str>")));
+                            };
+                            let exports = values
+                                .iter()
+                                .map(|v| match v {
+                                    Value::Str(s) => Ok(s.to_string()),
+                                    _ => Err(Flow::Error(format!("{name} の公開名は str"))),
+                                })
+                                .collect::<R<Vec<String>>>()?;
+                            if name == "compile" {
+                                bytes_value(
+                                    crate::pipeline::compile(&source, &str_arg(1)?, &exports)
+                                        .map_err(|e| Flow::Error(e.to_string()))?,
+                                )
+                            } else {
+                                Value::Str(
+                                    crate::pipeline::inspect_exports(&source, &exports)
+                                        .map_err(|e| Flow::Error(e.to_string()))?
+                                        .into(),
+                                )
+                            }
+                        }
+                    }
                 } else if let Some(v) = self.syn_fn(name, &mut vs)? {
                     v
                 } else if name == "print" {
@@ -676,19 +765,27 @@ impl Interp<'_> {
                 r?
             }
             // x = push(x, e): 他から指されていなければ（Rc が一つなら）写さずに足す
-            Expr::Assign(name, x) if x.self_push(name).is_some() && !self.fns.contains_key("push") => {
+            Expr::Assign(name, x)
+                if x.self_push(name).is_some() && !self.fns.contains_key("push") =>
+            {
                 let v = self.expr(x.self_push(name).unwrap(), env)?;
                 let slot = env.iter_mut().rev().find_map(|s| s.get_mut(name)).unwrap();
-                let Value::Arr(xs) = slot else { unreachable!("型検査済み") };
+                let Value::Arr(xs) = slot else {
+                    unreachable!("型検査済み")
+                };
                 Rc::make_mut(xs).push(v);
                 Value::Unit
             }
-            Expr::Assign(name, x) if x.self_set(name).is_some() && !self.fns.contains_key("set_at") => {
+            Expr::Assign(name, x)
+                if x.self_set(name).is_some() && !self.fns.contains_key("set_at") =>
+            {
                 let (i, e) = x.self_set(name).unwrap();
                 let i = int(self.expr(i, env)?);
                 let v = self.expr(e, env)?;
                 let slot = env.iter_mut().rev().find_map(|s| s.get_mut(name)).unwrap();
-                let Value::Arr(xs) = slot else { unreachable!("型検査済み") };
+                let Value::Arr(xs) = slot else {
+                    unreachable!("型検査済み")
+                };
                 Rc::make_mut(xs)[i as usize] = v;
                 Value::Unit
             }

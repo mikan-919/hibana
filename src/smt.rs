@@ -33,7 +33,7 @@ impl Smt {
     }
 
     // facts がすべて真なら goal も真か。答えが出ない時は false
-    pub fn prove(&mut self, facts: &[V], goal: &V) -> bool {
+    pub(crate) fn prove(&mut self, facts: &[V], goal: &V) -> bool {
         // HIBANA_NO_Z3 を設定するか without_z3 の中では Z3 を使わない（組み込みの証明器だけで示せるかを確かめる）
         if NO_Z3.get() || std::env::var_os("HIBANA_NO_Z3").is_some() {
             return false;

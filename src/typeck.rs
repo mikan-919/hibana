@@ -122,6 +122,9 @@ const SYN_FNS: &[(&str, &[&str], &str)] = &[
     ("ident", &["str"], "syn"),
 ];
 
+// マクロ専用。Vec<str> の引数は個別に検査する
+const BUILD_FNS: &[&str] = &["artifact", "compile", "inspect_exports", "utf8"];
+
 // どこでも使える組み込み関数
 const BUILTINS: &[&str] = &[
     "print",
@@ -371,8 +374,15 @@ fn mentions(v: &V, id: usize) -> bool {
 fn replace_len(v: &V, id: usize, t: &V) -> V {
     if let V::Neu(n) = v {
         match &**n {
-            Neu::Call(f, a) if f == "len" && matches!(&a[..], [V::Neu(x)] if matches!(&**x, Neu::Var(i, _) if *i == id)) => return t.clone(),
-            Neu::Bin(op, a, b) if matches!(*op, "+" | "-") => return Norm::bin(op, replace_len(a, id, t), replace_len(b, id, t)),
+            Neu::Call(f, a)
+                if f == "len"
+                    && matches!(&a[..], [V::Neu(x)] if matches!(&**x, Neu::Var(i, _) if *i == id)) =>
+            {
+                return t.clone();
+            }
+            Neu::Bin(op, a, b) if matches!(*op, "+" | "-") => {
+                return Norm::bin(op, replace_len(a, id, t), replace_len(b, id, t));
+            }
             _ => {}
         }
     }
@@ -504,7 +514,9 @@ impl Norm<'_> {
             V::Str(s) => V::Int(s.chars().count() as i64),
             V::Neu(n) => match &**n {
                 // push は 1 つ増やし、set_at は変えない
-                Neu::Call(f, a) if f == "push" && a.len() == 2 => Self::bin("+", Self::len(a[0].clone()), V::Int(1)),
+                Neu::Call(f, a) if f == "push" && a.len() == 2 => {
+                    Self::bin("+", Self::len(a[0].clone()), V::Int(1))
+                }
                 Neu::Call(f, a) if f == "set_at" && a.len() == 3 => Self::len(a[0].clone()),
                 _ => neu(Neu::Call("len".into(), vec![v.clone()])),
             },
@@ -971,7 +983,9 @@ fn op_site(fns: &HashMap<&str, &Fn>, f: &Fn, eff: &str) -> Option<(usize, usize)
         if let Expr::At(sp, inner) = x
             && let Expr::Call(n, _) = inner.peel()
             && found.is_none()
-            && fns.get(n.as_str()).is_some_and(|g| g.op.as_deref() == Some(eff))
+            && fns
+                .get(n.as_str())
+                .is_some_and(|g| g.op.as_deref() == Some(eff))
         {
             found = Some((sp.start.offset, sp.end.offset - sp.start.offset));
         }
@@ -1187,7 +1201,13 @@ fn components<'a>(graph: &HashMap<&'a str, Vec<String>>) -> HashMap<&'a str, usi
             }
         }
     }
-    let mut t = T { graph, index: HashMap::new(), stack: vec![], on: Default::default(), comp: HashMap::new() };
+    let mut t = T {
+        graph,
+        index: HashMap::new(),
+        stack: vec![],
+        on: Default::default(),
+        comp: HashMap::new(),
+    };
     let mut names: Vec<&str> = graph.keys().copied().collect();
     names.sort();
     for v in names {
@@ -1221,6 +1241,15 @@ pub struct Info {
 // 型検査して、省いた制約の実装を呼び出しに足す。足したら、アドレスで覚える情報のためにもう一度検査する
 // ponytail: 実装を省いた呼び出しがあると2回検査する。遅ければ足した式を記録の側で持つ
 pub fn elaborate(prog: &mut Program) -> R<Info> {
+    elaborate_mode(prog, true)
+}
+
+pub fn elaborate_library(prog: &mut Program) -> R<Info> {
+    elaborate_mode(prog, false)
+}
+
+fn elaborate_mode(prog: &mut Program, require_main: bool) -> R<Info> {
+    let check = |p: &Program| check_prog(p, require_main).map_err(Error::with_line);
     let info = check(prog)?;
     if info.elab.is_empty() {
         return Ok(info);
@@ -1247,9 +1276,11 @@ fn elab_block(b: &mut Block, m: &HashMap<usize, Vec<Expr>>) {
 fn elab_expr(e: &mut Expr, m: &HashMap<usize, Vec<Expr>>) {
     match e {
         Expr::Call(_, xs) | Expr::Array(xs) => xs.iter_mut().for_each(|x| elab_expr(x, m)),
-        Expr::At(_, x) | Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Assign(_, x) | Expr::Return(Some(x)) => {
-            elab_expr(x, m)
-        }
+        Expr::At(_, x)
+        | Expr::Unary(_, x)
+        | Expr::Field(x, _)
+        | Expr::Assign(_, x)
+        | Expr::Return(Some(x)) => elab_expr(x, m),
         Expr::Binary(_, a, b) | Expr::Index(a, b) => {
             elab_expr(a, m);
             elab_expr(b, m);
@@ -1290,13 +1321,20 @@ fn elab_expr(e: &mut Expr, m: &HashMap<usize, Vec<Expr>>) {
     };
     // a == b は std.eq(a, b, 実装)、to_str(x) は std.show(x, 実装)、print(x) は print(std.show(x, 実装))
     let with = |f: &Expr, xs: Vec<Expr>| match f {
-        Expr::Call(n, inst) => Expr::Call(n.clone(), xs.into_iter().chain(inst.iter().cloned()).collect()),
+        Expr::Call(n, inst) => Expr::Call(
+            n.clone(),
+            xs.into_iter().chain(inst.iter().cloned()).collect(),
+        ),
         _ => unreachable!(),
     };
     match e {
         Expr::Binary(op, a, b) => {
             let c = with(&add[0], vec![(**a).clone(), (**b).clone()]);
-            *e = if *op == "!=" { Expr::Unary("!", Box::new(c)) } else { c };
+            *e = if *op == "!=" {
+                Expr::Unary("!", Box::new(c))
+            } else {
+                c
+            };
         }
         Expr::Call(n, xs) if n == "to_str" => *e = with(&add[0], xs.clone()),
         Expr::Call(n, xs) if n == "print" => xs[0] = with(&add[0], vec![xs[0].clone()]),
@@ -1314,7 +1352,7 @@ fn is_impl(name: &str) -> bool {
 }
 
 pub fn check(prog: &Program) -> R<Info> {
-    check_prog(prog).map_err(Error::with_line)
+    check_prog(prog, true).map_err(Error::with_line)
 }
 
 // 位置が分かっている宣言・腕の誤りには、その位置を付ける（内側で付いた位置は残す）
@@ -1325,7 +1363,7 @@ fn at_opt(e: Error, s: Option<Span>) -> Error {
     }
 }
 
-fn check_prog(prog: &Program) -> R<Info> {
+fn check_prog(prog: &Program, require_main: bool) -> R<Info> {
     let fns = &prog.fns;
     let mut ck = Ck {
         norm: Norm::new(),
@@ -1367,12 +1405,15 @@ fn check_prog(prog: &Program) -> R<Info> {
     for (n, sp) in prog
         .datas
         .iter()
-        .flat_map(|d| std::iter::once((&d.name, d.span)).chain(d.ctors.iter().map(|c| (&c.name, d.span))))
+        .flat_map(|d| {
+            std::iter::once((&d.name, d.span)).chain(d.ctors.iter().map(|c| (&c.name, d.span)))
+        })
         .chain(fns.iter().map(|f| (&f.name, f.span)))
     {
         let reserved = BUILTINS.contains(&n.as_str())
             || PRIMS.contains(&n.as_str())
-            || SYN_FNS.iter().any(|s| s.0 == n);
+            || SYN_FNS.iter().any(|s| s.0 == n)
+            || BUILD_FNS.contains(&n.as_str());
         if reserved || names.contains(&n.as_str()) {
             return Err(at_opt(format!("名前 {n} が重複している").into(), sp));
         }
@@ -1413,9 +1454,11 @@ fn check_prog(prog: &Program) -> R<Info> {
             break;
         }
     }
-    match ck.norm.fns.get("main") {
-        Some(f) if f.params.is_empty() => {}
-        _ => return Err("引数なしの main 関数が必要".into()),
+    if require_main {
+        match ck.norm.fns.get("main") {
+            Some(f) if f.params.is_empty() => {}
+            _ => return Err("引数なしの main 関数が必要".into()),
+        }
     }
     for f in fns {
         check_fn(&mut ck, f).map_err(|e| at_opt(e, f.span))?;
@@ -1461,7 +1504,16 @@ fn check_fn(ck: &mut Ck, f: &Fn) -> R<()> {
     if never_fn {
         let mut ret_found = false;
         let tail = f.body.tail.iter().map(|t| &**t);
-        for e in f.body.stmts.iter().map(|s| match s { Stmt::Let { init, .. } => init, Stmt::Expr(e) => e }).chain(tail) {
+        for e in f
+            .body
+            .stmts
+            .iter()
+            .map(|s| match s {
+                Stmt::Let { init, .. } => init,
+                Stmt::Expr(e) => e,
+            })
+            .chain(tail)
+        {
             walk(e, &mut |x| ret_found |= matches!(x, Expr::Return(_)));
         }
         if ret_found {
@@ -1494,7 +1546,9 @@ fn check_fn(ck: &mut Ck, f: &Fn) -> R<()> {
         ck.block(&f.body).ctx(r)?;
     } else if never_fn {
         if ck.block(&f.body).ctx(r)? != prim("never") {
-            return Err(r("戻り値が never の関数は、panic などの戻らない式で終わる必要がある").into());
+            return Err(
+                r("戻り値が never の関数は、panic などの戻らない式で終わる必要がある").into(),
+            );
         }
     } else {
         ck.check_block(&f.body, &ret)
@@ -1504,11 +1558,21 @@ fn check_fn(ck: &mut Ck, f: &Fn) -> R<()> {
 }
 
 // マクロ本体を、束縛名を syn 型の変数として検査する。値は syn 型でなければならない
-pub fn check_macro(b: &Block, params: &Kinds, rules: &HashMap<String, Kinds>) -> R<()> {
-    check_macro_body(b, params, rules).map_err(Error::with_line)
+pub fn check_macro(
+    b: &Block,
+    params: &Kinds,
+    rules: &HashMap<String, Kinds>,
+    prog: &Program,
+) -> R<()> {
+    check_macro_body(b, params, rules, prog).map_err(Error::with_line)
 }
 
-fn check_macro_body(b: &Block, params: &Kinds, rules: &HashMap<String, Kinds>) -> R<()> {
+fn check_macro_body(
+    b: &Block,
+    params: &Kinds,
+    rules: &HashMap<String, Kinds>,
+    prog: &Program,
+) -> R<()> {
     let mut ck = Ck {
         norm: Norm::new(),
         scopes: vec![Scope::default()],
@@ -1532,6 +1596,36 @@ fn check_macro_body(b: &Block, params: &Kinds, rules: &HashMap<String, Kinds>) -
         impls: Vec::new(),
         effect_names: Default::default(),
     };
+    for f in &prog.fns {
+        ck.norm.fns.insert(&f.name, f);
+    }
+    for d in &prog.datas {
+        ck.norm.datas.insert(&d.name, d);
+        for c in &d.ctors {
+            ck.norm.ctors.insert(&c.name, (d, c));
+        }
+        ck.levels.insert(d.name.clone(), 0);
+    }
+    let mut pending = Vec::new();
+    walk(&Expr::Block(b.clone()), &mut |e| {
+        if let Expr::Call(n, _) | Expr::Var(n) = e {
+            pending.push(n.clone());
+        }
+    });
+    let mut checked = std::collections::HashSet::new();
+    while let Some(n) = pending.pop() {
+        if !checked.insert(n.clone()) {
+            continue;
+        }
+        if let Some(f) = prog.fns.iter().find(|f| f.name == n) {
+            pending.extend(callees(f));
+            check_fn(&mut ck, f)?;
+        }
+    }
+    ck.scopes = vec![Scope::default()];
+    ck.ret = prim("syn");
+    ck.cur_fn = None;
+    ck.cur_params.clear();
     for (p, k) in params {
         let v = ck.norm.opaque();
         ck.bind(p, syn_of(k), v, false)?;
@@ -1615,19 +1709,25 @@ impl Ck<'_> {
     fn new_len(&mut self, name: &str, x: &Expr) -> R<Option<(V, V)>> {
         let val = self.lookup(name).unwrap().val.clone();
         let V::Neu(n) = &val else { return Ok(None) };
-        let Neu::Var(id, _) = &**n else { return Ok(None) };
+        let Neu::Var(id, _) = &**n else {
+            return Ok(None);
+        };
         let id = *id;
         let mut l = Norm::len(self.eval_value(x)?);
         if mentions(&l, id) {
             let own = Norm::len(val.clone());
-            let known = self.scopes.iter().flat_map(|s| &s.facts).find_map(|f| match f {
-                V::Neu(n) => match &**n {
-                    Neu::Bin("==", a, b) if *a == own && !mentions(b, id) => Some(b.clone()),
-                    Neu::Bin("==", a, b) if *b == own && !mentions(a, id) => Some(a.clone()),
+            let known = self
+                .scopes
+                .iter()
+                .flat_map(|s| &s.facts)
+                .find_map(|f| match f {
+                    V::Neu(n) => match &**n {
+                        Neu::Bin("==", a, b) if *a == own && !mentions(b, id) => Some(b.clone()),
+                        Neu::Bin("==", a, b) if *b == own && !mentions(a, id) => Some(a.clone()),
+                        _ => None,
+                    },
                     _ => None,
-                },
-                _ => None,
-            });
+                });
             let Some(t) = known else { return Ok(None) };
             l = replace_len(&l, id, &t);
             if mentions(&l, id) {
@@ -1773,7 +1873,11 @@ impl Ck<'_> {
     fn in_range(&mut self, v: &Expr, i: &Expr) -> R<()> {
         let (vv, iv) = (self.eval_value(v)?, self.eval_value(i)?);
         let len = Norm::len(vv);
-        let goal = Norm::bin("&&", Norm::bin("<=", V::Int(0), iv.clone()), Norm::bin("<", iv, len));
+        let goal = Norm::bin(
+            "&&",
+            Norm::bin("<=", V::Int(0), iv.clone()),
+            Norm::bin("<", iv, len),
+        );
         if !self.prove(&goal) {
             return Err(format!("添字の範囲 {} を証明できない", show(&goal)).into());
         }
@@ -2316,6 +2420,28 @@ impl Ck<'_> {
                     _ => prim("syn"),
                 }
             }
+            Expr::Call(name, args) if BUILD_FNS.contains(&name.as_str()) => {
+                if !self.in_macro {
+                    return Err(format!("{name} はマクロ本体でだけ使えます").into());
+                }
+                let str_t = prim("str");
+                let bytes = V::VecT(Rc::new(prim("int")));
+                let names = V::VecT(Rc::new(str_t.clone()));
+                let (ps, ret) = match name.as_str() {
+                    "artifact" => (vec![str_t.clone(), bytes.clone()], prim("unit")),
+                    "compile" => (vec![str_t.clone(), str_t.clone(), names], bytes),
+                    "inspect_exports" => (vec![str_t.clone(), names], str_t.clone()),
+                    "utf8" => (vec![str_t.clone()], bytes),
+                    _ => unreachable!(),
+                };
+                if args.len() != ps.len() {
+                    return Err(format!("{name} の引数は{}個", ps.len()).into());
+                }
+                for (a, p) in args.iter().zip(&ps) {
+                    self.check(a, p)?;
+                }
+                ret
+            }
             Expr::Call(name, args) if self.in_macro && SYN_FNS.iter().any(|s| s.0 == name) => {
                 let (_, params, ret) = SYN_FNS.iter().find(|s| s.0 == name).unwrap();
                 if params.len() != args.len() {
@@ -2341,7 +2467,11 @@ impl Ck<'_> {
                 let t = en.ty.clone();
                 self.check(x, &t).ctx(|e| format!("変数 {name}: {e}"))?;
                 // 代入前の長さが分かっていれば、新しい長さを代入前の変数を使わない式にして事実にする
-                let new_len = if matches!(base(&t), V::VecT(_)) { self.new_len(name, x)? } else { None };
+                let new_len = if matches!(base(&t), V::VecT(_)) {
+                    self.new_len(name, x)?
+                } else {
+                    None
+                };
                 self.forget(name)?;
                 if let Some((v, l)) = new_len {
                     self.add_fact(Norm::bin("==", Norm::len(v), l));
@@ -2601,7 +2731,10 @@ impl Ck<'_> {
                 .iter()
                 .any(|id| !sol.contains_key(id) && mentions(&t, *id))
             {
-                let open = |v: &V| ids.iter().any(|id| !sol.contains_key(id) && mentions(v, *id));
+                let open = |v: &V| {
+                    ids.iter()
+                        .any(|id| !sol.contains_key(id) && mentions(v, *id))
+                };
                 let at = match (a.peel(), base(&t)) {
                     // 引数の型が決まっていれば、無名関数の引数の型を省ける。戻り値の型と効果は本体から求める
                     (Expr::Lam(ps, ret, effs, body), V::Pi(p)) if !p.doms.iter().any(open) => {
@@ -2757,7 +2890,9 @@ impl Ck<'_> {
                 ids.push(id);
                 fenv[0].insert(p.clone(), neu(Neu::Var(id, format!("?{p}"))));
             }
-            let rt = self.norm.eval_or_opaque(f.ret.as_ref().unwrap(), &mut fenv)?;
+            let rt = self
+                .norm
+                .eval_or_opaque(f.ret.as_ref().unwrap(), &mut fenv)?;
             let mut sol = HashMap::new();
             if !self.unify(&rt, goal, &ids, &mut sol)? {
                 continue;
@@ -2809,7 +2944,8 @@ impl Ck<'_> {
             .chain(self.norm.fns.keys().copied())
             .chain(STR_FNS.iter().map(|s| s.0))
             .chain([
-                "print", "len", "push", "set_at", "to_str", "new_ref", "read", "write", "all", "resume",
+                "print", "len", "push", "set_at", "to_str", "new_ref", "read", "write", "all",
+                "resume",
             ])
             .map(|k| k.to_string());
         let best = names
@@ -2829,7 +2965,12 @@ impl Ck<'_> {
         if key == "Async" && self.in_arm > 0 {
             return Err("handle の腕の中では Async の効果を起こせない".into());
         }
-        let Some(slot) = self.avail.iter_mut().rev().find(|(n, _)| *n == key || n == "*") else {
+        let Some(slot) = self
+            .avail
+            .iter_mut()
+            .rev()
+            .find(|(n, _)| *n == key || n == "*")
+        else {
             let s = show(&inst);
             return Err(format!(
                 "効果 {s} を起こすには、関数の型に ! {s} を書くか、handle で処理する"
@@ -2862,10 +3003,16 @@ impl Ck<'_> {
                 return Err(at_opt(format!("未定義の操作 {}", a.ctor).into(), a.span));
             };
             let Some(e) = &f.op else {
-                return Err(at_opt(format!("{} は効果の操作でない", a.ctor).into(), a.span));
+                return Err(at_opt(
+                    format!("{} は効果の操作でない", a.ctor).into(),
+                    a.span,
+                ));
             };
             if arms.iter().filter(|b| b.ctor == a.ctor).count() > 1 {
-                return Err(at_opt(format!("操作 {} の腕が重複している", a.ctor).into(), a.span));
+                return Err(at_opt(
+                    format!("操作 {} の腕が重複している", a.ctor).into(),
+                    a.span,
+                ));
             }
             if a.binds.len() != f.params.len() - f.implicit {
                 return Err(at_opt(
@@ -2928,7 +3075,8 @@ impl Ck<'_> {
             r
         })();
         self.pop();
-        r.ctx(|e| format!("操作 {} の腕: {e}", a.ctor)).map_err(|e| at_opt(e, a.span))
+        r.ctx(|e| format!("操作 {} の腕: {e}", a.ctor))
+            .map_err(|e| at_opt(e, a.span))
     }
 
     // トップレベルの関数を値として使った時の型
@@ -3085,7 +3233,11 @@ impl Ck<'_> {
             if let Some((p, _)) = hint {
                 let mut x = p.doms[i].clone();
                 for (j, id) in ids.iter().enumerate() {
-                    x = self.norm.subst(&x, binder(p.level, j), &neu(Neu::Var(*id, params[j].0.clone())))?;
+                    x = self.norm.subst(
+                        &x,
+                        binder(p.level, j),
+                        &neu(Neu::Var(*id, params[j].0.clone())),
+                    )?;
                 }
                 d = Some(x);
             }
@@ -3131,7 +3283,11 @@ impl Ck<'_> {
             for e in &p.effs {
                 let mut e = e.clone();
                 for (j, id) in ids.iter().enumerate() {
-                    e = self.norm.subst(&e, binder(p.level, j), &neu(Neu::Var(*id, params[j].0.clone())))?;
+                    e = self.norm.subst(
+                        &e,
+                        binder(p.level, j),
+                        &neu(Neu::Var(*id, params[j].0.clone())),
+                    )?;
                 }
                 for e in flat(&[e]) {
                     self.note_body(&e, body);
@@ -3637,8 +3793,10 @@ impl Ck<'_> {
                     .into()));
                 }
                 covered.push(c.name.clone());
-                let Some((mut substs, fvals)) =
-                    self.enter_ctor(d, c, &dt.1, Some(&arm.binds)).ctx(r).map_err(at)?
+                let Some((mut substs, fvals)) = self
+                    .enter_ctor(d, c, &dt.1, Some(&arm.binds))
+                    .ctx(r)
+                    .map_err(at)?
                 else {
                     // 添字が合わないので、この場合は起こらない
                     self.pop();
@@ -4081,4 +4239,51 @@ fn main() {
             assert!(e.contains(msg), "{to} => {e}");
         }
     }
+}
+
+// ホスト機能へ到達する関数はコンパイル時専用。
+pub(crate) fn compile_only(prog: &Program) -> std::collections::HashSet<String> {
+    let mut names: std::collections::HashSet<String> =
+        BUILD_FNS.iter().map(|n| n.to_string()).collect();
+    loop {
+        let before = names.len();
+        for f in &prog.fns {
+            if callees(f).iter().any(|n| names.contains(n)) {
+                names.insert(f.name.clone());
+            }
+        }
+        if before == names.len() {
+            break;
+        }
+    }
+    let host = names.clone();
+    // ビルド専用関数からだけ呼ばれる純粋な補助関数も実行時に残さない。
+    loop {
+        let before = names.len();
+        for f in &prog.fns {
+            if names.contains(&f.name) {
+                names.extend(callees(f));
+            }
+        }
+        if before == names.len() {
+            break;
+        }
+    }
+    let mut runtime = std::collections::HashSet::new();
+    let mut pending: Vec<String> = prog
+        .fns
+        .iter()
+        .filter(|f| f.name == "main" || !names.contains(&f.name))
+        .map(|f| f.name.clone())
+        .collect();
+    while let Some(n) = pending.pop() {
+        if !runtime.insert(n.clone()) {
+            continue;
+        }
+        if let Some(f) = prog.fns.iter().find(|f| f.name == n) {
+            pending.extend(callees(f));
+        }
+    }
+    names.retain(|n| host.contains(n) || !runtime.contains(n));
+    names
 }
