@@ -56,44 +56,46 @@ fn assert_error(output: &Output) {
 }
 
 #[test]
-fn scripts_build_and_dev_execute_shell_commands() {
+fn dev_executes_shell_commands() {
     let fixture = Fixture::new();
-    fixture.write(
-        "config.hibana.toml",
-        "[scripts]\nbuild = \"printf build\"\ndev = \"printf dev\"\n",
-    );
-    assert_eq!(stdout(&fixture.run(&["build"])), "build");
+    fixture.write("config.hibana.toml", "[scripts]\ndev = \"printf dev\"\n");
     assert_eq!(stdout(&fixture.run(&["dev"])), "dev");
 }
 
 #[test]
 fn scripts_find_parent_config_and_run_in_its_directory() {
     let fixture = Fixture::new();
-    fixture.write("config.hibana.toml", "[scripts]\nbuild = \"cat marker\"\n");
+    fixture.write("config.hibana.toml", "[scripts]\ndev = \"cat marker\"\n");
     fixture.write("marker", "project root\n");
     let nested = fixture.0.join("src/nested");
     std::fs::create_dir_all(&nested).unwrap();
     // パッケージ用設定はスクリプトの探索を遮らない。
     fixture.write("src/hibana.toml", "[package]\nname = \"nested\"\n");
-    assert_eq!(stdout(&run(&nested, &["build"])), "project root\n");
+    assert_eq!(stdout(&run(&nested, &["dev"])), "project root\n");
 }
 
 #[test]
 fn scripts_nearest_config_wins_without_falling_back() {
     let fixture = Fixture::new();
-    fixture.write("config.hibana.toml", "[scripts]\nbuild = \"printf outer\"\n");
+    fixture.write("config.hibana.toml", "[scripts]\ndev = \"printf outer\"\n");
     let nested = fixture.0.join("nested");
     std::fs::create_dir(&nested).unwrap();
-    fixture.write("nested/config.hibana.toml", "[scripts]\nbuild = \"printf inner\"\n");
-    assert_eq!(stdout(&run(&nested, &["build"])), "inner");
-    fixture.write("nested/config.hibana.toml", "[scripts]\ndev = \"printf inner\"\n");
-    assert_error(&run(&nested, &["build"]));
+    fixture.write(
+        "nested/config.hibana.toml",
+        "[scripts]\ndev = \"printf inner\"\n",
+    );
+    assert_eq!(stdout(&run(&nested, &["dev"])), "inner");
+    fixture.write("nested/config.hibana.toml", "[scripts]\n");
+    assert_error(&run(&nested, &["dev"]));
 }
 
 #[test]
-fn scripts_named_command_preserves_arguments_without_shell_injection() {
+fn dev_preserves_arguments_without_shell_injection() {
     let fixture = Fixture::new();
-    fixture.write("config.hibana.toml", "[scripts]\ncheck = \"printf '<%s>\\n'\"\n");
+    fixture.write(
+        "config.hibana.toml",
+        "[scripts]\ndev = \"printf '<%s>\\n'\"\n",
+    );
     let args = [
         "space value",
         "",
@@ -103,7 +105,7 @@ fn scripts_named_command_preserves_arguments_without_shell_injection() {
         "*",
         "日本語",
     ];
-    let mut command = vec!["script", "check", "--"];
+    let mut command = vec!["dev", "--"];
     command.extend(args);
     let expected: String = args.iter().map(|arg| format!("<{arg}>\n")).collect();
     assert_eq!(stdout(&fixture.run(&command)), expected);
@@ -111,11 +113,11 @@ fn scripts_named_command_preserves_arguments_without_shell_injection() {
 }
 
 #[test]
-fn scripts_build_accepts_arguments_after_separator() {
+fn dev_accepts_arguments_after_separator() {
     let fixture = Fixture::new();
-    fixture.write("config.hibana.toml", "[scripts]\nbuild = \"printf '<%s>'\"\n");
+    fixture.write("config.hibana.toml", "[scripts]\ndev = \"printf '<%s>'\"\n");
     assert_eq!(
-        stdout(&fixture.run(&["build", "--", "a b", "--release"])),
+        stdout(&fixture.run(&["dev", "--", "a b", "--release"])),
         "<a b><--release>"
     );
 }
@@ -123,44 +125,56 @@ fn scripts_build_accepts_arguments_after_separator() {
 #[test]
 fn scripts_preserve_nonzero_exit_status() {
     let fixture = Fixture::new();
-    fixture.write("config.hibana.toml", "[scripts]\nbuild = \"exit 37\"\n");
-    assert_eq!(fixture.run(&["build"]).status.code(), Some(37));
+    fixture.write("config.hibana.toml", "[scripts]\ndev = \"exit 37\"\n");
+    assert_eq!(fixture.run(&["dev"]).status.code(), Some(37));
 }
 
 #[cfg(unix)]
 #[test]
 fn scripts_map_signal_exit_to_shell_status() {
     let fixture = Fixture::new();
-    fixture.write("config.hibana.toml", "[scripts]\nbuild = \"kill -TERM $$\"\n");
-    assert_eq!(fixture.run(&["build"]).status.code(), Some(143));
+    fixture.write("config.hibana.toml", "[scripts]\ndev = \"kill -TERM $$\"\n");
+    assert_eq!(fixture.run(&["dev"]).status.code(), Some(143));
 }
 
 #[test]
 fn scripts_reject_missing_invalid_and_undefined_configuration() {
     let fixture = Fixture::new();
     // hibana.toml は config.hibana.toml の代わりにはならない。
-    fixture.write("hibana.toml", "[scripts]\nbuild = \"printf wrong-config\"\n");
-    assert_error(&fixture.run(&["build"]));
+    fixture.write("hibana.toml", "[scripts]\ndev = \"printf wrong-config\"\n");
+    assert_error(&fixture.run(&["dev"]));
     for config in [
         "[scripts\n",
         "scripts = 42\n",
-        "[scripts]\nbuild = 42\n",
-        "[scripts]\nbuild = ['printf', 'invalid']\n",
-        "[scripts]\ndev = \"printf dev\"\n",
+        "[scripts]\ndev = 42\n",
+        "[scripts]\ndev = ['printf', 'invalid']\n",
+        "[scripts]\nbuild = \"printf build\"\n",
     ] {
         fixture.write("config.hibana.toml", config);
-        assert_error(&fixture.run(&["build"]));
+        assert_error(&fixture.run(&["dev"]));
     }
-    fixture.write("config.hibana.toml", "[scripts]\nbuild = \"printf build\"\n");
-    assert_error(&fixture.run(&["script", "missing"]));
+    fixture.write("config.hibana.toml", "[scripts]\n");
+    assert_error(&fixture.run(&["dev"]));
 }
 
 #[test]
-fn scripts_do_not_override_explicit_legacy_build_input() {
+fn removed_build_and_script_commands_do_not_execute() {
     let fixture = Fixture::new();
-    fixture.write("config.hibana.toml", "[scripts]\nbuild = \"touch script-ran\"\n");
-    let result = fixture.run(&["build", "missing.hb"]);
-    assert!(!result.status.success());
-    assert!(!result.stderr.is_empty());
-    assert!(!fixture.0.join("script-ran").exists());
+    fixture.write(
+        "config.hibana.toml",
+        "[scripts]\nbuild = \"touch script-ran\"\ncheck = \"touch script-ran\"\n",
+    );
+    fixture.write("script", "println(\"must not execute\")\n");
+    for args in [
+        vec!["build"],
+        vec!["script"],
+        vec!["script", "build"],
+        vec!["script", "check", "--", "arg"],
+    ] {
+        let result = fixture.run(&args);
+        assert_eq!(result.status.code(), Some(2), "{result:?}");
+        assert!(!result.stderr.is_empty());
+        assert!(result.stdout.is_empty());
+        assert!(!fixture.0.join("script-ran").exists());
+    }
 }

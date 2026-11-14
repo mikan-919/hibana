@@ -1,7 +1,7 @@
 use std::process::Command;
 
 #[test]
-fn web_cli_emits_pair_and_runs_generated_module() {
+fn web_api_emits_pair_and_runs_generated_module() {
     let dir = std::env::temp_dir().join(format!("hibana-web-cli-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let source = dir.join("hello.web.hb");
@@ -11,21 +11,11 @@ fn web_cli_emits_pair_and_runs_generated_module() {
     )
     .unwrap();
     let out = dir.join("artifacts");
-    let result = Command::new(env!("CARGO_BIN_EXE_hibana"))
-        .arg("web")
-        .arg(&source)
-        .args(["--export", "echo", "--export", "answer", "--out-dir"])
-        .arg(&out)
-        .output()
-        .unwrap();
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    assert!(result.stdout.is_empty());
-    assert!(out.join("hello.web.wasm").exists());
-    assert!(out.join("hello.web.mjs").exists());
+    let source = std::fs::read_to_string(&source).unwrap();
+    let web = hibana::to_web(&source, &["echo".into(), "answer".into()]).unwrap();
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(out.join("hello.web.wasm"), web.wasm).unwrap();
+    std::fs::write(out.join("hello.web.mjs"), web.javascript).unwrap();
     let script = dir.join("check.mjs");
     std::fs::write(&script, r#"
 import { readFile } from 'node:fs/promises';
@@ -43,21 +33,30 @@ if (api.echo('日本語🌸') !== '日本語🌸' || api.answer(41) !== 42n) thr
 }
 
 #[test]
-fn web_cli_requires_exports_and_rejects_incomplete_options() {
-    for options in [
-        vec![],
-        vec!["--export"],
-        vec!["--export", "echo", "--out-dir"],
-        vec!["--wat"],
-    ] {
-        let result = Command::new(env!("CARGO_BIN_EXE_hibana"))
-            .args(["web", "missing.hb"])
-            .args(options)
-            .output()
-            .unwrap();
-        assert_eq!(result.status.code(), Some(2));
-        assert!(!result.stderr.is_empty());
+fn removed_codegen_commands_are_rejected() {
+    let dir = std::env::temp_dir().join(format!("hibana-removed-cli-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("input.hb"), "fn main() { print(42) }").unwrap();
+    for command in ["ir", "wasm", "glue", "web", "js", "c", "build"] {
+        // A same-named file must not revive the removed command through implicit eval.
+        std::fs::write(dir.join(command), "fn main() { print(42) }").unwrap();
+        for args in [
+            vec![command],
+            vec![command, "input.hb"],
+            vec![command, "input.hb", "--export", "main", "--out-dir", "dist"],
+        ] {
+            let result = Command::new(env!("CARGO_BIN_EXE_hibana"))
+                .current_dir(&dir)
+                .args(&args)
+                .output()
+                .unwrap();
+            assert_eq!(result.status.code(), Some(2), "{args:?}: {result:?}");
+            assert!(result.stdout.is_empty(), "{args:?}");
+            assert!(!result.stderr.is_empty(), "{args:?}");
+            assert!(!dir.join("dist").exists());
+        }
     }
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]

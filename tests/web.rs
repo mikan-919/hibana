@@ -16,7 +16,7 @@ fn reserved_wasm_exports_are_rejected() {
 #[test]
 fn web_strings_and_host_functions() {
     let source = r#"
-extern "browser" {
+extern 'browser' {
     fn decorate(s: str) -> str
     fn show(s: str)
     fn increment(n: int) -> int
@@ -24,7 +24,7 @@ extern "browser" {
     fn __EXPORTS__(s: str) -> str
 }
 fn echo(s: str) -> str { __EXPORTS__(s) }
-fn literal() -> str { "こんにちは🌸" }
+fn literal() -> str { 'こんにちは🌸' }
 fn run(s: str) -> str {
     let result = decorate(s)
     show(result)

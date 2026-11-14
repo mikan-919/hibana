@@ -1,26 +1,22 @@
 //! hibana のコンパイラーとビルドの各段階。
-pub mod build;
-pub mod c;
+pub mod backend;
+pub mod check;
 pub mod cli;
 pub mod error;
-pub mod eval;
-pub mod fmt;
-pub mod index;
-pub mod ir;
-pub mod js;
-pub mod lexer;
-pub mod lsp;
-pub mod meta;
-pub mod parser;
+pub mod frontend;
 pub mod pipeline;
-pub mod pkg;
-mod resolve;
-mod scripts;
-pub mod smt;
-mod tools;
-mod ts;
-pub mod typeck;
-pub mod wasm;
+pub mod project;
+pub mod tooling;
+
+// 既存の利用側は、機能別ディレクトリへの移動後も同じパスで参照できる。
+pub use backend::{c, eval, ir, js, wasm};
+pub use check::{smt, typeck};
+pub use frontend::{lexer, meta, parser};
+pub use project::{build, pkg};
+pub use tooling::{fmt, index, lsp};
+
+pub(crate) use frontend::{resolve, ts};
+pub(crate) use project::{scripts, tools};
 
 use std::io::Write;
 

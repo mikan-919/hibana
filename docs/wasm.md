@@ -2,16 +2,23 @@
 
 当面の WASM ターゲットは、型検査した関数を JavaScript から呼ぶためのライブラリです。`main` は不要です。既存のインタプリタ・JavaScript・C ターゲットも引き続き使えます。
 
-## 一度のコマンドで生成する
+## Rust API で生成する
 
-```sh
-nix develop -c cargo run -q -- web examples/wasm_web.hb \
-  --export echo --export answer --export greet --out-dir dist
+```rust
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let source = std::fs::read_to_string("tests/programs/wasm/wasm_web.hb")?;
+    let exports = vec!["echo".into(), "answer".into(), "greet".into()];
+    let output = hibana::to_web(&source, &exports)?;
+    std::fs::create_dir_all("dist")?;
+    std::fs::write("dist/wasm_web.wasm", output.wasm)?;
+    std::fs::write("dist/wasm_web.mjs", output.javascript)?;
+    Ok(())
+}
 ```
 
-`dist/wasm_web.wasm` と `dist/wasm_web.mjs` を生成します。`--out-dir` の既定値は `dist` です。公開関数は `--export` を繰り返して指定します。公開関数とそこから辿れる関数だけを WASM に含めます。ただしソース全体を型検査します。未対応の構文が呼び出し先に含まれる場合はエラーになります。
+Hibana を依存に追加した Rust プログラムから実行すると、WASM と JavaScript の接続コードを生成できます。ファイルの保存は呼び出し側で行います。公開関数とそこから辿れる関数だけを WASM に含めます。ただしソース全体を型検査します。未対応の構文が呼び出し先に含まれる場合はエラーになります。
 
-ルートディレクトリを HTTP サーバーで配信し、`examples/wasm_web.html` をブラウザで開くと、文字列を渡してブラウザ側の関数を呼べます。`file://` ではなく HTTP を使います。
+ルートディレクトリを HTTP サーバーで配信し、`tests/programs/wasm/wasm_web.html` をブラウザで開くと、文字列を渡してブラウザ側の関数を呼べます。`file://` ではなく HTTP を使います。
 
 ## JavaScript との接続
 
@@ -44,8 +51,8 @@ console.log(api.greet("hibana"));
 
 文字列の一時領域はバンプアロケータで確保します。呼び出し終了後は再利用されますが、増えた WASM メモリは縮みません。JS に返した文字列はコピーされ、次の呼び出し後も使えます。生の WASM 関数やポインタを直接呼ぶのではなく、生成された接続コードを使ってください。
 
-## Rust API と既存のコマンド
+## 関連する API と実行コマンド
 
 `hibana::to_web(source, &exports)` は一度の型検査と IR 変換から `WebOutput { wasm, javascript }` を返します。ファイルの保存は呼び出し側で行います。
 
-従来の `hibana wasm file.hb --export name` は WASM を、`hibana glue file.hb --export name` は接続コードを標準出力へ出します。`hibana run file.hb` の実行環境は整数の `print` を備えた CLI 用であり、ブラウザのホスト関数を提供するものではありません。
+WASM 単体は `hibana::to_wasm_library(source, &exports)`、接続コード単体は `hibana::to_js_glue(source, &exports)` で生成できます。`hibana run file.hb` の実行環境は整数の `print` を備えた CLI 用であり、ブラウザのホスト関数を提供するものではありません。
