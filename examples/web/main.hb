@@ -1,7 +1,7 @@
 use './syntax' -> *
 use './lib'
     -> { hanabi }
-    -> { Response }
+    -> { Response, Clock }
 
 fn main(){
     let app = hanabi(
@@ -13,13 +13,6 @@ fn main(){
                 Response::json({
                     status: 'OK'
                     code: 200
-                })
-            }
-            GET '/{id}/status' {
-                Response::json({
-                    status: 'OK'
-                    code: 200
-                    message: `Hello! {id.get()}`
                 })
             }
             @durable_object('ACCOUNT') -> account
@@ -34,5 +27,4 @@ fn main(){
             }
         }
     )
-
 }
