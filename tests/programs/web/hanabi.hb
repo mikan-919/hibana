@@ -1,7 +1,7 @@
 // examples/web の hanabi（syntax.hb の route と lib.hb）を、要求を作って呼ぶ
 use web
 use '../../../examples/web/syntax' -> *
-use '../../../examples/web/lib' -> { hanabi } -> { Response }
+use '../../../examples/web/lib' -> { hanabi } -> { Response, Clock }
 
 fn make() -> (web.Request) -> web.Response {
     hanabi(

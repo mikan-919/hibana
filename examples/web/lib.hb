@@ -18,6 +18,9 @@ fn Response::json(body: str) -> web.Response { web.json(body) }
 // ponytail: 経路の関数をそのまま返す。Workers の fetch に渡す（web.worker）のは、インタプリタと C でも動く形が決まってから
 fn hanabi(app: (web.Request) -> web.Response) -> (web.Request) -> web.Response { app }
 
+// 1970 年からのミリ秒
+fn Clock::now() -> int { now_ms() }
+
 // ---- JSON ----
 
 trait Json<A> {

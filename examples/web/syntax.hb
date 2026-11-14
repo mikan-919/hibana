@@ -2,9 +2,6 @@
 use web
 use './lib' -> *
 
-// 1970 年からのミリ秒
-fn Clock::now() -> int { now_ms() }
-
 syntax HanabiAnnotation = '@' ~ name:Ident '(' args:(Expr % ',') ')' '->' alias:Ident
 syntax HanabiPath = | s:String | t:Template
 syntax HanabiRoute = annotations:HanabiAnnotation* method:Ident path:HanabiPath body:Block

@@ -153,7 +153,7 @@ pub fn format(src: &str) -> R<String> {
             }
             let blank = nl >= 2 && !is_close && (!after_open || !cs.is_empty());
             let starts = prev.is_some_and(|p| BIN.contains(&punct(&toks[p])))
-                || matches!(punct(t), "|" | ".");
+                || matches!(punct(t), "|" | "." | "->");
             if blank || STARTS.contains(&punct(t)) {
                 in_syntax = punct(t) == "syntax";
             }
@@ -267,6 +267,15 @@ mod tests {
     fn layout() {
         let src = "fn add(a:int,b :int)->int{   a+b }  // 足す\n\n\n\nfn main(){\nlet x=add( 1,2 )\n      if x==3 {print( 'ok' )}else{\n  print('ng')\n}\n    /* c */\n  let ok = x == 3 ||\n  x == 4\n  print(<p>a   b {x}</p>)\n  print(web.json(f([\n    1\n    ])))\n\n}\n";
         let want = "fn add(a:int, b:int) -> int { a+b } // 足す\n\nfn main() {\n    let x = add(1, 2)\n    if x == 3 { print('ok') } else {\n        print('ng')\n    }\n    /* c */\n    let ok = x == 3 ||\n        x == 4\n    print(<p>a   b {x}</p>)\n    print(web.json(f([\n        1\n    ])))\n}\n";
+        assert_eq!(format(src).unwrap(), want);
+    }
+
+
+    // use の -> { ... } を次の行に続けて書いた時は、続きの行として字下げする
+    #[test]
+    fn use_continuation() {
+        let src = "use './lib'\n-> { a }\n        -> { B, C }\nfn main() {}\n";
+        let want = "use './lib'\n    -> { a }\n    -> { B, C }\nfn main() {}\n";
         assert_eq!(format(src).unwrap(), want);
     }
 
