@@ -2,7 +2,7 @@
 // ponytail: 依存型・添字付きの型族・細分化型の証明は無い（細分化型は元の型として扱う）
 // 効果: 起きた効果を集め、関数の終わりで宣言と比べる。無名関数の効果は本体から推論する。Async はどこでも起こせる
 // ponytail: 宣言の探索は線形。大きいプログラムで遅ければ Map にする
-use "./parser.hb".*
+use './parser.hb'.*
 use std.*
 
 enum Ty {
@@ -45,7 +45,7 @@ struct C {
 struct Bound { methods: Vec<str>, ty: Ty, call: bool }
 
 fn err(c: C, msg: str) -> Ty {
-    write(c.errs, push(read(c.errs), "関数 " + read(c.fname) + ": " + msg))
+    write(c.errs, push(read(c.errs), '関数 ' + read(c.fname) + ': ' + msg))
     YNever
 }
 
@@ -79,21 +79,21 @@ partial fn walk(c: C, t: Ty) -> Ty {
 
 partial fn show_ty(c: C, t0: Ty) -> str {
     match walk(c, t0) {
-        YInt => "int", YBool => "bool", YStr => "str", YUnit => "unit", YNever => "never", YType => "Type",
-        YVec(a) => "Vec<" + show_ty(c, a) + ">",
-        YRef(a) => "Ref<" + show_ty(c, a) + ">",
-        YData(n, args) => if len(args) == 0 { n } else { n + "<" + join(map(args, fn(a: Ty) -> str { show_ty(c, a) })) + ">" },
-        YFn(ps, r, es) => "(" + join(map(ps, fn(a: Ty) -> str { show_ty(c, a) })) + ") -> " + show_ty(c, r) +
-            (if len(es) == 0 { "" } else { " ! " + join(map(es, fn(a: Ty) -> str { show_ty(c, a) })) }),
+        YInt => 'int', YBool => 'bool', YStr => 'str', YUnit => 'unit', YNever => 'never', YType => 'Type',
+        YVec(a) => 'Vec<' + show_ty(c, a) + '>',
+        YRef(a) => 'Ref<' + show_ty(c, a) + '>',
+        YData(n, args) => if len(args) == 0 { n } else { n + '<' + join(map(args, fn(a: Ty) -> str { show_ty(c, a) })) + '>' },
+        YFn(ps, r, es) => '(' + join(map(ps, fn(a: Ty) -> str { show_ty(c, a) })) + ') -> ' + show_ty(c, r) +
+            (if len(es) == 0 { '' } else { ' ! ' + join(map(es, fn(a: Ty) -> str { show_ty(c, a) })) }),
         YRow(es) => join(map(es, fn(a: Ty) -> str { show_ty(c, a) })),
-        YVar(id) => "?" + to_str(id),
+        YVar(id) => '?' + to_str(id),
         YParam(n) => n,
     }
 }
 
 fn join(xs: Vec<str>) -> str {
-    let mut s = ""
-    for i in 0..len(xs) { s = s + (if i > 0 { ", " } else { "" }) + xs[i] }
+    let mut s = ''
+    for i in 0..len(xs) { s = s + (if i > 0 { ', ' } else { '' }) + xs[i] }
     s
 }
 
@@ -148,7 +148,7 @@ partial fn expand(c: C, es: Vec<Ty>) -> Vec<Ty> {
     r
 }
 
-fn eff_name(t: Ty) -> str { match t { YData(n, xs) => n, YParam(n) => n, _ => "" } }
+fn eff_name(t: Ty) -> str { match t { YData(n, xs) => n, YParam(n) => n, _ => '' } }
 
 // want の並びが got の効果をすべて含むか。一方が一つの決まっていない変数なら、もう一方の並びにする
 partial fn unify_effs(c: C, want: Vec<Ty>, got: Vec<Ty>) -> bool {
@@ -164,7 +164,7 @@ fn is_var(t: Ty) -> bool { match t { YVar(i) => true, _ => false } }
 
 partial fn covers(c: C, ws: Vec<Ty>, g: Ty) -> bool {
     let n = eff_name(g)
-    if n == "Async" { return true }
+    if n == 'Async' { return true }
     let mut ok = false
     for w in ws { if !ok && eff_name(w) == n { ok = unify(c, w, g) } }
     ok
@@ -173,7 +173,7 @@ partial fn covers(c: C, ws: Vec<Ty>, g: Ty) -> bool {
 partial fn raise(c: C, es: Vec<Ty>) {
     let mut r = read(c.raised)
     for e in es {
-        for d in read(c.declared) { if eff_name(d) != "" && eff_name(d) == eff_name(walk(c, e)) { unify(c, d, e); } }
+        for d in read(c.declared) { if eff_name(d) != '' && eff_name(d) == eff_name(walk(c, e)) { unify(c, d, e); } }
         r = push(r, e)
     }
     write(c.raised, r)
@@ -181,7 +181,7 @@ partial fn raise(c: C, es: Vec<Ty>) {
 
 // want の型が必要な所に got の型の式を置く
 partial fn expect_ty(c: C, want: Ty, got: Ty, what: str) {
-    if !unify(c, want, got) { err(c, what + ": " + show_ty(c, want) + " が必要だが " + show_ty(c, got)); }
+    if !unify(c, want, got) { err(c, what + ': ' + show_ty(c, want) + ' が必要だが ' + show_ty(c, got)); }
 }
 
 // ---- 宣言を探す ----
@@ -207,10 +207,10 @@ fn find_fn(c: C, name: str) -> Option<Func> {
 }
 
 fn is_alias(f: Func) -> bool {
-    match f.ret { Some(t) => match t { EVar(n) => n == "Type", _ => false }, None => false }
+    match f.ret { Some(t) => match t { EVar(n) => n == 'Type', _ => false }, None => false }
 }
 
-fn param_name(e: Expr) -> str { match e { EParam(n, t) => n, _ => "" } }
+fn param_name(e: Expr) -> str { match e { EParam(n, t) => n, _ => '' } }
 
 fn param_ty(e: Expr) -> Option<Expr> { match e { EParam(n, t) => t, _ => None } }
 
@@ -228,8 +228,8 @@ partial fn ty_of(c: C, env: Vec<Bind>, e: Expr) -> Ty {
     match e {
         EVar(n) => match lookup_bind(env, n) {
             Some(t) => t,
-            None => if n == "int" { YInt } else if n == "bool" { YBool } else if n == "str" { YStr }
-                else if n == "unit" { YUnit } else if n == "never" { YNever } else if n == "Type" { YType } else if n == "Async" { YData(n, []) }
+            None => if n == 'int' { YInt } else if n == 'bool' { YBool } else if n == 'str' { YStr }
+                else if n == 'unit' { YUnit } else if n == 'never' { YNever } else if n == 'Type' { YType } else if n == 'Async' { YData(n, []) }
                 else { named_ty(c, env, n, []) }
         },
         ECall(n, args) => named_ty(c, env, n, map(args, fn(a: Expr) -> Ty { ty_of(c, env, a) })),
@@ -243,22 +243,22 @@ partial fn ty_of(c: C, env: Vec<Bind>, e: Expr) -> Ty {
             }
             YFn(tys, ty_of(c, env2, r), map(effs, fn(x: Expr) -> Ty { ty_of(c, env2, x) }))
         }
-        _ => err(c, "型でない式"),
+        _ => err(c, '型でない式'),
     }
 }
 
 partial fn named_ty(c: C, env: Vec<Bind>, n: str, args: Vec<Ty>) -> Ty {
-    if n == "Vec" && len(args) == 1 { return YVec(args[0]) }
-    if n == "Ref" && len(args) == 1 { return YRef(args[0]) }
+    if n == 'Vec' && len(args) == 1 { return YVec(args[0]) }
+    if n == 'Ref' && len(args) == 1 { return YRef(args[0]) }
     match find_data(c, n) {
-        Some(d) => if len(d.params) == len(args) { YData(n, args) } else { err(c, "型 " + n + " の引数の数が違う") },
+        Some(d) => if len(d.params) == len(args) { YData(n, args) } else { err(c, '型 ' + n + ' の引数の数が違う') },
         None => match find_fn(c, n) {
             Some(f) => if is_alias(f) && len(f.params) == len(args) {
                 let mut bs: Vec<Bind> = []
                 for i in 0..len(f.params) { if i < len(args) { bs = push(bs, Bind { name: param_name(f.params[i]), ty: args[i] }) } }
-                match tail_of(f.body) { Some(t) => ty_of(c, bs, t), None => err(c, "型の別名 " + n + " に本体が無い") }
-            } else { err(c, n + " は型でない") },
-            None => err(c, "不明な型 " + n),
+                match tail_of(f.body) { Some(t) => ty_of(c, bs, t), None => err(c, '型の別名 ' + n + ' に本体が無い') }
+            } else { err(c, n + ' は型でない') },
+            None => err(c, '不明な型 ' + n),
         },
     }
 }
@@ -271,7 +271,7 @@ fn data_binds(c: C, d: Data) -> Vec<Bind> {
 // 関数の型。ジェネリック引数は新しい型変数にする（明示した型引数があれば targs）
 fn find_traitdef(c: C, name: str) -> Option<Func> {
     let mut r: Option<Func> = None
-    for f in c.prog.fns { if f.kind == "traitdef" && f.name == name { r = Some(f) } }
+    for f in c.prog.fns { if f.kind == 'traitdef' && f.name == name { r = Some(f) } }
     r
 }
 
@@ -288,14 +288,14 @@ partial fn add_bounds(c: C, t: Expr, ty: Ty) {
 }
 
 fn key_of(c: C, t: Ty) -> str {
-    match walk(c, t) { YInt => "int", YStr => "str", YBool => "bool", YVec(x) => "Vec", YData(n, xs) => n, _ => "" }
+    match walk(c, t) { YInt => 'int', YStr => 'str', YBool => 'bool', YVec(x) => 'Vec', YData(n, xs) => n, _ => '' }
 }
 
 fn has_impl(c: C, ms: Vec<str>, key: str, call: bool) -> bool {
     let mut ok = false
     for f in c.prog.fns {
         for m in ms {
-            if (f.kind == "impl" && f.name == m + "#" + key) || (call && f.kind == "default" && f.name == m + "#default") { ok = true }
+            if (f.kind == 'impl' && f.name == m + '#' + key) || (call && f.kind == 'default' && f.name == m + '#default') { ok = true }
         }
     }
     ok
@@ -305,7 +305,7 @@ fn has_impl(c: C, ms: Vec<str>, key: str, call: bool) -> bool {
 partial fn check_bounds(c: C) {
     for b in read(c.bounds) {
         let k = key_of(c, b.ty)
-        if k != "" && !has_impl(c, b.methods, k, b.call) { err(c, "型 " + show_ty(c, b.ty) + " に " + join_s(b.methods, "・") + " の impl が無い"); }
+        if k != '' && !has_impl(c, b.methods, k, b.call) { err(c, '型 ' + show_ty(c, b.ty) + ' に ' + join_s(b.methods, '・') + ' の impl が無い'); }
     }
 }
 
@@ -322,7 +322,7 @@ partial fn inst_fn(c: C, f: Func, targs: Vec<Ty>) -> Ty {
             ps = push(ps, match param_ty(p) { Some(t) => ty_of(c, bs, t), None => fresh(c) })
         }
     }
-    if f.kind == "trait" { for b in bs { write(c.bounds, push(read(c.bounds), Bound { methods: [f.name], ty: b.ty, call: true })) } }
+    if f.kind == 'trait' { for b in bs { write(c.bounds, push(read(c.bounds), Bound { methods: [f.name], ty: b.ty, call: true })) } }
     YFn(ps, match f.ret { Some(t) => ty_of(c, bs, t), None => YUnit }, map(f.effs, fn(x: Expr) -> Ty { ty_of(c, bs, x) }))
 }
 
@@ -344,46 +344,46 @@ fn lookup(env: Vec<Local>, name: str) -> Option<Local> {
 partial fn apply_ty(c: C, env: Vec<Local>, name: str, ft: Ty, args: Vec<Expr>) -> Ty {
     match walk(c, ft) {
         YFn(ps, r, es) => if len(ps) != len(args) {
-            err(c, name + " の引数は " + to_str(len(ps)) + " 個だが " + to_str(len(args)) + " 個渡した")
+            err(c, name + ' の引数は ' + to_str(len(ps)) + ' 個だが ' + to_str(len(args)) + ' 個渡した')
         } else {
-            for i in 0..len(args) { if i < len(ps) { expect_ty(c, ps[i], synth(c, env, args[i]), name + " の引数") } }
+            for i in 0..len(args) { if i < len(ps) { expect_ty(c, ps[i], synth(c, env, args[i]), name + ' の引数') } }
             raise(c, es)
             r
         }
         YNever => YNever,
-        _ => err(c, name + " は関数でない（" + show_ty(c, ft) + "）"),
+        _ => err(c, name + ' は関数でない（' + show_ty(c, ft) + '）'),
     }
 }
 
 partial fn builtin(c: C, env: Vec<Local>, name: str, args: Vec<Expr>) -> Option<Ty> {
     let a = fresh(c)
-    let sig = if name == "print" { Some(YFn([a], YUnit, [])) }
-        else if name == "to_str" { Some(YFn([a], YStr, [])) }
-        else if name == "push" { Some(YFn([YVec(a), a], YVec(a), [])) }
-        else if name == "set_at" { Some(YFn([YVec(a), YInt, a], YVec(a), [])) }
-        else if name == "split" { Some(YFn([YStr, YStr], YVec(YStr), [])) }
-        else if name == "starts_with" { Some(YFn([YStr, YStr], YBool, [])) }
-        else if name == "slice" { Some(YFn([YStr, YInt, YInt], YStr, [])) }
-        else if name == "chars" { Some(YFn([YStr], YVec(YStr), [])) }
-        else if name == "code" { Some(YFn([YStr], YInt, [])) }
-        else if name == "panic" { Some(YFn([YStr], YNever, [])) }
-        else if name == "new_ref" { Some(YFn([a], YRef(a), [])) }
-        else if name == "read" { Some(YFn([YRef(a)], a, [])) }
-        else if name == "write" { Some(YFn([YRef(a), a], YUnit, [])) }
-        else if name == "all" { Some(YFn([YVec(YFn([], a, [YData("Async", [])]))], YVec(a), [YData("Async", [])])) }
+    let sig = if name == 'print' { Some(YFn([a], YUnit, [])) }
+        else if name == 'to_str' { Some(YFn([a], YStr, [])) }
+        else if name == 'push' { Some(YFn([YVec(a), a], YVec(a), [])) }
+        else if name == 'set_at' { Some(YFn([YVec(a), YInt, a], YVec(a), [])) }
+        else if name == 'split' { Some(YFn([YStr, YStr], YVec(YStr), [])) }
+        else if name == 'starts_with' { Some(YFn([YStr, YStr], YBool, [])) }
+        else if name == 'slice' { Some(YFn([YStr, YInt, YInt], YStr, [])) }
+        else if name == 'chars' { Some(YFn([YStr], YVec(YStr), [])) }
+        else if name == 'code' { Some(YFn([YStr], YInt, [])) }
+        else if name == 'panic' { Some(YFn([YStr], YNever, [])) }
+        else if name == 'new_ref' { Some(YFn([a], YRef(a), [])) }
+        else if name == 'read' { Some(YFn([YRef(a)], a, [])) }
+        else if name == 'write' { Some(YFn([YRef(a), a], YUnit, [])) }
+        else if name == 'all' { Some(YFn([YVec(YFn([], a, [YData('Async', [])]))], YVec(a), [YData('Async', [])])) }
         else { None }
     match sig {
         Some(t) => Some(apply_ty(c, env, name, t, args)),
         // len は Vec と str の両方
         // resume(x) は腕の操作の戻り値を渡す。resume の後には戻らない
-        None => if name == "resume" && len(args) <= 1 {
+        None => if name == 'resume' && len(args) <= 1 {
             let t = if len(args) == 1 { synth(c, env, args[0]) } else { YUnit }
-            expect_ty(c, read(c.resume), t, "resume の引数")
+            expect_ty(c, read(c.resume), t, 'resume の引数')
             Some(YNever)
-        } else if name == "len" && len(args) == 1 {
+        } else if name == 'len' && len(args) == 1 {
             match walk(c, synth(c, env, args[0])) {
                 YStr => Some(YInt),
-                _ => { expect_ty(c, YVec(fresh(c)), synth(c, env, args[0]), "len の引数"); Some(YInt) }
+                _ => { expect_ty(c, YVec(fresh(c)), synth(c, env, args[0]), 'len の引数'); Some(YInt) }
             }
         } else { None },
     }
@@ -402,7 +402,7 @@ partial fn call(c: C, env: Vec<Local>, name: str, args: Vec<Expr>) -> Ty {
             } else { apply_ty(c, env, name, inst_fn(c, f, []), args) }
             None => match find_ctor(c, name) {
                 Some(k) => apply_ty(c, env, name, inst_ctor(c, k), args),
-                None => match builtin(c, env, name, args) { Some(t) => t, None => err(c, "未定義の関数 " + name) },
+                None => match builtin(c, env, name, args) { Some(t) => t, None => err(c, '未定義の関数 ' + name) },
             },
         },
     }
@@ -419,49 +419,49 @@ partial fn synth(c: C, env: Vec<Local>, e: Expr) -> Ty {
                 Some(f) => inst_fn(c, f, []),
                 None => match find_ctor(c, n) {
                     Some(k) => match inst_ctor(c, k) { YFn(ps, r, es) => if len(ps) == 0 { r } else { YFn(ps, r, es) }, _ => YNever },
-                    None => err(c, "未定義の変数 " + n),
+                    None => err(c, '未定義の変数 ' + n),
                 },
             },
         },
-        EUnary(op, x) => if op == "-" { expect_ty(c, YInt, synth(c, env, x), "-"); YInt } else { expect_ty(c, YBool, synth(c, env, x), "!"); YBool },
+        EUnary(op, x) => if op == '-' { expect_ty(c, YInt, synth(c, env, x), '-'); YInt } else { expect_ty(c, YBool, synth(c, env, x), '!'); YBool },
         EBinary(op, a, b) => binary_ty(c, env, op, a, b),
         ECall(f, args) => call(c, env, f, args),
-        EApply(f, args) => apply_ty(c, env, "式の値", synth(c, env, f), args),
+        EApply(f, args) => apply_ty(c, env, '式の値', synth(c, env, f), args),
         EField(x, f) => field_ty(c, synth(c, env, x), f),
-        EMethod(x, f, args) => err(c, "メソッドの呼び出しは未対応"),
+        EMethod(x, f, args) => err(c, 'メソッドの呼び出しは未対応'),
         EAssign(n, x) => match lookup(env, n) {
-            Some(l) => if !l.mutable { err(c, "変数 " + n + " は mut でない") } else { expect_ty(c, l.ty, synth(c, env, x), "変数 " + n); YUnit },
-            None => err(c, "未定義の変数 " + n),
+            Some(l) => if !l.mutable { err(c, '変数 ' + n + ' は mut でない') } else { expect_ty(c, l.ty, synth(c, env, x), '変数 ' + n); YUnit },
+            None => err(c, '未定義の変数 ' + n),
         },
         EIf(cond, t, els) => {
-            expect_ty(c, YBool, synth(c, env, cond), "if の条件")
+            expect_ty(c, YBool, synth(c, env, cond), 'if の条件')
             let tt = synth(c, env, t)
             match els {
                 None => YUnit,
                 Some(x) => {
                     let et = synth(c, env, x)
-                    expect_ty(c, tt, et, "if の分岐")
+                    expect_ty(c, tt, et, 'if の分岐')
                     match walk(c, tt) { YNever => et, _ => tt }
                 }
             }
         }
-        EWhile(cond, body) => { expect_ty(c, YBool, synth(c, env, cond), "while の条件"); synth(c, env, body); YUnit }
+        EWhile(cond, body) => { expect_ty(c, YBool, synth(c, env, cond), 'while の条件'); synth(c, env, body); YUnit }
         EBlock(stmts, tail) => block_ty(c, env, stmts, tail),
-        ELet(n, m, t, init) => err(c, "let はブロックの中にだけ書ける"),
+        ELet(n, m, t, init) => err(c, 'let はブロックの中にだけ書ける'),
         EReturn(x) => {
             let t = match x { Some(v) => synth(c, env, v), None => YUnit }
-            expect_ty(c, read(c.ret), t, "return")
+            expect_ty(c, read(c.ret), t, 'return')
             YNever
         }
         EArray(items) => {
             let a = fresh(c)
-            for x in items { expect_ty(c, a, synth(c, env, x), "配列の要素") }
+            for x in items { expect_ty(c, a, synth(c, env, x), '配列の要素') }
             YVec(a)
         }
         EIndex(v, i) => {
             let a = fresh(c)
-            expect_ty(c, YVec(a), synth(c, env, v), "添字の対象")
-            expect_ty(c, YInt, synth(c, env, i), "添字")
+            expect_ty(c, YVec(a), synth(c, env, v), '添字の対象')
+            expect_ty(c, YInt, synth(c, env, i), '添字')
             a
         }
         EMatch(x, arms) => match_ty(c, env, synth(c, env, x), arms),
@@ -480,39 +480,39 @@ partial fn synth(c: C, env: Vec<Local>, e: Expr) -> Ty {
             write(c.raised, [])
             let r = match ret { Some(x) => ty_of(c, read(c.tparams), x), None => fresh(c) }
             write(c.ret, r)
-            expect_ty(c, r, synth(c, env2, body), "無名関数の戻り値")
+            expect_ty(c, r, synth(c, env2, body), '無名関数の戻り値')
             write(c.ret, saved)
             let got = expand(c, read(c.raised))
             write(c.raised, saved_raised)
             let es = if len(effs) == 0 { got } else {
                 let ws = map(effs, fn(x: Expr) -> Ty { ty_of(c, read(c.tparams), x) })
-                for g in got { if !covers(c, ws, g) { err(c, "無名関数が宣言していない効果 " + show_ty(c, g) + " を起こす"); } }
+                for g in got { if !covers(c, ws, g) { err(c, '無名関数が宣言していない効果 ' + show_ty(c, g) + ' を起こす'); } }
                 ws
             }
             YFn(tys, r, es)
         }
         EFor(x, a, b, body) => {
             let xt = match b {
-                Some(hi) => { expect_ty(c, YInt, synth(c, env, a), "for の範囲"); expect_ty(c, YInt, synth(c, env, hi), "for の範囲"); YInt }
-                None => { let el = fresh(c); expect_ty(c, YVec(el), synth(c, env, a), "for の対象"); el }
+                Some(hi) => { expect_ty(c, YInt, synth(c, env, a), 'for の範囲'); expect_ty(c, YInt, synth(c, env, hi), 'for の範囲'); YInt }
+                None => { let el = fresh(c); expect_ty(c, YVec(el), synth(c, env, a), 'for の対象'); el }
             }
             synth(c, push(env, Local { name: x, ty: xt, mutable: false }), body)
             YUnit
         }
-        _ => err(c, "型を付けられない式"),
+        _ => err(c, '型を付けられない式'),
     }
 }
 
 partial fn binary_ty(c: C, env: Vec<Local>, op: str, a: Expr, b: Expr) -> Ty {
     let at = synth(c, env, a)
     let bt = synth(c, env, b)
-    if op == "&&" || op == "||" {
+    if op == '&&' || op == '||' {
         expect_ty(c, YBool, at, op); expect_ty(c, YBool, bt, op); YBool
-    } else if op == "==" || op == "!=" {
+    } else if op == '==' || op == '!=' {
         expect_ty(c, at, bt, op); YBool
-    } else if op == "<" || op == "<=" || op == ">" || op == ">=" {
+    } else if op == '<' || op == '<=' || op == '>' || op == '>=' {
         expect_ty(c, YInt, at, op); expect_ty(c, YInt, bt, op); YBool
-    } else if op == "+" && is_str(walk(c, at)) {
+    } else if op == '+' && is_str(walk(c, at)) {
         expect_ty(c, YStr, bt, op); YStr
     } else {
         expect_ty(c, YInt, at, op); expect_ty(c, YInt, bt, op); YInt
@@ -521,18 +521,18 @@ partial fn binary_ty(c: C, env: Vec<Local>, op: str, a: Expr, b: Expr) -> Ty {
 
 partial fn field_ty(c: C, t: Ty, f: str) -> Ty {
     match walk(c, t) {
-        YData(n, args) => match find_ctor(c, n + "{}") {
+        YData(n, args) => match find_ctor(c, n + '{}') {
             Some(k) => {
                 let mut bs: Vec<Bind> = []
                 for i in 0..len(k.d.params) { if i < len(args) { bs = push(bs, Bind { name: param_name(k.d.params[i]), ty: args[i] }) } }
                 let mut r: Option<Ty> = None
                 for p in k.ctor.fields { if param_name(p) == f { r = match param_ty(p) { Some(x) => Some(ty_of(c, bs, x)), None => None } } }
-                match r { Some(x) => x, None => err(c, "構造体 " + n + " にフィールド " + f + " は無い") }
+                match r { Some(x) => x, None => err(c, '構造体 ' + n + ' にフィールド ' + f + ' は無い') }
             }
-            None => err(c, n + " は構造体でない"),
+            None => err(c, n + ' は構造体でない'),
         },
         YNever => YNever,
-        _ => err(c, "フィールド " + f + " を持たない型 " + show_ty(c, t)),
+        _ => err(c, 'フィールド ' + f + ' を持たない型 ' + show_ty(c, t)),
     }
 }
 
@@ -543,21 +543,21 @@ partial fn match_ty(c: C, env: Vec<Local>, t: Ty, arms: Vec<Expr>) -> Ty {
         match arm {
             EArm(ctor, binds, body) => {
                 let mut env2 = env
-                if ctor != "_" {
+                if ctor != '_' {
                     match find_ctor(c, ctor) {
                         Some(k) => match inst_ctor(c, k) {
                             YFn(ps, dt, es) => {
-                                expect_ty(c, dt, t, "match の構築子 " + ctor)
-                                if len(ps) != len(binds) { err(c, "構築子 " + ctor + " のフィールドは " + to_str(len(ps)) + " 個"); }
+                                expect_ty(c, dt, t, 'match の構築子 ' + ctor)
+                                if len(ps) != len(binds) { err(c, '構築子 ' + ctor + ' のフィールドは ' + to_str(len(ps)) + ' 個'); }
                                 for i in 0..len(binds) { if i < len(ps) { env2 = push(env2, Local { name: binds[i], ty: ps[i], mutable: false }) } }
                             }
                             _ => {}
                         }
-                        None => { err(c, "不明な構築子 " + ctor); }
+                        None => { err(c, '不明な構築子 ' + ctor); }
                     }
                 }
                 let bt = synth(c, env2, body)
-                expect_ty(c, r, bt, "match の腕")
+                expect_ty(c, r, bt, 'match の腕')
                 match walk(c, bt) { YNever => {}, _ => { result = r } }
             }
             _ => {}
@@ -577,26 +577,26 @@ partial fn handle_ty(c: C, env: Vec<Local>, x: Expr, arms: Vec<Expr>) -> Ty {
     for arm in arms {
         match arm {
             EArm(op, binds, body) => match find_fn(c, op) {
-                Some(f) => if f.kind != "op" { err(c, op + " は効果の操作でない"); } else {
+                Some(f) => if f.kind != 'op' { err(c, op + ' は効果の操作でない'); } else {
                     match inst_fn(c, f, []) {
                         YFn(ps, r, es) => {
                             for e in es {
                                 handled = push(handled, eff_name(e))
                                 for t in inner { if eff_name(t) == eff_name(e) { unify(c, e, t); } }
                             }
-                            if len(ps) != len(binds) { err(c, "操作 " + op + " の引数は " + to_str(len(ps)) + " 個"); }
+                            if len(ps) != len(binds) { err(c, '操作 ' + op + ' の引数は ' + to_str(len(ps)) + ' 個'); }
                             let mut env2 = env
                             for i in 0..len(binds) { if i < len(ps) { env2 = push(env2, Local { name: binds[i], ty: ps[i], mutable: false }) } }
                             let saved_r = read(c.resume)
                             write(c.resume, r)
                             let at = synth(c, env2, body)
                             write(c.resume, saved_r)
-                            expect_ty(c, bt, at, "handle の腕")
+                            expect_ty(c, bt, at, 'handle の腕')
                         }
                         _ => {}
                     }
                 }
-                None => { err(c, "不明な操作 " + op); }
+                None => { err(c, '不明な操作 ' + op); }
             },
             _ => {}
         }
@@ -612,7 +612,7 @@ partial fn block_ty(c: C, env0: Vec<Local>, stmts: Vec<Expr>, tail: Option<Expr>
         match s {
             ELet(n, m, t, init) => {
                 let it = synth(c, env, init)
-                let lt = match t { Some(x) => { let w = ty_of(c, read(c.tparams), x); expect_ty(c, w, it, "変数 " + n); w }, None => it }
+                let lt = match t { Some(x) => { let w = ty_of(c, read(c.tparams), x); expect_ty(c, w, it, '変数 ' + n); w }, None => it }
                 env = push(env, Local { name: n, ty: lt, mutable: m })
             }
             _ => match walk(c, synth(c, env, s)) { YNever => { diverges = true }, _ => {} },
@@ -647,26 +647,26 @@ partial fn check_fn(c: C, f: Func) {
     let ws = map(f.effs, fn(x: Expr) -> Ty { ty_of(c, bs, x) })
     write(c.declared, ws)
     let bt = synth(c, env, f.body)
-    match r { YUnit => {}, _ => expect_ty(c, r, bt, "戻り値") }
-    for g in expand(c, read(c.raised)) { if !covers(c, ws, g) { err(c, "効果 " + show_ty(c, g) + " を処理していない（! で宣言するか handle で処理する）"); } }
+    match r { YUnit => {}, _ => expect_ty(c, r, bt, '戻り値') }
+    for g in expand(c, read(c.raised)) { if !covers(c, ws, g) { err(c, '効果 ' + show_ty(c, g) + ' を処理していない（! で宣言するか handle で処理する）'); } }
     check_bounds(c)
 }
 
 // 型エラーの並び（無ければ空）
 partial fn check(prog: Program) -> Vec<str> {
-    let c = C { prog: prog, subst: new_ref([]), errs: new_ref([]), fname: new_ref(""), ret: new_ref(YUnit), tparams: new_ref([]), raised: new_ref([]), resume: new_ref(YUnit), declared: new_ref([]), bounds: new_ref([]) }
+    let c = C { prog: prog, subst: new_ref([]), errs: new_ref([]), fname: new_ref(''), ret: new_ref(YUnit), tparams: new_ref([]), raised: new_ref([]), resume: new_ref(YUnit), declared: new_ref([]), bounds: new_ref([]) }
     // トレイトのメソッドと JS の関数は本体が無い
-    for f in prog.fns { if !is_alias(f) && f.kind != "trait" && f.kind != "traitdef" && f.kind != "op" && !starts_with(f.kind, "js:") { check_fn(c, f) } }
+    for f in prog.fns { if !is_alias(f) && f.kind != 'trait' && f.kind != 'traitdef' && f.kind != 'op' && !starts_with(f.kind, 'js:') { check_fn(c, f) } }
     read(c.errs)
 }
 
-test "infers generics and closures" {
-    assert_eq(check(parse("enum L<A> { N, C(x: A, xs: L<A>) }\nfn len2<A>(l: L<A>) -> int { match l { N => 0, C(x, xs) => 1 + len2(xs) } }\nfn main() { let f = fn(x) { x + 1 }; print(len2(C(f(1), N))) }")), [])
+test 'infers generics and closures' {
+    assert_eq(check(parse('enum L<A> { N, C(x: A, xs: L<A>) }\nfn len2<A>(l: L<A>) -> int { match l { N => 0, C(x, xs) => 1 + len2(xs) } }\nfn main() { let f = fn(x) { x + 1 }; print(len2(C(f(1), N))) }')), [])
 }
 
-test "reports errors" {
-    assert_eq(check(parse("fn f(x: int) -> str { x }")), ["関数 f: 戻り値: str が必要だが int"])
-    assert_eq(check(parse("fn f() { let x = 1; x = 2 }")), ["関数 f: 変数 x は mut でない"])
+test 'reports errors' {
+    assert_eq(check(parse('fn f(x: int) -> str { x }')), ['関数 f: 戻り値: str が必要だが int'])
+    assert_eq(check(parse('fn f() { let x = 1; x = 2 }')), ['関数 f: 変数 x は mut でない'])
 }
 
 fn is_str(t: Ty) -> bool { match t { YStr => true, _ => false } }

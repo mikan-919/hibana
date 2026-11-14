@@ -62,12 +62,12 @@ impl<A: Eq> Eq<Vec<A>> {
 
 impl<A: Show> Show<Vec<A>> {
     fn show(xs: Vec<A>) -> str {
-        let mut s = "["
+        let mut s = '['
         for i in 0..len(xs) {
-            if i > 0 { s = s + ", " }
+            if i > 0 { s = s + ', ' }
             s = s + show(xs[i])
         }
-        s + "]"
+        s + ']'
     }
 }
 
@@ -89,8 +89,8 @@ impl<A: Eq> Eq<Option<A>> {
 impl<A: Show> Show<Option<A>> {
     fn show(o: Option<A>) -> str {
         match o {
-            None => "None"
-            Some(x) => "Some(" + show(x) + ")"
+            None => 'None'
+            Some(x) => 'Some(' + show(x) + ')'
         }
     }
 }
@@ -114,14 +114,14 @@ fn contains<A: Eq>(xs: Vec<A>, x: A) -> bool {
 
 // derive(Eq, Show) struct ...（か enum ...）は、型の宣言と、その型の Eq・Show の impl にする
 // == は各フィールドの ==、to_str は各フィールドの to_str を使う（フィールドの型に実装があればその実装）
-syntax DeriveField = name:Ident ":" ty:Type ","?
-syntax DeriveCtor = name:Ident ("(" fields:DeriveField* ")")? ","?
-syntax DeriveParams = "<" names:(Ident % ",") ">"
+syntax DeriveField = name:Ident ':' ty:Type ','?
+syntax DeriveCtor = name:Ident ('(' fields:DeriveField* ')')? ','?
+syntax DeriveParams = '<' names:(Ident % ',') '>'
 syntax DeriveType =
-    | "struct" name:Ident params:DeriveParams? "{" fields:DeriveField* "}"
-    | "enum" name:Ident params:DeriveParams? "{" ctors:DeriveCtor* "}"
+    | 'struct' name:Ident params:DeriveParams? '{' fields:DeriveField* '}'
+    | 'enum' name:Ident params:DeriveParams? '{' ctors:DeriveCtor* '}'
 
-macro derive ("derive" "(" traits:(Ident % ",") ")" t:DeriveType) -> Decl {
+macro derive ('derive' '(' traits:(Ident % ',') ')' t:DeriveType) -> Decl {
     // 型引数があれば impl<A, B> ... Name<A, B>
     let mut ty = quote { ${t.name} }
     let mut gen = quote {}
@@ -132,19 +132,19 @@ macro derive ("derive" "(" traits:(Ident % ",") ")" t:DeriveType) -> Decl {
     let fs = t.fields
     let cs = t.ctors
     let mut eq = quote { true }
-    let mut show = quote { "" }
+    let mut show = quote { '' }
     if !is_null(fs) {
         // 構造体: a.x == b.x && ...、"Name { x: 1, y: 2 }"
-        show = quote { ${str_of(t.name) + " {"} }
+        show = quote { ${str_of(t.name) + ' {'} }
         let mut k = 0
         while k < len(fs) {
             let f = at(fs, k)
             eq = quote { $eq && a.${f.name} == b.${f.name} }
-            let sep = if k == 0 { " " } else { ", " }
-            show = quote { $show + ${sep + str_of(f.name) + ": "} + to_str(a.${f.name}) }
+            let sep = if k == 0 { ' ' } else { ', ' }
+            show = quote { $show + ${sep + str_of(f.name) + ': '} + to_str(a.${f.name}) }
             k = k + 1
         }
-        show = quote { $show + " }" }
+        show = quote { $show + ' }' }
     } else {
         // 構築子ごとの腕。"Name(1, 2)"、引数の無い構築子は "Name"
         let mut eq_arms = quote {}
@@ -159,11 +159,11 @@ macro derive ("derive" "(" traits:(Ident % ",") ")" t:DeriveType) -> Decl {
                 let mut xs = quote {}
                 let mut ys = quote {}
                 let mut cond = quote { true }
-                let mut s = quote { ${str_of(c.name) + "("} }
+                let mut s = quote { ${str_of(c.name) + '('} }
                 let mut j = 0
                 while j < len(c.fields) {
-                    let x = ident("x" + to_str(j))
-                    let y = ident("y" + to_str(j))
+                    let x = ident('x' + to_str(j))
+                    let y = ident('y' + to_str(j))
                     if j == 0 {
                         xs = quote { $x }
                         ys = quote { $y }
@@ -171,13 +171,13 @@ macro derive ("derive" "(" traits:(Ident % ",") ")" t:DeriveType) -> Decl {
                     } else {
                         xs = quote { $xs, $x }
                         ys = quote { $ys, $y }
-                        s = quote { $s + ", " + to_str($x) }
+                        s = quote { $s + ', ' + to_str($x) }
                     }
                     cond = quote { $cond && $x == $y }
                     j = j + 1
                 }
                 eq_arms = quote { $eq_arms ${c.name}($xs) => match b { ${c.name}($ys) => $cond, _ => false }, }
-                show_arms = quote { $show_arms ${c.name}($xs) => $s + ")", }
+                show_arms = quote { $show_arms ${c.name}($xs) => $s + ')', }
             }
             k = k + 1
         }
@@ -188,12 +188,12 @@ macro derive ("derive" "(" traits:(Ident % ",") ")" t:DeriveType) -> Decl {
     let mut i = 0
     while i < len(traits) {
         let tr = str_of(at(traits, i))
-        if tr == "Eq" {
+        if tr == 'Eq' {
             out = quote { $out impl $gen Eq<$ty> { fn eq(a: $ty, b: $ty) -> bool { $eq } } }
-        } else if tr == "Show" {
+        } else if tr == 'Show' {
             out = quote { $out impl $gen Show<$ty> { fn show(a: $ty) -> str { $show } } }
         } else {
-            error("derive できるのは Eq と Show（" + tr + " は無い）")
+            error('derive できるのは Eq と Show（' + tr + ' は無い）')
         }
         i = i + 1
     }
@@ -204,11 +204,11 @@ macro derive ("derive" "(" traits:(Ident % ",") ")" t:DeriveType) -> Decl {
 
 // 条件が偽なら実行時エラーにする（hibana test では、そのテストが失敗する）
 fn assert(ok: bool) {
-    if !ok { panic("assert が失敗した") }
+    if !ok { panic('assert が失敗した') }
 }
 
 fn assert_eq<A: Eq + Show>(got: A, want: A) {
-    if got != want { panic("assert_eq が失敗した: " + to_str(got) + " と " + to_str(want)) }
+    if got != want { panic('assert_eq が失敗した: ' + to_str(got) + ' と ' + to_str(want)) }
 }
 
 fn unwrap_or<A>(o: Option<A>, d: A) -> A {
@@ -312,7 +312,7 @@ fn find<A, E: Effect>(xs: Vec<A>, f: (A) -> bool ! E) -> Option<A> ! E {
 // ---- 文字列 ----
 
 fn join(xs: Vec<str>, sep: str) -> str {
-    let mut s = ""
+    let mut s = ''
     for i in 0..len(xs) {
         if i > 0 { s = s + sep }
         s = s + xs[i]
@@ -321,7 +321,7 @@ fn join(xs: Vec<str>, sep: str) -> str {
 }
 
 fn repeat(s: str, n: int) -> str {
-    let mut r = ""
+    let mut r = ''
     for i in 0..n { r = r + s }
     r
 }
@@ -338,7 +338,7 @@ fn includes(s: str, w: str) -> bool {
     false
 }
 
-fn is_space(c: str) -> bool { c == " " || c == "\n" || c == "\t" || c == "\r" }
+fn is_space(c: str) -> bool { c == ' ' || c == '\n' || c == '\t' || c == '\r' }
 
 // 前後の空白を除く
 fn trim(s: str) -> str {
@@ -352,7 +352,7 @@ fn trim(s: str) -> str {
 // from を to に置き換える（from が空なら変えない）
 fn replace(s: str, from: str, to: str) -> str {
     if len(from) == 0 { return s }
-    let mut out = ""
+    let mut out = ''
     let mut i = 0
     while i < len(s) {
         if starts_at(s, i, from) {
@@ -366,7 +366,7 @@ fn replace(s: str, from: str, to: str) -> str {
     out
 }
 
-fn lines(s: str) -> Vec<str> { split(s, "\n") }
+fn lines(s: str) -> Vec<str> { split(s, '\n') }
 
 // ---- Map（文字列のキーから値へ） ----
 
@@ -409,48 +409,55 @@ struct Field { key: str, value: Json }
 
 // JSON の文字列リテラル
 fn quote_str(s: str) -> str {
-    let mut out = "\""
+    let mut out = '"'
     for i in 0..len(s) {
         let c = slice(s, i, i + 1)
-        if c == "\"" {
-            out = out + "\\\""
-        } else if c == "\\" {
-            out = out + "\\\\"
-        } else if c == "\n" {
-            out = out + "\\n"
+        if c == '"' {
+            out = out + '\\"'
+        } else if c == '\\' {
+            out = out + '\\\\'
+        } else if c == '\n' {
+            out = out + '\\n'
+        } else if c == '\r' {
+            out = out + '\\r'
+        } else if c == '\t' {
+            out = out + '\\t'
+        } else if 0 <= code(c) && code(c) < 32 {
+            let digits = '0123456789abcdef'
+            out = out + '\\u00' + char_at(digits, code(c) / 16) + char_at(digits, code(c) % 16)
         } else {
             out = out + c
         }
     }
-    out + "\""
+    out + '"'
 }
 
 // ponytail: 要素ごとの再帰は停止性を示せないので partial fn。Vec の要素を部分項とみなせば fn にできる
 partial fn stringify(j: Json) -> str {
     match j {
-        JNull => "null"
+        JNull => 'null'
         JBool(b) => to_str(b)
         JInt(n) => to_str(n)
         JStr(s) => quote_str(s)
         JArr(items) => {
-            let mut out = "["
+            let mut out = '['
             let mut first = true
             for x in items {
-                if !first { out = out + "," }
+                if !first { out = out + ',' }
                 out = out + stringify(x)
                 first = false
             }
-            out + "]"
+            out + ']'
         }
         JObj(fields) => {
-            let mut out = "{"
+            let mut out = '{'
             let mut first = true
             for f in fields {
-                if !first { out = out + "," }
-                out = out + quote_str(f.key) + ":" + stringify(f.value)
+                if !first { out = out + ',' }
+                out = out + quote_str(f.key) + ':' + stringify(f.value)
                 first = false
             }
-            out + "}"
+            out + '}'
         }
     }
 }
@@ -464,14 +471,14 @@ fn no_parse() -> Parsed {
     Parsed { ok: false, value: JNull, pos: 0 }
 }
 
-// i 文字目（範囲外なら ""）
+// i 文字目（範囲外なら ''）
 fn char_at(s: str, i: int) -> str {
-    if 0 <= i && i < len(s) { slice(s, i, i + 1) } else { "" }
+    if 0 <= i && i < len(s) { slice(s, i, i + 1) } else { '' }
 }
 
 fn skip_ws(s: str, i: int) -> int {
     let mut j = i
-    while char_at(s, j) == " " || char_at(s, j) == "\n" || char_at(s, j) == "\t" || char_at(s, j) == "\r" {
+    while char_at(s, j) == ' ' || char_at(s, j) == '\n' || char_at(s, j) == '\t' || char_at(s, j) == '\r' {
         j = j + 1
     }
     j
@@ -479,7 +486,7 @@ fn skip_ws(s: str, i: int) -> int {
 
 // 数字なら 0 から 9、それ以外は -1
 fn digit(c: str) -> int {
-    let ds = "0123456789"
+    let ds = '0123456789'
     let mut r = -1
     for k in 0..10 {
         if slice(ds, k, k + 1) == c { r = k }
@@ -494,7 +501,7 @@ fn starts_at(s: str, i: int, w: str) -> bool {
 // ponytail: 整数だけを読む（小数・指数は読めない）
 fn parse_int(s: str, i: int) -> Parsed {
     let mut j = i
-    let neg = char_at(s, j) == "-"
+    let neg = char_at(s, j) == '-'
     if neg { j = j + 1 }
     let start = j
     let mut n = 0
@@ -526,31 +533,73 @@ fn parse_int(s: str, i: int) -> Parsed {
     }
 }
 
-// ponytail: \uXXXX のエスケープは読めない
+// JSON の Unicode エスケープを4桁読む。途中で切れているものも拒否する。
+fn json_hex4(s: str, i: int) -> int {
+    let mut n = 0
+    for k in 0..4 {
+        let c = char_at(s, i + k)
+        let mut value = -1
+        let lower = '0123456789abcdef'
+        let upper = '0123456789ABCDEF'
+        for h in 0..16 {
+            if c == char_at(lower, h) || c == char_at(upper, h) { value = h }
+        }
+        if value < 0 { return -1 }
+        n = n * 16 + value
+    }
+    n
+}
+
 fn parse_string(s: str, i: int) -> Parsed {
     let mut j = i + 1
-    let mut out = ""
+    let mut out = ''
     let mut done = false
     let mut bad = false
     while !done && !bad {
         let c = char_at(s, j)
-        if c == "" {
+        if c == '' {
             bad = true
-        } else if c == "\"" {
+        } else if c == '"' {
             done = true
             j = j + 1
-        } else if c == "\\" {
+        } else if c == '\\' {
             let e = char_at(s, j + 1)
-            if e == "n" {
-                out = out + "\n"
-            } else if e == "t" {
-                out = out + "\t"
-            } else if e == "\"" || e == "\\" || e == "/" {
-                out = out + e
+            if e == 'u' {
+                let high = json_hex4(s, j + 2)
+                if high < 0 || (56320 <= high && high <= 57343) {
+                    bad = true
+                } else if 55296 <= high && high <= 56319 {
+                    let low = json_hex4(s, j + 8)
+                    if char_at(s, j + 6) != '\\' || char_at(s, j + 7) != 'u' || low < 56320 || low > 57343 {
+                        bad = true
+                    } else {
+                        out = out + char_from_codepoint(65536 + (high - 55296) * 1024 + low - 56320)
+                        j = j + 12
+                    }
+                } else {
+                    out = out + char_from_codepoint(high)
+                    j = j + 6
+                }
             } else {
-                bad = true
+                if e == 'n' {
+                    out = out + '\n'
+                } else if e == 'r' {
+                    out = out + '\r'
+                } else if e == 't' {
+                    out = out + '\t'
+                } else if e == 'b' {
+                    out = out + char_from_codepoint(8)
+                } else if e == 'f' {
+                    out = out + char_from_codepoint(12)
+                } else if e == '"' || e == '\\' || e == '/' {
+                    out = out + e
+                } else {
+                    bad = true
+                }
+                j = j + 2
             }
-            j = j + 2
+        } else if code(c) < 32 {
+            bad = true
         } else {
             out = out + c
             j = j + 1
@@ -562,17 +611,17 @@ fn parse_string(s: str, i: int) -> Parsed {
 partial fn parse_value(s: str, i0: int) -> Parsed {
     let i = skip_ws(s, i0)
     let c = char_at(s, i)
-    if starts_at(s, i, "null") {
+    if starts_at(s, i, 'null') {
         Parsed { ok: true, value: JNull, pos: i + 4 }
-    } else if starts_at(s, i, "true") {
+    } else if starts_at(s, i, 'true') {
         Parsed { ok: true, value: JBool(true), pos: i + 4 }
-    } else if starts_at(s, i, "false") {
+    } else if starts_at(s, i, 'false') {
         Parsed { ok: true, value: JBool(false), pos: i + 5 }
-    } else if c == "\"" {
+    } else if c == '"' {
         parse_string(s, i)
-    } else if c == "[" {
+    } else if c == '[' {
         parse_array(s, i + 1)
-    } else if c == "{" {
+    } else if c == '{' {
         parse_object(s, i + 1)
     } else {
         parse_int(s, i)
@@ -583,7 +632,7 @@ partial fn parse_value(s: str, i0: int) -> Parsed {
 partial fn parse_array(s: str, i: int) -> Parsed {
     let mut items: Vec<Json> = []
     let mut j = skip_ws(s, i)
-    let mut done = char_at(s, j) == "]"
+    let mut done = char_at(s, j) == ']'
     if done { j = j + 1 }
     let mut bad = false
     while !done && !bad {
@@ -594,9 +643,9 @@ partial fn parse_array(s: str, i: int) -> Parsed {
             items = push(items, p.value)
             j = skip_ws(s, p.pos)
             let c = char_at(s, j)
-            if c == "," {
+            if c == ',' {
                 j = j + 1
-            } else if c == "]" {
+            } else if c == ']' {
                 done = true
                 j = j + 1
             } else {
@@ -611,13 +660,13 @@ partial fn parse_array(s: str, i: int) -> Parsed {
 partial fn parse_object(s: str, i: int) -> Parsed {
     let mut fields: Vec<Field> = []
     let mut j = skip_ws(s, i)
-    let mut done = char_at(s, j) == "}"
+    let mut done = char_at(s, j) == '}'
     if done { j = j + 1 }
     let mut bad = false
     while !done && !bad {
         let k = parse_string(s, skip_ws(s, j))
         let colon = skip_ws(s, k.pos)
-        if char_at(s, skip_ws(s, j)) != "\"" || !k.ok || char_at(s, colon) != ":" {
+        if char_at(s, skip_ws(s, j)) != '"' || !k.ok || char_at(s, colon) != ':' {
             bad = true
         } else {
             let v = parse_value(s, colon + 1)
@@ -630,9 +679,9 @@ partial fn parse_object(s: str, i: int) -> Parsed {
                 }
                 j = skip_ws(s, v.pos)
                 let c = char_at(s, j)
-                if c == "," {
+                if c == ',' {
                     j = j + 1
-                } else if c == "}" {
+                } else if c == '}' {
                     done = true
                     j = j + 1
                 } else {

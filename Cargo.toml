@@ -13,6 +13,10 @@ toml = { version = "1.1.6", features = ["preserve_order"] }
 wasm-encoder = "0.227.1"
 wasmtime = { version = "50.0.1", default-features = false, features = ["cranelift", "runtime", "std"] }
 
+[[example]]
+name = "cms-build"
+path = "apps/cms/build.rs"
+
 [features]
 # Z3 をソースからビルドして静的にリンクする（時間がかかる。実行ファイル1つで動く）
 static = ["z3/bundled"]

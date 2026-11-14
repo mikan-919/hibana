@@ -2,12 +2,14 @@
 
 hibana は、依存型（型の中に値を書ける型）と、構文を拡張できるマクロを根幹に置く言語です。実装は Rust で、`nix develop` の中で `cargo run -- <ファイル.hb>` で実行します。証明に使う Z3 は、z3 クレートでライブラリ（libz3）を直接呼びます。`nix develop` でビルドした実行ファイルは libz3 の場所を rpath に持つので、外でもそのまま動きます。`cargo build --features static` は Z3 をソースからビルドして静的にリンクします（配布用。時間がかかり、cmake が要ります）。
 
-この文書は実装（`src/`）の現状を書いたものです。例は `examples/` にあります。
+この文書は実装（`src/`）の現状を書いたものです。例は `tests/programs/` にあります。利用者が書く正本は `examples/` です。
 
 ## 1. 字句
 
 - 識別子は英字か `_` で始まり、英数字と `_` が続きます。
-- 整数（`42`、`0xFF`）と文字列（`"a\n"`）を書けます。浮動小数（`3.14`）と文字（`'a'`）は字句解析だけ対応していて、式には書けません（マクロのパターンの `Float` `Char` で使えます）。文字列のエスケープは `\n \t \r \0 \\ \" \'` です。
+- 整数（`42`、`0xFF`）と文字列（`'a\n'`）を書けます。文字列は `'...'` だけで書き、`"` は使えません。浮動小数（`3.14`）は字句解析だけ対応していて、式には書けません（マクロのパターンの `Float` で使えます）。文字列のエスケープは `\n \t \r \0 \\ \' \` \{ \}` です。
+- `` `Hello {name}!` `` は埋め込み付きの文字列です。`{ }` の中に式を1つ書き、その値を `to_str` で文字列にしてつなぎます（`'Hello ' + to_str(name) + '!'` と同じ）。`{ }` の中には `'...'` や入れ子の `` `...` `` も書けます。
+- `型の名前::名前`（`Response::text`）は1つの名前です（3.9 節）。
 - コメントは `// 行末まで` と `/* ... */` です。
 - キーワード: `fn partial let mut if else while for in return match type struct enum trait impl syntax macro quote use module extern effect handle true false`
 - 各トークンは、直前に空白があるか（`gap_before`）と改行があるか（`nl_before`）を持ちます。前者はマクロのパターンの `~`（空白なしで続く）に、後者は文の区切りに使います。
@@ -71,24 +73,29 @@ type T<b: bool> = if b { int } else { str }
 use web              // 組み込みのライブラリ（lib/ 以下。実行ファイルに埋め込まれている）。web.ok のように修飾して使う
 use web.*            // すべての名前を修飾なしで使う
 use web.{ok, Request}  // 挙げた名前だけ修飾なしで使う
-use "util.hb"        // ファイル（今のディレクトリからの経路）。モジュール名は拡張子を除いた名前（util）
+use 'util.hb'        // ファイル（今のディレクトリからの経路）。モジュール名は拡張子を除いた名前（util）
+use './lib' -> *     // ./ か ../ で始まる経路は .hb を省ける。-> * はすべての名前を修飾なしで使う
+use './lib'
+    -> { hanabi }    // -> { 名前 } は挙げた名前だけ修飾なしで使う。改行して続けて書ける
+    -> { Response }  // 型の名前を挙げると、その型に属する関数（Response::text など）も修飾なしで使える
 ```
 
-- `use` したモジュールの関数・型・構築子は `モジュール名.名前`（`web.ok("a")`、`web.Request { ... }`、`Option<web.Request>`）で参照します。利用者のファイルの同じ名前とは衝突しません。
+- `use` したモジュールの関数・型・構築子は `モジュール名.名前`（`web.ok('a')`、`web.Request { ... }`、`Option<web.Request>`）で参照します。利用者のファイルの同じ名前とは衝突しません。
 - モジュールの中では、そのモジュール自身の名前を修飾なしで参照できます。
 - 名前は、局所変数、自分のモジュール、`use` で修飾なしに取り込んだ名前の順に探します。
 - `syntax` と `macro` は、`use` したモジュールのものもすべて有効です（パターンのリテラルで呼び出すため）。マクロの展開結果がライブラリの関数や型を使っていても、衛生性によって定義した側のモジュールの名前（`web.not_found` など）を指すので、利用者が修飾なしで取り込んでいなくても動きます。
-- 同じモジュールは1回だけ読みます。
+- 同じモジュールは1回だけ読みます。別の経路で書いた同じ名前のファイル（`'./lib'` と `'../web/lib'`）も1回です。
+- ファイル名がキーワードと同じ（`syntax.hb`）なら、モジュール名の末尾に `_` を足します（`syntax_`）。
 
 ### 3.4 JavaScript / TypeScript のモジュール
 
-JS ターゲット（`hibana js`）でだけ使えます。インタプリタで呼ぶと実行時エラー、`hibana c` / `hibana build` ではエラーになります。
+JS ターゲット（Rust API の `hibana::to_js`）でだけ使えます。インタプリタで呼ぶと実行時エラー、C ターゲットではエラーになります。
 
 ```
-use "./js/util.ts"        // TypeScript のファイル。export した関数・interface・type の型を読む
-use "./js/greet.js"       // JavaScript のファイル。隣の greet.d.ts の型を読む
-use "some-package"        // npm のパッケージ。node_modules の package.json の types、index.d.ts、@types/... を探す
-use "node:path"           // Node.js の組み込み。node_modules/@types/node が要る
+use './js/util.ts'        // TypeScript のファイル。export した関数・interface・type の型を読む
+use './js/greet.js'       // JavaScript のファイル。隣の greet.d.ts の型を読む
+use 'some-package'        // npm のパッケージ。node_modules の package.json の types、index.d.ts、@types/... を探す
+use 'node:path'           // Node.js の組み込み。node_modules/@types/node が要る
 
 fn main() {
     print(util.add(2, 3))
@@ -98,7 +105,7 @@ fn main() {
 ```
 
 - `use` に名前で書く（`use web`）と組み込みのライブラリ、文字列で書くとファイルかパッケージです。ファイルの経路は、`use` を書いた .hb のファイルのディレクトリからの経路です。
-- モジュール名は、ファイル名から拡張子を除いた名前です（`./js/util.ts` は `util`、`node:path` は `path`、名前に使えない文字は `_`）。hibana のモジュールと同じく、`use "./js/util.ts".*` で修飾なしにもできます。
+- モジュール名は、ファイル名から拡張子を除いた名前です（`./js/util.ts` は `util`、`node:path` は `path`、名前に使えない文字は `_`）。hibana のモジュールと同じく、`use './js/util.ts'.*` で修飾なしにもできます。
 - 型は TypeScript の型宣言から読み、境界でその型に従って値を変換します。型宣言の無い JavaScript は使えません。
 
 | TypeScript の型 | hibana の型 | 境界での変換 |
@@ -113,12 +120,12 @@ fn main() {
 | 共用体・ジェネリクス・`any` などそれ以外 | `js` | JavaScript の値をそのまま持ち回る |
 
 - ジェネリクスや可変長引数を持つ関数、メソッドは読めないので無視します。
-- 内部では、型宣言から `extern "経路" { fn 名前(引数) -> 型 }` の宣言を作って使います。型宣言の無いモジュールには、この `extern` を直接書くこともできます。
+- 内部では、型宣言から `extern '経路' { fn 名前(引数) -> 型 }` の宣言を作って使います。型宣言の無いモジュールには、この `extern` を直接書くこともできます。
 - JavaScript の関数は中身が分からないので、停止性を検査せず（`partial fn` と同じ扱い）、型の計算でも展開しません。
 
 ### 3.5 効果
 
-非同期・失敗・依存の注入などは、代数的エフェクト（効果の「操作」を呼ぶと、外側の `handle` の腕がそれを処理し、必要なら呼んだ所から続きを再開する仕組み）で書きます。Promise や `await` は書きません。例は `examples/effects.hb` です。
+非同期・失敗・依存の注入などは、代数的エフェクト（効果の「操作」を呼ぶと、外側の `handle` の腕がそれを処理し、必要なら呼んだ所から続きを再開する仕組み）で書きます。Promise や `await` は書きません。例は `tests/programs/effects/effects.hb` です。
 
 ```
 effect Fail<E> { fn fail(e: E) -> never }
@@ -126,13 +133,13 @@ effect Need<T> { fn need() -> T }
 
 fn find(id: str) -> User ! Fail<NotFound>, Need<Db> {
     let db = need()
-    if id == "0" { fail(NotFound { id: id }) } else { User { name: db.prefix + id } }
+    if id == '0' { fail(NotFound { id: id }) } else { User { name: db.prefix + id } }
 }
 
 fn main() {
-    let name = handle find("42").name {
-        fail(e) => "not found: " + e.id       // resume しない腕は handle 全体の値になる
-        need() => resume(Db { prefix: "u" })  // resume で、操作の戻り値を渡して続きを再開する
+    let name = handle find('42').name {
+        fail(e) => 'not found: ' + e.id       // resume しない腕は handle 全体の値になる
+        need() => resume(Db { prefix: 'u' })  // resume で、操作の戻り値を渡して続きを再開する
     }
 }
 ```
@@ -142,7 +149,7 @@ fn main() {
 - `handle 式 { 操作(引数) => 式 ... }` は、式の中で起きた腕の操作を処理します。処理した効果は、`handle` の外の型から消えます。効果の型引数（`Fail<E>` の `E`）は、本体で起こした効果の型から決まります。
 - 腕の中の操作は、その `handle` より外側で処理します（深いハンドラー）。
 - 関数型にも効果を書けます（`(str) -> unit ! Log`）。期待する型が効果を持つ関数型なら、無名関数の中でその効果を起こせます。起こす効果の少ない関数は、多い関数型の値として使えます（効果の無い関数を `! Log` の引数に渡せる）。
-- 効果の多相: `<E: Effect>` は効果の並びを表す型引数です。`fn map<A, B, E: Effect>(xs: Vec<A>, f: (A) -> B ! E) -> Vec<B> ! E` を呼ぶと、`E` は渡した関数の効果になり（効果の無い関数なら空）、`map` もその効果を起こします。関数の中では `E` を1つの効果として扱い、`E` の値の関数を呼べます。std の `map` `filter` `fold` がこの形です（例は `examples/poly.hb`）。
+- 効果の多相: `<E: Effect>` は効果の並びを表す型引数です。`fn map<A, B, E: Effect>(xs: Vec<A>, f: (A) -> B ! E) -> Vec<B> ! E` を呼ぶと、`E` は渡した関数の効果になり（効果の無い関数なら空）、`map` もその効果を起こします。関数の中では `E` を1つの効果として扱い、`E` の値の関数を呼べます。std の `map` `filter` `fold` がこの形です（例は `tests/programs/effects/poly.hb`）。
   - 渡す無名関数の引数の型は、前の引数から決まった関数型の引数の型から推論します（`map([1, 2], fn(x) { x * 2 })`）。戻り値の型と効果は本体から求め、`E` は本体で起きた効果になります。書けば、書いた型と効果を使います。
   - 効果の変数に `Async` も入れられます。JavaScript では、効果の多相な関数ごとに、効果の変数を通した呼び出しを待つ async 版（`f_map$a`）も出力し、`E` に `Async` が入る呼び出しはそちらを呼んで待ちます（async かどうかだけの単相化）。
 - 引数の並びの中で、効果を持つ関数型の後に名前の無い引数が続く時は、関数型を括弧で囲みます（`(int, ((int) -> int ! Log), str) -> int`）。
@@ -154,7 +161,7 @@ fn main() {
 `Async` は組み込みの効果で、待つ処理を表します。TypeScript の `Promise<T>` を返す関数は、`T` を返して `Async` の効果を起こす関数として読みます（3.4 節）。
 
 ```
-use "./js/util.ts"        // export async function later(x: number): Promise<number>
+use './js/util.ts'        // export async function later(x: number): Promise<number>
 
 fn twice_later(x: int) -> int ! Async {
     util.later(x) + util.later(x)       // await は書かない
@@ -197,18 +204,18 @@ greet = { git = "https://github.com/someone/hibana-greet", tag = "v0.1.0" }   # 
 - ファイルは内容の SHA-256 と実行属性で識別して共通ストアに一度だけ保存し、パッケージのツリーへハードリンクします。同じ内容・実行属性なら、プロジェクト・版・取得元をまたいで共有します。プロジェクトにはコピーせず、共通のツリーを直接参照します。保存したファイルは読み取り専用です。
 - 取得用の git 履歴は一時領域だけに置き、保存時に `.git` を除きます。パッケージ内に収まる相対シンボリックリンクのみ使えます。ハードリンクできない環境ではコピーせずエラーにします。旧 `XDG_CACHE_HOME` のキャッシュは移行・削除せず、新しい保存先に再取得します。ストアの自動削除・GC はまだありません。
 - `hibana.toml` のあるディレクトリの下のファイルを実行・変換すると、取ってきていない依存を先に取ってきます。
-- パッケージの中の `use "x.hb"` は、そのファイルのディレクトリから探します。
+- パッケージの中の `use 'x.hb'` は、そのファイルのディレクトリから探します。
 - 同じ名前のパッケージは一つの版だけ使えます。違う git の URL で二つ要るとエラーです。版の範囲（semver）の解決とレジストリはまだありません。
 - JavaScript のパッケージは npm で入れます（3.4 節）。
 
 ### 3.7 トレイト
 
-トレイトは、型ごとに実装を書ける関数の組です（例は `examples/trait.hb`）。
+トレイトは、型ごとに実装を書ける関数の組です（例は `tests/programs/types/trait.hb`）。
 
 ```
 trait Show<A> {
     fn show(x: A) -> str
-    fn loud(x: A) -> str { show(x) + "!" }   // 既定の実装。impl で省ける
+    fn loud(x: A) -> str { show(x) + '!' }   // 既定の実装。impl で省ける
 }
 
 impl Show<int> {
@@ -240,21 +247,40 @@ trait Ord<A>: Eq<A> {                        // 親のトレイト。Ord の実�
 ```
 use std.*
 
-test "足し算" {
+test '足し算' {
     assert_eq(add(1, 2), 3)
     assert(add(0, 0) == 0)
 }
 ```
 
-- `test "名前" { 本体 }` は、引数の無い関数として型検査します。`hibana test` でだけ実行し、ほかの実行方式では呼びません。`test` は宣言の先頭で文字列が続く時だけ特別で、変数名にも使えます。
+- `test '名前' { 本体 }` は、引数の無い関数として型検査します。`hibana test` でだけ実行し、ほかの実行方式では呼びません。`test` は宣言の先頭で文字列が続く時だけ特別で、変数名にも使えます。
 - 本体で実行時エラーが起きると、そのテストは失敗です。std の `assert(ok)` と `assert_eq(got, want)`（`Eq` と `Show` の実装が要る）は、組み込みの `panic` で実行時エラーにします。失敗の位置は、ライブラリの中で起きたエラーでも、テストのファイルの中の呼び出しにします。
 - `main` の無いファイルには、空の `main` を足して検査します。
+
+### 3.9 型に属する関数とメソッド
+
+```
+struct Param { value: str }
+
+fn Param::get(p: Param) -> str { p.value }     // 型 Param に属する関数
+fn str::twice(s: str) -> str { s + s }         // 組み込みの型にも書ける
+
+fn main() {
+    let id = Param { value: 'u7' }
+    print(Param::get(id))       // u7
+    print(id.get().twice())     // u7u7。x.f(a) は、x の型 T の T::f(x, a) を呼ぶ
+}
+```
+
+- `型の名前::名前` は1つの名前です。関数の宣言・呼び出し・`use ... -> { 名前 }` のどこでも書けます。
+- `x.f(a)` は、`x` の型を求めてから `T::f(x, a)` の呼び出しに書き換えます。`T::f` が無ければエラーです。`str`・`int`・`Vec` などの組み込みの型のメソッドは、どのモジュールで宣言しても使えます。
+- ponytail: 名前は内部で `T__f` になり、エラーにもその名前で出ます。同じ組み込みの型に同じ名前のメソッドを複数のモジュールが宣言すると、名前の順で最初のものを使います。
 
 ## 4. 式
 
 | 式 | 例 |
 |---|---|
-| リテラル | `1` `"s"` `true` `[1, 2, 3]` |
+| リテラル | `1` `'s'` `` `n={n}` `` `true` `[1, 2, 3]` |
 | 変数 | `let x = 1`、`let mut i: int = 0`、`i = i + 1` |
 | 演算 | `+ - * / %`（`+` は文字列の連結にも使う）、`< <= > >= == !=`、`&& \|\| !` |
 | 呼び出し | `f(x)`、`f<int>(x)`、`adder(10)(5)` |
@@ -290,7 +316,7 @@ test "足し算" {
 
 ```
 type T<b: bool> = if b { int } else { str }
-fn f(b: bool) -> T<b> { if b { 42 } else { "forty-two" } }
+fn f(b: bool) -> T<b> { if b { 42 } else { 'forty-two' } }
 
 fn add_zero(n: Nat) -> Eq<Nat, add(n, Zero), n> {
     match n {
@@ -337,15 +363,15 @@ fn add_zero(n: Nat) -> Eq<Nat, add(n, Zero), n> {
 
 ```
 syntax Route = annotations:Annotation* method:Ident path:String body:Block
-macro routes ("routes" "{" rs:Route* "}") -> Expr { ...本体... }
+macro routes ('routes' '{' rs:Route* '}') -> Expr { ...本体... }
 ```
 
 パターンの書き方:
 
 | 書き方 | 意味 |
 |---|---|
-| `"lit"` | リテラル（1個のトークンでなければならない） |
-| `Ident Int Float String Char Expr Block Stmt Type Text` | 組み込みの項。`Text` は、後に続きうるトークンの手前までの生の文字列 |
+| `'lit'` | リテラル（1個のトークンでなければならない。`'Response::json'` は1つの名前として照合する） |
+| `Ident Int Float String Template Expr Block Stmt Type Text` | 組み込みの項。`Template` は `` `...` `` の文字列で、`str_of` はソースのままの中身（`{ }` を含む）を返す。`Text` は、後に続きうるトークンの手前までの生の文字列 |
 | `Name` | 他の `syntax` 規則 |
 | `x:P` | 束縛。同じ連接の中で同じ名前を2回使うとエラー |
 | `P*` `P+` `P?` `P % sep` | 0回以上・1回以上・省略可能・区切り付きの並び |
@@ -354,7 +380,7 @@ macro routes ("routes" "{" rs:Route* "}") -> Expr { ...本体... }
 | `( P )` | グループ |
 
 - マクロは、式の位置（`-> Expr`、省略時）か文の位置（`-> Stmt`）で、組み込みの構文より先に試します。宣言の位置（`-> Decl`）のマクロは、`fn` や `type` などで始まらない宣言の位置で試します（8.4 節）。一致しなければ組み込みの構文として読みます。複数のマクロが一致すると「Ambiguous macro match」エラーです。
-- 左再帰（`syntax E = E "+" Int`）と、`Expr` / `Stmt` で始まるマクロは禁止です。
+- 左再帰（`syntax E = E '+' Int`）と、`Expr` / `Stmt` で始まるマクロは禁止です。
 - `syntax` 宣言の末尾の `;` は省けます。
 
 ### 8.2 本体
@@ -362,7 +388,7 @@ macro routes ("routes" "{" rs:Route* "}") -> Expr { ...本体... }
 マクロ本体はコンパイル時に実行する普通の hibana のコードで、最後の値（`syn` 型）が展開結果になります。本体が空なら照合結果だけを残し、型検査で「展開コードが無い」エラーになります。
 
 ```
-macro pow ("pow" "(" x:Expr "," n:Int ")") {
+macro pow ('pow' '(' x:Expr ',' n:Int ')') {
     let mut acc = quote { 1 }
     let mut i = 0
     while i < int_of(n) {
@@ -375,7 +401,7 @@ macro pow ("pow" "(" x:Expr "," n:Int ")") {
 
 - `quote { ... }` はコード片を作ります。中では `$x`（変数の値）、`$x.f`（フィールド）、`${式}`（式の値）、`$( ... ) 区切り? *`（配列を繰り返す）が使えます。差し込める値は `syn`・`int`・`str`・`bool` です。
 - パターンで束縛した式は、括弧で囲んで差し込みます（`-sum(1 + 2)` は `-(1 + 2)`）。`quote` で作った断片は囲みません。
-- 束縛の型は、パターンから決まる `syn<種類>` です（`p:Pair` は `syn<Pair>`、`ps:(Pair % ",")` は `syn<[Pair]>`、`x:Expr` は `syn<Expr>`）。存在しないフィールドの参照や、配列でない値への `at` は、マクロ定義の時点で型エラーになります。
+- 束縛の型は、パターンから決まる `syn<種類>` です（`p:Pair` は `syn<Pair>`、`ps:(Pair % ',')` は `syn<[Pair]>`、`x:Expr` は `syn<Expr>`）。存在しないフィールドの参照や、配列でない値への `at` は、マクロ定義の時点で型エラーになります。
 - 組み込み関数: `len(x)`、`at(xs, i)`、`is_null(x)`、`int_of(x)`、`str_of(x)`、`ident(s)`（文字列から識別子を作る）、`error(msg)`（コンパイルエラーにする）。文字列の関数（9 節）も使えます。マクロ本体の `print` は標準エラーに出ます。
 - 本体から普通の `fn` は呼べません。マクロは関数の構文解析より前に実行するためです。
 
@@ -389,9 +415,9 @@ macro pow ("pow" "(" x:Expr "," n:Int ")") {
 
 ```
 syntax DeriveType =
-    | "struct" name:Ident params:DeriveParams? "{" fields:DeriveField* "}"
-    | "enum" name:Ident params:DeriveParams? "{" ctors:DeriveCtor* "}"
-macro derive ("derive" "(" traits:(Ident % ",") ")" t:DeriveType) -> Decl {
+    | 'struct' name:Ident params:DeriveParams? '{' fields:DeriveField* '}'
+    | 'enum' name:Ident params:DeriveParams? '{' ctors:DeriveCtor* '}'
+macro derive ('derive' '(' traits:(Ident % ',') ')' t:DeriveType) -> Decl {
     ...
     quote { $t impl Eq<${t.name}> { fn eq(a: ${t.name}, b: ${t.name}) -> bool { ... } } }
 }
@@ -401,7 +427,7 @@ macro derive ("derive" "(" traits:(Ident % ",") ")" t:DeriveType) -> Decl {
 - 型の宣言を受け取る組み込みの項はありません。型の宣言の形は `syntax` で書きます（std の `DeriveType` など）。
 - `quote` の中の `_`（`match` のどれにも合わない腕）は付け替えません。
 
-std の `derive` は、型の宣言と、その型の `Eq`・`Show` の `impl` を作ります（例は `examples/derive.hb`）。
+std の `derive` は、型の宣言と、その型の `Eq`・`Show` の `impl` を作ります（例は `tests/programs/macros/derive.hb`）。
 
 ```
 derive(Eq, Show)
@@ -423,7 +449,7 @@ enum Shape { Circle(r: int), Rect(w: int, h: int), Dot }
 | `compile(source, target, exports)` | `(str, str, Vec<str>) -> Vec<int>`。明示したソースをコンパイルする |
 | `inspect_exports(source, exports)` | `(str, Vec<str>) -> str`。公開関数と外部関数の ABI 情報を JSON 文字列で返す |
 
-`compile` の target は `"wasm"`・`"js"`・`"c"` です。WASM は空でない exports を受け取り、指定した関数を公開するライブラリを返します。JS と C は exports を空にし、`main` を持つプログラムを渡します（ライブラリ出力は未対応）。コンパイル対象ソースがさらに成果物を登録することはできません。
+`compile` の target は `'wasm'`・`'js'`・`'c'` です。WASM は空でない exports を受け取り、指定した関数を公開するライブラリを返します。JS と C は exports を空にし、`main` を持つプログラムを渡します（ライブラリ出力は未対応）。コンパイル対象ソースがさらに成果物を登録することはできません。
 
 `inspect_exports` は `{"exports":[[名前,[引数型,...],戻り型],...],"imports":[...]}` の形式です。型名は現在の WASM ABI の `"int"`・`"str"`・`"unit"` です。任意の型付き構文木を読むリフレクションではありません。
 
@@ -432,17 +458,17 @@ fn emit_text(path: str, text: str) {
     artifact(path, utf8(text))
 }
 
-macro page ("page" path:String text:String) -> Decl {
+macro page ('page' path:String text:String) -> Decl {
     emit_text(str_of(path), str_of(text))
     quote {}
 }
 
-page "index.html" "<h1>hello</h1>"
+page 'index.html' '<h1>hello</h1>'
 ```
 
 このマクロは空の宣言列を返します。実行時の処理も `main` も残さず、成果物だけを作れます。生成処理は通常の関数で組み合わせ、ビルド側には名前とバイト列だけを登録します。WASM や JS 接続コード専用の成果物登録関数はありません。
 
-`artifact` は呼び出した時点ではファイルを書きません。`hibana build <ファイル> --out-dir <ディレクトリ>` は、展開後のプログラム全体の型検査と生成・出力先の検査を済ませてから書き出します。成果物を受け取るビルド処理の外で登録しようとするとエラーになります。`pipeline::build_artifacts` はファイルを書かず、名前とバイト列の一覧を返す Rust API です。
+`artifact` は呼び出した時点ではファイルを書きません。Rust API の `pipeline::build_artifacts` は、展開後のプログラム全体の型検査と生成・成果物名の検査を済ませてから結果を返します。保存先の検査とファイルへの書き込みは呼び出し側で行います。成果物を受け取るビルド処理の外で登録しようとするとエラーになります。`pipeline::build_artifacts` はファイルを書かず、名前とバイト列の一覧を返す Rust API です。
 
 出力先は `--out-dir` からの相対パスです。絶対パス、`.`・`..`、重複する名前、ファイルとディレクトリが衝突する名前、シンボリックリンクを通る出力先は拒否します。型検査・生成・出力先検査の失敗では書き出しません。ただし、書き出し途中の OS の I/O エラーを巻き戻す仕組みではありません。
 
@@ -462,6 +488,7 @@ page "index.html" "<h1>hello</h1>"
 | `slice(s, i, j)` | `(str, int, int) -> str`。範囲外は実行時エラー |
 | `chars(s)` `code(c)` | `str -> Vec<str>`（1 文字ずつ）、`str -> int`（先頭の文字の番号。空なら -1） |
 | `panic(msg)` | `str -> never`。実行時エラーにする |
+| `now_ms()` | `() -> int`。1970 年 1 月 1 日（UTC）からのミリ秒 |
 | `new_ref(x)` `read(r)` `write(r, x)` | `T -> Ref<T>`、`Ref<T> -> T`、`(Ref<T>, T) -> unit` |
 | `push(v, x)` | `(Vec<T>, T) -> Vec<T>`。`v` の後ろに `x` を足した新しい `Vec`（`v` は変わらない）。`xs = push(xs, x)` の形で、`xs` の配列を他から指していなければ、写さずにその場で足す（平均 O(1)） |
 | `set_at(v, i, x)` | `(Vec<T>, int, T) -> Vec<T>`。`v` の `i` 番目を `x` にした新しい `Vec`。`i` が範囲内であることを添字と同じく証明する。`xs = set_at(xs, i, x)` の形は `push` と同じく、その場で書き換える（O(1)） |
@@ -472,7 +499,7 @@ page "index.html" "<h1>hello</h1>"
 
 ### std
 
-`use std.*` で、修飾なしに使うのが普通です（`lib/std.hb`、例は `examples/std.hb`）。
+`use std.*` で、修飾なしに使うのが普通です（`lib/std.hb`、例は `tests/programs/stdlib/std.hb`）。
 
 | 名前 | 内容 |
 |---|---|
@@ -496,15 +523,17 @@ page "index.html" "<h1>hello</h1>"
 
 ### web
 
-`use web` で、Web アプリのための型・関数・マクロを使えます（`lib/web.hb`、例は `examples/web.hb`）。
+`use web` で、Web アプリのための型・関数・マクロを使えます（`lib/web.hb`、例は `tests/programs/web/web.hb`）。
 
 | 名前 | 内容 |
 |---|---|
 | `Request` | `{ method: str, path: str, query: str, headers: Vec<Header>, body: str }`。`Header` は `{ name, value }` で、名前は小文字。`request(method, path)` で試しの要求を作る |
-| `header(req, name)` `query(req, name)` | ヘッダーとクエリ（`?a=1&b=2`）の値。無ければ `""` |
-| `Response` | `{ status: int, content_type: str, body: str }` |
-| `ok(body)` `html(body)` `json(body)` `status(code, body)` `not_found()` | 応答を作る（200 の text/plain・text/html・application/json、任意の番号の text/plain、404） |
-| `routes { メソッド "パス" { 本体 } ... }` | `(Request) -> Response` の関数を作る。パスの `{名前}` はその名前の変数になる。どれにも合わなければ `not_found()`。ルートの本体では、要求を `req` として使える。`routes ! Async, Need<Db> { ... }` と書くと、ルートの本体でその効果を起こせる（`(Request) -> Response ! Async, Need<Db>` の関数になる） |
+| `header(req, name)` `query(req, name)` | ヘッダーとクエリ（`?a=1&b=2`）の値。無ければ `''` |
+| `Response` | `{ status: int, content_type: str, body: str, headers: Vec<Header> }`。直接構築するときは `headers` も必要 |
+| `ok(body)` `html(body)` `json(body)` `status(code, body)` `not_found()` | 空の `headers` を持つ応答を作る（200 の text/plain・text/html・application/json、任意の番号の text/plain、404） |
+| `with_header(res, name, value)` | 元の応答を変えず、ヘッダーを末尾に追加した応答を返す。同じ名前も残すので、複数の `Set-Cookie` を返せる |
+| `redirect(location)` | 303 See Other、`Location` ヘッダー、空の本文を持つ応答を作る。POST の保存後に GET へ遷移するために使う |
+| `routes { メソッド 'パス' { 本体 } ... }` | `(Request) -> Response` の関数を作る。パスの `{名前}` はその名前の変数になる。どれにも合わなければ `not_found()`。ルートの本体では、要求を `req` として使える。`routes ! Async, Need<Db> { ... }` と書くと、ルートの本体でその効果を起こせる（`(Request) -> Response ! Async, Need<Db>` の関数になる） |
 | `serve(port, app)` | Node.js の HTTP サーバーとして `app: (Request) -> Response ! Async` を動かす（`Async`）。`port` が 0 なら空いている番号を使う。起動すると URL を表示する |
 | `worker(app)` | Cloudflare Workers の `fetch` として `app` を動かす。`use web` したプログラムの JS の出力は `export default { fetch }` を持つ ES モジュールになる |
 | `@f(引数) -> x` | `routes` のルートの前に書く注釈。本体の前で `let x = f(引数)` する |
@@ -515,25 +544,38 @@ use web
 
 fn main() {
     let app = routes {
-        GET "/" { web.html(<h1>Welcome</h1>) }
-        GET "/user/{id}" { web.ok("user " + id) }
+        GET '/' { web.html(<h1>Welcome</h1>) }
+        GET '/user/{id}' { web.ok('user ' + id) }
     }
-    let res = app(web.request("GET", "/user/42"))
+    let res = app(web.request('GET', '/user/42'))
     print(res.body)    // user 42
 }
 ```
 
-サーバーの例は `examples/server.hb` です。データの置き場（`Ref` を持つ構造体）を `Need<Db>` の効果で受け取り、`main` の `handle` で本物の置き場を渡しています（テストでは置き場を差し替えられる）。
+サーバーの例は `tests/programs/web/server.hb` です。データの置き場（`Ref` を持つ構造体）を `Need<Db>` の効果で受け取り、`main` の `handle` で本物の置き場を渡しています（テストでは置き場を差し替えられる）。
 
 ```
 let api = routes ! Need<Db> {
-    GET "/users/{name}" { if exists(name) { web.ok("found " + name) } else { web.not_found() } }
+    GET '/users/{name}' { if exists(name) { web.ok('found ' + name) } else { web.not_found() } }
 }
 let app = fn(req: web.Request) -> web.Response { handle api(req) { need() => resume(db) } }
-web.serve(8080, app)    // hibana js examples/server.hb > server.mjs && node server.mjs
+web.serve(8080, app)    // Rust API の hibana::to_js で生成した JS を Node.js で実行
 ```
 
 `serve` と `worker` は JS ターゲットでだけ動きます（インタプリタと C では、呼ぶと実行時エラー）。
+
+応答の `content_type` は既定の `Content-Type` です。`headers` に `Content-Type` を追加すれば上書きでき、名前の大文字・小文字は区別しません（複数あれば最後の値）。それ以外の同名ヘッダーは追加し、`Set-Cookie` は結合せず別々に送ります。不正なヘッダー名や改行を含む値など、送信先の HTTP API が受け付けない応答は 500 にします。`with_header` 自体は値を検査せず、HTTP へ送るときに検査します。
+
+```
+// 記事を保存した後の応答。Cookie の署名やセッション検証は別途必要
+let res = web.with_header(
+    web.redirect('/posts/42'),
+    'Set-Cookie',
+    'notice=saved; HttpOnly; SameSite=Lax; Path=/'
+)
+```
+
+`redirect` は遷移先を検証しません。外部入力をそのまま渡すと意図しないサイトへ誘導できるため、アプリ側で許可したパスを使います。
 
 `routes` の展開は、ルートの本体から見えない変数（`req` `parts`）を衛生性で隠しています。パスの区切りの位置 `parts[k]` は、条件の `len(parts) == N &&` から範囲を証明しています。
 
@@ -547,14 +589,12 @@ web.serve(8080, app)    // hibana js examples/server.hb > server.mjs && node ser
 
 ```toml
 [scripts]
-build = "my-builder src/main.hb"
 dev = "my-dev-server"
-check = "my-checker src"
 ```
 
-`hibana build` と `hibana dev` は同名のスクリプトを呼びます。任意の名前は `hibana script check` の形で実行します。現在のディレクトリから親へ探し、最初に見つかった `config.hibana.toml` だけを読みます。そのファイルにスクリプトが無くても、さらに親の設定には戻りません。設定ファイルのあるディレクトリを作業ディレクトリとして、`sh -c` で実行します。標準入出力と環境変数（`PATH` を含む）は親プロセスから継承します。コマンドは信頼できる設定からだけ実行してください。
+`hibana dev` は同名の開発用スクリプトを呼びます。任意名のスクリプトを呼び出す CLI はありません。現在のディレクトリから親へ探し、最初に見つかった `config.hibana.toml` だけを読みます。そのファイルにスクリプトが無くても、さらに親の設定には戻りません。設定ファイルのあるディレクトリを作業ディレクトリとして、`sh -c` で実行します。標準入出力と環境変数（`PATH` を含む）は親プロセスから継承します。コマンドは信頼できる設定からだけ実行してください。
 
-追加引数は `hibana build -- --release` や `hibana script check -- "src with spaces"` のように `--` の後へ書きます。引数がある場合、コマンド文字列の末尾に `"$@"` を付け、引数の値自体はシェルの位置引数として渡します。空白やシェルのメタ文字を含む値も一つの引数として保ちます。複数のコマンドをつないだスクリプトでは、末尾のコマンドへの追加になります。
+追加引数は `hibana dev -- --port 3000` や `hibana dev -- "src with spaces"` のように `--` の後へ書きます。引数がある場合、コマンド文字列の末尾に `"$@"` を付け、引数の値自体はシェルの位置引数として渡します。空白やシェルのメタ文字を含む値も一つの引数として保ちます。複数のコマンドをつないだスクリプトでは、末尾のコマンドへの追加になります。
 
 スクリプトの終了コードを CLI の終了コードにします。Unix でシェルがシグナルにより終了した場合は `128 + シグナル番号` にします。設定が無い・不正な TOML・`[scripts]` がテーブルでない・値が文字列でない・名前が未定義の場合は診断を出し、終了コード 1 にします。CLI の引数の書式が不正なら終了コード 2 です。
 
@@ -610,25 +650,20 @@ version = "6.1.0"
 
 既存の Git 依存の記録は保持します。ただし従来形式の Hibana 依存名 `tools` はこの表と衝突するため併用できません。破損した lock は自動的に無視せずエラーにします。設定・lock のコメントや書式は保持しません。
 
-npm ツールは各記録の `npm_lock` に npm の package-lock JSON（lockfileVersion 2/3）を文字列として保存します。推移依存の版・取得 URL・integrity を含み、別環境での再取得には `npm ci` を使います。同じ直接版でも異なる依存ツリーは別キャッシュとして扱い、ファイル内容の重複は共通 CAS で排除します。registry の HTTP(S) 配布だけを対象とし、local/git/link 依存や不正な integrity はエラーにします。ハッシュと取得内容の照合は npm が行います。旧形式で `npm_lock` が無い場合、通常の `install`・`add`・スクリプト実行で補完しますが、`--frozen-lockfile` は拒否します。Cargo ツールは `cargo_lock` に Cargo.lock の TOML を文字列として保存します。再取得時は crate ソースへ lock を復元し、`--locked` でビルドします。直接版・推移依存と registry checksum を検査し、異なる lock は別キャッシュに保存します。Cargo.lock は version 3/4 に対応し、依存の取得元は crates.io に限定します（git・path・別 registry は非対応）。`cargo_lock` の無い旧記録は通常の install・add・スクリプト実行で補完し、frozen は拒否します。Cargo のビルド環境は固定しません。npm の install scripts や OS 別依存、ビルド環境による差まで含めた同一バイナリは保証しません。`dlx` と `add -g` はプロジェクトの lock を読み書きせず、識別子・OS・CPU ごとに初回取得結果を再利用します。自動更新・更新コマンド・削除・GC は未実装です。
+npm ツールは各記録の `npm_lock` に npm の package-lock JSON（lockfileVersion 2/3）を文字列として保存します。推移依存の版・取得 URL・integrity を含み、別環境での再取得には `npm ci` を使います。同じ直接版でも異なる依存ツリーは別キャッシュとして扱い、ファイル内容の重複は共通 CAS で排除します。registry の HTTP(S) 配布だけを対象とし、local/git/link 依存や不正な integrity はエラーにします。ハッシュと取得内容の照合は npm が行います。旧形式で `npm_lock` が無い場合、通常の `install`・`add`・スクリプト実行で補完しますが、`--frozen-lockfile` は拒否します。Cargo ツールは `cargo_lock` に Cargo.lock の TOML を文字列として保存します。再取得時は crate ソースへ lock を復元し、`--locked` でビルドします。直接版・推移依存と registry checksum を検査し、異なる lock は別キャッシュに保存します。Cargo.lock は version 3/4 に対応し、依存の取得元は crates.io に限定します（git・path・別 registry は非対応）。`cargo_lock` の無い旧記録は通常の install・add・スクリプト実行で補完し、frozen は拒否します。Cargo のビルド環境は固定しません。npm の install scripts や OS 別依存、ビルド環境による差まで含めた同一バイナリは保証しません。`dlx` と `add -g` はプロジェクトの lock を読み書きせず、識別子・OS・CPU ごとに初回取得結果を再利用します。自動更新は行いません。`hibana update npm:名前` または `hibana update cargo:名前` は、`config.hibana.toml` に登録されたプロジェクト依存だけを対象にし、指定した版の範囲内で直接・推移依存を解決し直して lock に記録します。他の依存の lock は維持し、対象が見つからない場合や解決に失敗した場合は lock を書き換えません。引数なし・通常の依存名での `update` は Git 依存を対象にします。`dlx`・グローバル追加の個別更新は未対応です。Git 依存の `hibana remove 名前` は `hibana.toml` の直接依存を外し、残る依存を解決して lock の不要な Git 記録を取り除きます。npm/Cargo の `hibana remove npm:名前` / `hibana remove cargo:名前` は `config.hibana.toml` の依存と該当 lock だけを外します。`hibana remove -g npm:名前` / `hibana remove -g cargo:名前` は共通 `bin/` 内の該当ツール所有 shim だけを削除します。依存削除では共通 CAS のファイル・ツリーは削除しません。store の GC は未実装です。
 
-### 11.2 ファイルを指定する既存コマンド
+### 11.2 コマンドとコード生成 API
 
-`hibana build <ファイル>` など、ファイルを明示する既存コマンドは維持しています。引数なしの `hibana build` とは異なり、`[scripts]` を読みません。
+ファイルを指定した実行は `hibana <ファイル>` と `hibana run <ファイル>` で行います。コード生成は Rust API から利用します。
 
 | コマンド | 出力 | 用途 |
 |---|---|---|
 | `hibana <ファイル>` | 構文木を直接評価して実行 | 開発中の確認。マクロと型の計算もこの評価器で行う |
 | `hibana run <ファイル>` | WASM に変換し、組み込んだ Wasmtime で実行 | WASM 出力が対応するプログラムの実行 |
-| `hibana ir <ファイル>` | 型検査後の中間表現を標準出力に書く | コンパイラーの開発。整数の定数・算術演算・不変変数・整数を返す関数の呼び出しに対応し、それ以外はエラーにする |
-| `hibana wasm <ファイル> [--export 関数名 ...]` | WebAssembly のバイナリを標準出力に書く | 整数を扱う IR に対応。`--export` で公開関数を選べる |
-| `hibana glue <ファイル> --export 関数名 ...` | WASM に接続する JavaScript の ES モジュールを標準出力に書く | 同じ公開関数を指定して生成し、整数の引数を変換する |
-| `hibana js <ファイル>` | JavaScript を標準出力に書く | Web（ブラウザ・Node.js・Cloudflare Workers など） |
-| `hibana c <ファイル>` | C を標準出力に書く | ネイティブ（出力だけ欲しい時） |
-| `hibana build <ファイル>` | C を作って `cc -O2 ... -lgc` でビルドし（ヒープは Boehm GC が回収する）、拡張子を除いた名前の実行ファイルを作る | ネイティブ |
 | `hibana fmt <ファイル>` | ファイルを整形して書き戻す | 整形。トークンの並びと改行の位置は変えず、字下げ（空白4つ）・行内の空白（`,` の後、`=` `==` `&&` `=>` `->` などの前後、`{ }` の内側）・空行（続く空行は1行、括弧の直後と閉じ括弧の前は無し）・コメントの位置を整える。設定は無い。JSX の要素と `$( )` `${ }` の中は元のまま（JSX の本文は空白も文字列になるため）。`+ - * /` の前後は元の空白のまま。行の長さで改行の位置は変えない |
 | `hibana new <名前>` | `hibana.toml` と `src/main.hb` のディレクトリを作る | パッケージ（3.6 節） |
 | `hibana add <git の URL> [tag]` | `hibana.toml` に依存を足して取ってくる。名前は URL の最後の部分（`hibana-` は除く） | パッケージ（3.6 節） |
+| `hibana remove [-g] <依存名|npm:名前|cargo:名前>` | 言語依存・プロジェクトツール依存を設定と lock から外す。`-g` は global shim のみ削除 | パッケージ・外部ツール |
 | `hibana install [--frozen-lockfile]` | 設定の全依存を取得。frozen は lock を変更せず検証 | パッケージ・外部ツール |
 | `hibana fetch` | Hibana の Git 依存を取ってきて `config.hibana.lock.toml` を書く | パッケージ（3.6 節） |
 | `hibana test [ファイル...]` | `test` をインタプリタで実行し、成功した数を表示する。失敗があれば終了コード 1。ファイルを省くと、`hibana.toml` のあるディレクトリの `src` と `tests` の `.hb` すべて | テスト（3.8 節） |
@@ -636,27 +671,11 @@ npm ツールは各記録の `npm_lock` に npm の package-lock JSON（lockfile
 
 WASM 出力は関数を名前で公開します。整数は符号付き 64 ビットで、JavaScript からは `BigInt` で渡します。整数の `print` がある場合、取り込み `hibana.print` に `i64` 引数の関数を渡します。整数の範囲外や 0 による除算では WASM の実行を停止します。文字列・分岐・外部関数など、IR が扱えない構文はコンパイル時にエラーになります。
 
-ライブラリは `--export` に公開する関数を指定します。`--export` は複数回指定でき、`main` は必要ありません。型検査はライブラリ全体に行い、WASM には公開関数と、そこから呼ぶ関数だけを含めます。未使用の関数や型が IR に未対応でも、型検査を通れば含めません。
+ライブラリは `hibana::to_wasm_library(source, &exports)` に公開する関数名を渡して生成します。`main` は必要ありません。型検査はライブラリ全体に行い、WASM には公開関数と、そこから呼ぶ関数だけを含めます。未使用の関数や型が IR に未対応でも、型検査を通れば含めません。
 
-```text
-// math.hb
-fn add(a: int, b: int) -> int { a + b }
-fn twice(n: int) -> int { add(n, n) }
-```
+JavaScript の接続コードは `hibana::to_js_glue(source, &exports)`、WASM と接続コードの同時生成は `hibana::to_web(source, &exports)` で行えます。`instantiate` の引数には WASM のバイト列と必要な外部関数を渡します。公開関数には安全に表せる JavaScript の整数か `BigInt` を渡し、整数の結果は `BigInt` で受け取ります。文字列やホスト関数を使う Web 向けライブラリの例は [WebAssembly](wasm.md) を参照してください。
 
-```sh
-hibana wasm math.hb --export twice > math.wasm
-node -e 'const fs = require("fs"); const m = new WebAssembly.Module(fs.readFileSync("math.wasm")); console.log(new WebAssembly.Instance(m).exports.twice(21n))'
-```
-
-この例で公開されるのは `twice` だけです。`add` は内部の呼び出しに必要なので含まれます。`--export` を省いた場合は、これまでどおり `main` が必要で、すべての関数を公開します。
-
-JavaScript の接続コードは WASM と別に生成できます。`instantiate` の引数には WASM のバイト列と、必要な外部関数を渡します。公開関数には安全に表せる JavaScript の整数か `BigInt` を渡し、整数の結果は `BigInt` で受け取ります。
-
-```sh
-hibana glue math.hb --export twice > math.mjs
-node --input-type=module -e 'import fs from "node:fs"; import { instantiate } from "./math.mjs"; const math = await instantiate(fs.readFileSync("math.wasm")); console.log(math.twice(21))'
-```
+JavaScript、C、IR、実行用 WASM は、それぞれ `hibana::to_js`、`hibana::to_c`、`hibana::to_ir`、`hibana::to_wasm` で生成します。API は文字列やバイト列を返し、ファイルへの保存や C コンパイラーの起動は呼び出し側で行います。
 
 Rust のライブラリからは、`hibana::pipeline` の各関数を組み合わせられます。`load` は `use` のファイルを読み、`parse` は構文木を作り、`check` は型検査します。`lower` は IR を作り、`link` は IR から公開関数とその呼び出し先を選びます。`emit_wasm` と `emit_js_glue` はそれぞれバイト列と文字列を返すため、書き込みや外部ツールの起動は呼び出し側で決められます。
 
@@ -680,10 +699,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 現在の IR は整数の演算と呼び出しに限ります。全関数が IR に対応していない場合は、`lower(&checked, Some(&exports))` に公開関数を渡すと、使う関数だけを変換できます。任意の外部関数、文字列や配列の受け渡し、WASM モジュール同士のリンクには未対応です。
 
-```sh
-hibana wasm input.hb > input.wasm
-node -e 'const fs = require("fs"); const m = new WebAssembly.Module(fs.readFileSync("input.wasm")); new WebAssembly.Instance(m, { hibana: { print: n => console.log(n.toString()) } }).exports.main()'
-```
+`hibana::to_wasm` は `main` を持つ実行用 WASM を返します。CLI から直接実行する場合は `hibana run input.hb` を使います。
 
 JavaScript と C の値の表し方:
 
@@ -697,11 +713,11 @@ JavaScript と C の値の表し方:
 | 関数 | 関数（作った時の可変な変数を写し取る） | コードと、写し取った変数の組（クロージャ変換） |
 | 型 | 名前の文字列 | 名前の文字列 |
 
-どのバックエンドも、インタプリタと同じ出力になることをテスト（`examples/` のすべてのプログラム）で確かめています。`fib(30)`（約135万回の関数呼び出し）は、ネイティブ 0.007 秒、Node.js 0.11 秒、インタプリタ 1.8 秒でした。
+どのバックエンドも、インタプリタと同じ出力になることをテスト（`tests/programs/` と `examples/` のすべてのプログラム）で確かめています。`fib(30)`（約135万回の関数呼び出し）は、ネイティブ 0.007 秒、Node.js 0.11 秒、インタプリタ 1.8 秒でした。
 
 ### セルフホスト
 
-`selfhost/` に hibana で書いたコンパイラーがあります。言語が実用の規模のプログラムを書けることの実証で、本流は Rust の実装です（selfhost に Rust 版の全機能を移す予定はありません）。`node` で動かす JavaScript にしてから使い、`compile.hb` が入口です（`hibana js selfhost/compile.hb > c.mjs` の後に `node c.mjs 入力.hb`）。
+`selfhost/` に hibana で書いたコンパイラーがあります。言語が実用の規模のプログラムを書けることの実証で、本流は Rust の実装です（selfhost に Rust 版の全機能を移す予定はありません）。`node` で動かす JavaScript にしてから使い、`compile.hb` が入口です（Rust API の `hibana::to_js` で `c.mjs` を保存してから `node c.mjs 入力.hb`）。
 
 | ファイル | 内容 |
 |---|---|

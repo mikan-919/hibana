@@ -1,19 +1,19 @@
-// フォーマッタ。src/fmt.rs と同じ整形をする。トークンの並びと改行は変えず、字下げ・行内の空白・空行・コメントの位置だけを整える
-use "./lexer.hb".*
+// フォーマッタ。src/tooling/fmt.rs と同じ整形をする。トークンの並びと改行は変えず、字下げ・行内の空白・空行・コメントの位置だけを整える
+use './lexer.hb'.*
 use std.*
 
-fn punct(t: Token) -> str { match t.tok { TPunct(p) => p, _ => "" } }
+fn punct(t: Token) -> str { match t.tok { TPunct(p) => p, _ => '' } }
 
-fn is_open(p: str) -> bool { p == "(" || p == "[" || p == "{" }
+fn is_open(p: str) -> bool { p == '(' || p == '[' || p == '{' }
 
-fn is_close_p(p: str) -> bool { p == ")" || p == "]" || p == "}" }
+fn is_close_p(p: str) -> bool { p == ')' || p == ']' || p == '}' }
 
 // 前後に空白を置く演算子
-fn is_bin(p: str) -> bool { has(["=", "==", "!=", "<=", ">=", "&&", "||", "=>", "->"], p) }
+fn is_bin(p: str) -> bool { has(['=', '==', '!=', '<=', '>=', '&&', '||', '=>', '->'], p) }
 
 // 新しい宣言や文を始めるキーワード
 fn is_starts(p: str) -> bool {
-    has(["fn", "let", "type", "syntax", "macro", "effect", "use", "module", "extern", "partial", "return", "trait", "impl", "struct", "enum"], p)
+    has(['fn', 'let', 'type', 'syntax', 'macro', 'effect', 'use', 'module', 'extern', 'partial', 'return', 'trait', 'impl', 'struct', 'enum'], p)
 }
 
 fn is_ident(t: Tok) -> bool { match t { TIdent(n) => true, _ => false } }
@@ -23,9 +23,8 @@ fn ends_value(t: Token) -> bool {
     match t.tok {
         TInt(n) => true,
         TStr(s) => true,
-        TChar(c) => true,
         TIdent(n) => true,
-        _ => has([")", "]", "}", "true", "false"], punct(t)),
+        _ => has([')', ']', '}', 'true', 'false'], punct(t)),
     }
 }
 
@@ -36,13 +35,13 @@ fn tk(ts: Vec<Token>, i: int) -> Token {
 
 // 文字の並びの a から b の手前まで
 fn range(cs: Vec<str>, a: int, b: int) -> str {
-    let mut s = ""
+    let mut s = ''
     for i in a..b { s = s + char_at(cs, i) }
     s
 }
 
 fn repeat(s: str, n: int) -> str {
-    let mut r = ""
+    let mut r = ''
     for i in 0..n { r = r + s }
     r
 }
@@ -64,7 +63,7 @@ fn trim(s: str) -> str {
 }
 
 fn cat(xs: Vec<str>, sep: str) -> str {
-    let mut r = ""
+    let mut r = ''
     let mut first = true
     for x in xs { r = if first { x } else { r + sep + x }; first = false }
     r
@@ -84,14 +83,14 @@ fn at_i(xs: Vec<int>, i: int) -> int { if i >= 0 && i < len(xs) { xs[i] } else {
 
 // k 番目が JSX の開始タグ（< の直後に空白の無い識別子）か
 fn jsx_start(ts: Vec<Token>, k: int) -> bool {
-    punct(tk(ts, k)) == "<" && is_ident(tk(ts, k + 1).tok) && !tk(ts, k + 1).gap
+    punct(tk(ts, k)) == '<' && is_ident(tk(ts, k + 1).tok) && !tk(ts, k + 1).gap
 }
 
 // i 番目から始まる JSX の要素（<tag ... </tag>）の最後のトークンの番号。無ければ -1
 // JSX の本文は空白も文字列になるので、要素はソースのまま写す
 fn jsx_end(ts: Vec<Token>, i: int) -> int {
     let p = tk(ts, i - 1)
-    if !jsx_start(ts, i) || (i > 0 && (ends_value(p) || punct(p) == ">")) {
+    if !jsx_start(ts, i) || (i > 0 && (ends_value(p) || punct(p) == '>')) {
         -1
     } else {
         let mut depth = 0
@@ -101,7 +100,7 @@ fn jsx_end(ts: Vec<Token>, i: int) -> int {
         while going && k < len(ts) {
             if jsx_start(ts, k) {
                 depth = depth + 1
-            } else if punct(tk(ts, k)) == "</" {
+            } else if punct(tk(ts, k)) == '</' {
                 depth = depth - 1
                 if depth == 0 {
                     going = false
@@ -123,21 +122,21 @@ fn comments(cs: Vec<str>, a: int, b: int) -> Cms {
     let mut nl = 0
     let mut i = a
     while i < b {
-        if char_at(cs, i) == "/" && char_at(cs, i + 1) == "/" {
+        if char_at(cs, i) == '/' && char_at(cs, i + 1) == '/' {
             let mut j = i
-            while j < b && char_at(cs, j) != "\n" { j = j + 1 }
+            while j < b && char_at(cs, j) != '\n' { j = j + 1 }
             out = push(out, Cmt { nl: nl, text: trim_end(range(cs, i, j)) })
             nl = 0
             i = j
-        } else if char_at(cs, i) == "/" && char_at(cs, i + 1) == "*" {
+        } else if char_at(cs, i) == '/' && char_at(cs, i + 1) == '*' {
             let mut j = i + 2
-            while j < b && !ahead(cs, j, "*/") { j = j + 1 }
+            while j < b && !ahead(cs, j, '*/') { j = j + 1 }
             j = if j < b { j + 2 } else { b }
             out = push(out, Cmt { nl: nl, text: range(cs, i, j) })
             nl = 0
             i = j
         } else {
-            if char_at(cs, i) == "\n" { nl = nl + 1 }
+            if char_at(cs, i) == '\n' { nl = nl + 1 }
             i = i + 1
         }
     }
@@ -156,10 +155,10 @@ fn rep_close(ts: Vec<Token>, i: int) -> bool {
             depth = depth + 1
         } else if is_open(p) && depth > 0 {
             depth = depth - 1
-        } else if p == "(" {
-            r = k > 0 && punct(tk(ts, k - 1)) == "$"
+        } else if p == '(' {
+            r = k > 0 && punct(tk(ts, k - 1)) == '$'
             going = false
-        } else if p == "[" || p == "{" {
+        } else if p == '[' || p == '{' {
             going = false
         }
         k = k - 1
@@ -176,7 +175,7 @@ fn same_tokens(a: Vec<Token>, b: Vec<Token>) -> bool {
 
 partial fn format(src: str) -> Result<str, str> {
     match lex(src) {
-        Err(e) => Err(to_str(e.line) + ":" + to_str(e.col) + " " + e.msg),
+        Err(e) => Err(to_str(e.line) + ':' + to_str(e.col) + ' ' + e.msg),
         Ok(ts) => {
             let cs = chars(src)
             let mut out: Vec<str> = []
@@ -205,12 +204,12 @@ partial fn format(src: str) -> Result<str, str> {
                 let mut k = 0
                 for c in cm.items {
                     if c.nl == 0 && k == 0 && prev >= 0 {
-                        out = push(out, " ")
+                        out = push(out, ' ')
                     } else if len(out) > 0 {
                         let top = last_i(sd)
-                        out = push(out, "\n")
-                        if c.nl >= 2 && !after_open { out = push(out, "\n") }
-                        out = push(out, repeat("    ", top))
+                        out = push(out, '\n')
+                        if c.nl >= 2 && !after_open { out = push(out, '\n') }
+                        out = push(out, repeat('    ', top))
                         line_indent = top
                         line_base = len(sd)
                     }
@@ -218,11 +217,11 @@ partial fn format(src: str) -> Result<str, str> {
                     fresh_line = false
                     k = k + 1
                 }
-                if prev < 0 && punct(t) == "syntax" { in_syntax = true }
+                if prev < 0 && punct(t) == 'syntax' { in_syntax = true }
                 if t.tok == TEof {
                     done = true
                 } else {
-                    let line_end = len(cm.items) > 0 && starts_with(cm.items[len(cm.items) - 1].text, "//")
+                    let line_end = len(cm.items) > 0 && starts_with(cm.items[len(cm.items) - 1].text, '//')
                     if cm.nl > 0 || line_end {
                         // 行頭に並んだ閉じ括弧のうち、一番外側の括弧を開いた行の深さにする
                         let mut closers = 0
@@ -236,14 +235,14 @@ partial fn format(src: str) -> Result<str, str> {
                         let mut top = at_i(sd, len(sd) - (if closers > 1 { closers } else { 1 }))
                         if closers == 0 { top = last_i(sd) }
                         let blank = cm.nl >= 2 && !is_close && (!after_open || len(cm.items) > 0)
-                        let starts = (prev >= 0 && is_bin(punct(tk(ts, prev)))) || punct(t) == "|" || punct(t) == "."
-                        if blank || is_starts(punct(t)) { in_syntax = punct(t) == "syntax" }
+                        let starts = (prev >= 0 && is_bin(punct(tk(ts, prev)))) || punct(t) == '|' || punct(t) == '.'
+                        if blank || is_starts(punct(t)) { in_syntax = punct(t) == 'syntax' }
                         let keeps = in_syntax && cont == len(sd) && closers == 0 && !is_starts(punct(t))
                         cont = if starts || keeps { len(sd) } else { -1 }
                         if cont >= 0 { top = top + 1 }
-                        out = push(out, "\n")
-                        if blank { out = push(out, "\n") }
-                        out = push(out, repeat("    ", top))
+                        out = push(out, '\n')
+                        if blank { out = push(out, '\n') }
+                        out = push(out, repeat('    ', top))
                         line_indent = top
                         line_base = len(sd)
                     } else if !fresh_line {
@@ -251,19 +250,19 @@ partial fn format(src: str) -> Result<str, str> {
                         let c = punct(t)
                         let had = t.s > prev_end
                         let splice = last_b(ss)
-                        let space = if prev_rep || (splice && (pp == "(" || pp == "{" || c == ")" || c == "}")) {
+                        let space = if prev_rep || (splice && (pp == '(' || pp == '{' || c == ')' || c == '}')) {
                             had
-                        } else if c == "," || c == ")" || c == "]" || c == ";" || c == ":" || pp == "(" || pp == "[" {
+                        } else if c == ',' || c == ')' || c == ']' || c == ';' || c == ':' || pp == '(' || pp == '[' {
                             false
-                        } else if pp == "}" && c == "else" {
+                        } else if pp == '}' && c == 'else' {
                             true
-                        } else if pp == "," {
-                            !(c == "*" || c == "+" || c == "?")
-                        } else if c == "{" {
-                            pp != "$"
-                        } else if pp == "{" {
-                            c != "}"
-                        } else if c == "}" || is_bin(c) || prev_bin {
+                        } else if pp == ',' {
+                            !(c == '*' || c == '+' || c == '?')
+                        } else if c == '{' {
+                            pp != '$'
+                        } else if pp == '{' {
+                            c != '}'
+                        } else if c == '}' || is_bin(c) || prev_bin {
                             true
                         } else {
                             had
@@ -273,7 +272,7 @@ partial fn format(src: str) -> Result<str, str> {
                             ss = init(ss)
                             if len(sd) < line_base { line_base = len(sd) }
                         }
-                        if space { out = push(out, " ") }
+                        if space { out = push(out, ' ') }
                     }
                     let end = jsx_end(ts, i)
                     if end >= 0 {
@@ -291,9 +290,9 @@ partial fn format(src: str) -> Result<str, str> {
                         if is_open(c) {
                             let level = if len(sd) > line_base { last_i(sd) } else { line_indent + 1 }
                             sd = push(sd, level)
-                            ss = push(ss, c != "[" && prev >= 0 && punct(tk(ts, prev)) == "$")
+                            ss = push(ss, c != '[' && prev >= 0 && punct(tk(ts, prev)) == '$')
                         } else if is_close {
-                            prev_rep = c == ")" && rep_close(ts, i)
+                            prev_rep = c == ')' && rep_close(ts, i)
                         }
                         prev_bin = is_bin(c)
                         prev = i
@@ -303,18 +302,18 @@ partial fn format(src: str) -> Result<str, str> {
                 }
             }
             let mut lines: Vec<str> = []
-            for l in split(cat(out, ""), "\n") { lines = push(lines, trim_end(l)) }
-            let res = trim(cat(lines, "\n")) + "\n"
+            for l in split(cat(out, ''), '\n') { lines = push(lines, trim_end(l)) }
+            let res = trim(cat(lines, '\n')) + '\n'
             match lex(res) {
                 Err(e) => Err(e.msg),
-                Ok(after) => if same_tokens(ts, after) { Ok(res) } else { Err("整形でトークンの並びが変わった（フォーマッタの誤り）") },
+                Ok(after) => if same_tokens(ts, after) { Ok(res) } else { Err('整形でトークンの並びが変わった（フォーマッタの誤り）') },
             }
         },
     }
 }
 
-test "layout" {
-    let src = "fn add(a:int,b :int)->int{   a+b }  // 足す\n\n\n\nfn main(){\nlet x=add( 1,2 )\n      if x==3 {print( \"ok\" )}else{\n  print(\"ng\")\n}\n    /* c */\n  let ok = x == 3 ||\n  x == 4\n  print(<p>a   b {x}</p>)\n  print(web.json(f([\n    1\n    ])))\n\n}\n"
-    let want = "fn add(a:int, b:int) -> int { a+b } // 足す\n\nfn main() {\n    let x = add(1, 2)\n    if x == 3 { print(\"ok\") } else {\n        print(\"ng\")\n    }\n    /* c */\n    let ok = x == 3 ||\n        x == 4\n    print(<p>a   b {x}</p>)\n    print(web.json(f([\n        1\n    ])))\n}\n"
+test 'layout' {
+    let src = 'fn add(a:int,b :int)->int{   a+b }  // 足す\n\n\n\nfn main(){\nlet x=add( 1,2 )\n      if x==3 {print( \'ok\' )}else{\n  print(\'ng\')\n}\n    /* c */\n  let ok = x == 3 ||\n  x == 4\n  print(<p>a   b {x}</p>)\n  print(web.json(f([\n    1\n    ])))\n\n}\n'
+    let want = 'fn add(a:int, b:int) -> int { a+b } // 足す\n\nfn main() {\n    let x = add(1, 2)\n    if x == 3 { print(\'ok\') } else {\n        print(\'ng\')\n    }\n    /* c */\n    let ok = x == 3 ||\n        x == 4\n    print(<p>a   b {x}</p>)\n    print(web.json(f([\n        1\n    ])))\n}\n'
     assert_eq(match format(src) { Ok(s) => s, Err(e) => e }, want)
 }

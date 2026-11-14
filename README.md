@@ -39,15 +39,27 @@ Nix の flake で開発環境（Rust、Z3、Node.js、tree-sitter）を作りま
 
 ```sh
 nix develop -c cargo build
-nix develop -c cargo run -q -- examples/refine.hb      # インタプリタで実行
-nix develop -c cargo run -q -- js examples/refine.hb   # JavaScript を出力
-nix develop -c cargo run -q -- build examples/refine.hb  # C を経由して実行ファイルを作る
+nix develop -c cargo run -q -- tests/programs/types/refine.hb      # インタプリタで実行
+nix develop -c cargo run -q -- test                    # Hibana のテストを実行
 nix develop -c cargo test
 ```
+
+## ソース構成
+
+Rust の実装は `src/` 内で役割ごとに分けています。
+
+- `frontend/`: 字句・構文解析、名前解決、マクロ展開、TypeScript の宣言の読み込み
+- `check/`: 型検査と Z3 による証明
+- `backend/`: インタプリタ、JavaScript、C、整数 IR、WebAssembly
+- `tooling/`: フォーマッタ、Language Server、シンボルの索引
+- `project/`: ビルド、スクリプト、パッケージ管理（`pkg/`）、外部ツール管理（`tools/`）
+- `cli/`: CLI のコマンド処理と統合的なテスト
+
+`src/lib.rs` と `src/main.rs` が入口で、`pipeline.rs` はコンパイルの各段階、`error.rs` は共通のエラー表現を扱います。標準ライブラリは `lib/`、Hibana で書いたコンパイラーは `selfhost/`、エディター連携は `editors/` にあります。
 
 ## 文書
 
 - [入門](docs/tutorial.md)
 - [言語仕様](docs/spec.md)
 - [WebAssembly](docs/wasm.md)
-- [例](examples/)
+- [カテゴリ別の例](tests/programs/README.md)

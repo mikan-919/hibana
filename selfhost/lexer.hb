@@ -1,8 +1,8 @@
-// 字句解析器。src/lexer.rs と同じトークンの並びを作る
+// 字句解析器。src/frontend/lexer.rs と同じトークンの並びを作る
 use std.*
 
 derive(Eq, Show)
-enum Tok { TInt(n: int), TStr(s: str), TChar(c: str), TIdent(name: str), TPunct(p: str), TEof }
+enum Tok { TInt(n: int), TStr(s: str), TIdent(name: str), TPunct(p: str), TEof }
 
 // s・e はソースの文字の位置（s から e の手前まで）
 derive(Eq, Show)
@@ -11,20 +11,20 @@ struct Token { tok: Tok, line: int, col: int, gap: bool, nl: bool, s: int, e: in
 struct LexError { msg: str, line: int, col: int }
 
 fn keywords() -> Vec<str> {
-    ["fn", "let", "mut", "if", "else", "while", "return", "true", "false", "syntax", "macro",
-     "type", "match", "quote", "partial", "for", "in", "use", "module", "extern", "effect",
-     "handle", "trait", "impl", "struct", "enum"]
+    ['fn', 'let', 'mut', 'if', 'else', 'while', 'return', 'true', 'false', 'syntax', 'macro',
+     'type', 'match', 'quote', 'partial', 'for', 'in', 'use', 'module', 'extern', 'effect',
+     'handle', 'trait', 'impl', 'struct', 'enum']
 }
 
 // 最長一致のため、2文字の記号を先に置く
 fn puncts() -> Vec<str> {
-    ["->", "=>", "..", "==", "!=", "<=", ">=", "&&", "||", "</", "(", ")", "{", "}", "[", "]", ",",
-     ";", ":", ".", "=", "<", ">", "+", "-", "*", "/", "%", "!", "@", "$", "~", "|", "?"]
+    ['->', '=>', '..', '==', '!=', '<=', '>=', '&&', '||', '</', '(', ')', '{', '}', '[', ']', ',',
+     ';', ':', '.', '=', '<', '>', '+', '-', '*', '/', '%', '!', '@', '$', '~', '|', '?']
 }
 
-// i 番目の文字。範囲の外は ""
+// i 番目の文字。範囲の外は ''
 fn char_at(cs: Vec<str>, i: int) -> str {
-    if i >= 0 && i < len(cs) { cs[i] } else { "" }
+    if i >= 0 && i < len(cs) { cs[i] } else { '' }
 }
 
 fn is_digit(c: str) -> bool { code(c) >= 48 && code(c) <= 57 }
@@ -34,10 +34,10 @@ fn is_hex(c: str) -> bool {
 }
 
 fn is_alpha(c: str) -> bool {
-    (code(c) >= 97 && code(c) <= 122) || (code(c) >= 65 && code(c) <= 90) || c == "_"
+    (code(c) >= 97 && code(c) <= 122) || (code(c) >= 65 && code(c) <= 90) || c == '_'
 }
 
-fn is_space(c: str) -> bool { c == " " || c == "\n" || c == "\t" || c == "\r" }
+fn is_space(c: str) -> bool { c == ' ' || c == '\n' || c == '\t' || c == '\r' }
 
 fn digit(c: str) -> int {
     if is_digit(c) { code(c) - 48 } else if code(c) >= 97 { code(c) - 87 } else { code(c) - 55 }
@@ -64,9 +64,9 @@ fn lex(src: str) -> Result<Vec<Token>, LexError> {
     let mut line = 1
     // 行頭の位置。列は i - bol + 1
     let mut bol = 0
-    let mut err = ""
+    let mut err = ''
     let mut done = false
-    while !done && err == "" {
+    while !done && err == '' {
         // 空白とコメントを読み飛ばす。ファイル先頭のトークンは gap = false
         let line0 = line
         let mut gap = false
@@ -74,19 +74,19 @@ fn lex(src: str) -> Result<Vec<Token>, LexError> {
         while skipping {
             let c = char_at(cs, i)
             if is_space(c) {
-                if c == "\n" { line = line + 1; bol = i + 1 }
+                if c == '\n' { line = line + 1; bol = i + 1 }
                 i = i + 1
                 gap = true
-            } else if c == "/" && char_at(cs, i + 1) == "/" {
-                while char_at(cs, i) != "\n" && char_at(cs, i) != "" { i = i + 1 }
+            } else if c == '/' && char_at(cs, i + 1) == '/' {
+                while char_at(cs, i) != '\n' && char_at(cs, i) != '' { i = i + 1 }
                 gap = true
-            } else if c == "/" && char_at(cs, i + 1) == "*" {
+            } else if c == '/' && char_at(cs, i + 1) == '*' {
                 i = i + 2
-                while !ahead(cs, i, "*/") && char_at(cs, i) != "" {
-                    if char_at(cs, i) == "\n" { line = line + 1; bol = i + 1 }
+                while !ahead(cs, i, '*/') && char_at(cs, i) != '' {
+                    if char_at(cs, i) == '\n' { line = line + 1; bol = i + 1 }
                     i = i + 1
                 }
-                if char_at(cs, i) == "" { err = "ブロックコメントが閉じていない" }
+                if char_at(cs, i) == '' { err = 'ブロックコメントが閉じていない' }
                 i = i + 2
                 gap = true
             } else {
@@ -100,10 +100,10 @@ fn lex(src: str) -> Result<Vec<Token>, LexError> {
         let s0 = i
         let c = char_at(cs, i)
         let mut tok = TEof
-        if err != "" {
-        } else if c == "" {
+        if err != '' {
+        } else if c == '' {
             done = true
-        } else if c == "0" && (char_at(cs, i + 1) == "x" || char_at(cs, i + 1) == "X") {
+        } else if c == '0' && (char_at(cs, i + 1) == 'x' || char_at(cs, i + 1) == 'X') {
             i = i + 2
             let mut n = 0
             while is_hex(char_at(cs, i)) { n = n * 16 + digit(char_at(cs, i)); i = i + 1 }
@@ -113,39 +113,41 @@ fn lex(src: str) -> Result<Vec<Token>, LexError> {
             while is_digit(char_at(cs, i)) { n = n * 10 + digit(char_at(cs, i)); i = i + 1 }
             tok = TInt(n)
         } else if is_alpha(c) {
-            let mut w = ""
+            let mut w = ''
             while is_alpha(char_at(cs, i)) || is_digit(char_at(cs, i)) { w = w + char_at(cs, i); i = i + 1 }
             tok = if has(kws, w) { TPunct(w) } else { TIdent(w) }
-        } else if c == "\"" || c == "'" {
+        } else if c == '"' {
+            err = '文字列は \'...\' で書く'
+        } else if c == '\'' {
             i = i + 1
-            let mut s = ""
-            while char_at(cs, i) != c && err == "" {
+            let mut s = ''
+            while char_at(cs, i) != c && err == '' {
                 let d = char_at(cs, i)
-                if d == "" {
-                    err = "リテラルが閉じていない"
-                } else if d == "\\" {
+                if d == '' {
+                    err = 'リテラルが閉じていない'
+                } else if d == '\\' {
                     let e = char_at(cs, i + 1)
-                    if e == "n" { s = s + "\n" } else if e == "t" { s = s + "\t" } else if e == "r" { s = s + "\r" }
-                    else if e == "\\" || e == "\"" || e == "'" { s = s + e } else { err = "不明なエスケープ" }
+                    if e == 'n' { s = s + '\n' } else if e == 't' { s = s + '\t' } else if e == 'r' { s = s + '\r' }
+                    else if e == '\\' || e == '\'' || e == '`' || e == '{' || e == '}' { s = s + e } else { err = '不明なエスケープ' }
                     i = i + 2
                 } else {
-                    if d == "\n" { line = line + 1; bol = i + 1 }
+                    if d == '\n' { line = line + 1; bol = i + 1 }
                     s = s + d
                     i = i + 1
                 }
             }
             i = i + 1
-            tok = if c == "\"" { TStr(s) } else { TChar(s) }
+            tok = TStr(s)
         } else {
             // 2 文字の記号を先に試す
             let two = c + char_at(cs, i + 1)
-            if has(ps, two) { tok = TPunct(two); i = i + 2 } else if has(ps, c) { tok = TPunct(c); i = i + 1 } else { err = "不明な文字 " + c }
+            if has(ps, two) { tok = TPunct(two); i = i + 2 } else if has(ps, c) { tok = TPunct(c); i = i + 1 } else { err = '不明な文字 ' + c }
         }
-        if err == "" {
+        if err == '' {
             out = push(out, Token { tok: tok, line: l0, col: c0, gap: gap, nl: nl, s: s0, e: i })
         }
     }
-    if err == "" { Ok(out) } else { Err(LexError { msg: err, line: line, col: i - bol + 1 }) }
+    if err == '' { Ok(out) } else { Err(LexError { msg: err, line: line, col: i - bol + 1 }) }
 }
 
 fn has(xs: Vec<str>, s: str) -> bool {
@@ -158,18 +160,18 @@ fn kinds(src: str) -> Vec<Tok> {
     match lex(src) { Ok(ts) => map(ts, fn(t: Token) -> Tok { t.tok }), Err(e) => panic(e.msg) }
 }
 
-test "literals" {
-    assert_eq(kinds("a 0xFF 25 \"h\\n\" 'x' fn"), [TIdent("a"), TInt(255), TInt(25), TStr("h\n"), TChar("x"), TPunct("fn"), TEof])
+test 'literals' {
+    assert_eq(kinds('a 0xFF 25 \'h\\n\' \'x\' fn'), [TIdent('a'), TInt(255), TInt(25), TStr('h\n'), TStr('x'), TPunct('fn'), TEof])
 }
 
-test "puncts and gaps" {
-    let ts = match lex("a/* c */b ~c</x") { Ok(ts) => ts, Err(e) => panic(e.msg) }
+test 'puncts and gaps' {
+    let ts = match lex('a/* c */b ~c</x') { Ok(ts) => ts, Err(e) => panic(e.msg) }
     assert_eq(map(ts, fn(t: Token) -> bool { t.gap }), [false, true, true, false, false, false, false])
-    assert_eq(map(ts, fn(t: Token) -> Tok { t.tok }), [TIdent("a"), TIdent("b"), TPunct("~"), TIdent("c"), TPunct("</"), TIdent("x"), TEof])
+    assert_eq(map(ts, fn(t: Token) -> Tok { t.tok }), [TIdent('a'), TIdent('b'), TPunct('~'), TIdent('c'), TPunct('</'), TIdent('x'), TEof])
 }
 
-test "positions" {
-    let ts = match lex("a\n  bc // x\nd") { Ok(ts) => ts, Err(e) => panic(e.msg) }
+test 'positions' {
+    let ts = match lex('a\n  bc // x\nd') { Ok(ts) => ts, Err(e) => panic(e.msg) }
     assert_eq(map(ts, fn(t: Token) -> int { t.line * 100 + t.col }), [101, 203, 301, 302])
     assert_eq(map(ts, fn(t: Token) -> bool { t.nl }), [false, true, true, false])
 }

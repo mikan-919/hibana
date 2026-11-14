@@ -66,7 +66,7 @@ try { x.twice(); throw Error('accepted missing argument'); } catch (e) { if (!(e
 #[test]
 fn inspection_and_glue_preserve_boundary_signatures_and_order() {
     let source = r#"
-extern "host" {
+extern 'host' {
     fn show(message: str)
     fn decorate(message: str, n: int) -> str
     fn count() -> int
@@ -159,7 +159,7 @@ fn load_uses_explicit_base_directory_without_changing_caller() {
     std::fs::create_dir_all(&b).unwrap();
     std::fs::write(a.join("util.hb"), "fn value() -> int { 1 }").unwrap();
     std::fs::write(b.join("util.hb"), "fn value() -> int { 2 }").unwrap();
-    let source = "use \"util.hb\"\n";
+    let source = "use 'util.hb'\n";
     hibana::parser::set_base_dir(&a);
     assert!(pipeline::load(source, &b).unwrap().contains("{ 2 }"));
     assert!(hibana::parser::with_uses(source).unwrap().contains("{ 1 }"));

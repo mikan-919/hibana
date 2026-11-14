@@ -5,3 +5,5 @@
 
 /target
 /selfhost/*.mjs
+/apps/cms/dist/
+/apps/cms/data/

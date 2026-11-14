@@ -536,3 +536,85 @@ fn invalid_cargo_lock_fails_before_install_and_preserves_bytes() {
         }
     }
 }
+
+#[test]
+fn remove_project_tool_updates_config_and_only_its_lock_entry() {
+    let f = Fixture::new();
+    let (url, revision) = repository(&f);
+    f.write("hibana.toml", &format!("[dependencies]\ngreet = {{ git = {url:?} }}\n"));
+    f.write(
+        "config.hibana.toml",
+        "[dependencies]\n\"npm:demo\" = \"*\"\n\"cargo:demo\" = \"*\"\n",
+    );
+    success(&f.run(&["install"]));
+    let original: toml::Table = String::from_utf8(lock(&f)).unwrap().parse().unwrap();
+    assert_eq!(original["greet"]["rev"].as_str(), Some(revision.as_str()));
+    let installs = f.installs();
+
+    success(&f.run(&["remove", "npm:demo"]));
+    let config: toml::Table = std::fs::read_to_string(f.0.join("config.hibana.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let after_npm: toml::Table = String::from_utf8(lock(&f)).unwrap().parse().unwrap();
+    assert!(config["dependencies"].get("npm:demo").is_none());
+    assert!(config["dependencies"].get("cargo:demo").is_some());
+    assert!(after_npm["tools"].get("npm:demo").is_none());
+    assert_eq!(after_npm["tools"]["cargo:demo"], original["tools"]["cargo:demo"]);
+    assert_eq!(after_npm["greet"], original["greet"]);
+    assert_eq!(f.installs(), installs);
+
+    success(&f.run(&["remove", "cargo:demo"]));
+    let final_lock: toml::Table = String::from_utf8(lock(&f)).unwrap().parse().unwrap();
+    assert!(final_lock.get("tools").is_none());
+    assert_eq!(final_lock["greet"], original["greet"]);
+    assert_eq!(f.installs(), installs);
+}
+
+#[test]
+fn remove_git_dependency_prunes_lock_without_deleting_store_tree() {
+    let f = Fixture::new();
+    let (url, revision) = repository(&f);
+    f.write("hibana.toml", &format!("[dependencies]\ngreet = {{ git = {url:?} }}\n"));
+    f.write("config.hibana.toml", "[dependencies]\n\"npm:demo\" = \"*\"\n");
+    success(&f.run(&["install"]));
+    let packages = f.0.join("data/hibana/packages/v1");
+    let count = std::fs::read_dir(&packages).unwrap().count();
+    let before: toml::Table = String::from_utf8(lock(&f)).unwrap().parse().unwrap();
+    assert_eq!(before["greet"]["rev"].as_str(), Some(revision.as_str()));
+
+    success(&f.run(&["remove", "greet"]));
+    let manifest: toml::Table = std::fs::read_to_string(f.0.join("hibana.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let after: toml::Table = String::from_utf8(lock(&f)).unwrap().parse().unwrap();
+    assert!(manifest["dependencies"].get("greet").is_none());
+    assert!(after.get("greet").is_none());
+    assert_eq!(after["tools"]["npm:demo"], before["tools"]["npm:demo"]);
+    assert_eq!(std::fs::read_dir(packages).unwrap().count(), count);
+}
+
+#[test]
+fn remove_global_deletes_only_owned_shims() {
+    let f = Fixture::new();
+    success(&f.run(&["add", "-g", "npm:demo"]));
+    success(&f.run(&["add", "-g", "npm:many"]));
+    let bin = f.0.join("data/hibana/bin");
+    f.write("data/hibana/bin/manual", "user file");
+    f.write("home/owned-target", "#!/bin/sh\n# hibana: npm:many\n");
+    std::os::unix::fs::symlink(f.0.join("home/owned-target"), bin.join("linked")).unwrap();
+
+    success(&f.run(&["remove", "-g", "npm:many"]));
+    assert!(!bin.join("first").exists());
+    assert!(!bin.join("second").exists());
+    assert!(bin.join("demo").is_file());
+    assert_eq!(std::fs::read_to_string(bin.join("manual")).unwrap(), "user file");
+    assert!(std::fs::symlink_metadata(bin.join("linked")).unwrap().file_type().is_symlink());
+
+    success(&f.run(&["remove", "npm:demo", "--global"]));
+    assert!(!bin.join("demo").exists());
+    assert_eq!(std::fs::read_to_string(bin.join("manual")).unwrap(), "user file");
+    error(&f.run(&["remove", "-g", "npm:demo"]));
+    error(&f.run(&["remove", "-g", "npm:demo@1.2.3"]));
+}
