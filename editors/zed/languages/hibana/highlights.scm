@@ -5,7 +5,11 @@
 (identifier) @variable
 (number) @number
 (string) @string
-(char) @string
+(template_string "`" @string)
+(string_content) @string
+(escape_sequence) @string.escape
+(interpolation_start) @punctuation.special
+(interpolation_end) @punctuation.special
 (splice) @variable.special
 (operator) @operator
 (bracket) @punctuation.bracket

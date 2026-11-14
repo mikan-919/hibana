@@ -2,7 +2,7 @@
 // 対応: エラーの表示・整形・hover（宣言の形・コメント・式の型）・定義へのジャンプ・補完・色付け（semantic tokens）
 // ponytail: 変更のたびに文書全体を検査し直す。大きくなれば差分の検査や検査の間引きを入れる
 use crate::index::{Index, Kind};
-use crate::lexer::{Tok, Token, lex};
+use crate::lexer::{TPart, Tok, Token, lex};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
@@ -249,6 +249,24 @@ fn semantic_tokens(src: &str, ix: &Index) -> Value {
     let Ok(toks) = lex(src) else {
         return json!({ "data": [] });
     };
+    // `...{式}...` の中の式のトークンも並べる（位置はファイルの中の位置）
+    fn flat(ts: Vec<Token>, out: &mut Vec<Token>) {
+        for t in ts {
+            match t.tok {
+                Tok::Template(_, parts) => {
+                    for p in parts {
+                        if let TPart::Code(c) = p {
+                            flat(c.into_iter().filter(|t| t.tok != Tok::Eof).collect(), out)
+                        }
+                    }
+                }
+                _ => out.push(t),
+            }
+        }
+    }
+    let mut v = Vec::new();
+    flat(toks, &mut v);
+    let toks = v;
     let mut data = Vec::new();
     let (mut last_line, mut last_col) = (0u32, 0u32);
     for (k, t) in toks.iter().enumerate() {
@@ -535,5 +553,16 @@ mod completion_tests {
         // P は型の宣言（種類 1、宣言の印 1）
         let data = semantic_tokens(src, &ix)["data"].clone();
         assert_eq!(data.as_array().unwrap()[..5], [json!(1), json!(7), json!(1), json!(1), json!(1)]);
+    }
+
+    #[test]
+    fn colors_names_in_templates_and_paths() {
+        let src = "fn P::f(x: int) -> int { x }\nfn main() { print(`a{P::f(1)}`) }\n";
+        let (err, _, ix) = analyze("file:///tmp/b.hb", src);
+        assert!(err.is_none(), "{err:?}");
+        let data = semantic_tokens(src, &ix.unwrap())["data"].clone();
+        // 最後は 2 行目の P::f（main から 18 列先、長さ 4、関数）
+        let d = data.as_array().unwrap();
+        assert_eq!(d[d.len() - 5..], [json!(0), json!(18), json!(4), json!(3), json!(0)]);
     }
 }
