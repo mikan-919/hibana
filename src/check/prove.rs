@@ -1,5 +1,9 @@
-//! 細分化型の項と事実の照合。
-use super::typeck::{neu, V};
+//! 細分化型の項・評価器・事実の照合。
+use super::typeck::{bound, neu, prim, ref_t, PiV, V, PRIMS, SYN_FNS};
+use crate::error::{Error, R};
+use crate::parser::{Ctor, Data, Expr, Fn};
+use std::collections::HashMap;
+use std::rc::Rc;
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum Term {
@@ -14,7 +18,6 @@ pub(crate) enum Term {
     // 型の計算で扱えない式（while・代入・print など）。どの値とも等しくない
     Opaque(usize),
 }
-
 
 // 項と定数の和に分ける。定数だけなら項は 0
 fn lin(v: &V) -> (V, i64) {
@@ -115,18 +118,31 @@ pub(super) fn prove_facts<'a>(goal: &V, facts: impl Iterator<Item = &'a V> + Clo
 }
 
 // 事実との照合と定数の代入で示し、残りを Z3 に問い合わせる。
-pub(super) fn prove<'a>(goal: &V, facts: impl Iterator<Item = &'a V> + Clone, smt: &mut super::smt::Smt) -> bool {
-    if prove_facts(goal, facts.clone()) { return true; }
-    let eqs: Vec<_> = facts.clone().filter_map(|f| match f {
-        V::Neu(n) => match &**n {
-            Term::Bin("==", x, c @ V::Int(_)) | Term::Bin("==", c @ V::Int(_), x) => Some((x, c)),
+pub(super) fn prove<'a>(
+    goal: &V,
+    facts: impl Iterator<Item = &'a V> + Clone,
+    smt: &mut super::smt::Smt,
+) -> bool {
+    if prove_facts(goal, facts.clone()) {
+        return true;
+    }
+    let eqs: Vec<_> = facts
+        .clone()
+        .filter_map(|f| match f {
+            V::Neu(n) => match &**n {
+                Term::Bin("==", x, c @ V::Int(_)) | Term::Bin("==", c @ V::Int(_), x) => {
+                    Some((x, c))
+                }
+                _ => None,
+            },
             _ => None,
-        },
-        _ => None,
-    }).collect();
+        })
+        .collect();
     if !eqs.is_empty() {
         let g = eqs.iter().fold(goal.clone(), |g, (x, c)| replace(&g, x, c));
-        if g == V::Bool(true) || prove_facts(&g, facts.clone()) { return true; }
+        if g == V::Bool(true) || prove_facts(&g, facts.clone()) {
+            return true;
+        }
     }
     smt.prove(&facts.cloned().collect::<Vec<_>>(), goal)
 }
@@ -206,5 +222,307 @@ pub(super) fn len(v: V) -> V {
             _ => neu(Term::Call("len".into(), vec![v.clone()])),
         },
         _ => neu(Term::Call("len".into(), vec![v])),
+    }
+}
+
+pub(super) enum Halt {
+    Stuck,
+    Err(Error),
+}
+
+pub(super) type H<T> = Result<T, Halt>;
+
+// 型の計算と、細分化型の条件の評価をする評価器
+// ponytail: 展開は燃料と深さに上限があり、超えると記号として残す
+pub(super) struct Eval {
+    pub(super) fns: HashMap<String, Fn>,
+    pub(super) datas: HashMap<String, Data>,
+    // 構築子名から (型, 構築子)
+    pub(super) ctors: HashMap<String, (Data, Ctor)>,
+    pub(super) fuel: usize,
+    // 展開の入れ子の深さ。スタックあふれを防ぐ
+    pub(super) depth: usize,
+    pub(super) next_id: usize,
+}
+
+pub(super) type Env = Vec<HashMap<String, V>>;
+
+impl Eval {
+    pub(super) fn new() -> Self {
+        Eval {
+            fns: HashMap::new(),
+            datas: HashMap::new(),
+            ctors: HashMap::new(),
+            fuel: 100_000,
+            depth: 0,
+            next_id: 0,
+        }
+    }
+
+    pub(super) fn fresh(&mut self) -> usize {
+        self.next_id += 1;
+        self.next_id
+    }
+
+    pub(super) fn opaque(&mut self) -> V {
+        let id = self.fresh();
+        neu(Term::Opaque(id))
+    }
+
+    // 止まった計算は、どの値とも等しくない項にする
+    pub(super) fn eval_or_opaque(&mut self, e: &Expr, env: &mut Env) -> R<V> {
+        match self.eval(e, env) {
+            Ok(v) => Ok(v),
+            Err(Halt::Stuck) => Ok(self.opaque()),
+            Err(Halt::Err(e)) => Err(e),
+        }
+    }
+
+    // 構造体のフィールド。値が分からなければ x.f という項にする
+    pub(super) fn proj(&self, x: V, f: &str) -> V {
+        if let V::Data(d) = &x
+            && let Some((_, c)) = self.ctors.get(d.0.as_str())
+            && let Some(i) = c.fields.iter().position(|(n, _)| n == f)
+        {
+            return d.1[i].clone();
+        }
+        neu(Term::Proj(x, f.to_string()))
+    }
+
+    // 関数型の式を評価する。型は引数の値に依存しない
+    pub(super) fn eval_pi(
+        &mut self,
+        binders: &[(String, Expr)],
+        ret: &Expr,
+        effs: &[Expr],
+        env: &mut Env,
+    ) -> H<V> {
+        let mut doms = Vec::new();
+        for (_, t) in binders {
+            doms.push(self.eval(t, env)?);
+        }
+        let cod = self.eval(ret, env)?;
+        let mut es = Vec::new();
+        for e in effs {
+            es.push(match e.peel() {
+                Expr::Var(n) if n == "Async" => V::DataT(Rc::new(("Async".into(), vec![]))),
+                e => self.eval(e, env)?,
+            });
+        }
+        Ok(V::Pi(Rc::new(PiV {
+            doms,
+            cod,
+            effs: es,
+        })))
+    }
+
+    // 関数を展開する。中で止まったら呼び出しのまま残す
+    pub(super) fn call(&mut self, name: &str, args: Vec<V>) -> R<V> {
+        match (name, args.as_slice()) {
+            ("len", [v]) => return Ok(len(v.clone())),
+            ("Vec", [a]) => return Ok(V::VecT(Rc::new(a.clone()))),
+            ("Ref", [a]) => return Ok(ref_t(a.clone())),
+            _ if self.ctors.contains_key(name) => return Ok(V::Data(Rc::new((name.into(), args)))),
+            _ if self.datas.contains_key(name) => {
+                return Ok(V::DataT(Rc::new((name.into(), args))));
+            }
+            _ => {}
+        }
+        // 実行時関数は展開せず、型別名だけを展開する
+        let Some(f) = self.fns.get(name).filter(|f| f.alias).cloned() else {
+            return Ok(neu(Term::Call(name.into(), args)));
+        };
+        // 制約の実装を省いた呼び出しは展開しない
+        if f.insts > 0 && args.len() < f.params.len() - f.implicit {
+            return Ok(neu(Term::Call(name.into(), args)));
+        }
+        // 省かれたジェネリック引数は、値の計算には使わないので () で埋める
+        let args = if args.len() + f.implicit == f.params.len() {
+            let mut full = vec![V::Unit; f.implicit];
+            full.extend(args);
+            full
+        } else {
+            args
+        };
+        if self.fuel == 0 || self.depth >= 64 {
+            return Ok(neu(Term::Call(name.into(), args)));
+        }
+        self.fuel -= 1;
+        let mut env = vec![
+            f.params
+                .iter()
+                .map(|(n, _)| n.clone())
+                .zip(args.iter().cloned())
+                .collect(),
+        ];
+        self.depth += 1;
+        let r = match &f.body.tail {
+            Some(t) => self.eval(t, &mut env),
+            None => Err(Halt::Stuck),
+        };
+        self.depth -= 1;
+        match r {
+            Ok(v) => Ok(v),
+            Err(Halt::Stuck) => Ok(neu(Term::Call(name.into(), args))),
+            Err(Halt::Err(e)) => Err(e),
+        }
+    }
+
+    pub(super) fn eval(&mut self, e: &Expr, env: &mut Env) -> H<V> {
+        Ok(match e {
+            Expr::At(_, x) => self.eval(x, env)?,
+            Expr::Int(n) => V::Int(*n),
+            Expr::Bool(b) => V::Bool(*b),
+            Expr::Str(s) => V::Str(s.as_str().into()),
+            Expr::Var(n) => match env.iter().rev().find_map(|s| s.get(n)) {
+                Some(v) => v.clone(),
+                None if n == "Type" => V::Type,
+                None if PRIMS.contains(&n.as_str()) => prim(n),
+                None if self
+                    .fns
+                    .get(n.as_str())
+                    .is_some_and(|f| f.alias && f.params.is_empty()) =>
+                {
+                    self.call(n, vec![]).map_err(Halt::Err)?
+                }
+                None if self.ctors.contains_key(n.as_str())
+                    || self.datas.contains_key(n.as_str()) =>
+                {
+                    self.call(n, vec![]).map_err(Halt::Err)?
+                }
+                None if self.fns.contains_key(n.as_str()) => return Err(Halt::Stuck),
+                None => return Err(Halt::Err(format!("未定義の変数 {n}").into())),
+            },
+            Expr::Unary(op, x) => un(op, self.eval(x, env)?),
+            Expr::Binary(op, l, r) => {
+                let a = self.eval(l, env)?;
+                // 左辺で決まる && と || は右辺を評価しない
+                match (*op, &a) {
+                    ("&&", V::Bool(false)) | ("||", V::Bool(true)) => return Ok(a),
+                    _ => {}
+                }
+                let b = self.eval(r, env)?;
+                bin(op, a, b)
+            }
+            Expr::Call(name, _) if name == "print" || SYN_FNS.iter().any(|s| s.0 == name) => {
+                return Err(Halt::Stuck);
+            }
+            Expr::Call(name, args) => {
+                let mut vs = Vec::new();
+                for a in args {
+                    vs.push(self.eval(a, env)?);
+                }
+                match env.iter().rev().find_map(|s| s.get(name)).cloned() {
+                    Some(_) => return Err(Halt::Stuck),
+                    None => self.call(name, vs).map_err(Halt::Err)?,
+                }
+            }
+            Expr::Pi(binders, ret, effs) => self.eval_pi(binders, ret, effs, env)?,
+            Expr::Array(items) => {
+                let mut vs = Vec::new();
+                for a in items {
+                    vs.push(self.eval(a, env)?);
+                }
+                V::Arr(Rc::new(vs))
+            }
+            Expr::Field(x, f) => {
+                let v = self.eval(x, env)?;
+                if matches!(v, V::Prim("syn") | V::Syn(_)) {
+                    return Err(Halt::Stuck);
+                }
+                if !matches!(v, V::Data(_) | V::Neu(_)) {
+                    return Err(Halt::Stuck);
+                }
+                self.proj(v, f)
+            }
+            Expr::Index(v, i) => match (self.eval(v, env)?, self.eval(i, env)?) {
+                (V::Arr(xs), V::Int(i)) if usize::try_from(i).is_ok_and(|i| i < xs.len()) => {
+                    xs[i as usize].clone()
+                }
+                // 値の分からない配列や添字は v[i] という項にする（範囲は型検査で証明済み）
+                (v @ V::Neu(_), i) | (v, i @ V::Neu(_)) => neu(Term::Call("[]".into(), vec![v, i])),
+                _ => return Err(Halt::Stuck),
+            },
+            Expr::Refine(b, x, p) => {
+                let b = self.eval(b, env)?;
+                env.push(HashMap::from([(x.clone(), bound())]));
+                let p = self.eval_or_opaque(p, env);
+                env.pop();
+                V::Refine(Rc::new((b, p.map_err(Halt::Err)?)))
+            }
+            Expr::Apply(..)
+            | Expr::Lam(..)
+            | Expr::Match(..)
+            | Expr::If(..)
+            | Expr::Block(..)
+            | Expr::Assign(..)
+            | Expr::For(..)
+            | Expr::While(..)
+            | Expr::Return(_)
+            | Expr::Handle(..)
+            | Expr::Method(..)
+            | Expr::Quote(_)
+            | Expr::Macro(..) => return Err(Halt::Stuck),
+        })
+    }
+
+    // 変数 id を by に置き換え、止まっていた計算を進め直す
+    pub(super) fn subst(&mut self, v: &V, id: usize, by: &V) -> R<V> {
+        Ok(match v {
+            V::Arr(xs) => V::Arr(Rc::new(
+                xs.iter().map(|x| self.subst(x, id, by)).collect::<R<_>>()?,
+            )),
+            V::VecT(a) => V::VecT(Rc::new(self.subst(a, id, by)?)),
+            V::Data(d) => V::Data(Rc::new((
+                d.0.clone(),
+                d.1.iter()
+                    .map(|x| self.subst(x, id, by))
+                    .collect::<R<_>>()?,
+            ))),
+            V::DataT(d) => V::DataT(Rc::new((
+                d.0.clone(),
+                d.1.iter()
+                    .map(|x| self.subst(x, id, by))
+                    .collect::<R<_>>()?,
+            ))),
+            V::Refine(r) => V::Refine(Rc::new((
+                self.subst(&r.0, id, by)?,
+                self.subst(&r.1, id, by)?,
+            ))),
+            V::Pi(p) => V::Pi(Rc::new(PiV {
+                doms: p
+                    .doms
+                    .iter()
+                    .map(|x| self.subst(x, id, by))
+                    .collect::<R<_>>()?,
+                cod: self.subst(&p.cod, id, by)?,
+                effs: p
+                    .effs
+                    .iter()
+                    .map(|x| self.subst(x, id, by))
+                    .collect::<R<_>>()?,
+            })),
+            V::Neu(n) => match &**n {
+                Term::Var(i, _) if *i == id => by.clone(),
+                Term::Var(..) | Term::Opaque(_) => v.clone(),
+                Term::Un(op, x) => un(op, self.subst(x, id, by)?),
+                Term::Bin(op, a, b) => {
+                    let (a, b) = (self.subst(a, id, by)?, self.subst(b, id, by)?);
+                    bin(op, a, b)
+                }
+                Term::Call(f, args) => {
+                    let args = args
+                        .iter()
+                        .map(|a| self.subst(a, id, by))
+                        .collect::<R<_>>()?;
+                    self.call(f, args)?
+                }
+                Term::Proj(x, f) => {
+                    let x = self.subst(x, id, by)?;
+                    self.proj(x, f)
+                }
+            },
+            v => v.clone(),
+        })
     }
 }

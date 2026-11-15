@@ -297,7 +297,7 @@ fn test_cmd(files: &[&str]) -> Result<bool, String> {
         });
         let full = if has_main { src.clone() } else { format!("{src}\nfn main() {{}}\n") };
         let prog = parser::with_uses(&full).and_then(|s| parser::parse(&s)).and_then(|mut prog| {
-            typeck::elaborate(&mut prog)?;
+            typeck::check(&mut prog)?;
             Ok(prog)
         });
         let prog = match prog {

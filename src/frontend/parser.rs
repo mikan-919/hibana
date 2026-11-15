@@ -83,6 +83,14 @@ impl Expr {
             e => e,
         }
     }
+
+    // 位置の包みを外す（可変）
+    pub fn peel_mut(&mut self) -> &mut Expr {
+        match self {
+            Expr::At(_, e) => e.peel_mut(),
+            e => e,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

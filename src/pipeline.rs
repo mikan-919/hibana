@@ -87,8 +87,8 @@ fn exported_ir(checked: &Checked, exports: &[String]) -> R<ir::Program> {
 /// 構文木を型検査し、必要な引数を補う。
 pub fn check(mut program: parser::Program, kind: Kind) -> R<Checked> {
     let info = match kind {
-        Kind::Executable => typeck::elaborate(&mut program)?,
-        Kind::Library => typeck::elaborate_library(&mut program)?,
+        Kind::Executable => typeck::check(&mut program)?,
+        Kind::Library => typeck::check_library(&mut program)?,
     };
     Ok(Checked { program, info })
 }

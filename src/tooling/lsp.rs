@@ -96,9 +96,9 @@ fn analyze(uri: &str, src: &str) -> (Option<crate::error::Error>, Types, Option<
     let mut index = None;
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> crate::error::R<()> {
         let combined = crate::parser::with_uses(src)?;
-        let prog = crate::parser::parse(&combined)?;
+        let mut prog = crate::parser::parse(&combined)?;
         index = Some(crate::index::build(src, &combined, &prog));
-        crate::typeck::check(&prog)?;
+        crate::typeck::check(&mut prog)?;
         Ok(())
     }));
     let types = crate::typeck::TYPES.with(|t| t.borrow_mut().take()).unwrap_or_default();

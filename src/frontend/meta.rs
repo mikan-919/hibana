@@ -1076,7 +1076,7 @@ impl Parser<'_> {
             .iter()
             .map(|(n, r)| (n.clone(), field_kinds(&r.pat)))
             .collect();
-        typeck::check_macro(&b, &field_kinds(&m.pat), &rules, &self.helpers).ctx(wrap)?;
+        typeck::check_macro(&mut b, &field_kinds(&m.pat), &rules, &self.helpers).ctx(wrap)?;
         let _ = m.compiled.set(b.clone());
         Ok(b)
     }
