@@ -467,7 +467,7 @@ fn addrs(e: &Expr, out: &mut Vec<usize>) {
 }
 
 // 式とその部分式をすべて f に渡す
-fn walk(e: &Expr, f: &mut dyn FnMut(&Expr)) {
+pub(crate) fn walk(e: &Expr, f: &mut dyn FnMut(&Expr)) {
     f(e);
     let block = |b: &Block, f: &mut dyn FnMut(&Expr)| {
         for s in &b.stmts {

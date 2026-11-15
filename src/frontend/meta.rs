@@ -144,6 +144,8 @@ struct Macro {
     decl: bool,
     // 本体のトークン列（コンパイル時に実行するコード）。空なら照合結果を Expr::Macro として残す
     body: Option<Vec<Token>>,
+    // 本体で x.do() を使うマクロ。本体は呼び出し位置で実行するコードの雛形（template_body で quote に直してある）
+    template: bool,
     compiled: OnceCell<Block>,
     first: Firsts,
     // 定義したモジュール。quote の中のそのモジュールの名前は、修飾した名前にする
@@ -175,6 +177,135 @@ pub enum Q {
 }
 // 束縛名ごとの種類（マクロ本体での型 syn<種類> に使う）。規則名・Ident・Expr などで、配列は [種類]、分からなければ ""
 pub type Kinds = Vec<(String, String)>;
+
+// 本体に 照合した名前.do() があれば、雛形として quote { { 本体 } } に直す。x.do() は $x、本体の return は macro_return にする
+fn template_body(raw: &[Token], fields: &[(String, bool)]) -> Option<Vec<Token>> {
+    let is_do = |i: usize| match &raw[i..] {
+        [x, dot, name, open, close, ..] => {
+            matches!(&x.tok, Tok::Ident(c) if fields.iter().any(|f| &f.0 == c))
+                && dot.tok == Tok::Punct(".")
+                && name.tok == Tok::Ident("do".into())
+                && open.tok == Tok::Punct("(")
+                && close.tok == Tok::Punct(")")
+        }
+        _ => false,
+    };
+    if !(0..raw.len()).any(is_do) {
+        return None;
+    }
+    let tok = |t: &Token, k: Tok| Token { tok: k, ..t.clone() };
+    let (first, last) = (&raw[0], &raw[raw.len() - 1]);
+    let mut out = vec![
+        tok(first, Tok::Punct("quote")),
+        tok(first, Tok::Punct("{")),
+        tok(first, Tok::Punct("{")),
+    ];
+    let mut i = 0;
+    while i < raw.len() {
+        if is_do(i) {
+            out.push(tok(&raw[i], Tok::Punct("$")));
+            out.push(Token {
+                gap_before: false,
+                nl_before: false,
+                ..raw[i].clone()
+            });
+            i += 5;
+            continue;
+        }
+        out.push(match raw[i].tok {
+            Tok::Punct("return") => tok(&raw[i], Tok::Punct("macro_return")),
+            _ => raw[i].clone(),
+        });
+        i += 1;
+    }
+    out.extend([tok(last, Tok::Punct("}")), tok(last, Tok::Punct("}"))]);
+    Some(out)
+}
+
+// 雛形の本体の return（構文解析で #return の呼び出しにしてある）を、展開した式の値に直す
+const RET_ERR: &str =
+    "マクロ本体の return は、本体の文か if・ブロックの中に書く（while・for・無名関数・let の右辺の中には書けない）";
+
+fn is_ret(e: &Expr) -> bool {
+    matches!(e.peel(), Expr::Call(n, _) if n == "#return")
+}
+
+fn has_ret(e: &Expr) -> bool {
+    let mut found = false;
+    typeck::walk(e, &mut |x| found |= is_ret(x));
+    found
+}
+
+// 値になる位置の式
+fn ret_tail(e: Expr) -> R<Expr> {
+    if !has_ret(&e) {
+        return Ok(e);
+    }
+    Ok(match e {
+        Expr::At(s, x) => Expr::At(s, Box::new(ret_tail(*x)?)),
+        Expr::Call(n, mut a) if n == "#return" => a.pop().unwrap(),
+        Expr::If(c, t, f) if !has_ret(&c) => {
+            Expr::If(c, ret_block(t)?, f.map(|f| ret_tail(*f).map(Box::new)).transpose()?)
+        }
+        Expr::Block(b) => Expr::Block(ret_block(b)?),
+        _ => return Err(RET_ERR.into()),
+    })
+}
+
+// 文の位置の式。return しなかった分岐には、後に続く文 rest を移す
+// ponytail: rest は分岐ごとに複製する。return が多いと展開が大きくなる。大きければ、抜け出す印の付いたブロックを IR に足す
+fn ret_stmt(e: Expr, rest: Block) -> R<Expr> {
+    Ok(match e {
+        Expr::At(s, x) => Expr::At(s, Box::new(ret_stmt(*x, rest)?)),
+        Expr::Call(n, mut a) if n == "#return" => a.pop().unwrap(),
+        Expr::If(c, t, f) if !has_ret(&c) => {
+            let t = ret_block(join(t, rest.clone()))?;
+            let f = match f {
+                Some(f) => join(Block { stmts: vec![Stmt::Expr(*f)], tail: None }, rest),
+                None => rest,
+            };
+            Expr::If(c, t, Some(Box::new(Expr::Block(ret_block(f)?))))
+        }
+        // ponytail: ブロックの let が rest からも見える。名前が重なれば外側の変数を隠す
+        Expr::Block(b) => Expr::Block(ret_block(join(b, rest))?),
+        _ => return Err(RET_ERR.into()),
+    })
+}
+
+// return を含む最初の文で、残りの文をその文の分岐に移す
+fn ret_block(b: Block) -> R<Block> {
+    let mut stmts = Vec::new();
+    let mut it = b.stmts.into_iter();
+    while let Some(s) = it.next() {
+        match s {
+            Stmt::Expr(e) if has_ret(&e) => {
+                let rest = Block {
+                    stmts: it.collect(),
+                    tail: b.tail,
+                };
+                return Ok(Block {
+                    stmts,
+                    tail: Some(Box::new(ret_stmt(e, rest)?)),
+                });
+            }
+            Stmt::Let { init, .. } if has_ret(&init) => return Err(RET_ERR.into()),
+            s => stmts.push(s),
+        }
+    }
+    let tail = b.tail.map(|t| ret_tail(*t).map(Box::new)).transpose()?;
+    Ok(Block { stmts, tail })
+}
+
+// a の後に b を続けたブロック。a の最後の式の値は捨てる
+fn join(a: Block, b: Block) -> Block {
+    let mut stmts = a.stmts;
+    stmts.extend(a.tail.map(|t| Stmt::Expr(*t)));
+    stmts.extend(b.stmts);
+    Block {
+        stmts,
+        tail: b.tail,
+    }
+}
 
 fn field_kinds(p: &Pattern) -> Kinds {
     let mut out: Kinds = Vec::new();
@@ -858,10 +989,14 @@ impl Parser<'_> {
         }
         let fields = fields(&pat).ctx(|e| format!("マクロ {name}: {e}"))?;
         let raw = &self.toks[start..self.pos - 1];
+        let template = template_body(raw, &fields);
+        if template.is_some() && decl {
+            return self.err_at(format!("マクロ {name}: -> Decl のマクロでは .do() を使えない"));
+        }
         let body = if raw.is_empty() {
             None
         } else {
-            Some(raw.to_vec())
+            Some(template.clone().unwrap_or_else(|| raw.to_vec()))
         };
         g.macros.push(Macro {
             name,
@@ -870,6 +1005,7 @@ impl Parser<'_> {
             stmt,
             decl,
             body,
+            template: template.is_some(),
             first: (vec![], true),
             compiled: OnceCell::new(),
             module: self.cur_module(),
@@ -1128,14 +1264,15 @@ impl Parser<'_> {
                 },
                 eof,
             ]);
-            return p.block().map(Expr::Block).ctx(wrap);
+            let e = p.block().map(Expr::Block).ctx(wrap)?;
+            return if m.template { ret_tail(e).ctx(wrap) } else { Ok(e) };
         }
         p.toks.push(eof);
         let e = p.expr().ctx(wrap)?;
         if p.peek() != &Tok::Eof {
             return p.err("1個の式でない").ctx(wrap);
         }
-        Ok(e)
+        if m.template { ret_tail(e).ctx(wrap) } else { Ok(e) }
     }
 
     // マクロ本体を実行し、展開結果をトークン列にする

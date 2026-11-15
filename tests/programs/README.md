@@ -7,7 +7,7 @@
 - [basics/](basics/): 関数、クロージャ、可変変数、参照、文字列、べき乗などの基本機能
 - [types/](types/): 細分化型、構造体、トレイト、等値性、Z3 による証明
 - [effects/](effects/): 代数的効果と効果の多相
-- [macros/](macros/): 文法拡張、derive、マクロの衛生性
+- [macros/](macros/): 文法拡張、derive、マクロの衛生性、.do() を使う雛形のマクロ
 - [stdlib/](stdlib/): 標準ライブラリの使用例とテスト
 - [web/](web/): Web ライブラリ、ルーティング、HTTP サーバー
 - [interop/](interop/): JavaScript / TypeScript との連携（補助ファイルは `interop/js/`）

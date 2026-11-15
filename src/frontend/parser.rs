@@ -2196,6 +2196,15 @@ impl Parser<'_> {
                     Expr::Return(Some(Box::new(self.expr()?)))
                 }
             }
+            // .do() を使うマクロの本体に書いた return（meta.rs の template_body）。展開後に式の値へ直す
+            Tok::Punct("macro_return") => {
+                let v = if self.at_newline() || matches!(self.peek(), Tok::Punct(";" | "}")) {
+                    Expr::Block(Block { stmts: vec![], tail: None })
+                } else {
+                    self.expr()?
+                };
+                Expr::Call("#return".into(), vec![v])
+            }
             t => {
                 if t != Tok::Eof {
                     self.pos -= 1;
