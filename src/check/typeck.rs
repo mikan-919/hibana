@@ -2,7 +2,7 @@
 use crate::meta::{Kinds, Q};
 use crate::parser::{Arm, Block, Ctor, Data, Expr, Fn, Program, Stmt};
 use crate::smt::Smt;
-use super::prove::replace_len;
+use super::prove::{bin, len, replace_len, un};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -176,7 +176,7 @@ fn ref_of(t: &V) -> Option<V> {
     }
 }
 
-fn neu(n: Neu) -> V {
+pub(super) fn neu(n: Neu) -> V {
     V::Neu(Rc::new(n))
 }
 
@@ -364,84 +364,6 @@ impl Norm<'_> {
         }
     }
 
-    pub(super) fn un(op: &'static str, v: V) -> V {
-        if let V::Neu(n) = &v
-            && let (true, Neu::Bin(o, a, b)) = (op == "!", &**n)
-        {
-            // 否定は比較を反転させて、証明で照合しやすい形にする
-            let flip = match *o {
-                "<" => Some(("<=", b, a)),
-                "<=" => Some(("<", b, a)),
-                "==" => Some(("!=", a, b)),
-                "!=" => Some(("==", a, b)),
-                _ => None,
-            };
-            if let Some((o, a, b)) = flip {
-                return Self::bin(o, a.clone(), b.clone());
-            }
-        }
-        match (op, v) {
-            ("-", V::Int(n)) if n != i64::MIN => V::Int(-n),
-            ("!", V::Bool(b)) => V::Bool(!b),
-            (op, v) => neu(Neu::Un(op, v)),
-        }
-    }
-
-    pub(super) fn bin(op: &'static str, a: V, b: V) -> V {
-        use V::*;
-        let r = match (op, &a, &b) {
-            ("+", Int(x), Int(y)) => x.checked_add(*y).map(Int),
-            ("+", Str(x), Str(y)) => Some(Str(format!("{x}{y}").into())),
-            ("-", Int(x), Int(y)) => x.checked_sub(*y).map(Int),
-            ("*", Int(x), Int(y)) => x.checked_mul(*y).map(Int),
-            ("/", Int(x), Int(y)) => x.checked_div(*y).map(Int),
-            ("%", Int(x), Int(y)) => x.checked_rem(*y).map(Int),
-            ("<", Int(x), Int(y)) => Some(Bool(x < y)),
-            ("<=", Int(x), Int(y)) => Some(Bool(x <= y)),
-            (">", Int(x), Int(y)) => Some(Bool(x > y)),
-            (">=", Int(x), Int(y)) => Some(Bool(x >= y)),
-            // 片方が分かれば簡約する（true && p は p）
-            ("&&", Bool(true), _) => Some(b.clone()),
-            ("&&", _, Bool(true)) => Some(a.clone()),
-            ("&&", Bool(false), _) | ("&&", _, Bool(false)) => Some(Bool(false)),
-            ("||", Bool(false), _) => Some(b.clone()),
-            ("||", _, Bool(false)) => Some(a.clone()),
-            ("||", Bool(true), _) | ("||", _, Bool(true)) => Some(Bool(true)),
-            // 同じ項は値が分からなくても等しい
-            ("==", _, _) if a == b => Some(Bool(true)),
-            ("!=", _, _) if a == b => Some(Bool(false)),
-            ("==" | "!=", x, y) if !matches!(x, Neu(_)) && !matches!(y, Neu(_)) => {
-                Some(Bool((a == b) == (op == "==")))
-            }
-            _ => None,
-        };
-        if let Some(r) = r {
-            return r;
-        }
-        // > と >= は向きを揃えて < と <= にする
-        match op {
-            ">" => neu(self::Neu::Bin("<", b, a)),
-            ">=" => neu(self::Neu::Bin("<=", b, a)),
-            _ => neu(self::Neu::Bin(op, a, b)),
-        }
-    }
-
-    fn len(v: V) -> V {
-        match &v {
-            V::Arr(xs) => V::Int(xs.len() as i64),
-            V::Str(s) => V::Int(s.chars().count() as i64),
-            V::Neu(n) => match &**n {
-                // push は 1 つ増やし、set_at は変えない
-                Neu::Call(f, a) if f == "push" && a.len() == 2 => {
-                    Self::bin("+", Self::len(a[0].clone()), V::Int(1))
-                }
-                Neu::Call(f, a) if f == "set_at" && a.len() == 3 => Self::len(a[0].clone()),
-                _ => neu(Neu::Call("len".into(), vec![v.clone()])),
-            },
-            _ => neu(Neu::Call("len".into(), vec![v])),
-        }
-    }
-
     // 構造体のフィールド。値が分からなければ x.f という項にする
     fn proj(&self, x: V, f: &str) -> V {
         if let V::Data(d) = &x
@@ -495,7 +417,7 @@ impl Norm<'_> {
     // 関数を展開する。中で止まったら呼び出しのまま残す
     fn call(&mut self, name: &str, args: Vec<V>) -> R<V> {
         match (name, args.as_slice()) {
-            ("len", [v]) => return Ok(Self::len(v.clone())),
+            ("len", [v]) => return Ok(len(v.clone())),
             ("Vec", [a]) => return Ok(V::VecT(Rc::new(a.clone()))),
             ("Ref", [a]) => return Ok(ref_t(a.clone())),
             _ if self.ctors.contains_key(name) => return Ok(V::Data(Rc::new((name.into(), args)))),
@@ -566,7 +488,7 @@ impl Norm<'_> {
                 None if self.fns.contains_key(n.as_str()) => return Err(Halt::Stuck),
                 None => return Err(Halt::Err(format!("未定義の変数 {n}").into())),
             },
-            Expr::Unary(op, x) => Self::un(op, self.eval(x, env)?),
+            Expr::Unary(op, x) => un(op, self.eval(x, env)?),
             Expr::Binary(op, l, r) => {
                 let a = self.eval(l, env)?;
                 // 左辺で決まる && と || は右辺を評価しない
@@ -575,7 +497,7 @@ impl Norm<'_> {
                     _ => {}
                 }
                 let b = self.eval(r, env)?;
-                Self::bin(op, a, b)
+                bin(op, a, b)
             }
             Expr::Call(name, _) if name == "print" || SYN_FNS.iter().any(|s| s.0 == name) => {
                 return Err(Halt::Stuck);
@@ -672,10 +594,10 @@ impl Norm<'_> {
             V::Neu(n) => match &**n {
                 Neu::Var(i, _) if *i == id => by.clone(),
                 Neu::Var(..) | Neu::Opaque(_) => v.clone(),
-                Neu::Un(op, x) => Self::un(op, self.subst(x, id, by)?),
+                Neu::Un(op, x) => un(op, self.subst(x, id, by)?),
                 Neu::Bin(op, a, b) => {
                     let (a, b) = (self.subst(a, id, by)?, self.subst(b, id, by)?);
-                    Self::bin(op, a, b)
+                    bin(op, a, b)
                 }
                 Neu::Call(f, args) => {
                     let args = args
@@ -1415,9 +1337,9 @@ impl Ck<'_> {
             return Ok(None);
         };
         let id = *id;
-        let mut l = Norm::len(self.eval_value(x)?);
+        let mut l = len(self.eval_value(x)?);
         if mentions(&l, id) {
-            let own = Norm::len(val.clone());
+            let own = len(val.clone());
             let known = self
                 .scopes
                 .iter()
@@ -1503,11 +1425,11 @@ impl Ck<'_> {
     // 0 <= i < len(v) を証明する
     fn in_range(&mut self, v: &Expr, i: &Expr) -> R<()> {
         let (vv, iv) = (self.eval_value(v)?, self.eval_value(i)?);
-        let len = Norm::len(vv);
-        let goal = Norm::bin(
+        let len = len(vv);
+        let goal = bin(
             "&&",
-            Norm::bin("<=", V::Int(0), iv.clone()),
-            Norm::bin("<", iv, len),
+            bin("<=", V::Int(0), iv.clone()),
+            bin("<", iv, len),
         );
         if !self.prove(&goal) {
             return Err(format!("添字の範囲 {} を証明できない", show(&goal)).into());
@@ -1569,8 +1491,8 @@ impl Ck<'_> {
                     self.bind(name, t.clone(), val.clone(), *mutable)?;
                     // 可変な Vec は、初期値の長さを事実として持つ
                     if *mutable && matches!(base(&t), V::VecT(_)) {
-                        let l = Norm::len(self.eval_value(init)?);
-                        self.add_fact(Norm::bin("==", Norm::len(val), l));
+                        let l = len(self.eval_value(init)?);
+                        self.add_fact(bin("==", len(val), l));
                     }
                 }
                 Stmt::Expr(e) => diverges |= self.expr(e)? == prim("never"),
@@ -1599,7 +1521,7 @@ impl Ck<'_> {
         self.add_fact(if b {
             c.clone()
         } else {
-            Norm::un("!", c.clone())
+            un("!", c.clone())
         });
     }
 
@@ -2125,7 +2047,7 @@ impl Ck<'_> {
                 };
                 self.forget(name)?;
                 if let Some((v, l)) = new_len {
-                    self.add_fact(Norm::bin("==", Norm::len(v), l));
+                    self.add_fact(bin("==", len(v), l));
                 }
                 prim("unit")
             }
@@ -2219,8 +2141,8 @@ impl Ck<'_> {
                             let id = self.norm.fresh();
                             let v = neu(Neu::Var(id, x.clone()));
                             self.bind(x, int.clone(), v.clone(), false)?;
-                            self.add_fact(Norm::bin("<=", a, v.clone()));
-                            self.add_fact(Norm::bin("<", v, b));
+                            self.add_fact(bin("<=", a, v.clone()));
+                            self.add_fact(bin("<", v, b));
                         }
                         None => {
                             let V::VecT(el) = base(&self.expr(it)?) else {
@@ -2256,7 +2178,7 @@ impl Ck<'_> {
                     self.forget(n)?;
                 }
                 // 抜けた後は条件が偽
-                self.add_fact(Norm::un("!", cv));
+                self.add_fact(un("!", cv));
                 prim("unit")
             }
             Expr::Block(b) => self.block(b)?,

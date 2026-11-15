@@ -1,5 +1,5 @@
 //! 細分化型の項と事実の照合。
-use super::typeck::{Neu, Norm, V};
+use super::typeck::{neu, Neu, V};
 
 // 項と定数の和に分ける。定数だけなら項は 0
 fn lin(v: &V) -> (V, i64) {
@@ -33,8 +33,8 @@ pub(super) fn replace(v: &V, from: &V, to: &V) -> V {
     }
     let V::Neu(n) = v else { return v.clone() };
     match &**n {
-        Neu::Bin(op, a, b) => Norm::bin(op, replace(a, from, to), replace(b, from, to)),
-        Neu::Un(op, x) => Norm::un(op, replace(x, from, to)),
+        Neu::Bin(op, a, b) => bin(op, replace(a, from, to), replace(b, from, to)),
+        Neu::Un(op, x) => un(op, replace(x, from, to)),
         _ => v.clone(),
     }
 }
@@ -50,7 +50,7 @@ pub(super) fn replace_len(v: &V, id: usize, t: &V) -> V {
                 return t.clone();
             }
             Neu::Bin(op, a, b) if matches!(*op, "+" | "-") => {
-                return Norm::bin(op, replace_len(a, id, t), replace_len(b, id, t));
+                return bin(op, replace_len(a, id, t), replace_len(b, id, t));
             }
             _ => {}
         }
@@ -114,4 +114,82 @@ pub(super) fn prove<'a>(goal: &V, facts: impl Iterator<Item = &'a V> + Clone, sm
         if g == V::Bool(true) || prove_facts(&g, facts.clone()) { return true; }
     }
     smt.prove(&facts.cloned().collect::<Vec<_>>(), goal)
+}
+
+pub(super) fn un(op: &'static str, v: V) -> V {
+    if let V::Neu(n) = &v
+        && let (true, Neu::Bin(o, a, b)) = (op == "!", &**n)
+    {
+        // 否定は比較を反転させて、証明で照合しやすい形にする
+        let flip = match *o {
+            "<" => Some(("<=", b, a)),
+            "<=" => Some(("<", b, a)),
+            "==" => Some(("!=", a, b)),
+            "!=" => Some(("==", a, b)),
+            _ => None,
+        };
+        if let Some((o, a, b)) = flip {
+            return bin(o, a.clone(), b.clone());
+        }
+    }
+    match (op, v) {
+        ("-", V::Int(n)) if n != i64::MIN => V::Int(-n),
+        ("!", V::Bool(b)) => V::Bool(!b),
+        (op, v) => neu(Neu::Un(op, v)),
+    }
+}
+
+pub(super) fn bin(op: &'static str, a: V, b: V) -> V {
+    use V::*;
+    let r = match (op, &a, &b) {
+        ("+", Int(x), Int(y)) => x.checked_add(*y).map(Int),
+        ("+", Str(x), Str(y)) => Some(Str(format!("{x}{y}").into())),
+        ("-", Int(x), Int(y)) => x.checked_sub(*y).map(Int),
+        ("*", Int(x), Int(y)) => x.checked_mul(*y).map(Int),
+        ("/", Int(x), Int(y)) => x.checked_div(*y).map(Int),
+        ("%", Int(x), Int(y)) => x.checked_rem(*y).map(Int),
+        ("<", Int(x), Int(y)) => Some(Bool(x < y)),
+        ("<=", Int(x), Int(y)) => Some(Bool(x <= y)),
+        (">", Int(x), Int(y)) => Some(Bool(x > y)),
+        (">=", Int(x), Int(y)) => Some(Bool(x >= y)),
+        // 片方が分かれば簡約する（true && p は p）
+        ("&&", Bool(true), _) => Some(b.clone()),
+        ("&&", _, Bool(true)) => Some(a.clone()),
+        ("&&", Bool(false), _) | ("&&", _, Bool(false)) => Some(Bool(false)),
+        ("||", Bool(false), _) => Some(b.clone()),
+        ("||", _, Bool(false)) => Some(a.clone()),
+        ("||", Bool(true), _) | ("||", _, Bool(true)) => Some(Bool(true)),
+        // 同じ項は値が分からなくても等しい
+        ("==", _, _) if a == b => Some(Bool(true)),
+        ("!=", _, _) if a == b => Some(Bool(false)),
+        ("==" | "!=", x, y) if !matches!(x, Neu(_)) && !matches!(y, Neu(_)) => {
+            Some(Bool((a == b) == (op == "==")))
+        }
+        _ => None,
+    };
+    if let Some(r) = r {
+        return r;
+    }
+    // > と >= は向きを揃えて < と <= にする
+    match op {
+        ">" => neu(super::typeck::Neu::Bin("<", b, a)),
+        ">=" => neu(super::typeck::Neu::Bin("<=", b, a)),
+        _ => neu(super::typeck::Neu::Bin(op, a, b)),
+    }
+}
+
+pub(super) fn len(v: V) -> V {
+    match &v {
+        V::Arr(xs) => V::Int(xs.len() as i64),
+        V::Str(s) => V::Int(s.chars().count() as i64),
+        V::Neu(n) => match &**n {
+            // push は 1 つ増やし、set_at は変えない
+            Neu::Call(f, a) if f == "push" && a.len() == 2 => {
+                bin("+", len(a[0].clone()), V::Int(1))
+            }
+            Neu::Call(f, a) if f == "set_at" && a.len() == 3 => len(a[0].clone()),
+            _ => neu(Neu::Call("len".into(), vec![v.clone()])),
+        },
+        _ => neu(Neu::Call("len".into(), vec![v])),
+    }
 }
