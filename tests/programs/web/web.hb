@@ -51,10 +51,12 @@ test 'response headers' {
     assert_eq(len(original.headers), 0)
     assert_eq(len(first.headers), 1)
     assert_eq(len(res.headers), 2)
-    assert_eq(res.headers[0].name, 'Set-Cookie')
-    assert_eq(res.headers[0].value, 'session=one; HttpOnly')
-    assert_eq(res.headers[1].name, 'Set-Cookie')
-    assert_eq(res.headers[1].value, 'theme=dark')
+    if len(res.headers) == 2 {
+        assert_eq(res.headers[0].name, 'Set-Cookie')
+        assert_eq(res.headers[0].value, 'session=one; HttpOnly')
+        assert_eq(res.headers[1].name, 'Set-Cookie')
+        assert_eq(res.headers[1].value, 'theme=dark')
+    } else { panic('ヘッダーの数が違う') }
 }
 
 test 'redirect after save' {

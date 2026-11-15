@@ -559,8 +559,8 @@ impl Norm<'_> {
             }
             _ => {}
         }
-        // 未知の関数と外部関数は記号として残す
-        let Some(f) = self.fns.get(name).copied().filter(|f| f.js.is_none() && f.op.is_none()) else {
+        // 実行時関数は展開せず、型別名だけを展開する
+        let Some(f) = self.fns.get(name).copied().filter(|f| f.alias) else {
             return Ok(neu(Neu::Call(name.into(), args)));
         };
         // 制約の実装を省いた呼び出しは展開しない
@@ -3518,6 +3518,13 @@ mod tests {
     fn recursive_functions_and_negative_types_are_allowed() {
         check("enum Bad { MkBad(f: (Bad) -> int) }\nfn even(n: int) -> bool { if n == 0 { true } else { odd(n - 1) } }\nfn odd(n: int) -> bool { if n == 0 { false } else { even(n - 1) } }\nfn main() { print(even(4)) }").unwrap();
         check("fn f(n: int) -> int { let g = f\n g(n) }\nfn main() {}").unwrap();
+    }
+
+    #[test]
+    fn runtime_calls_are_opaque_to_refinement_proofs() {
+        let source = "fn items() -> Vec<int> { [1] }\nfn main() { let xs = items()\n print(xs[0]) }";
+        assert!(check(source).unwrap_err().to_string().contains("添字の範囲"));
+        check(&source.replace("print(xs[0])", "if len(xs) > 0 { print(xs[0]) }")).unwrap();
     }
 
     #[test]
