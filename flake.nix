@@ -29,8 +29,6 @@
             pkgs.nodejs
             # editors/tree-sitter-hibana の parser.c を作る（tree-sitter generate）
             pkgs.tree-sitter
-            # C バックエンドの実行ファイルのごみ集め（Boehm GC）
-            pkgs.boehmgc
           ];
           RUST_SRC_PATH = "${toolchain}/lib/rustlib/src/rust/library";
           # build.rs が実行ファイルの rpath に入れる（Z3 のライブラリを FFI で使う）

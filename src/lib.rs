@@ -9,7 +9,7 @@ pub mod project;
 pub mod tooling;
 
 // 既存の利用側は、機能別ディレクトリへの移動後も同じパスで参照できる。
-pub use backend::{c, eval, ir, js, native, wasm};
+pub use backend::{eval, ir, js, native, wasm};
 pub use check::{smt, typeck};
 pub use frontend::{lexer, meta, parser};
 pub use project::{build, pkg};
@@ -77,10 +77,6 @@ pub fn to_web(src: &str, exports: &[String]) -> error::R<WebOutput> {
         wasm: pipeline::emit_wasm(&ir, Some(exports))?,
         javascript: pipeline::emit_js_glue(&ir, exports)?,
     })
-}
-
-pub fn to_c(src: &str) -> error::R<String> {
-    pipeline::emit_c(&checked(src, pipeline::Kind::Executable)?)
 }
 
 /// libc を使わない静的な ELF の実行ファイルを作る。main から辿れる関数だけを含める。

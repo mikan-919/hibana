@@ -1,26 +1,7 @@
 use crate::{error, eval, fmt, lexer, lsp, parser, pkg, typeck, wasm};
 use crate::to_wasm;
 #[cfg(test)]
-use crate::{run, to_c, to_js, to_web};
-
-// バックエンドのテスト用に、C からネイティブの実行ファイルを作る。
-#[cfg(test)]
-fn build(src: &str, out: &std::path::Path) -> error::R<()> {
-    let code = to_c(src)?;
-    let c_path = out.with_extension("c");
-    std::fs::write(&c_path, code).map_err(|e| e.to_string())?;
-    let r = std::process::Command::new(std::env::var("CC").unwrap_or("cc".into()))
-        .args(["-O2", "-w", "-o"])
-        .arg(out)
-        .arg(&c_path)
-        .arg("-lgc")
-        .status()
-        .map_err(|e| format!("cc を起動できない: {e}"))?;
-    if !r.success() {
-        return Err(format!("cc が失敗した（{}）", c_path.display()).into());
-    }
-    Ok(())
-}
+use crate::{run, to_js, to_web};
 
 // ソースの該当箇所に下線を引いて表示するためのエラー
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
@@ -467,37 +448,6 @@ mod tests {
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 
-    // すべての例について、C に変換してネイティブにビルドした実行結果がインタプリタと同じか
-    #[test]
-    fn native_backend_matches_interpreter() {
-        let tmp = std::env::temp_dir().join(format!("hibana-c-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
-        let names = program_files();
-        for p in names {
-            let src = std::fs::read_to_string(&p).unwrap();
-            // extern を使う例はインタプリタでは動かないので、js_extern で確かめる。サーバーは web_server で確かめる
-            if src.contains(".ts'")
-                || src.contains(".js'")
-                || src.contains("\nextern")
-                || src.contains("web.serve(")
-            {
-                continue;
-            }
-            crate::parser::set_base_dir(p.parent().unwrap());
-            let want = out(&src).unwrap();
-            let exe = tmp.join(p.file_stem().unwrap());
-            super::build(&src, &exe).unwrap();
-            let r = std::process::Command::new(&exe).output().unwrap();
-            assert_eq!(
-                String::from_utf8(r.stdout).unwrap(),
-                want,
-                "{}",
-                p.display()
-            );
-        }
-        std::fs::remove_dir_all(&tmp).unwrap();
-    }
-
     // IR を通す 2 つの出力（WASM と Cranelift のネイティブ）の結果が、インタプリタと同じか。
     // IR が未対応のプログラムは飛ばし、対応した数を表示する
     #[test]
@@ -574,26 +524,6 @@ mod tests {
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 
-    // ネイティブの実行ファイルは、使われなくなった値を回収する。合わせて約 100MB の文字列を作るプログラムが、
-    // 仮想メモリ 50MB の上限の中で最後まで動く
-    #[test]
-    fn native_heap_is_collected() {
-        let src = "fn main() {\n    let mut total = 0\n    for i in 0..1000000 {\n        let s = to_str(i) + '-0123456789012345678901234567890123456789012345678901234567890123456789'\n        total = total + len(s)\n    }\n    print(total)\n}\n";
-        let tmp = std::env::temp_dir().join(format!("hibana-gc-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
-        let exe = tmp.join("churn");
-        super::build(src, &exe).unwrap();
-        let r = std::process::Command::new("sh")
-            .arg("-c")
-            .arg("ulimit -v 50000; exec \"$0\"")
-            .arg(&exe)
-            .output()
-            .unwrap();
-        std::fs::remove_dir_all(&tmp).unwrap();
-        assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
-        assert_eq!(String::from_utf8(r.stdout).unwrap(), out(src).unwrap());
-    }
-
     // use で JavaScript と TypeScript のモジュールを使う例を、Node.js で実行する
     #[test]
     fn js_extern() {
@@ -613,8 +543,6 @@ mod tests {
             "50\nHIBANA!\n18\n3\n3\nHello, world\n6\n20\n[3, 5]\n[\"a2a\", \"b4b\"]\n[20, 40]\n"
         );
         let e = out(&src).unwrap_err();
-        assert!(e.contains("JS ターゲット"), "{e}");
-        let e = super::to_c(&src).unwrap_err();
         assert!(e.contains("JS ターゲット"), "{e}");
         // 型宣言が無いモジュールは型が分からないので使えない
         let e = out("use './nope.js'\nfn main() {}").unwrap_err();
@@ -1071,7 +999,7 @@ fn main() {
         assert!(e.msg.starts_with("行 5: 関数 Show#impl0: "), "{e:?}");
     }
 
-    // 実行時エラーの位置。インタプリタはエラーに位置を付け、JS と C はメッセージに行と列を足す
+    // 実行時エラーの位置。インタプリタはエラーに位置を付け、JS はメッセージに行と列を足す
     #[test]
     fn runtime_error_positions() {
         let src = "fn half(x: int, y: int) -> int {\n    x / y\n}\nfn main() {\n    print(half(1, 0))\n}\n";
@@ -1086,10 +1014,6 @@ fn main() {
             .output()
             .unwrap();
         let want = "実行時エラー: 0 で除算した（2 行 5 列）\n";
-        assert_eq!(String::from_utf8(r.stderr).unwrap(), want);
-        let exe = tmp.join("d");
-        super::build(src, &exe).unwrap();
-        let r = std::process::Command::new(&exe).output().unwrap();
         assert_eq!(String::from_utf8(r.stderr).unwrap(), want);
         std::fs::remove_dir_all(&tmp).unwrap();
     }

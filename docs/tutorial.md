@@ -1,6 +1,6 @@
 # hibana 入門
 
-hibana は静的型付けの言語です。型検査を通ったプログラムは、インタプリタ（構文木を直接評価する実行方式）、JavaScript、C のどれでも同じ出力になります。この文書は、書き始めるのに必要な機能を例で順に説明します。言語の規則は `docs/spec.md` にあります。
+hibana は静的型付けの言語です。型検査を通ったプログラムは、インタプリタ（構文木を直接評価する実行方式）と JavaScript で同じ出力になります。この文書は、書き始めるのに必要な機能を例で順に説明します。言語の規則は `docs/spec.md` にあります。
 
 ## 1. 動かす
 
@@ -36,7 +36,7 @@ Hibana の Git 依存を更新するには `hibana update` を実行します。
 
 プロジェクトの npm/Cargo ツールは `hibana update npm:vite` や `hibana update cargo:clap` のように指定して更新できます。対象は `config.hibana.toml` の `[dependencies]` に登録したツールに限り、設定した版の範囲内で直接・推移依存を解決し直して lock に記録します。他の依存の lock は維持します。依存名が見つからない場合や取得に失敗した場合、lock は書き換えません。引数なし・通常の依存名での更新は従来どおり Git 依存だけを対象にします。
 
-`hibana <ファイル>` でインタプリタが実行します。`hibana run <ファイル>` は対応するプログラムを WASM に変換して実行します。JavaScript や C の生成は Rust API の `hibana::to_js` / `hibana::to_c` で行えます。
+`hibana <ファイル>` でインタプリタが実行します。`hibana run <ファイル>` は対応するプログラムを WASM に変換して実行します。JavaScript の生成は Rust API の `hibana::to_js` で行えます。
 
 ```
 fn greet(name: str) -> str {

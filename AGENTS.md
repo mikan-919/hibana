@@ -1,6 +1,6 @@
 # AGENTS.md
 
-hibana は Rust で実装した静的型付けの言語です。依存型・細分化型（Z3 で証明）・代数的効果・トレイト・マクロを持ち、インタプリタ、JavaScript、C のバックエンドがあります。言語の規則は `docs/spec.md`、入門は `docs/tutorial.md` です。
+hibana は Rust で実装した静的型付けの言語です。依存型・細分化型（Z3 で証明）・代数的効果・トレイト・マクロを持ち、インタプリタ、JavaScript、WebAssembly、ネイティブのバックエンドがあります。言語の規則は `docs/spec.md`、入門は `docs/tutorial.md` です。
 
 ## 開発環境
 
@@ -21,7 +21,7 @@ nix develop -c cargo run -q -- <ファイル>   # 実行（run / fmt / test / ls
 |---|---|
 | `src/frontend/` | 字句解析（`lexer.rs`）、構文解析（`parser.rs`）、名前解決（`resolve.rs`）、マクロ展開（`meta.rs`）、TypeScript の宣言の読み込み（`ts.rs`） |
 | `src/check/` | 型検査（`typeck.rs`）。依存型の評価、細分化型の証明、停止性・正値性の検査、効果、トレイト。`smt.rs` は Z3 の FFI |
-| `src/backend/` | インタプリタ（`eval.rs`）、JavaScript（`js.rs`）、C（`c.rs`）、WASM とネイティブの共通の構造化 IR（`ir.rs`）、WebAssembly（`wasm.rs`）、Cranelift によるネイティブ（`native.rs`。libc なしの静的 ELF） |
+| `src/backend/` | インタプリタ（`eval.rs`）、JavaScript（`js.rs`）、WASM とネイティブの共通の構造化 IR（`ir.rs`）、WebAssembly（`wasm.rs`）、Cranelift によるネイティブ（`native.rs`。libc なしの静的 ELF） |
 | `src/tooling/` | フォーマッタ（`fmt.rs`）、Language Server（`lsp.rs`）、シンボルの索引（`index.rs`） |
 | `src/project/` | ビルド（`build.rs`）、スクリプト（`scripts.rs`）、パッケージ管理（`pkg/`）、外部ツール管理（`tools/`） |
 | `src/cli/mod.rs` | CLI のコマンド処理と、全体のテスト（`mod tests`） |
@@ -34,8 +34,8 @@ nix develop -c cargo run -q -- <ファイル>   # 実行（run / fmt / test / ls
 
 ## 規約
 
-- インタプリタ・JavaScript・C は同じ出力になることをテストで確かめています。バックエンドに手を入れたら、3 つとも確認します。
-- 組み込み関数を足す時は `src/check/typeck.rs` の `BUILTINS`、`src/frontend/parser.rs` の `globals`、3 つのバックエンド、`docs/spec.md` の 9 章を更新します。`std` に足した名前が組み込み（`all`、`resume` など）と衝突しないか確認します。
+- インタプリタ・JavaScript・WASM・ネイティブの出力をテストで比較します。バックエンドに手を入れたら対応するテストを実行します。
+- 組み込み関数を足す時は `src/check/typeck.rs` の `BUILTINS`、`src/frontend/parser.rs` の `globals`、各バックエンド、`docs/spec.md` の 9 章を更新します。`std` に足した名前が組み込み（`all`、`resume` など）と衝突しないか確認します。
 - `lib/std.hb` に関数を足したら `tests/programs/stdlib/stdlib.hb` にテストを足します。
 - 簡略化して上限がある所には `ponytail:` で始まるコメントに、上限と改善の方向を書きます。
 - コメント・エラーメッセージ・ドキュメントは日本語です。修飾表現（「非常に」など）は使わず、事実を書きます。

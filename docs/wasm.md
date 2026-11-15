@@ -1,6 +1,6 @@
 # WebAssembly を Web から使う
 
-当面の WASM ターゲットは、型検査した関数を JavaScript から呼ぶためのライブラリです。`main` は不要です。既存のインタプリタ・JavaScript・C ターゲットも引き続き使えます。
+当面の WASM ターゲットは、型検査した関数を JavaScript から呼ぶためのライブラリです。`main` は不要です。既存のインタプリタ・JavaScript ターゲットも引き続き使えます。
 
 ## Rust API で生成する
 

@@ -1,5 +1,5 @@
 //! ビルドの段階。ファイルの書き込みや外部ツールの起動は呼び出し側が行う。
-use crate::{build, c, error::R, ir, js, parser, typeck, wasm};
+use crate::{build, error::R, ir, js, parser, typeck, wasm};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -78,16 +78,12 @@ pub fn compile(source: &str, target: &str, exports: &[String]) -> R<Vec<u8>> {
             let ir = exported_ir(&program, exports)?;
             emit_wasm(&ir, Some(exports))
         }
-        "js" | "c" => {
+        "js" => {
             if !exports.is_empty() {
-                return Err("js/c の compile は公開関数の指定に未対応。main と空の公開関数一覧を使ってください".into());
+                return Err("js の compile は公開関数の指定に未対応。main と空の公開関数一覧を使ってください".into());
             }
             let program = compiler_input(source, Kind::Executable)?;
-            let text = if target == "js" {
-                emit_js(&program)?
-            } else {
-                emit_c(&program)?
-            };
+            let text = emit_js(&program)?;
             Ok(text.into_bytes())
         }
         "native" => {
@@ -358,22 +354,4 @@ fn select_exports<'a>(program: &'a ir::Program, names: &[String]) -> R<Vec<&'a i
 pub fn emit_js(checked: &Checked) -> R<String> {
     typeck::reject_script_calls(&checked.program, &["main".into()])?;
     Ok(js::emit(&checked.program, &checked.info))
-}
-
-/// 型検査済みプログラムから C を作る。
-pub fn emit_c(checked: &Checked) -> R<String> {
-    typeck::reject_script_calls(&checked.program, &["main".into()])?;
-    if let Some(f) = checked
-        .program
-        .fns
-        .iter()
-        .find(|f| f.js.as_ref().is_some_and(|m| !m.is_empty()))
-    {
-        return Err(format!(
-            "extern の関数 {} は JS ターゲット（hibana js）でだけ使える",
-            f.name
-        )
-        .into());
-    }
-    Ok(c::emit(&checked.program))
 }

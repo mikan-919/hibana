@@ -212,9 +212,10 @@ fn echo(s: str) -> str { notify(s); s }
     });
     assert!(requests.is_empty());
     assert!(hibana::pipeline::compile(source, "unknown", &names).is_err());
+    assert!(hibana::pipeline::compile("fn main() {}", "c", &[]).is_err());
     assert!(hibana::pipeline::compile(source, "wasm", &[]).is_err());
     assert!(hibana::pipeline::compile("fn main() {}", "js", &names).is_err());
-    for target in ["js", "c"] {
+    for target in ["js"] {
         assert!(
             !hibana::pipeline::compile("fn main() {}", target, &[])
                 .unwrap()
@@ -324,7 +325,6 @@ fn arguments() -> Vec<str> { args() }
 fn main() {
     print(arguments())
     write_bytes('dist/app.mjs', compile_file('src/app.hb', 'js', []))
-    write_bytes('dist/app.c', compile_file('src/app.hb', 'c', []))
     write_bytes('dist/app.native', compile_file('src/app.hb', 'native', []))
     write_bytes('dist/app.wasm', compile_file('src/wasm.hb', 'wasm', ['answer2']))
     write_text('dist/glue.mjs', js_glue(inspect_file_exports('src/wasm.hb', ['answer2'])))
@@ -343,7 +343,6 @@ fn main() {
     assert_eq!(wasm.stdout, b"42\n");
     assert_eq!(std::fs::read(dir.join("dist/app.wasm")).unwrap(), std::fs::read(dir.join("dist/copy")).unwrap());
     assert!(std::fs::read(dir.join("dist/app.native")).unwrap().starts_with(b"\x7fELF"));
-    assert!(!std::fs::read(dir.join("dist/app.c")).unwrap().is_empty());
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -351,7 +350,7 @@ fn main() {
 fn compiled_targets_reject_script_functions() {
     for call in ["args()", "read_text('x')", "write_bytes('x', [1])", "compile_file('x', 'js', [])", "utf8('x')"] {
         let src = format!("fn helper() {{ {call}; }}\nfn main() {{ helper() }}\n");
-        for result in [hibana::to_js(&src).map(|_| ()), hibana::to_c(&src).map(|_| ()), hibana::to_wasm(&src).map(|_| ()), hibana::to_native(&src).map(|_| ())] {
+        for result in [hibana::to_js(&src).map(|_| ()), hibana::to_wasm(&src).map(|_| ()), hibana::to_native(&src).map(|_| ())] {
             let err = result.unwrap_err().to_string();
             assert!(err.contains("スクリプト実行"), "{call}: {err}");
         }
