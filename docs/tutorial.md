@@ -116,7 +116,7 @@ fn main() {
 
 `mut` の `Vec` も、初期値と `push`・`set_at` の代入から長さを追います。ループと分岐の後は長さが分からなくなるので、添字の前に `if i < len(xs)` で確かめます。
 
-## 4. トレイト・derive・効果
+## 4. トレイト・効果
 
 トレイトは、型ごとに実装を書ける関数の組です。`<A: Describe>` は、`A` に `Describe` の実装があることを要求します。実装が無い型を渡すとエラーです。
 
@@ -135,9 +135,6 @@ impl Describe<int> {
 
 fn twice<A: Describe>(x: A) -> str { describe(x) + ', ' + describe(x) }
 
-derive(Eq, Show)
-struct P { x: int, y: int }
-
 effect Log {
     fn log(msg: str)
 }
@@ -149,17 +146,14 @@ fn work() ! Log {
 
 fn main() {
     put(twice(3))
-    put(P { x: 1, y: 2 } == P { x: 1, y: 2 })
-    put(P { x: 1, y: 2 })
     handle work() {
         log(msg) => { put('log: ' + msg); resume() }
     }
 }
 ```
 
-出力は `int 3, int 3`、`true`、`P { x: 1, y: 2 }`、`log: start`、`log: end` です。
+出力は `int 3, int 3`、`log: start`、`log: end` です。
 
-- `derive(Eq, Show)` は宣言のマクロで、型の `Eq`（`==`）と `Show`（`to_str` と `put`）の実装を作ります。
 - `==` は `Eq` の実装があればそれを使い、無ければ構造の比較をします。
 
 ## 5. テスト
@@ -208,4 +202,4 @@ fn main() {
 ## 8. 次に読むもの
 
 - 言語の規則と既知の制約: `docs/spec.md`
-- [カテゴリ別の例](../tests/programs/README.md)（効果は `tests/programs/effects/effects.hb`、トレイトは `tests/programs/types/trait.hb`、Web サーバーは `tests/programs/web/server.hb`、マクロは `tests/programs/macros/macros.hb`）
+- [カテゴリ別の例](../tests/programs/README.md)（効果は `tests/programs/effects/effects.hb`、トレイトは `tests/programs/types/trait.hb`、マクロは `tests/programs/macros/macros.hb`）

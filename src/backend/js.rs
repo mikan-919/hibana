@@ -41,59 +41,6 @@ function $show(v) {
   if (v.$c.endsWith("{}")) return v.$c.slice(0, -2) + " { " + $fields[v.$c].map((f, i) => f + ": " + $show(v.$f[i])).join(", ") + " }";
   return v.$f.length === 0 ? v.$c : v.$c + "(" + v.$f.map($show).join(", ") + ")";
 }
-// web ライブラリの serve と worker。app は JS の関数（$to で変換済み）で、{ method, path, body } を受け取る
-globalThis.hibana_serve = async (port, app) => {
-  const http = await import("node:http");
-  const server = http.createServer(async (req, res) => {
-    try {
-      let body = "";
-      for await (const c of req) body += c;
-      const u = new URL(req.url, "http://localhost");
-      const headers = Object.entries(req.headers).map(([name, value]) => ({ name, value: String(value) }));
-      const r = await app({ method: req.method, path: u.pathname, query: u.search.slice(1), headers, body });
-      const hs = Object.create(null);
-      hs["content-type"] = r.content_type;
-      for (const { name, value } of r.headers ?? []) {
-        const key = name.toLowerCase();
-        if (key === "content-type" || !Object.hasOwn(hs, key)) hs[key] = value;
-        else hs[key] = [...(Array.isArray(hs[key]) ? hs[key] : [hs[key]]), value];
-      }
-      // writeHead が途中まで設定して失敗しないよう、先に全ヘッダーを検査する
-      for (const [name, values] of Object.entries(hs)) {
-        http.validateHeaderName(name);
-        for (const value of Array.isArray(values) ? values : [values]) http.validateHeaderValue(name, value);
-      }
-      res.writeHead(r.status, hs);
-      res.end(r.body);
-    } catch (e) {
-      console.error("実行時エラー: " + e.message + ($at ? "（" + $at + "）" : ""));
-      if (res.headersSent) { res.destroy(); return; }
-      for (const name of res.getHeaderNames()) res.removeHeader(name);
-      res.writeHead(500, { "content-type": "text/plain" });
-      res.end("Internal Server Error");
-    }
-  });
-  await new Promise((ok) => server.listen(port, ok));
-  console.log("http://localhost:" + server.address().port);
-};
-let $worker;
-globalThis.hibana_worker = (app) => { $worker = app; };
-const $fetch = async (req) => {
-  try {
-    const u = new URL(req.url);
-    const headers = [...req.headers].map(([name, value]) => ({ name, value }));
-    const r = await $worker({ method: req.method, path: u.pathname, query: u.search.slice(1), headers, body: await req.text() });
-    const hs = new Headers({ "content-type": r.content_type });
-    for (const { name, value } of r.headers ?? []) {
-      if (name.toLowerCase() === "content-type") hs.set(name, value);
-      else hs.append(name, value);
-    }
-    return new Response(r.body, { status: r.status, headers: hs });
-  } catch (e) {
-    console.error("実行時エラー: " + e.message + ($at ? "（" + $at + "）" : ""));
-    return new Response("Internal Server Error", { status: 500, headers: { "content-type": "text/plain" } });
-  }
-};
 // 処理中の handle。内側ほど後ろ。腕の中の操作は、その handle より外で処理する
 // 並べ替えずに作り直す（並行に動く処理と共有するため）。await の後は $k で、待つ前の並びに戻す
 let $h = [];
@@ -233,10 +180,6 @@ pub fn emit(prog: &Program, info: &crate::typeck::Info) -> String {
     }
     // import は ES モジュールの先頭に置く
     let mut out = imports + &out;
-    // web を使うプログラムは Cloudflare Workers の ES モジュールとしても使える
-    if g.fns.contains_key("web.worker") {
-        out += "export default { fetch: $fetch };\n";
-    }
     out += "(async () => { try { await f_main(); } catch (e) { console.error(\"実行時エラー: \" + e.message + ($at ? \"（\" + $at + \"）\" : \"\")); if (globalThis.process) process.exitCode = 1; } })();\n";
     out
 }

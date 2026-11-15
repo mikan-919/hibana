@@ -1,3 +1,0 @@
-[scripts]
-build = "hibana build.hb"
-dev = "hibana build.hb && node start.mjs"

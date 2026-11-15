@@ -62,9 +62,9 @@ type Pos = int[x -> x > 0]
 ### 3.3 モジュール
 
 ```
-use web              // 組み込みのライブラリ（lib/ 以下。実行ファイルに埋め込まれている）。web.ok のように修飾して使う
-use web -> *            // すべての名前を修飾なしで使う
-use web -> {ok, Request}  // 挙げた名前だけ修飾なしで使う
+use std              // 組み込みのライブラリ（lib/ 以下。実行ファイルに埋め込まれている）。std.map のように修飾して使う
+use std -> *         // すべての名前を修飾なしで使う
+use std -> {map, Option}  // 挙げた名前だけ修飾なしで使う
 use 'util.hb'        // ファイル（今のディレクトリからの経路）。モジュール名は拡張子を除いた名前（util）
 use './lib' -> *     // ./ か ../ で始まる経路は .hb を省ける。-> * はすべての名前を修飾なしで使う
 use './lib'
@@ -72,11 +72,11 @@ use './lib'
     -> { Response }  // 型の名前を挙げると、その型に属する関数（Response::text など）も修飾なしで使える
 ```
 
-- `use` したモジュールの関数・型・構築子は `モジュール名.名前`（`web.ok('a')`、`web.Request { ... }`、`Option<web.Request>`）で参照します。利用者のファイルの同じ名前とは衝突しません。
+- `use` したモジュールの関数・型・構築子は `モジュール名.名前`（`std.map(xs, f)`、`std.Some(1)`、`std.Option<int>`）で参照します。利用者のファイルの同じ名前とは衝突しません。
 - モジュールの中では、そのモジュール自身の名前を修飾なしで参照できます。
 - 名前は、局所変数、自分のモジュール、`use` で修飾なしに取り込んだ名前の順に探します。
-- `syntax` と `macro` は、`use` したモジュールのものもすべて有効です（パターンのリテラルで呼び出すため）。マクロの展開結果がライブラリの関数や型を使っていても、衛生性によって定義した側のモジュールの名前（`web.not_found` など）を指すので、利用者が修飾なしで取り込んでいなくても動きます。
-- 同じモジュールは1回だけ読みます。別の経路で書いた同じ名前のファイル（`'./lib'` と `'../web/lib'`）も1回です。
+- `syntax` と `macro` は、`use` したモジュールのものもすべて有効です（パターンのリテラルで呼び出すため）。マクロの展開結果がライブラリの関数や型を使っていても、衛生性によって定義した側のモジュールの名前（`std.map` など）を指すので、利用者が修飾なしで取り込んでいなくても動きます。
+- 同じモジュールは1回だけ読みます。別の経路で書いた同じ名前のファイル（`'./lib'` と `'../util/lib'`）も1回です。
 - ファイル名がキーワードと同じ（`syntax.hb`）なら、モジュール名の末尾に `_` を足します（`syntax_`）。
 
 ### 3.4 JavaScript / TypeScript のモジュール
@@ -96,7 +96,7 @@ fn main() {
 }
 ```
 
-- `use` に名前で書く（`use web`）と組み込みのライブラリ、文字列で書くとファイルかパッケージです。ファイルの経路は、`use` を書いた .hb のファイルのディレクトリからの経路です。
+- `use` に名前で書く（`use std`）と組み込みのライブラリ、文字列で書くとファイルかパッケージです。ファイルの経路は、`use` を書いた .hb のファイルのディレクトリからの経路です。
 - モジュール名は、ファイル名から拡張子を除いた名前です（`./js/util.ts` は `util`、`node:path` は `path`、名前に使えない文字は `_`）。hibana のモジュールと同じく、`use './js/util.ts' -> *` で修飾なしにもできます。
 - 型は TypeScript の型宣言から読み、境界でその型に従って値を変換します。型宣言の無い JavaScript は使えません。
 
@@ -180,7 +180,7 @@ fn main() ! Async { put(twice_later(5)) }
 
 ### 3.6 パッケージ
 
-パッケージは git のリポジトリで、入口は `src/lib.hb` です。プロジェクトの直下の `hibana.toml` に依存を書くと、`use 名前` で使えます。名前は組み込みのライブラリ（`std` `web`）、`hibana.toml` の依存の順に探します。
+パッケージは git のリポジトリで、入口は `src/lib.hb` です。プロジェクトの直下の `hibana.toml` に依存を書くと、`use 名前` で使えます。名前は組み込みのライブラリ（`std`）、`hibana.toml` の依存の順に探します。
 
 ```
 [package]
@@ -342,7 +342,7 @@ macro routes ('routes' '{' rs:Route* '}') -> Expr { ...本体... }
 | `A \| B` | 順序付きの選択（先に一致した方を採る） |
 | `( P )` | グループ |
 
-- マクロは、式の位置（`-> Expr`、省略時）か文の位置（`-> Stmt`）で、組み込みの構文より先に試します。宣言の位置（`-> Decl`）のマクロは、`fn` や `type` などで始まらない宣言の位置で試します（8.4 節）。一致しなければ組み込みの構文として読みます。複数のマクロが一致すると「Ambiguous macro match」エラーです。
+- マクロは、式の位置（`-> Expr`、省略時）か文の位置（`-> Stmt`）で、組み込みの構文より先に試します。一致しなければ組み込みの構文として読みます。複数のマクロが一致すると「Ambiguous macro match」エラーです。
 - 左再帰（`syntax E = E '+' Int`）と、`Expr` / `Stmt` で始まるマクロは禁止です。
 - `syntax` 宣言の末尾の `;` は省けます。
 
@@ -380,40 +380,11 @@ macro unless('unless' expr:Expr block:Block) {
 
 - 雛形の本体は `quote { { 本体 } }` と同じに扱い、`x.do()` は `$x` になります。名前の付け替え（8.3 節）も同じです。本体の中の名前は呼び出し側の変数と衝突せず、差し込んだブロックの中の `return` や代入は、呼び出し側の関数と変数に効きます。
 - 本体の `return` は、その後の文を `return` しなかった分岐に移して、式の値にします。`return` を書けるのは、本体の文と、`if`・ブロックの中です。`while`・`for`・無名関数・`let` の右辺の中に書くとエラーです。どこでも `return` しなければ、本体の最後の式が値です。
-- 雛形の本体ではコンパイル時の計算（`quote` や `len(rs)` など）はできません。`-> Decl` のマクロは雛形にできません。
+- 雛形の本体ではコンパイル時の計算（`quote` や `len(rs)` など）はできません。
 
 ### 8.3 衛生性
 
 `quote` に直接書いた識別子は、展開ごとに固有の名前（`tmp#3`）に付け替えます。展開したコードの変数が、呼び出し側の変数と衝突しません。関数名・型名・構築子名・組み込み関数・パターンのリテラル・`.` の後のフィールド名・`Name { x: 式 }` の `x`（構造体のフィールド名）は付け替えません。ただし、同じ `quote` の中で `let`・`for` の変数、`fn` の引数、`match` と `handle` の腕の束縛になる名前は、関数名や組み込みの関数と同じでも付け替えます（`let len = 1` の `len` など）。その名前を同じ `quote` の中で大域の関数として呼ぶと、その呼び出しも付け替えられるので、避けてください。`$x` で差し込んだ呼び出し側のトークンと、`ident(s)` で作った識別子も付け替えないので、呼び出し側から見える名前を導入できます。
-
-### 8.4 宣言のマクロ
-
-`-> Decl` のマクロは、トップレベルの宣言の位置で呼び、展開結果を宣言の並びとして読みます。`syntax` と `macro` の宣言はほかの宣言より先に読むので、宣言のマクロは後で（`use` したライブラリの中で）宣言したものでも使えます。
-
-```
-syntax DeriveType =
-    | 'struct' name:Ident params:DeriveParams? '{' fields:DeriveField* '}'
-    | 'enum' name:Ident params:DeriveParams? '{' ctors:DeriveCtor* '}'
-macro derive ('derive' '(' traits:(Ident % ',') ')' t:DeriveType) -> Decl {
-    ...
-    quote { $t impl Eq<${t.name}> { fn eq(a: ${t.name}, b: ${t.name}) -> bool { ... } } }
-}
-```
-
-- 展開は、すべての宣言の名前を集めた後にします（衛生性で、後で宣言した名前も大域の名前として扱うため）。展開した宣言を含めて、ソースを最初から読み直します。展開結果がまた宣言のマクロを含めば、16回まで繰り返します。
-- 型の宣言を受け取る組み込みの項はありません。型の宣言の形は `syntax` で書きます（std の `DeriveType` など）。
-- `quote` の中の `_`（`match` のどれにも合わない腕）は付け替えません。
-
-std の `derive` は、型の宣言と、その型の `Eq`・`Show` の `impl` を作ります（例は `tests/programs/macros/derive.hb`）。
-
-```
-derive(Eq, Show)
-enum Shape { Circle(r: int), Rect(w: int, h: int), Dot }
-```
-
-- `Eq` は、同じ構築子でフィールドがすべて `==` なら等しいとします。`Show` は組み込みの文字列化と同じ形（`Point { x: 1, y: 2 }`、`Rect(3, 4)`）で、フィールドは `to_str` で文字列にします。どちらも、フィールドの型に実装があればその実装を使います。
-- 型引数を持つ型では `impl<A, B> Eq<Pair<A, B>>` を作ります。型引数に制約は付けないので、型引数の型の値は組み込みの比較と文字列化になります。
-- `struct Name(型)` の構造体と `Ord` の derive はできません。
 
 ## 9. 組み込み関数
 
@@ -459,7 +430,6 @@ enum Shape { Circle(r: int), Rect(w: int, h: int), Dot }
 | `Eq<A>`（`eq`）、`Ord<A>: Eq<A>`（`lt`）、`Show<A>`（`show`） | トレイト（3.7 節）。`int` `str` `bool` の `Eq` と `Show`、`int` の `Ord`、`Vec<A>` の `Eq` と `Show` の実装がある（`put` と `to_str` での `Vec` の表示は組み込みのまま） |
 | `max(a, b)` `min(a, b)` `contains(xs, x)` | `Ord` と `Eq` を使う関数 |
 | `assert(ok)` `assert_eq(got, want)` | テスト（3.8 節）。偽か等しくなければ実行時エラー |
-| `derive(Eq, Show) struct ...`（`enum` も） | 型の `Eq`・`Show` の `impl` を作る宣言のマクロ（8.4 節） |
 | `map(xs, f)` `filter(xs, f)` `fold(xs, init, f)` | `Vec` の高階関数。`f` の効果をそのまま起こす（効果の多相） |
 | `concat(a, b)` `reverse(xs)` `take(xs, n)` `drop(xs, n)` `last(xs)` `range(a, b)` `sum(xs)` | `Vec` の操作。`last` は `Option` を返す。`range` は `a` 以上 `b` 未満の `int` の `Vec` |
 | `some(xs, f)` `every(xs, f)` `find(xs, f)` | 一つでも・すべてが条件を満たすか、最初の要素（`Option`）。`f` の効果をそのまま起こす。`all` は並行実行の組み込みなので `every` と呼ぶ |
@@ -471,64 +441,6 @@ enum Shape { Circle(r: int), Rect(w: int, h: int), Dot }
 
 - `empty()` の型引数は引数から決まらないので、`let e: Map<int> = empty()` のように期待する型を書きます。
 - JSON の数は整数だけを読み、`\uXXXX` のエスケープは読めません。
-
-### web
-
-`use web` で、Web アプリのための型・関数・マクロを使えます（`lib/web.hb`、例は `tests/programs/web/web.hb`）。
-
-| 名前 | 内容 |
-|---|---|
-| `Request` | `{ method: str, path: str, query: str, headers: Vec<Header>, body: str }`。`Header` は `{ name, value }` で、名前は小文字。`request(method, path)` で試しの要求を作る |
-| `header(req, name)` `query(req, name)` | ヘッダーとクエリ（`?a=1&b=2`）の値。無ければ `''` |
-| `Response` | `{ status: int, content_type: str, body: str, headers: Vec<Header> }`。直接構築するときは `headers` も必要 |
-| `ok(body)` `html(body)` `json(body)` `status(code, body)` `not_found()` | 空の `headers` を持つ応答を作る（200 の text/plain・text/html・application/json、任意の番号の text/plain、404） |
-| `with_header(res, name, value)` | 元の応答を変えず、ヘッダーを末尾に追加した応答を返す。同じ名前も残すので、複数の `Set-Cookie` を返せる |
-| `redirect(location)` | 303 See Other、`Location` ヘッダー、空の本文を持つ応答を作る。POST の保存後に GET へ遷移するために使う |
-| `routes { メソッド 'パス' { 本体 } ... }` | `(Request) -> Response` の関数を作る。パスの `{名前}` はその名前の変数になる。どれにも合わなければ `not_found()`。ルートの本体では、要求を `req` として使える。`routes ! Async, Need<Db> { ... }` と書くと、ルートの本体でその効果を起こせる（`(Request) -> Response ! Async, Need<Db>` の関数になる） |
-| `serve(port, app)` | Node.js の HTTP サーバーとして `app: (Request) -> Response ! Async` を動かす（`Async`）。`port` が 0 なら空いている番号を使う。起動すると URL を表示する |
-| `worker(app)` | Cloudflare Workers の `fetch` として `app` を動かす。`use web` したプログラムの JS の出力は `export default { fetch }` を持つ ES モジュールになる |
-| `@f(引数) -> x` | `routes` のルートの前に書く注釈。本体の前で `let x = f(引数)` する |
-| JSX | `<div class={c}>Hello {name}</div>` を HTML の文字列にする。閉じタグが合わなければコンパイルエラー |
-
-```
-use web
-
-fn main() {
-    let app = routes {
-        GET '/' { web.html(<h1>Welcome</h1>) }
-        GET '/user/{id}' { web.ok('user ' + id) }
-    }
-    let res = app(web.request('GET', '/user/42'))
-    put(res.body)    // user 42
-}
-```
-
-サーバーの例は `tests/programs/web/server.hb` です。データの置き場（`Ref` を持つ構造体）を `Need<Db>` の効果で受け取り、`main` の `handle` で本物の置き場を渡しています（テストでは置き場を差し替えられる）。
-
-```
-let api = routes ! Need<Db> {
-    GET '/users/{name}' { if exists(name) { web.ok('found ' + name) } else { web.not_found() } }
-}
-let app = fn(req: web.Request) -> web.Response { handle api(req) { need() => resume(db) } }
-web.serve(8080, app)    // Rust API の hibana::to_js で生成した JS を Node.js で実行
-```
-
-`serve` と `worker` は JS ターゲットでだけ動きます（インタプリタでは、呼ぶと実行時エラー）。
-
-応答の `content_type` は既定の `Content-Type` です。`headers` に `Content-Type` を追加すれば上書きでき、名前の大文字・小文字は区別しません（複数あれば最後の値）。それ以外の同名ヘッダーは追加し、`Set-Cookie` は結合せず別々に送ります。不正なヘッダー名や改行を含む値など、送信先の HTTP API が受け付けない応答は 500 にします。`with_header` 自体は値を検査せず、HTTP へ送るときに検査します。
-
-```
-// 記事を保存した後の応答。Cookie の署名やセッション検証は別途必要
-let res = web.with_header(
-    web.redirect('/posts/42'),
-    'Set-Cookie',
-    'notice=saved; HttpOnly; SameSite=Lax; Path=/'
-)
-```
-
-`redirect` は遷移先を検証しません。外部入力をそのまま渡すと意図しないサイトへ誘導できるため、アプリ側で許可したパスを使います。
-
-`routes` の展開は、ルートの本体から見えない変数（`req` `parts`）を衛生性で隠しています。パスの区切りの位置 `parts[k]` は、条件の `len(parts) == N &&` から範囲を証明しています。
 
 ## 11. 実行方式
 

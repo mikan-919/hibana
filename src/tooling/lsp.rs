@@ -534,7 +534,7 @@ mod completion_tests {
 
     #[test]
     fn completes_modules_fields_and_names() {
-        let src = "use web\nstruct P { x: int, y: int }\nfn main() {\n let p = P { x: 1, y: 2 }\n put(p.x)\n}\n";
+        let src = "use std\nstruct P { x: int, y: int }\nfn main() {\n let p = P { x: 1, y: 2 }\n put(p.x)\n}\n";
         let (err, ts, ix) = analyze("file:///tmp/a.hb", src);
         assert!(err.is_none());
         let ix = ix.unwrap();
@@ -545,11 +545,11 @@ mod completion_tests {
         let typing = src.replace("put(p.x)", "put(p.");
         let at = typing.find("p.").unwrap() + 2;
         assert_eq!(labels(completion(&typing, at, &ix, &ts)), ["x", "y"]);
-        let typing = src.replace("put(p.x)", "web.");
-        let at = typing.find("web.").unwrap() + 4;
-        assert!(labels(completion(&typing, at, &ix, &ts)).contains(&"json".to_string()));
+        let typing = src.replace("put(p.x)", "std.");
+        let at = typing.find("std.").unwrap() + 4;
+        assert!(labels(completion(&typing, at, &ix, &ts)).contains(&"map".to_string()));
         let all = labels(completion(src, src.find("put").unwrap(), &ix, &ts));
-        assert!(all.contains(&"p".to_string()) && all.contains(&"web".to_string()));
+        assert!(all.contains(&"p".to_string()) && all.contains(&"std".to_string()));
         // P は型の宣言（種類 1、宣言の印 1）
         let data = semantic_tokens(src, &ix)["data"].clone();
         assert_eq!(data.as_array().unwrap()[..5], [json!(1), json!(7), json!(1), json!(1), json!(1)]);
@@ -568,16 +568,16 @@ mod completion_tests {
 
     #[test]
     fn selected_imports_are_visible() {
-        let src = "use web -> { ok, Request }\nfn main() { put(ok('x').status) }\n";
+        let src = "use std -> { map, Option }\nfn main() { put(map([1], fn(x) { x })) }\n";
         let (err, types, ix) = analyze("file:///tmp/imports.hb", src);
         assert!(err.is_none(), "{err:?}");
         let ix = ix.unwrap();
         let items = completion(src, src.find("put").unwrap(), &ix, &types);
         let labels: Vec<_> = items.as_array().unwrap().iter().filter_map(|x| x["label"].as_str()).collect();
-        assert!(labels.contains(&"ok") && labels.contains(&"Request"));
-        assert!(!labels.contains(&"html") && !labels.contains(&"web"));
+        assert!(labels.contains(&"map") && labels.contains(&"Option"));
+        assert!(!labels.contains(&"filter") && !labels.contains(&"std"));
         let toks = lex(src).unwrap();
-        let at = src.rfind("ok(").unwrap();
+        let at = src.rfind("map(").unwrap();
         let (name, _, _) = name_at(&toks, &ix, at).unwrap();
         assert_eq!(ix.get(&name).unwrap().kind, Kind::Function);
         assert!(semantic_tokens(src, &ix)["data"].as_array().unwrap().len() >= 10);

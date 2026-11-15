@@ -242,7 +242,6 @@ pub struct Program {
 
 // 組み込みのライブラリ。実行ファイルに埋め込むので、どこからでも use できる
 const LIBS: &[(&str, &str)] = &[
-    ("web", include_str!("../../lib/web.hb")),
     ("std", include_str!("../../lib/std.hb")),
 ];
 
@@ -456,14 +455,10 @@ pub fn with_uses(src: &str) -> R<String> {
 }
 
 pub fn parse(src: &str) -> R<Program> {
-    parse_toks(src, lex(src)?, 0)
+    parse_toks(src, lex(src)?)
 }
 
-// round は宣言のマクロを展開して読み直した回数
-fn parse_toks(src: &str, toks: Vec<Token>, round: usize) -> R<Program> {
-    if round > 16 {
-        return Err("宣言のマクロの展開が終わらない".into());
-    }
+fn parse_toks(src: &str, toks: Vec<Token>) -> R<Program> {
     let mut p = Parser {
         helpers: Rc::default(),
         toks,
@@ -592,7 +587,6 @@ fn parse_toks(src: &str, toks: Vec<Token>, round: usize) -> R<Program> {
     g.validate()?;
     p.g = Rc::new(g);
     // 宣言の位置で照合した宣言のマクロ (始まり, 終わり, マクロの番号, 照合結果)
-    let mut decl_macros = Vec::new();
     // 1周目は宣言の名前を集める
     loop {
         let cur = module_at.last().unwrap().1.clone();
@@ -699,13 +693,7 @@ fn parse_toks(src: &str, toks: Vec<Token>, round: usize) -> R<Program> {
                 test_starts.push(p.pos);
                 p.skip_fn()?;
             }
-            _ => {
-                let start = p.pos;
-                match p.match_decl()? {
-                    Some((k, rec)) => decl_macros.push((start, p.pos, k, rec)),
-                    None => return p.err("fn・type・effect・trait・impl・extern・syntax・macro・use のいずれか（か宣言のマクロ）が必要"),
-                }
-            }
+            _ => return p.err("fn・type・effect・trait・impl・extern・syntax・macro・use のいずれかが必要"),
         }
     }
     p.types = Rc::new(types.clone());
@@ -775,17 +763,6 @@ fn parse_toks(src: &str, toks: Vec<Token>, round: usize) -> R<Program> {
     let mut helpers = prog.clone();
     crate::resolve::resolve(&mut helpers, &p.uses, &p.known);
     p.helpers = Rc::new(helpers);
-    // 宣言のマクロは、名前がそろってから（衛生性のため）展開し、展開した宣言を含めて最初から読み直す
-    if !decl_macros.is_empty() {
-        let mut toks = p.toks.clone();
-        for (s, e, k, rec) in decl_macros.into_iter().rev() {
-            p.pos = e;
-            let site = p.span_of(s);
-            let out = p.expand_decl(k, rec, site)?;
-            toks.splice(s..e, out);
-        }
-        return parse_toks(src, toks, round + 1);
-    }
     while !deferred.is_empty() {
         let before = deferred.len();
         let mut failed = Vec::new();

@@ -27,7 +27,7 @@ nix develop -c cargo run -q -- <ファイル>   # 実行（fmt / test / lsp は�
 | `src/cli/mod.rs` | CLI のコマンド処理と、全体のテスト（`mod tests`） |
 | `src/lib.rs` `src/main.rs` | ライブラリと CLI の入口。既存の `hibana::parser` などの API は再エクスポートで維持 |
 | `src/pipeline.rs` `src/error.rs` | コンパイルの各段階と、共通のエラー表現 |
-| `lib/` | 標準ライブラリ（`std.hb`）と web ライブラリ（`web.hb`）。hibana で書いてある |
+| `lib/` | 標準ライブラリ（`std.hb`）。hibana で書いてある |
 | `examples/` | 利用者が書く正本。動作と書き方の基準。エージェントは書き換えない |
 | `tests/programs/` | カテゴリ別の例（一覧は `tests/programs/README.md`）。テストの入力になる |
 | `editors/` | VS Code・Zed の拡張機能と tree-sitter の文法 |

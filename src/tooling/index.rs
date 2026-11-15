@@ -210,20 +210,17 @@ mod tests {
 
     #[test]
     fn symbols() {
-        let src = "use std -> *\nuse web\n// 2 倍にする\nfn double(x: int) -> int { x * 2 }\nstruct P { x: int, y: int }\nfn main() { put(double(1)) }\n";
+        let src = "use std -> *\n// 2 倍にする\nfn double(x: int) -> int { x * 2 }\nstruct P { x: int, y: int }\nfn main() { put(double(1)) }\n";
         let combined = crate::parser::with_uses(src).unwrap();
         let prog = crate::parser::parse(&combined).unwrap();
         let ix = build(src, &combined, &prog);
         let d = ix.get("double").unwrap();
         assert_eq!(d.detail, "fn double(x: int) -> int");
         assert_eq!(d.doc, "2 倍にする");
-        // use std -> * の関数は修飾なし、use web の関数は修飾付き
+        // use std -> * の関数は修飾なしで引ける
         assert_eq!(ix.get("map").unwrap().kind, Kind::Function);
-        assert!(ix.get("web.json").is_some());
         assert_eq!(ix.get("Some").unwrap().kind, Kind::Ctor);
-        assert_eq!(ix.get("routes").unwrap().kind, Kind::Macro);
         assert_eq!(ix.fields["P"], ["x", "y"]);
-        assert!(ix.modules.contains("web"));
         // トレイトのメソッドは関数、impl から作った関数は出さない
         assert_eq!(ix.get("show").unwrap().detail, "fn show(x: A) -> str");
         assert!(ix.syms.iter().all(|s| !s.name.contains('#')));
@@ -231,15 +228,15 @@ mod tests {
 
     #[test]
     fn selected_imports() {
-        let src = "use web\nuse web\n    -> { ok }\n    -> { Request }\nfn main() {}\n";
+        let src = "use std\nuse std\n    -> { map }\n    -> { Option }\nfn main() {}\n";
         let combined = crate::parser::with_uses(src).unwrap();
         let prog = crate::parser::parse(&combined).unwrap();
         let ix = build(src, &combined, &prog);
-        assert!(ix.get("ok").is_some());
-        assert!(ix.get("Request").is_some());
-        assert!(ix.get("html").is_none());
-        assert!(ix.get("web.ok").is_some());
-        assert!(ix.modules.contains("web"));
+        assert!(ix.get("map").is_some());
+        assert!(ix.get("Option").is_some());
+        assert!(ix.get("filter").is_none());
+        assert!(ix.get("std.map").is_some());
+        assert!(ix.modules.contains("std"));
 
         let src = "use sample -> { B }\nfn main() {}\n";
         let combined = format!("{src}\nmodule sample\nstruct B {{ x: int }}\nfn B::f(x: int) -> int {{ x }}\n");

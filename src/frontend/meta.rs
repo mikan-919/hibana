@@ -140,8 +140,6 @@ struct Macro {
     fields: Vec<(String, bool)>,
     // -> Stmt なら文の位置、-> Expr なら式の位置で試す
     stmt: bool,
-    // -> Decl なら宣言の位置で試す。展開結果は宣言の並びとして読み直す
-    decl: bool,
     // 本体のトークン列（コンパイル時に実行するコード）。空なら照合結果を Expr::Macro として残す
     body: Option<Vec<Token>>,
     // 本体で x.do() を使うマクロ。本体は呼び出し位置で実行するコードの雛形（template_body で quote に直してある）
@@ -966,15 +964,14 @@ impl Parser<'_> {
         self.expect("(")?;
         let pat = self.pattern()?;
         self.expect(")")?;
-        let (stmt, decl) = if self.eat("->") {
+        let stmt = if self.eat("->") {
             match self.ident()?.as_str() {
-                "Expr" => (false, false),
-                "Stmt" => (true, false),
-                "Decl" => (false, true),
-                _ => return self.err_at("マクロの戻り値は Expr か Stmt か Decl".into()),
+                "Expr" => false,
+                "Stmt" => true,
+                _ => return self.err_at("マクロの戻り値は Expr か Stmt".into()),
             }
         } else {
-            (false, false)
+            false
         };
         self.expect("{")?;
         let start = self.pos;
@@ -990,9 +987,6 @@ impl Parser<'_> {
         let fields = fields(&pat).ctx(|e| format!("マクロ {name}: {e}"))?;
         let raw = &self.toks[start..self.pos - 1];
         let template = template_body(raw, &fields);
-        if template.is_some() && decl {
-            return self.err_at(format!("マクロ {name}: -> Decl のマクロでは .do() を使えない"));
-        }
         let body = if raw.is_empty() {
             None
         } else {
@@ -1003,7 +997,6 @@ impl Parser<'_> {
             pat,
             fields,
             stmt,
-            decl,
             body,
             template: template.is_some(),
             first: (vec![], true),
@@ -1096,7 +1089,7 @@ impl Parser<'_> {
     pub fn try_macros(&mut self, stmt: bool) -> R<Option<Expr>> {
         let g = self.g.clone();
         let start = self.pos;
-        let Some((k, rec)) = self.find_macro(|m| m.stmt == stmt && !m.decl)? else {
+        let Some((k, rec)) = self.find_macro(|m| m.stmt == stmt)? else {
             return Ok(None);
         };
         let m = &g.macros[k];
@@ -1107,21 +1100,6 @@ impl Parser<'_> {
                 self.expand(m, rec, site).map(Some)
             }
         }
-    }
-
-    // 宣言の位置で、宣言のマクロを照合する。(マクロの番号, 照合結果)。展開は名前がそろってから expand_decl でする
-    pub fn match_decl(&mut self) -> R<Option<(usize, Node)>> {
-        self.find_macro(|m| m.decl)
-    }
-
-    // 宣言のマクロを展開したトークン列。self.pos は呼び出しの直後
-    pub fn expand_decl(&self, k: usize, rec: Node, site: Span) -> R<Vec<Token>> {
-        let g = self.g.clone();
-        let m = &g.macros[k];
-        if m.body.is_none() {
-            return Err(format!("マクロ {} の展開コードが無い", m.name).into());
-        }
-        self.expand_toks(m, rec, site)
     }
 
     // pred に合うマクロを照合する。一つだけ合えば、その番号と照合結果を返し、self.pos を直後に進める
