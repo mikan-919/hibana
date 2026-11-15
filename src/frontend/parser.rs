@@ -1580,11 +1580,30 @@ impl Parser<'_> {
             let mut ctors = Vec::new();
             while !self.eat("}") {
                 let c = self.ident()?;
-                let fields = if self.eat("(") {
-                    self.params()?
-                } else {
-                    vec![]
-                };
+                // 名前の無いフィールド（Circle(Point, int)）は 0, 1, ... と名付ける
+                let mut fields = Vec::new();
+                if self.eat("(") {
+                    while !self.eat(")") {
+                        let named = matches!(self.peek(), Tok::Ident(_))
+                            && self.toks.get(self.pos + 1).is_some_and(|t| t.tok == Tok::Punct(":"));
+                        let n = if named {
+                            let n = self.ident()?;
+                            self.expect(":")?;
+                            n
+                        } else {
+                            fields.len().to_string()
+                        };
+                        let ty = self.ty()?;
+                        if matches!(ty.peel(), Expr::Var(name) if name == "Type") {
+                            return self.err("型の値を構築子の引数にできない");
+                        }
+                        fields.push((n, ty));
+                        if !self.eat(",") {
+                            self.expect(")")?;
+                            break;
+                        }
+                    }
+                }
                 if self.eat("->") {
                     return self.err("構築子の戻り値の型は指定できない");
                 }

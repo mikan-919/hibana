@@ -4,11 +4,21 @@ use crate::parser::{Block, Expr, Program, Stmt, Use, qual};
 use std::collections::{HashMap, HashSet};
 
 pub fn resolve(prog: &mut Program, uses: &HashMap<String, Vec<Use>>, known: &HashSet<String>) {
+    // 型の名前::構築子（Shape::Circle は字句解析で Shape__Circle になっている）から構築子の名前
+    // ponytail: 型の名前は修飾を外して引く。別のモジュールに同じ名前の型と構築子があれば後の方になる
+    let last = |n: &str| n.rsplit('.').next().unwrap_or(n).to_string();
+    let ctors: HashMap<String, String> = prog
+        .datas
+        .iter()
+        .flat_map(|d| d.ctors.iter().map(move |c| (format!("{}__{}", last(&d.name), last(&c.name)), last(&c.name))))
+        .collect();
+    let ctors = &ctors;
     for f in &mut prog.fns {
         let mut r = Resolver {
             module: f.module.clone(),
             uses,
             known,
+            ctors,
             locals: vec![Vec::new()],
         };
         for (n, t) in &mut f.params {
@@ -28,6 +38,7 @@ pub fn resolve(prog: &mut Program, uses: &HashMap<String, Vec<Use>>, known: &Has
             module: d.module.clone(),
             uses,
             known,
+            ctors,
             locals: vec![Vec::new()],
         };
         for (n, t) in &mut d.params {
@@ -56,6 +67,7 @@ pub(crate) fn resolve_macro(
         module: module.into(),
         uses,
         known,
+        ctors: &HashMap::new(),
         locals: vec![params],
     };
     r.block(block);
@@ -65,12 +77,18 @@ struct Resolver<'a> {
     module: String,
     uses: &'a HashMap<String, Vec<Use>>,
     known: &'a HashSet<String>,
+    ctors: &'a HashMap<String, String>,
     locals: Vec<Vec<String>>,
 }
 
 impl Resolver<'_> {
     // 自分のモジュール、use で取り込んだ名前の順に探す。利用者のファイル（module が ""）では、自分の名前は修飾しない形のまま
     fn name(&self, n: &mut String) {
+        if let Some(c) = self.ctors.get(n.as_str())
+            && !self.locals.iter().any(|s| s.contains(n))
+        {
+            *n = c.clone();
+        }
         if n.contains('.') || self.locals.iter().any(|s| s.contains(n)) {
             return;
         }

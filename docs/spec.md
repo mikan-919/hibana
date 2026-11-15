@@ -48,6 +48,7 @@ struct UserId(int)
 // 直和型。構築子は , か改行で区切る
 enum Nat { Zero, Succ(n: Nat) }
 enum Option<T> { None, Some(x: T) }
+enum Shape { Circle(Point, int), Empty }   // フィールドの名前は省ける（0, 1, ... になる）
 
 // 別名。型引数（`<A>`）を取れる。実行時には消える
 type Pos = int[x -> x > 0]
@@ -55,6 +56,7 @@ type Pos = int[x -> x > 0]
 
 - 型の引数は `<>` で宣言し、`<>` で渡します（`Option<int>`）。値の引数は `()` で渡します（`Some(3)`）。型の名前に `()` で引数を渡すとエラーです（`struct Name(型)` の構造体の値を作る時を除く）。
 - 構築子の型引数は推論します。`let o: Option<int> = None` のように期待する型から、`Some(3)` のように引数の型から求めます。
+- 構築子は `Shape::Circle(p, 2)` のように型の名前を付けても書けます。`match` の腕でも同じです（`Shape::Circle(c, r) -> ...`）。
 - 構造体の値のフィールドの順序は自由です。構造体は、構築子を1つ持つ型として扱います。`struct Name(型, ...)` のフィールドの名前は `0`、`1`、... で、`Name(1, 2)` と表示します。
 - `type Name = { ... }` と `type Name = A | B` はエラーで、`struct` と `enum` を使うよう伝えます。
 - 名前の決まり: 組み込みのプリミティブ型は小文字（`int bool str syn unit`）、それ以外の型は大文字で始めます。
