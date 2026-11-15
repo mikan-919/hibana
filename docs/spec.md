@@ -669,13 +669,13 @@ npm ツールは各記録の `npm_lock` に npm の package-lock JSON（lockfile
 | `hibana test [ファイル...]` | `test` をインタプリタで実行し、成功した数を表示する。失敗があれば終了コード 1。ファイルを省くと、`hibana.toml` のあるディレクトリの `src` と `tests` の `.hb` すべて | テスト（3.8 節） |
 | `hibana lsp` | Language Server を標準入出力で動かす | エディタ（エラーの表示・整形・hover・定義へのジャンプ・補完・色付け）。VS Code と Zed の拡張機能は `editors/`（`editors/README.md`） |
 
-WASM 出力は関数を名前で公開します。整数は符号付き 64 ビットで、JavaScript からは `BigInt` で渡します。整数の `print` がある場合、取り込み `hibana.print` に `i64` 引数の関数を渡します。整数の範囲外や 0 による除算では WASM の実行を停止します。文字列・分岐・外部関数など、IR が扱えない構文はコンパイル時にエラーになります。
+WASM 出力は関数を名前で公開します。整数は符号付き 64 ビットで、JavaScript からは `BigInt` で渡します。`print` がある場合、整数は取り込み `hibana.print`（`i64` 引数）、文字列と真偽値は取り込み `hibana.print_str`（文字列の値を 1 つ受け取る）を呼びます。整数の範囲外や 0 による除算では WASM の実行を停止します。IR が扱えない構文はコンパイル時にエラーになります。
 
 ライブラリは `hibana::to_wasm_library(source, &exports)` に公開する関数名を渡して生成します。`main` は必要ありません。型検査はライブラリ全体に行い、WASM には公開関数と、そこから呼ぶ関数だけを含めます。未使用の関数や型が IR に未対応でも、型検査を通れば含めません。
 
 JavaScript の接続コードは `hibana::to_js_glue(source, &exports)`、WASM と接続コードの同時生成は `hibana::to_web(source, &exports)` で行えます。`instantiate` の引数には WASM のバイト列と必要な外部関数を渡します。公開関数には安全に表せる JavaScript の整数か `BigInt` を渡し、整数の結果は `BigInt` で受け取ります。文字列やホスト関数を使う Web 向けライブラリの例は [WebAssembly](wasm.md) を参照してください。
 
-JavaScript、C、IR、実行用 WASM は、それぞれ `hibana::to_js`、`hibana::to_c`、`hibana::to_ir`、`hibana::to_wasm` で生成します。API は文字列やバイト列を返し、ファイルへの保存や C コンパイラーの起動は呼び出し側で行います。
+JavaScript、C、IR、実行用 WASM、ネイティブの実行ファイルは、それぞれ `hibana::to_js`、`hibana::to_c`、`hibana::to_ir`、`hibana::to_wasm`、`hibana::to_native` で生成します。API は文字列やバイト列を返し、ファイルへの保存や C コンパイラーの起動は呼び出し側で行います。`to_wasm` と `to_native` は `main` から辿れる関数だけを含めます。
 
 Rust のライブラリからは、`hibana::pipeline` の各関数を組み合わせられます。`load` は `use` のファイルを読み、`parse` は構文木を作り、`check` は型検査します。`lower` は IR を作り、`link` は IR から公開関数とその呼び出し先を選びます。`emit_wasm` と `emit_js_glue` はそれぞれバイト列と文字列を返すため、書き込みや外部ツールの起動は呼び出し側で決められます。
 
@@ -697,7 +697,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-現在の IR は整数の演算と呼び出しに限ります。全関数が IR に対応していない場合は、`lower(&checked, Some(&exports))` に公開関数を渡すと、使う関数だけを変換できます。任意の外部関数、文字列や配列の受け渡し、WASM モジュール同士のリンクには未対応です。
+IR は WASM とネイティブの共通の中間表現です。制御フローは WASM と同じ入れ子の形（`if`・`while`・`return`）で持ちます。現在は整数・真偽値・文字列のリテラル・`if`・`while`・範囲の `for`・関数呼び出し・`print` に対応し、ヒープを使う値（文字列の演算、`Vec`、構造体、`type` の値、クロージャ）と効果には未対応です。全関数が IR に対応していない場合は、`lower(&checked, Some(&exports))` に公開関数を渡すと、使う関数だけを変換できます。WASM の境界（公開関数と外部関数）は `int`・`str`・`unit` だけを渡せます。任意の外部関数、配列の受け渡し、WASM モジュール同士のリンクには未対応です。
+
+ネイティブの出力（`hibana::to_native`）は、IR を Cranelift（Rust で書かれたコード生成器）で機械語にし、libc を使わない静的な ELF の実行ファイルを返します。リンカーは使わず、出力・終了は Linux の syscall を直接呼びます。現在は x86-64 の Linux だけに対応し、外部関数は使えません。範囲外と 0 による除算では、標準エラーにメッセージを書いて終了コード 1 で終わります。
 
 `hibana::to_wasm` は `main` を持つ実行用 WASM を返します。CLI から直接実行する場合は `hibana run input.hb` を使います。
 

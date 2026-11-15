@@ -21,8 +21,8 @@ fn builds_and_links_as_independent_steps() {
             .collect::<Vec<_>>(),
         ["add", "twice", "log"]
     );
-    assert_eq!(linked.functions()[1].params(), 1);
-    assert!(!linked.functions()[1].instructions().is_empty());
+    assert_eq!(linked.functions()[1].param_types().len(), 1);
+    assert!(!linked.functions()[1].body().is_empty());
     assert!(pipeline::link(&all, &["missing".into()]).is_err());
     assert!(pipeline::emit_wasm(&linked, Some(&["unused".into()])).is_err());
     assert!(pipeline::emit_js_glue(&linked, &["twice".into(), "twice".into()]).is_err());

@@ -501,6 +501,79 @@ mod tests {
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 
+    // IR を通す 2 つの出力（WASM と Cranelift のネイティブ）の結果が、インタプリタと同じか。
+    // IR が未対応のプログラムは飛ばし、対応した数を表示する
+    #[test]
+    fn ir_backends_match_interpreter() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = std::env::temp_dir().join(format!("hibana-ir-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let (mut total, mut native, mut wasm) = (0, Vec::new(), Vec::new());
+        for p in program_files() {
+            let src = std::fs::read_to_string(&p).unwrap();
+            if src.contains(".ts'") || src.contains(".js'") || src.contains("\nextern") || src.contains("web.serve(") {
+                continue;
+            }
+            crate::parser::set_base_dir(p.parent().unwrap());
+            let Ok(want) = out(&src) else { continue };
+            total += 1;
+            let name = p.file_stem().unwrap().to_str().unwrap().to_string();
+            match crate::to_native(&src) {
+                Ok(bytes) => {
+                    let exe = tmp.join(&name);
+                    std::fs::write(&exe, bytes).unwrap();
+                    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+                    let r = std::process::Command::new(&exe).output().unwrap();
+                    assert_eq!(String::from_utf8(r.stdout).unwrap(), want, "ネイティブ: {}", p.display());
+                    native.push(name.clone());
+                }
+                Err(e) => assert!(e.msg.contains("未対応"), "ネイティブ: {}: {}", p.display(), e.msg),
+            }
+            match crate::to_wasm(&src) {
+                Ok(bytes) => {
+                    let got = crate::wasm::run(&bytes, Vec::new()).unwrap_or_else(|e| panic!("WASM: {}: {e}", p.display()));
+                    assert_eq!(String::from_utf8(got).unwrap(), want, "WASM: {}", p.display());
+                    wasm.push(name);
+                }
+                Err(e) => assert!(e.msg.contains("未対応"), "WASM: {}: {}", p.display(), e.msg),
+            }
+        }
+        std::fs::remove_dir_all(&tmp).unwrap();
+        eprintln!("ネイティブ {}/{total}: {native:?}\nWASM {}/{total}: {wasm:?}", native.len(), wasm.len());
+        assert_eq!(native, wasm, "2 つの出力が対応するプログラムは同じ");
+        assert!(native.iter().any(|n| n == "fib"), "{native:?}");
+    }
+
+    // 範囲外と 0 による除算は、ネイティブでもメッセージを出して終了コード 1 で終わる
+    #[test]
+    fn native_reports_integer_errors() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = std::env::temp_dir().join(format!("hibana-native-err-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let cases = [
+            ("fn f(a: int, b: int) -> int { a + b }\nfn main() { print(1)\n print(f(9223372036854775807, 1)) }", "オーバーフロー"),
+            ("fn f(a: int, b: int) -> int { a * b }\nfn main() { print(1)\n print(f(-1, -9223372036854775807 - 1)) }", "オーバーフロー"),
+            ("fn f(a: int, b: int) -> int { a / b }\nfn main() { print(1)\n print(f(1, 0)) }", "0 で除算した"),
+            ("fn f(a: int, b: int) -> int { a % b }\nfn main() { print(1)\n print(f(-9223372036854775807 - 1, -1)) }", "オーバーフロー"),
+        ];
+        for (i, (src, msg)) in cases.iter().enumerate() {
+            let exe = tmp.join(format!("e{i}"));
+            std::fs::write(&exe, crate::to_native(src).unwrap()).unwrap();
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let r = std::process::Command::new(&exe).output().unwrap();
+            assert_eq!(r.status.code(), Some(1), "{src}");
+            assert_eq!(String::from_utf8(r.stdout).unwrap(), "1\n", "{src}");
+            assert!(String::from_utf8(r.stderr).unwrap().contains(msg), "{src}");
+        }
+        let src = "fn main() { print(-9223372036854775807 - 1)\n print(0)\n print(-42)\n print(true)\n print('日本語') }";
+        let exe = tmp.join("print");
+        std::fs::write(&exe, crate::to_native(src).unwrap()).unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let r = std::process::Command::new(&exe).output().unwrap();
+        assert_eq!(String::from_utf8(r.stdout).unwrap(), out(src).unwrap());
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
     // ネイティブの実行ファイルは、使われなくなった値を回収する。合わせて約 100MB の文字列を作るプログラムが、
     // 仮想メモリ 50MB の上限の中で最後まで動く
     #[test]

@@ -159,11 +159,7 @@ pub fn link(program: &ir::Program, exports: &[String]) -> R<ir::Program> {
         let function = functions
             .get(name)
             .ok_or_else(|| format!("IR に呼び出し先 {name} が無い"))?;
-        for inst in &function.instructions {
-            if let ir::Instruction::Call(name, _) = inst {
-                pending.push(name);
-            }
-        }
+        pending.extend(function.calls());
     }
     Ok(ir::Program {
         imports: program
@@ -279,6 +275,7 @@ fn boundary_signature<'a>(
             ir::ValueType::Int => "int",
             ir::ValueType::Str => "str",
             ir::ValueType::Unit => "unit",
+            ir::ValueType::Bool => "bool",
         }
     }
     (name, params.iter().map(ty).collect(), ty(result))

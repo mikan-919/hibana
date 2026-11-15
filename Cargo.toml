@@ -11,6 +11,9 @@ thiserror = "2.0.21"
 z3 = "0.21.1"
 toml = { version = "1.1.6", features = ["preserve_order"] }
 wasm-encoder = "0.227.1"
+cranelift-codegen = "0.137.1"
+cranelift-frontend = "0.137.1"
+cranelift-native = "0.137.1"
 wasmtime = { version = "50.0.1", default-features = false, features = ["cranelift", "runtime", "std"] }
 
 [[example]]
