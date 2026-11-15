@@ -1,9 +1,9 @@
 // モジュール。use をたどってファイルを読み、名前をモジュールで修飾して一つのプログラムにする
-// ponytail: use は "パス".* と std.* と "パス.ts" だけ。名前の表は線形探索。循環した use は検査しない
+// ponytail: use は "パス" -> * と std -> * と "パス.ts" だけ。名前の表は線形探索。循環した use は検査しない
 use './io.ts'
-use './lexer.hb'.*
-use './parser.hb'.*
-use std.*
+use './lexer.hb' -> *
+use './parser.hb' -> *
+use std -> *
 
 // 修飾しない名前と修飾した名前
 struct Name { short: str, full: str }

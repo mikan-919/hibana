@@ -1,5 +1,5 @@
 // derive: 型の宣言から Eq と Show の実装を作る宣言のマクロ（std の derive）
-use std.*
+use std -> *
 
 derive(Eq, Show)
 struct Point { x: int, y: int }

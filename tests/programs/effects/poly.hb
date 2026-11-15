@@ -1,5 +1,5 @@
 // 効果の多相。std の map・filter・fold は、渡した関数の効果をそのまま起こす
-use std.*
+use std -> *
 
 effect Log {
     fn log(msg: str)

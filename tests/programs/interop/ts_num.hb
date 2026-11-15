@@ -1,6 +1,6 @@
 // TypeScript の number は境界で int（BigInt）と変換される
 use './js/num.ts'
-use std.*
+use std -> *
 
 fn main() {
     print(num.add(2, 3) * 10)

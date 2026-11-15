@@ -1,6 +1,6 @@
 // LSP の補完・色付け・hover に使う名前の表。構文解析の結果と、ライブラリを足したソースから作る
 use crate::lexer::{Tok, Token, lex};
-use crate::parser::Program;
+use crate::parser::{Program, UseNames};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -34,7 +34,7 @@ pub struct Index {
 
 impl Index {
     pub fn get(&self, name: &str) -> Option<&Sym> {
-        self.syms.iter().find(|s| s.name == name)
+        self.syms.iter().find(|s| s.name == name.replace("__", "::"))
     }
 }
 
@@ -74,11 +74,11 @@ fn doc_above(src: &str, offset: usize) -> String {
     lines.join("\n")
 }
 
-// 利用者のファイルの use から、修飾なしで使えるモジュール（use std.*）と、修飾して使うモジュールを求める
-fn uses(src: &str) -> (HashSet<String>, HashSet<String>) {
-    let (mut glob, mut qualified) = (HashSet::new(), HashSet::new());
+// 利用者のファイルの use から、修飾なしで使えるモジュール（use std -> *）と、修飾して使うモジュールを求める
+fn uses(src: &str) -> (HashMap<String, Vec<UseNames>>, HashSet<String>) {
+    let (mut imports, mut qualified) = (HashMap::<String, Vec<UseNames>>::new(), HashSet::new());
     let Ok(toks) = lex(src) else {
-        return (glob, qualified);
+        return (imports, qualified);
     };
     for (k, w) in toks.windows(2).enumerate() {
         if w[0].tok != Tok::Punct("use") {
@@ -89,24 +89,40 @@ fn uses(src: &str) -> (HashSet<String>, HashSet<String>) {
             Tok::Str(s) => crate::parser::module_name(s),
             _ => continue,
         };
-        let star = toks.get(k + 2).is_some_and(|t| t.tok == Tok::Punct("."))
-            && toks.get(k + 3).is_some_and(|t| t.tok == Tok::Punct("*"));
-        if star {
-            glob.insert(m);
-        } else {
-            qualified.insert(m);
+        let mut i = k + 2;
+        if toks.get(i).is_none_or(|t| t.tok != Tok::Punct("->")) {
+            qualified.insert(m.clone());
+            continue;
         }
+        let mut names = Vec::new();
+        let mut all = false;
+        while toks.get(i).is_some_and(|t| t.tok == Tok::Punct("->")) {
+            i += 1;
+            if toks.get(i).is_some_and(|t| t.tok == Tok::Punct("*")) {
+                all = true;
+                i += 1;
+            } else if toks.get(i).is_some_and(|t| t.tok == Tok::Punct("{")) {
+                i += 1;
+                while let Some(t) = toks.get(i) {
+                    if t.tok == Tok::Punct("}") { i += 1; break; }
+                    if t.tok == Tok::Eof { break; }
+                    if let Tok::Ident(n) = &t.tok { names.push(n.clone()); }
+                    i += 1;
+                }
+            } else { break; }
+        }
+        imports.entry(m).or_default().push(if all { UseNames::All } else { UseNames::List(names) });
     }
-    (glob, qualified)
+    (imports, qualified)
 }
 
 pub fn build(src: &str, combined: &str, prog: &Program) -> Index {
-    let (glob, qualified) = uses(src);
+    let (imports, qualified) = uses(src);
     // 利用者のファイルで書く名前
     let written = |q: &str| -> String {
         match q.split_once('.') {
-            Some((m, n)) if glob.contains(m) => n.to_string(),
-            _ => q.to_string(),
+            Some((m, n)) if imports.get(m).is_some_and(|us| us.iter().any(|u| u.takes(n))) => n.replace("__", "::"),
+            _ => q.replace("__", "::"),
         }
     };
     // 宣言の形とコメントを、(修飾した名前) ごとにソースから集める
@@ -173,6 +189,19 @@ pub fn build(src: &str, combined: &str, prog: &Program) -> Index {
             syms.push(Sym { name, kind: Kind::Macro, detail: detail.clone(), doc: doc.clone() });
         }
     }
+    // 同じモジュールを修飾付きと名前指定の両方で使う場合は両方の名前を載せる
+    let aliases: Vec<_> = syms.iter().flat_map(|s| {
+        qualified.iter().filter_map(|m| {
+            let q = format!("{m}.{}", s.name.replace("::", "__"));
+            if !s.name.contains('.') && imports.get(m).is_some_and(|us| us.iter().any(|u| u.takes(&s.name.replace("::", "__"))))
+                && (prog.fns.iter().any(|f| f.name == q) || prog.datas.iter().any(|d| d.name == q || d.ctors.iter().any(|c| c.name == q))) {
+                let mut alias = s.clone();
+                alias.name = q.replace("__", "::");
+                Some(alias)
+            } else { None }
+        }).collect::<Vec<_>>()
+    }).collect();
+    syms.extend(aliases);
     Index { syms, modules: qualified, fields }
 }
 
@@ -182,14 +211,14 @@ mod tests {
 
     #[test]
     fn symbols() {
-        let src = "use std.*\nuse web\n// 2 倍にする\nfn double(x: int) -> int { x * 2 }\nstruct P { x: int, y: int }\nfn main() { print(double(1)) }\n";
+        let src = "use std -> *\nuse web\n// 2 倍にする\nfn double(x: int) -> int { x * 2 }\nstruct P { x: int, y: int }\nfn main() { print(double(1)) }\n";
         let combined = crate::parser::with_uses(src).unwrap();
         let prog = crate::parser::parse(&combined).unwrap();
         let ix = build(src, &combined, &prog);
         let d = ix.get("double").unwrap();
         assert_eq!(d.detail, "fn double(x: int) -> int");
         assert_eq!(d.doc, "2 倍にする");
-        // use std.* の関数は修飾なし、use web の関数は修飾付き
+        // use std -> * の関数は修飾なし、use web の関数は修飾付き
         assert_eq!(ix.get("map").unwrap().kind, Kind::Function);
         assert!(ix.get("web.json").is_some());
         assert_eq!(ix.get("Some").unwrap().kind, Kind::Ctor);
@@ -199,5 +228,26 @@ mod tests {
         // トレイトのメソッドは関数、impl から作った関数は出さない
         assert_eq!(ix.get("show").unwrap().detail, "fn show(x: A) -> str");
         assert!(ix.syms.iter().all(|s| !s.name.contains('#')));
+    }
+
+    #[test]
+    fn selected_imports() {
+        let src = "use web\nuse web\n    -> { ok }\n    -> { Request }\nfn main() {}\n";
+        let combined = crate::parser::with_uses(src).unwrap();
+        let prog = crate::parser::parse(&combined).unwrap();
+        let ix = build(src, &combined, &prog);
+        assert!(ix.get("ok").is_some());
+        assert!(ix.get("Request").is_some());
+        assert!(ix.get("html").is_none());
+        assert!(ix.get("web.ok").is_some());
+        assert!(ix.modules.contains("web"));
+
+        let src = "use sample -> { B }\nfn main() {}\n";
+        let combined = format!("{src}\nmodule sample\nstruct B {{ x: int }}\nfn B::f(x: int) -> int {{ x }}\n");
+        let prog = crate::parser::parse(&combined).unwrap();
+        let ix = build(src, &combined, &prog);
+        assert!(ix.get("B::f").is_some());
+        assert!(ix.get("B__f").is_some());
+        assert!(!ix.modules.contains("sample"));
     }
 }

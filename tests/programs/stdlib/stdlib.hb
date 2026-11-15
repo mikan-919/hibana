@@ -1,5 +1,5 @@
 // std の文字列と Vec の関数
-use std.*
+use std -> *
 
 test 'vec' {
     assert_eq(concat([1, 2], [3]), [1, 2, 3])

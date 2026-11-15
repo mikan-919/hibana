@@ -1,5 +1,5 @@
 // 標準ライブラリ（lib/std.hb）の例
-use std.*
+use std -> *
 fn main() {
     let e: Map<int> = empty()
     let m = set(set(set(e, 'a', 1), 'b', 2), 'a', 3)

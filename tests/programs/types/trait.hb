@@ -1,5 +1,5 @@
 // トレイト: 型ごとに実装を書ける関数の組
-use std.*
+use std -> *
 
 struct Point { x: int, y: int }
 

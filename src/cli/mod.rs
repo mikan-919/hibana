@@ -827,15 +827,20 @@ mod tests {
         assert_eq!(out(&format!("use web\n{ok}")).unwrap(), "2\na\n");
         let e = out("use web\nfn main() { print(ok('a').body) }").unwrap_err();
         assert!(e.contains("未定義の関数 ok"), "{e}");
-        // use web.* はすべて、use web.{..} は挙げた名前だけ修飾なしで使える
+        // use web -> * はすべて、use web -> {..} は挙げた名前だけ修飾なしで使える
         let all = "fn main() { let r = request('GET', '/')\n print(ok(r.path).status) }";
-        assert_eq!(out(&format!("use web.*\n{all}")).unwrap(), "200\n");
+        assert_eq!(out(&format!("use web -> *\n{all}")).unwrap(), "200\n");
         assert_eq!(
-            out(&format!("use web.{{ok, request}}\n{all}")).unwrap(),
+            out(&format!("use web -> {{ok, request}}\n{all}")).unwrap(),
             "200\n"
         );
-        let e = out("use web.{ok}\nfn main() { print(html('a').body) }").unwrap_err();
+        let e = out("use web -> {ok}\nfn main() { print(html('a').body) }").unwrap_err();
         assert!(e.contains("未定義の関数 html"), "{e}");
+        for suffix in ["*", "{ok}", " {ok}"] {
+            let src = format!("use web{}{}\nfn main() {{}}", '.', suffix);
+            let e = out(&src).unwrap_err();
+            assert!(e.contains("use 名前 -> *"), "{e}");
+        }
     }
 
     #[test]
@@ -963,11 +968,11 @@ fn main() {
             "int 1\nint 2!\n(1, 2)\nPOINT\n[int 1;int 2;]\n[(3, 4);] [(3, 4);]\ntrue\ntrue\nP5,0\n7\nto_str: P1,2\ntrue\n"
         );
         // == は Eq の実装を使う（x だけ比べる実装なら y が違っても等しい）
-        let src = "use std.*\nstruct P { x: int, y: int }\nimpl Eq<P> {\n fn eq(a: P, b: P) -> bool { a.x == b.x }\n}\nfn main() { print(P { x: 1, y: 2 } == P { x: 1, y: 3 }) }";
+        let src = "use std -> *\nstruct P { x: int, y: int }\nimpl Eq<P> {\n fn eq(a: P, b: P) -> bool { a.x == b.x }\n}\nfn main() { print(P { x: 1, y: 2 } == P { x: 1, y: 3 }) }";
         assert_eq!(out(src).unwrap(), "true\n");
-        let e = out("use std.*\nfn main() { print(max('a', 'b')) }").unwrap_err();
+        let e = out("use std -> *\nfn main() { print(max('a', 'b')) }").unwrap_err();
         assert!(e.msg.contains("Ord<str> の実装が無い"), "{}", e.msg);
-        let e = out("use std.*\nimpl Show<int> {\n fn shw(x: int) -> str { '' }\n}\nfn main() {}").unwrap_err();
+        let e = out("use std -> *\nimpl Show<int> {\n fn shw(x: int) -> str { '' }\n}\nfn main() {}").unwrap_err();
         assert!(e.msg.contains("メソッド shw は無い"), "{}", e.msg);
     }
 
@@ -990,7 +995,7 @@ fn main() {
             o,
             "Point { x: 1, y: 2 }\ntrue\ntrue\nRect(3, 4)\ntrue\nfalse\nDot / Pair { fst: 1, snd: Point { x: 1, y: 2 } }\ntrue\n"
         );
-        let e = out("use std.*\nderive(Ord)\nstruct P { x: int }\nfn main() {}").unwrap_err();
+        let e = out("use std -> *\nderive(Ord)\nstruct P { x: int }\nfn main() {}").unwrap_err();
         assert!(e.msg.contains("derive できるのは Eq と Show"), "{}", e.msg);
     }
 
@@ -1000,8 +1005,8 @@ fn main() {
         let dir = std::env::temp_dir().join(format!("hibana-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let (ok, ng) = (dir.join("ok.hb"), dir.join("ng.hb"));
-        std::fs::write(&ok, "use std.*\ntest 'a' {\n let test = 1\n assert_eq(test + 1, 2)\n}\n").unwrap();
-        std::fs::write(&ng, "use std.*\ntest 'b' { assert(false) }\nfn main() { print(1) }\n").unwrap();
+        std::fs::write(&ok, "use std -> *\ntest 'a' {\n let test = 1\n assert_eq(test + 1, 2)\n}\n").unwrap();
+        std::fs::write(&ng, "use std -> *\ntest 'b' { assert(false) }\nfn main() { print(1) }\n").unwrap();
         assert_eq!(super::test_cmd(&[ok.to_str().unwrap()]), Ok(true));
         assert_eq!(super::test_cmd(&[ok.to_str().unwrap(), ng.to_str().unwrap()]), Ok(false));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1133,7 +1138,10 @@ fn main() {
     fn selfhost_parser_matches() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let names = ["basics/capture", "basics/closure", "types/dependent", "basics/fib", "types/inductive", "basics/push", "types/refine", "types/smt", "basics/strings", "types/struct"];
-        let files: Vec<_> = names.iter().map(|n| root.join(format!("tests/programs/{n}.hb"))).collect();
+        let mut files: Vec<_> = names.iter().map(|n| root.join(format!("tests/programs/{n}.hb"))).collect();
+        let extra = std::env::temp_dir().join(format!("hibana-use-{}.hb", std::process::id()));
+        std::fs::write(&extra, "use './lib'\n -> { a,\n B }\n -> { c }\nfn main() {}\n").unwrap();
+        files.push(extra.clone());
         let mut want = String::new();
         for p in &files {
             let prog = crate::parser::parse(&std::fs::read_to_string(p).unwrap()).unwrap();
@@ -1147,6 +1155,7 @@ fn main() {
         std::fs::write(&js, super::to_js(&src).unwrap()).unwrap();
         let r = std::process::Command::new("node").arg(&js).args(&files).output().unwrap();
         std::fs::remove_file(&js).unwrap();
+        std::fs::remove_file(&extra).unwrap();
         assert_eq!(String::from_utf8(r.stdout).unwrap(), want, "{}", String::from_utf8_lossy(&r.stderr));
     }
 
@@ -1166,6 +1175,7 @@ fn main() {
             "fn add(a:int,b :int)->int{   a+b }  // 足す\n\n\n\nfn main(){\nlet x=add( 1,2 )\n      if x==3 {print( 'ok' )}else{\n  print('ng')\n}\n    /* c */\n  let ok = x == 3 ||\n  x == 4\n  print(<p>a   b {x}</p>)\n  print(web.json(f([\n    1\n    ])))\n\n}\n",
             "// 先頭のコメント\nfn f() {\n  let v = [1,\n  2 ,3]\n  v\n    .map(1)\n    | 2\n}\n",
             "fn f(){ /* a */ 1 }\n/* b */ fn g() { 2 }\n",
+            "use './lib'\n-> { a }\n-> { B, C }\nfn main() {}\n",
         ];
         for (i, c) in cases.iter().enumerate() {
             let p = tmp.join(format!("case{i}.hb"));

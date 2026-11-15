@@ -2,8 +2,8 @@
 // ponytail: 依存型・添字付きの型族・細分化型の証明は無い（細分化型は元の型として扱う）
 // 効果: 起きた効果を集め、関数の終わりで宣言と比べる。無名関数の効果は本体から推論する。Async はどこでも起こせる
 // ponytail: 宣言の探索は線形。大きいプログラムで遅ければ Map にする
-use './parser.hb'.*
-use std.*
+use './parser.hb' -> *
+use std -> *
 
 enum Ty {
     YInt, YBool, YStr, YUnit, YNever, YType,
@@ -84,7 +84,7 @@ partial fn show_ty(c: C, t0: Ty) -> str {
         YRef(a) => 'Ref<' + show_ty(c, a) + '>',
         YData(n, args) => if len(args) == 0 { n } else { n + '<' + join(map(args, fn(a: Ty) -> str { show_ty(c, a) })) + '>' },
         YFn(ps, r, es) => '(' + join(map(ps, fn(a: Ty) -> str { show_ty(c, a) })) + ') -> ' + show_ty(c, r) +
-            (if len(es) == 0 { '' } else { ' ! ' + join(map(es, fn(a: Ty) -> str { show_ty(c, a) })) }),
+        (if len(es) == 0 { '' } else { ' ! ' + join(map(es, fn(a: Ty) -> str { show_ty(c, a) })) }),
         YRow(es) => join(map(es, fn(a: Ty) -> str { show_ty(c, a) })),
         YVar(id) => '?' + to_str(id),
         YParam(n) => n,
@@ -229,8 +229,8 @@ partial fn ty_of(c: C, env: Vec<Bind>, e: Expr) -> Ty {
         EVar(n) => match lookup_bind(env, n) {
             Some(t) => t,
             None => if n == 'int' { YInt } else if n == 'bool' { YBool } else if n == 'str' { YStr }
-                else if n == 'unit' { YUnit } else if n == 'never' { YNever } else if n == 'Type' { YType } else if n == 'Async' { YData(n, []) }
-                else { named_ty(c, env, n, []) }
+            else if n == 'unit' { YUnit } else if n == 'never' { YNever } else if n == 'Type' { YType } else if n == 'Async' { YData(n, []) }
+            else { named_ty(c, env, n, []) }
         },
         ECall(n, args) => named_ty(c, env, n, map(args, fn(a: Expr) -> Ty { ty_of(c, env, a) })),
         ERefine(t, x, cond) => ty_of(c, env, t),
@@ -358,20 +358,20 @@ partial fn apply_ty(c: C, env: Vec<Local>, name: str, ft: Ty, args: Vec<Expr>) -
 partial fn builtin(c: C, env: Vec<Local>, name: str, args: Vec<Expr>) -> Option<Ty> {
     let a = fresh(c)
     let sig = if name == 'print' { Some(YFn([a], YUnit, [])) }
-        else if name == 'to_str' { Some(YFn([a], YStr, [])) }
-        else if name == 'push' { Some(YFn([YVec(a), a], YVec(a), [])) }
-        else if name == 'set_at' { Some(YFn([YVec(a), YInt, a], YVec(a), [])) }
-        else if name == 'split' { Some(YFn([YStr, YStr], YVec(YStr), [])) }
-        else if name == 'starts_with' { Some(YFn([YStr, YStr], YBool, [])) }
-        else if name == 'slice' { Some(YFn([YStr, YInt, YInt], YStr, [])) }
-        else if name == 'chars' { Some(YFn([YStr], YVec(YStr), [])) }
-        else if name == 'code' { Some(YFn([YStr], YInt, [])) }
-        else if name == 'panic' { Some(YFn([YStr], YNever, [])) }
-        else if name == 'new_ref' { Some(YFn([a], YRef(a), [])) }
-        else if name == 'read' { Some(YFn([YRef(a)], a, [])) }
-        else if name == 'write' { Some(YFn([YRef(a), a], YUnit, [])) }
-        else if name == 'all' { Some(YFn([YVec(YFn([], a, [YData('Async', [])]))], YVec(a), [YData('Async', [])])) }
-        else { None }
+    else if name == 'to_str' { Some(YFn([a], YStr, [])) }
+    else if name == 'push' { Some(YFn([YVec(a), a], YVec(a), [])) }
+    else if name == 'set_at' { Some(YFn([YVec(a), YInt, a], YVec(a), [])) }
+    else if name == 'split' { Some(YFn([YStr, YStr], YVec(YStr), [])) }
+    else if name == 'starts_with' { Some(YFn([YStr, YStr], YBool, [])) }
+    else if name == 'slice' { Some(YFn([YStr, YInt, YInt], YStr, [])) }
+    else if name == 'chars' { Some(YFn([YStr], YVec(YStr), [])) }
+    else if name == 'code' { Some(YFn([YStr], YInt, [])) }
+    else if name == 'panic' { Some(YFn([YStr], YNever, [])) }
+    else if name == 'new_ref' { Some(YFn([a], YRef(a), [])) }
+    else if name == 'read' { Some(YFn([YRef(a)], a, [])) }
+    else if name == 'write' { Some(YFn([YRef(a), a], YUnit, [])) }
+    else if name == 'all' { Some(YFn([YVec(YFn([], a, [YData('Async', [])]))], YVec(a), [YData('Async', [])])) }
+    else { None }
     match sig {
         Some(t) => Some(apply_ty(c, env, name, t, args)),
         // len は Vec と str の両方

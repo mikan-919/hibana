@@ -62,7 +62,7 @@ fn main() {
 `struct` は名前付きのフィールドを持つ型、`enum` は構築子（値を作る名前）の選択肢を持つ型です。`match` は構築子ごとに分岐し、すべての構築子を書かないとエラーになります。
 
 ```
-use std.*
+use std -> *
 
 enum Shape {
     Circle(r: int),
@@ -91,7 +91,7 @@ fn main() {
 出力は `3`、`12`、`[10, 20, 30]`、`20` です。
 
 - 型引数は `<>` で書きます。`Vec<int>` は `int` の配列、`Option<A>` は値が無いかもしれないことを表し、`None` か `Some(値)` です。
-- `use std.*` は標準ライブラリ（`lib/std.hb`）の名前を修飾なしで使えるようにします。`map`、`filter`、`fold`、`range`、`join`、`trim` などがあります。一覧は仕様の 10 章にあります。
+- `use std -> *` は標準ライブラリ（`lib/std.hb`）の名前を修飾なしで使えるようにします。`map`、`filter`、`fold`、`range`、`join`、`trim` などがあります。一覧は仕様の 10 章にあります。
 - `fn(x) { ... }` は無名関数（クロージャ）で、外側の変数を使えます。引数の型は呼び出し先から推論します。
 
 ## 3. 検査される条件
@@ -122,7 +122,7 @@ fn main() {
 効果（代数的効果）は、関数が外部に頼む操作です。`effect` で操作を宣言し、使う関数は `! 効果名` で宣言します。`handle` が操作を受け取って処理し、`resume()` で操作の呼び出しの直後から実行を再開します（再開は 1 回だけです）。
 
 ```
-use std.*
+use std -> *
 
 trait Describe<A> {
     fn describe(x: A) -> str
@@ -166,7 +166,7 @@ fn main() {
 `test '名前' { ... }` は `hibana test` が実行します。`assert(条件)` と `assert_eq(結果, 期待値)` で確かめます。ファイルを省くと、`hibana.toml` のあるディレクトリの `src` と `tests` のすべての `.hb` を実行します。
 
 ```
-use std.*
+use std -> *
 
 test 'join' {
     assert_eq(join(['a', 'b'], '-'), 'a-b')

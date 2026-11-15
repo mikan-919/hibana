@@ -71,8 +71,8 @@ type T<b: bool> = if b { int } else { str }
 
 ```
 use web              // 組み込みのライブラリ（lib/ 以下。実行ファイルに埋め込まれている）。web.ok のように修飾して使う
-use web.*            // すべての名前を修飾なしで使う
-use web.{ok, Request}  // 挙げた名前だけ修飾なしで使う
+use web -> *            // すべての名前を修飾なしで使う
+use web -> {ok, Request}  // 挙げた名前だけ修飾なしで使う
 use 'util.hb'        // ファイル（今のディレクトリからの経路）。モジュール名は拡張子を除いた名前（util）
 use './lib' -> *     // ./ か ../ で始まる経路は .hb を省ける。-> * はすべての名前を修飾なしで使う
 use './lib'
@@ -105,7 +105,7 @@ fn main() {
 ```
 
 - `use` に名前で書く（`use web`）と組み込みのライブラリ、文字列で書くとファイルかパッケージです。ファイルの経路は、`use` を書いた .hb のファイルのディレクトリからの経路です。
-- モジュール名は、ファイル名から拡張子を除いた名前です（`./js/util.ts` は `util`、`node:path` は `path`、名前に使えない文字は `_`）。hibana のモジュールと同じく、`use './js/util.ts'.*` で修飾なしにもできます。
+- モジュール名は、ファイル名から拡張子を除いた名前です（`./js/util.ts` は `util`、`node:path` は `path`、名前に使えない文字は `_`）。hibana のモジュールと同じく、`use './js/util.ts' -> *` で修飾なしにもできます。
 - 型は TypeScript の型宣言から読み、境界でその型に従って値を変換します。型宣言の無い JavaScript は使えません。
 
 | TypeScript の型 | hibana の型 | 境界での変換 |
@@ -246,7 +246,7 @@ trait Ord<A>: Eq<A> {                        // 親のトレイト。Ord の実�
 ### 3.8 テスト
 
 ```
-use std.*
+use std -> *
 
 test '足し算' {
     assert_eq(add(1, 2), 3)
@@ -500,7 +500,7 @@ page 'index.html' '<h1>hello</h1>'
 
 ### std
 
-`use std.*` で、修飾なしに使うのが普通です（`lib/std.hb`、例は `tests/programs/stdlib/std.hb`）。
+`use std -> *` で、修飾なしに使うのが普通です（`lib/std.hb`、例は `tests/programs/stdlib/std.hb`）。
 
 | 名前 | 内容 |
 |---|---|

@@ -1,5 +1,5 @@
 // 字句解析器。src/frontend/lexer.rs と同じトークンの並びを作る
-use std.*
+use std -> *
 
 derive(Eq, Show)
 enum Tok { TInt(n: int), TStr(s: str), TIdent(name: str), TPunct(p: str), TEof }
@@ -12,14 +12,14 @@ struct LexError { msg: str, line: int, col: int }
 
 fn keywords() -> Vec<str> {
     ['fn', 'let', 'mut', 'if', 'else', 'while', 'return', 'true', 'false', 'syntax', 'macro',
-     'type', 'match', 'quote', 'partial', 'for', 'in', 'use', 'module', 'extern', 'effect',
-     'handle', 'trait', 'impl', 'struct', 'enum']
+        'type', 'match', 'quote', 'partial', 'for', 'in', 'use', 'module', 'extern', 'effect',
+        'handle', 'trait', 'impl', 'struct', 'enum']
 }
 
 // 最長一致のため、2文字の記号を先に置く
 fn puncts() -> Vec<str> {
     ['->', '=>', '..', '==', '!=', '<=', '>=', '&&', '||', '</', '(', ')', '{', '}', '[', ']', ',',
-     ';', ':', '.', '=', '<', '>', '+', '-', '*', '/', '%', '!', '@', '$', '~', '|', '?']
+        ';', ':', '.', '=', '<', '>', '+', '-', '*', '/', '%', '!', '@', '$', '~', '|', '?']
 }
 
 // i 番目の文字。範囲の外は ''

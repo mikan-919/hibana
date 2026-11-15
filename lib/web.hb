@@ -13,7 +13,7 @@
 // JSX（<div class={c}>Hello {name}</div>）は HTML の文字列になる
 
 use std
-use std.{Option, Some, None}
+use std -> { Option, Some, None }
 
 // ---- リクエストと応答 ----
 

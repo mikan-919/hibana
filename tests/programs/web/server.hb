@@ -2,7 +2,7 @@
 // ルートの本体はデータの置き場を Need<Db> の効果で受け取り、main で本物の置き場を渡す
 // 置き場は Ref で、要求をまたいで書き換えられる
 use web
-use std.*
+use std -> *
 
 effect Need<T> {
     fn need() -> T

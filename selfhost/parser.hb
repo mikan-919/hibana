@@ -1,7 +1,7 @@
 // 構文解析器。src/frontend/parser.rs と同じ構文木を作る（S 式にして比べる）
 // ponytail: マクロは derive(Eq, Show) だけを組み込みで展開し、syntax・macro・test の宣言は読み飛ばす。extern は無い。エラーは panic で止める
-use './lexer.hb'.*
-use std.*
+use './lexer.hb' -> *
+use std -> *
 
 // 式・文・ブロック・腕・引数を一つの型にする（相互に再帰する型を避ける）
 enum Expr {
@@ -115,8 +115,8 @@ fn struct_fields(p: P, name: str) -> Option<Vec<str>> {
 fn binop(t: Tok) -> int {
     match t {
         TPunct(p) => if p == '||' { 1 } else if p == '&&' { 2 } else if p == '==' || p == '!=' { 3 }
-            else if p == '<' || p == '<=' || p == '>' || p == '>=' { 4 } else if p == '+' || p == '-' { 5 }
-            else if p == '*' || p == '/' || p == '%' { 6 } else { 0 }
+        else if p == '<' || p == '<=' || p == '>' || p == '>=' { 4 } else if p == '+' || p == '-' { 5 }
+        else if p == '*' || p == '/' || p == '%' { 6 } else { 0 }
         _ => 0,
     }
 }
@@ -194,19 +194,19 @@ partial fn primary(p: P) -> Expr {
         TStr(s) => EStr(s),
         TIdent(name) => ident_expr(p, name),
         TPunct(k) => if k == 'true' { EBool(true) } else if k == 'false' { EBool(false) }
-            else if k == '[' { EArray(list_of(p, ']')) }
-            else if k == '(' { paren(p) }
-            else if k == 'fn' { lambda(p) }
-            else if k == '{' { block(p) }
-            else if k == 'if' { if_rest(p) }
-            else if k == 'while' { let c = expr(p); expect(p, '{'); EWhile(c, block(p)) }
-            else if k == 'for' { for_rest(p) }
-            else if k == 'match' { match_rest(p) }
-            else if k == 'handle' { handle_rest(p) }
-            else if k == 'return' {
-                if nl(p) || is_p(peek(p), ';') || is_p(peek(p), '}') { EReturn(None) } else { EReturn(Some(expr(p))) }
-            }
-            else { write(p.pos, read(p.pos) - 1); fail(p, '式が必要') }
+        else if k == '[' { EArray(list_of(p, ']')) }
+        else if k == '(' { paren(p) }
+        else if k == 'fn' { lambda(p) }
+        else if k == '{' { block(p) }
+        else if k == 'if' { if_rest(p) }
+        else if k == 'while' { let c = expr(p); expect(p, '{'); EWhile(c, block(p)) }
+        else if k == 'for' { for_rest(p) }
+        else if k == 'match' { match_rest(p) }
+        else if k == 'handle' { handle_rest(p) }
+        else if k == 'return' {
+            if nl(p) || is_p(peek(p), ';') || is_p(peek(p), '}') { EReturn(None) } else { EReturn(Some(expr(p))) }
+        }
+        else { write(p.pos, read(p.pos) - 1); fail(p, '式が必要') }
         _ => { write(p.pos, read(p.pos) - 1); fail(p, '式が必要') }
     }
     postfix(p, e)
@@ -550,10 +550,15 @@ fn head(p: P) -> str { match peek(p) { TPunct(k) => k, TIdent(n) => n, _ => '' }
 // 次の行の頭まで読み飛ばす（use）。cont で始まる行は続きとみなす（syntax の | の行）
 fn skip_line(p: P, cont: str) {
     advance(p)
-    while peek(p) != TEof && !(nl(p) && !is_p(peek(p), cont)) { advance(p) }
+    let mut depth = 0
+    while peek(p) != TEof && !(depth == 0 && nl(p) && !is_p(peek(p), cont)) {
+        if is_p(peek(p), '{') { depth = depth + 1 }
+        if is_p(peek(p), '}') { depth = depth - 1 }
+        advance(p)
+    }
 }
 
-// use の対象。use "./x.hb".* なら "./x.hb"、use std.* なら "std"
+// use の対象。use "./x.hb" -> * なら "./x.hb"、use std -> * なら "std"
 fn uses_of(ts: Vec<Token>) -> Vec<str> {
     let mut r: Vec<str> = []
     let mut depth = 0
@@ -763,7 +768,7 @@ partial fn parse_tokens(ts0: Vec<Token>, ext: Ext) -> Program {
         } else if h == 'fn' || h == 'partial' || h == 'trait' || h == 'impl' || h == 'macro' || h == 'test' {
             skip_fn(p0)
         } else if h == 'use' {
-            skip_line(p0, '')
+            skip_line(p0, '->')
         } else if h == 'syntax' {
             skip_line(p0, '|')
         } else {
@@ -793,7 +798,7 @@ partial fn parse_tokens(ts0: Vec<Token>, ext: Ext) -> Program {
         else if h == 'trait' { fns = concat_f(fns, trait_decl(p)) }
         else if h == 'effect' { fns = concat_f(fns, effect_decl(p).ops) }
         else if h == 'impl' { fns = concat_f(fns, impl_decl(p)) }
-        else if h == 'use' { skip_line(p, '') }
+        else if h == 'use' { skip_line(p, '->') }
         else if h == 'syntax' { skip_line(p, '|') }
         else { skip_fn(p) }
     }

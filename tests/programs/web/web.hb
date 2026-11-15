@@ -1,8 +1,8 @@
 // web ライブラリ（lib/web.hb）を使う例。use web の名前は web.ok のように修飾して使う
-// （use web.* なら修飾なし、use web.{ok, Request} なら挙げた名前だけ修飾なし）
+// （use web -> * なら修飾なし、use web -> {ok, Request} なら挙げた名前だけ修飾なし）
 use web
 use std
-use std. { assert_eq }
+use std -> { assert_eq }
 
 fn durable_objects(name: str) -> str { 'stub(' + name + ')' }
 
@@ -70,7 +70,6 @@ test 'redirect after save' {
         assert_eq(res.headers[0].value, '/posts/42')
     }
 }
-
 
 test 'HTML text and attribute escaping' {
     assert_eq(web.escape_html('<&>"\'日本語😀'), '&lt;&amp;&gt;&quot;&#39;日本語😀')

@@ -1,7 +1,7 @@
 // 引数のファイルごとに、整形した結果と区切りの行を出す（Rust 版との照合用）
 use './io.ts'
-use './fmt.hb'.*
-use std.*
+use './fmt.hb' -> *
+use std -> *
 
 fn main() {
     for p in io.args() {

@@ -1,6 +1,6 @@
 // フォーマッタ。src/tooling/fmt.rs と同じ整形をする。トークンの並びと改行は変えず、字下げ・行内の空白・空行・コメントの位置だけを整える
-use './lexer.hb'.*
-use std.*
+use './lexer.hb' -> *
+use std -> *
 
 fn punct(t: Token) -> str { match t.tok { TPunct(p) => p, _ => '' } }
 
@@ -235,7 +235,7 @@ partial fn format(src: str) -> Result<str, str> {
                         let mut top = at_i(sd, len(sd) - (if closers > 1 { closers } else { 1 }))
                         if closers == 0 { top = last_i(sd) }
                         let blank = cm.nl >= 2 && !is_close && (!after_open || len(cm.items) > 0)
-                        let starts = (prev >= 0 && is_bin(punct(tk(ts, prev)))) || punct(t) == '|' || punct(t) == '.'
+                        let starts = (prev >= 0 && is_bin(punct(tk(ts, prev)))) || punct(t) == '|' || punct(t) == '.' || punct(t) == '->'
                         if blank || is_starts(punct(t)) { in_syntax = punct(t) == 'syntax' }
                         let keeps = in_syntax && cont == len(sd) && closers == 0 && !is_starts(punct(t))
                         cont = if starts || keeps { len(sd) } else { -1 }

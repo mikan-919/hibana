@@ -1,5 +1,5 @@
 // == はユーザーが書いた Eq の実装を使う
-use std.*
+use std -> *
 
 struct P { x: int, y: int }
 

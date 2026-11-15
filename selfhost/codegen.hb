@@ -3,8 +3,8 @@
 // ponytail: Async は意味を持たず、all は順に実行する
 // 効果は src/backend/js.rs と同じ形: 処理中の handle の並び $h から腕を探し、resume しない腕の値は例外 $Abort で handle まで戻す
 // トレイトのメソッドは、最初の引数の実行時の型で実装を選ぶ（型引数が戻り値にだけ現れるメソッドは呼べない）
-use './parser.hb'.*
-use std.*
+use './parser.hb' -> *
+use std -> *
 
 // 式の JavaScript。pre は先に実行する文、val は値の式（副作用の無い式か一時変数）
 struct Code { pre: str, val: str }
@@ -283,8 +283,8 @@ partial fn binary(g: G, env: Vec<Var>, op: str, a: Expr, b: Expr) -> Code {
         let l = if len(c.vals) > 0 { c.vals[0] } else { '' }
         let r = if len(c.vals) > 1 { c.vals[1] } else { '' }
         let v = if op == '==' { '$eq(' + l + ', ' + r + ')' } else if op == '!=' { '!$eq(' + l + ', ' + r + ')' }
-            else if op == '/' { '$div(' + l + ', ' + r + ')' } else if op == '%' { '$mod(' + l + ', ' + r + ')' }
-            else { '(' + l + ' ' + op + ' ' + r + ')' }
+        else if op == '/' { '$div(' + l + ', ' + r + ')' } else if op == '%' { '$mod(' + l + ', ' + r + ')' }
+        else { '(' + l + ' ' + op + ' ' + r + ')' }
         Code { pre: c.pre, val: v }
     }
 }

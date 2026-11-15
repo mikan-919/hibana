@@ -2,7 +2,7 @@
 // 型は TypeScript の型宣言から読む。モジュール名はファイル名（util・greet）
 use './js/util.ts'
 use './js/greet.js'
-use std.*
+use std -> *
 
 // Promise を返す関数は Async の効果を持つ。呼ぶ関数にも ! Async を書き、await は書かない
 fn twice_later(x: int) -> int ! Async {

@@ -565,4 +565,21 @@ mod completion_tests {
         let d = data.as_array().unwrap();
         assert_eq!(d[d.len() - 5..], [json!(0), json!(18), json!(4), json!(3), json!(0)]);
     }
+
+    #[test]
+    fn selected_imports_are_visible() {
+        let src = "use web -> { ok, Request }\nfn main() { print(ok('x').status) }\n";
+        let (err, types, ix) = analyze("file:///tmp/imports.hb", src);
+        assert!(err.is_none(), "{err:?}");
+        let ix = ix.unwrap();
+        let items = completion(src, src.find("print").unwrap(), &ix, &types);
+        let labels: Vec<_> = items.as_array().unwrap().iter().filter_map(|x| x["label"].as_str()).collect();
+        assert!(labels.contains(&"ok") && labels.contains(&"Request"));
+        assert!(!labels.contains(&"html") && !labels.contains(&"web"));
+        let toks = lex(src).unwrap();
+        let at = src.rfind("ok(").unwrap();
+        let (name, _, _) = name_at(&toks, &ix, at).unwrap();
+        assert_eq!(ix.get(&name).unwrap().kind, Kind::Function);
+        assert!(semantic_tokens(src, &ix)["data"].as_array().unwrap().len() >= 10);
+    }
 }

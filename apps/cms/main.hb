@@ -1,6 +1,6 @@
 // 記事のルート・入力検証・HTML は Hibana。ファイルと暗号処理だけ Node のホストへ渡す。
 use web
-use std.*
+use std -> *
 
 extern {
     fn cms_load() -> str

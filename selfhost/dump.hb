@@ -1,7 +1,7 @@
 // 引数のファイルごとに、トークンを「行:列 トークン」で 1 行ずつ出す（Rust 版との照合用）
 use './io.ts'
-use './lexer.hb'.*
-use std.*
+use './lexer.hb' -> *
+use std -> *
 
 fn main() {
     for p in io.args() {

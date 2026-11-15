@@ -225,9 +225,9 @@ const LIBS: &[(&str, &str)] = &[
 pub enum UseNames {
     // use web: web.ok のように修飾して使う
     Qualified,
-    // use web.*: すべて修飾なしで使える
+    // use web -> *: すべて修飾なしで使える
     All,
-    // use web.{ok, Request}: 挙げた名前だけ修飾なしで使える
+    // use web -> {ok, Request}: 挙げた名前だけ修飾なしで使える
     List(Vec<String>),
 }
 
@@ -1023,7 +1023,7 @@ impl Parser<'_> {
         cands.into_iter().find(known).unwrap_or(n.to_string())
     }
 
-    // use 名前、use 名前.*、use 名前.{a, b}、use "file.hb"
+    // use 名前、use 名前 -> *、use 名前 -> {a, b}、use "file.hb"
     fn use_decl(&mut self) -> R<Use> {
         self.expect("use")?;
         let module = match self.next() {
@@ -1031,20 +1031,10 @@ impl Parser<'_> {
             Tok::Str(f) => module_name(&f),
             _ => return self.err("use の後にはライブラリ名かファイル名が必要"),
         };
-        let names = if self.toks[self.pos].tok == Tok::Punct(".") && !self.at_newline() {
-            self.pos += 1;
-            if self.eat("*") {
-                UseNames::All
-            } else {
-                self.expect("{")?;
-                let mut ns = Vec::new();
-                while !self.eat("}") {
-                    ns.push(self.ident()?);
-                    self.eat(",");
-                }
-                UseNames::List(ns)
-            }
-        } else if self.peek() == &Tok::Punct("->") {
+        if self.toks[self.pos].tok == Tok::Punct(".") && !self.at_newline() {
+            return self.err("use 名前 -> * または use 名前 -> { ... } で書く");
+        }
+        let names = if self.peek() == &Tok::Punct("->") {
             // use 'file' -> * と、use 'file' -> { a } -> { b }（改行して続けてよい）
             let mut ns = Vec::new();
             let mut all = false;
