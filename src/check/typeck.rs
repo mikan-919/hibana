@@ -2,7 +2,7 @@
 use crate::meta::{Kinds, Q};
 use crate::parser::{Arm, Block, Ctor, Data, Expr, Fn, Program, Stmt};
 use crate::smt::Smt;
-use super::prove::{bin, len, replace_len, un};
+use super::prove::{bin, len, replace_len, un, Term};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -47,7 +47,7 @@ pub(crate) enum V {
     // 種類の分かっているコード片 syn<種類>。種類の分からないものは Prim("syn")
     Syn(Rc<str>),
     // 値が分からず計算が止まった項
-    Neu(Rc<Neu>),
+    Neu(Rc<Term>),
 }
 
 // 関数型の値。引数 i は Var(binder(level, i)) として doms と cod の中に現れる
@@ -71,20 +71,6 @@ impl PartialEq for PiV {
 // ponytail: 深さの違う所で書いた同じ依存関数型は別の型になる。α同値で比べるなら de Bruijn 添字にする
 fn binder(level: usize, i: usize) -> usize {
     (1 << 40) + level * 64 + i
-}
-
-#[derive(Debug, PartialEq)]
-pub(crate) enum Neu {
-    // 引数など、値の分からない変数。番号で区別する。0 は細分化型の条件の変数
-    Var(usize, String),
-    Un(&'static str, V),
-    Bin(&'static str, V, V),
-    // 展開しきれなかった関数呼び出し
-    Call(String, Vec<V>),
-    // 値の分からない構造体のフィールド
-    Proj(V, String),
-    // 型の計算で扱えない式（while・代入・print など）。どの値とも等しくない
-    Opaque(usize),
 }
 
 // js は JavaScript の値をそのまま持ち回る型（extern で使う）。never は戻らない効果の操作（fail など）の戻り値の型
@@ -176,13 +162,13 @@ fn ref_of(t: &V) -> Option<V> {
     }
 }
 
-pub(super) fn neu(n: Neu) -> V {
+pub(super) fn neu(n: Term) -> V {
     V::Neu(Rc::new(n))
 }
 
 // 細分化型の条件の中の変数
 fn bound() -> V {
-    neu(Neu::Var(0, "_".into()))
+    neu(Term::Var(0, "_".into()))
 }
 
 fn show(v: &V) -> String {
@@ -224,19 +210,19 @@ fn show(v: &V) -> String {
         ),
         V::Syn(k) => format!("syn<{k}>"),
         V::Neu(n) => match &**n {
-            Neu::Var(_, name) => name.clone(),
-            Neu::Un(op, x) => format!("{op}{}", show(x)),
-            Neu::Bin(op, a, b) => format!("({} {op} {})", show(a), show(b)),
-            Neu::Call(f, args) if f == "[]" => format!("{}[{}]", show(&args[0]), show(&args[1])),
+            Term::Var(_, name) => name.clone(),
+            Term::Un(op, x) => format!("{op}{}", show(x)),
+            Term::Bin(op, a, b) => format!("({} {op} {})", show(a), show(b)),
+            Term::Call(f, args) if f == "[]" => format!("{}[{}]", show(&args[0]), show(&args[1])),
             // 型の別名は大文字で始まる名前とみなして <> で表す
-            Neu::Call(f, args) if f.starts_with(|c: char| c.is_ascii_uppercase()) => {
+            Term::Call(f, args) if f.starts_with(|c: char| c.is_ascii_uppercase()) => {
                 format!(
                     "{f}<{}>",
                     args.iter().map(show).collect::<Vec<_>>().join(", ")
                 )
             }
             // ジェネリック引数は値の計算では () になるので、先頭の () は表示しない
-            Neu::Call(f, args) => format!(
+            Term::Call(f, args) => format!(
                 "{f}({})",
                 args.iter()
                     .skip_while(|a| matches!(a, V::Unit))
@@ -244,8 +230,8 @@ fn show(v: &V) -> String {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            Neu::Proj(x, f) => format!("{}.{f}", show(x)),
-            Neu::Opaque(_) => "?".into(),
+            Term::Proj(x, f) => format!("{}.{f}", show(x)),
+            Term::Opaque(_) => "?".into(),
         },
     }
 }
@@ -270,7 +256,7 @@ fn eff_key(v: &V) -> String {
     match v {
         V::DataT(d) => d.0.clone(),
         V::Neu(n) => match &**n {
-            Neu::Var(id, name) => format!("{name}#{id}"),
+            Term::Var(id, name) => format!("{name}#{id}"),
             _ => show(v),
         },
         _ => show(v),
@@ -296,12 +282,12 @@ fn mentions(v: &V, id: usize) -> bool {
         V::Refine(r) => mentions(&r.0, id) || mentions(&r.1, id),
         V::Pi(p) => p.doms.iter().chain(&p.effs).any(|x| mentions(x, id)) || mentions(&p.cod, id),
         V::Neu(n) => match &**n {
-            Neu::Var(i, _) => *i == id,
-            Neu::Un(_, x) => mentions(x, id),
-            Neu::Bin(_, a, b) => mentions(a, id) || mentions(b, id),
-            Neu::Proj(x, _) => mentions(x, id),
-            Neu::Call(_, args) => args.iter().any(|a| mentions(a, id)),
-            Neu::Opaque(_) => false,
+            Term::Var(i, _) => *i == id,
+            Term::Un(_, x) => mentions(x, id),
+            Term::Bin(_, a, b) => mentions(a, id) || mentions(b, id),
+            Term::Proj(x, _) => mentions(x, id),
+            Term::Call(_, args) => args.iter().any(|a| mentions(a, id)),
+            Term::Opaque(_) => false,
         },
         _ => false,
     }
@@ -352,7 +338,7 @@ impl Norm<'_> {
 
     fn opaque(&mut self) -> V {
         let id = self.fresh();
-        neu(Neu::Opaque(id))
+        neu(Term::Opaque(id))
     }
 
     // 止まった計算は、どの値とも等しくない項にする
@@ -372,7 +358,7 @@ impl Norm<'_> {
         {
             return d.1[i].clone();
         }
-        neu(Neu::Proj(x, f.to_string()))
+        neu(Term::Proj(x, f.to_string()))
     }
 
     // 関数型の式を評価する。引数は Var(binder(深さ, i)) にする
@@ -392,7 +378,7 @@ impl Norm<'_> {
                 doms.push(self.eval(t, env)?);
                 env.last_mut()
                     .unwrap()
-                    .insert(n.clone(), neu(Neu::Var(binder(level, i), n.clone())));
+                    .insert(n.clone(), neu(Term::Var(binder(level, i), n.clone())));
             }
             let cod = self.eval(ret, env)?;
             let mut es = Vec::new();
@@ -428,11 +414,11 @@ impl Norm<'_> {
         }
         // 実行時関数は展開せず、型別名だけを展開する
         let Some(f) = self.fns.get(name).copied().filter(|f| f.alias) else {
-            return Ok(neu(Neu::Call(name.into(), args)));
+            return Ok(neu(Term::Call(name.into(), args)));
         };
         // 制約の実装を省いた呼び出しは展開しない
         if f.insts > 0 && args.len() < f.params.len() - f.implicit {
-            return Ok(neu(Neu::Call(name.into(), args)));
+            return Ok(neu(Term::Call(name.into(), args)));
         }
         // 省かれたジェネリック引数は、値の計算には使わないので () で埋める
         let args = if args.len() + f.implicit == f.params.len() {
@@ -443,7 +429,7 @@ impl Norm<'_> {
             args
         };
         if self.fuel == 0 || self.depth >= 64 {
-            return Ok(neu(Neu::Call(name.into(), args)));
+            return Ok(neu(Term::Call(name.into(), args)));
         }
         self.fuel -= 1;
         let mut env = vec![
@@ -458,7 +444,7 @@ impl Norm<'_> {
         self.depth -= 1;
         match r {
             Ok(v) => Ok(v),
-            Err(Halt::Stuck) => Ok(neu(Neu::Call(name.into(), args))),
+            Err(Halt::Stuck) => Ok(neu(Term::Call(name.into(), args))),
             Err(Halt::Err(e)) => Err(e),
         }
     }
@@ -532,7 +518,7 @@ impl Norm<'_> {
                     xs[i as usize].clone()
                 }
                 // 値の分からない配列や添字は v[i] という項にする（範囲は型検査で証明済み）
-                (v @ V::Neu(_), i) | (v, i @ V::Neu(_)) => neu(Neu::Call("[]".into(), vec![v, i])),
+                (v @ V::Neu(_), i) | (v, i @ V::Neu(_)) => neu(Term::Call("[]".into(), vec![v, i])),
                 _ => return Err(Halt::Stuck),
             },
             Expr::Refine(b, x, p) => {
@@ -592,21 +578,21 @@ impl Norm<'_> {
                 level: p.level,
             })),
             V::Neu(n) => match &**n {
-                Neu::Var(i, _) if *i == id => by.clone(),
-                Neu::Var(..) | Neu::Opaque(_) => v.clone(),
-                Neu::Un(op, x) => un(op, self.subst(x, id, by)?),
-                Neu::Bin(op, a, b) => {
+                Term::Var(i, _) if *i == id => by.clone(),
+                Term::Var(..) | Term::Opaque(_) => v.clone(),
+                Term::Un(op, x) => un(op, self.subst(x, id, by)?),
+                Term::Bin(op, a, b) => {
                     let (a, b) = (self.subst(a, id, by)?, self.subst(b, id, by)?);
                     bin(op, a, b)
                 }
-                Neu::Call(f, args) => {
+                Term::Call(f, args) => {
                     let args = args
                         .iter()
                         .map(|a| self.subst(a, id, by))
                         .collect::<R<_>>()?;
                     self.call(f, args)?
                 }
-                Neu::Proj(x, f) => {
+                Term::Proj(x, f) => {
                     let x = self.subst(x, id, by)?;
                     self.proj(x, f)
                 }
@@ -1123,7 +1109,7 @@ fn check_fn(ck: &mut Ck, f: &Fn) -> R<()> {
     for (n, t) in &f.params {
         let ty = ck.eval_type(t).ctx(|e| r(&format!("引数 {n}: {e}")))?;
         let id = ck.norm.fresh();
-        ck.bind(n, ty, neu(Neu::Var(id, n.clone())), false).ctx(r)?;
+        ck.bind(n, ty, neu(Term::Var(id, n.clone())), false).ctx(r)?;
     }
     ck.avail = Vec::new();
     for e in &f.effects {
@@ -1320,7 +1306,7 @@ impl Ck<'_> {
 
     fn add_fact(&mut self, v: V) {
         if let V::Neu(n) = &v
-            && let Neu::Bin("&&", a, b) = &**n
+            && let Term::Bin("&&", a, b) = &**n
         {
             self.add_fact(a.clone());
             self.add_fact(b.clone());
@@ -1333,7 +1319,7 @@ impl Ck<'_> {
     fn new_len(&mut self, name: &str, x: &Expr) -> R<Option<(V, V)>> {
         let val = self.lookup(name).unwrap().val.clone();
         let V::Neu(n) = &val else { return Ok(None) };
-        let Neu::Var(id, _) = &**n else {
+        let Term::Var(id, _) = &**n else {
             return Ok(None);
         };
         let id = *id;
@@ -1346,8 +1332,8 @@ impl Ck<'_> {
                 .flat_map(|s| &s.facts)
                 .find_map(|f| match f {
                     V::Neu(n) => match &**n {
-                        Neu::Bin("==", a, b) if *a == own && !mentions(b, id) => Some(b.clone()),
-                        Neu::Bin("==", a, b) if *b == own && !mentions(a, id) => Some(a.clone()),
+                        Term::Bin("==", a, b) if *a == own && !mentions(b, id) => Some(b.clone()),
+                        Term::Bin("==", a, b) if *b == own && !mentions(a, id) => Some(a.clone()),
                         _ => None,
                     },
                     _ => None,
@@ -1368,7 +1354,7 @@ impl Ck<'_> {
         };
         let (ty, val) = (en.ty.clone(), en.val.clone());
         let V::Neu(n) = &val else { return Ok(()) };
-        let Neu::Var(id, _) = &**n else { return Ok(()) };
+        let Term::Var(id, _) = &**n else { return Ok(()) };
         for s in &mut self.scopes {
             s.facts.retain(|f| !mentions(f, *id));
         }
@@ -1484,7 +1470,7 @@ impl Ck<'_> {
                     // 可変な変数は、値の代わりに変数そのものを表す項を持つ
                     let val = if *mutable {
                         let id = self.norm.fresh();
-                        neu(Neu::Var(id, name.clone()))
+                        neu(Term::Var(id, name.clone()))
                     } else {
                         self.eval_value(init)?
                     };
@@ -1541,7 +1527,7 @@ impl Ck<'_> {
                 // 条件が値の分からない変数なら、各分岐ではその値が分かっているものとして扱う
                 let var = match (c.peel(), &cv) {
                     (Expr::Var(n), V::Neu(nu)) => match &**nu {
-                        Neu::Var(id, _) => {
+                        Term::Var(id, _) => {
                             Some((n.clone(), *id, self.lookup(n).unwrap().ty.clone()))
                         }
                         _ => None,
@@ -2139,7 +2125,7 @@ impl Ck<'_> {
                             self.check(end, &int)?;
                             let (a, b) = (self.eval_value(it)?, self.eval_value(end)?);
                             let id = self.norm.fresh();
-                            let v = neu(Neu::Var(id, x.clone()));
+                            let v = neu(Term::Var(id, x.clone()));
                             self.bind(x, int.clone(), v.clone(), false)?;
                             self.add_fact(bin("<=", a, v.clone()));
                             self.add_fact(bin("<", v, b));
@@ -2212,7 +2198,7 @@ impl Ck<'_> {
             for (p, _) in &f.params[..f.implicit] {
                 let id = self.norm.fresh();
                 metas.push((id, p.clone()));
-                fenv[0].insert(p.clone(), neu(Neu::Var(id, format!("?{p}"))));
+                fenv[0].insert(p.clone(), neu(Term::Var(id, format!("?{p}"))));
             }
             &f.params[f.implicit..]
         } else {
@@ -2400,7 +2386,7 @@ impl Ck<'_> {
             for (p, _) in &f.params[..f.implicit] {
                 let id = self.norm.fresh();
                 ids.push(id);
-                fenv[0].insert(p.clone(), neu(Neu::Var(id, format!("?{p}"))));
+                fenv[0].insert(p.clone(), neu(Term::Var(id, format!("?{p}"))));
             }
             let rt = self
                 .norm
@@ -2440,7 +2426,7 @@ impl Ck<'_> {
             match &v {
                 V::DataT(d) if self.effect_names.contains(&d.0) => out.push(v),
                 // 効果の変数（<E: Effect>）
-                V::Neu(n) if matches!(&**n, Neu::Var(..)) => out.push(v),
+                V::Neu(n) if matches!(&**n, Term::Var(..)) => out.push(v),
                 _ => return Err(format!("{} は効果でない", show(&v)).into()),
             }
         }
@@ -2573,7 +2559,7 @@ impl Ck<'_> {
             for ((p, pt), b) in f.params[f.implicit..].iter().zip(&a.binds) {
                 let ty = self.norm.eval_or_opaque(pt, &mut fenv)?;
                 let id = self.norm.fresh();
-                let v = neu(Neu::Var(id, b.clone()));
+                let v = neu(Term::Var(id, b.clone()));
                 self.bind(b, ty, v.clone(), false)?;
                 fenv[0].insert(p.clone(), v);
             }
@@ -2741,7 +2727,7 @@ impl Ck<'_> {
                     x = self.norm.subst(
                         &x,
                         binder(p.level, j),
-                        &neu(Neu::Var(*id, params[j].0.clone())),
+                        &neu(Term::Var(*id, params[j].0.clone())),
                     )?;
                 }
                 d = Some(x);
@@ -2763,7 +2749,7 @@ impl Ck<'_> {
                 }
             };
             let id = self.norm.fresh();
-            self.bind(n, ty.clone(), neu(Neu::Var(id, n.clone())), false)?;
+            self.bind(n, ty.clone(), neu(Term::Var(id, n.clone())), false)?;
             doms.push(ty);
             ids.push(id);
         }
@@ -2791,7 +2777,7 @@ impl Ck<'_> {
                     e = self.norm.subst(
                         &e,
                         binder(p.level, j),
-                        &neu(Neu::Var(*id, params[j].0.clone())),
+                        &neu(Term::Var(*id, params[j].0.clone())),
                     )?;
                 }
                 for e in flat(&[e]) {
@@ -2820,7 +2806,7 @@ impl Ck<'_> {
                 d = self.norm.subst(
                     &d,
                     *id,
-                    &neu(Neu::Var(binder(level, j), params[j].0.clone())),
+                    &neu(Term::Var(binder(level, j), params[j].0.clone())),
                 )?;
             }
             out.push(d);
@@ -2830,7 +2816,7 @@ impl Ck<'_> {
             cod = self.norm.subst(
                 &cod,
                 *id,
-                &neu(Neu::Var(binder(level, j), params[j].0.clone())),
+                &neu(Term::Var(binder(level, j), params[j].0.clone())),
             )?;
         }
         let mut effs = Vec::new();
@@ -2839,7 +2825,7 @@ impl Ck<'_> {
                 e = self.norm.subst(
                     &e,
                     *id,
-                    &neu(Neu::Var(binder(level, j), params[j].0.clone())),
+                    &neu(Term::Var(binder(level, j), params[j].0.clone())),
                 )?;
             }
             effs.push(e);
@@ -2877,7 +2863,7 @@ impl Ck<'_> {
                     want(&tt, &d, &format!("引数 {n}"))?;
                 }
                 let id = self.norm.fresh();
-                let v = neu(Neu::Var(id, n.clone()));
+                let v = neu(Term::Var(id, n.clone()));
                 self.bind(n, d, v.clone(), false)?;
                 vals.push(v);
             }
@@ -2915,7 +2901,7 @@ impl Ck<'_> {
                 self.type_level(t)?;
                 let ty = self.eval_value(t)?;
                 let id = self.norm.fresh();
-                self.bind(n, ty, neu(Neu::Var(id, n.clone())), false)?;
+                self.bind(n, ty, neu(Term::Var(id, n.clone())), false)?;
             }
             for e in effs {
                 let mut env = self.val_env();
@@ -2944,7 +2930,7 @@ impl Ck<'_> {
                 .eval_type(t)
                 .ctx(|e| format!("型 {} の引数 {n}: {e}", d.name))?;
             let id = self.norm.fresh();
-            self.bind(n, ty, neu(Neu::Var(id, n.clone())), false)?;
+            self.bind(n, ty, neu(Term::Var(id, n.clone())), false)?;
         }
         for c in &d.ctors {
             let r = |e: &str| format!("構築子 {}: {e}", c.name);
@@ -2953,7 +2939,7 @@ impl Ck<'_> {
                 self.type_level(t).ctx(r)?;
                 let ty = self.eval_value(t)?;
                 let id = self.norm.fresh();
-                self.bind(n, ty, neu(Neu::Var(id, n.clone())), false)?;
+                self.bind(n, ty, neu(Term::Var(id, n.clone())), false)?;
             }
             self.pop();
         }
@@ -2996,7 +2982,7 @@ impl Ck<'_> {
         }
         for (x, y) in [(&a, &b), (&b, &a)] {
             if let V::Neu(n) = x
-                && let Neu::Var(id, _) = &**n
+                && let Term::Var(id, _) = &**n
                 && metas.contains(id)
             {
                 sol.insert(*id, base(y));
@@ -3027,7 +3013,7 @@ impl Ck<'_> {
                     .iter()
                     .filter_map(|e| match e {
                         V::Neu(n) => match &**n {
-                            Neu::Var(id, _) if metas.contains(id) && !sol.contains_key(id) => {
+                            Term::Var(id, _) if metas.contains(id) && !sol.contains_key(id) => {
                                 Some(*id)
                             }
                             _ => None,
@@ -3056,7 +3042,7 @@ impl Ck<'_> {
         for (p, _) in &d.params {
             let id = self.norm.fresh();
             metas.push((id, p.clone()));
-            env[0].insert(p.clone(), neu(Neu::Var(id, format!("?{p}"))));
+            env[0].insert(p.clone(), neu(Term::Var(id, format!("?{p}"))));
         }
         let mut sol = HashMap::new();
         if let Some(exp) = expected {
@@ -3135,7 +3121,7 @@ impl Ck<'_> {
                 for ((field, field_type), bind) in c.fields.iter().zip(&arm.binds) {
                     let ty = self.norm.eval_or_opaque(field_type, &mut env).ctx(r).map_err(at)?;
                     let id = self.norm.fresh();
-                    let value = neu(Neu::Var(id, bind.clone()));
+                    let value = neu(Term::Var(id, bind.clone()));
                     env[0].insert(field.clone(), value.clone());
                     if bind != "_" { self.bind(bind, ty, value, false)?; }
                 }

@@ -1,13 +1,28 @@
 //! 細分化型の項と事実の照合。
-use super::typeck::{neu, Neu, V};
+use super::typeck::{neu, V};
+
+#[derive(Debug, PartialEq)]
+pub(crate) enum Term {
+    // 引数など、値の分からない変数。番号で区別する。0 は細分化型の条件の変数
+    Var(usize, String),
+    Un(&'static str, V),
+    Bin(&'static str, V, V),
+    // 長さなどの記号的な呼び出し
+    Call(String, Vec<V>),
+    // 値の分からない構造体のフィールド
+    Proj(V, String),
+    // 型の計算で扱えない式（while・代入・print など）。どの値とも等しくない
+    Opaque(usize),
+}
+
 
 // 項と定数の和に分ける。定数だけなら項は 0
 fn lin(v: &V) -> (V, i64) {
     match v {
         V::Int(c) => (V::Int(0), *c),
         V::Neu(m) => match &**m {
-            Neu::Bin("+", x, V::Int(c)) => (x.clone(), *c),
-            Neu::Bin("-", x, V::Int(c)) => (x.clone(), c.saturating_neg()),
+            Term::Bin("+", x, V::Int(c)) => (x.clone(), *c),
+            Term::Bin("-", x, V::Int(c)) => (x.clone(), c.saturating_neg()),
             _ => (v.clone(), 0),
         },
         _ => (v.clone(), 0),
@@ -18,8 +33,8 @@ fn lin(v: &V) -> (V, i64) {
 fn le_form(v: &V) -> Option<(V, V, i64)> {
     let V::Neu(n) = v else { return None };
     let (a, b, k): (&V, &V, i64) = match &**n {
-        Neu::Bin("<=", a, b) => (a, b, 0),
-        Neu::Bin("<", a, b) => (a, b, -1),
+        Term::Bin("<=", a, b) => (a, b, 0),
+        Term::Bin("<", a, b) => (a, b, -1),
         _ => return None,
     };
     let ((ta, ca), (tb, cb)) = (lin(a), lin(b));
@@ -33,8 +48,8 @@ pub(super) fn replace(v: &V, from: &V, to: &V) -> V {
     }
     let V::Neu(n) = v else { return v.clone() };
     match &**n {
-        Neu::Bin(op, a, b) => bin(op, replace(a, from, to), replace(b, from, to)),
-        Neu::Un(op, x) => un(op, replace(x, from, to)),
+        Term::Bin(op, a, b) => bin(op, replace(a, from, to), replace(b, from, to)),
+        Term::Un(op, x) => un(op, replace(x, from, to)),
         _ => v.clone(),
     }
 }
@@ -43,13 +58,13 @@ pub(super) fn replace(v: &V, from: &V, to: &V) -> V {
 pub(super) fn replace_len(v: &V, id: usize, t: &V) -> V {
     if let V::Neu(n) = v {
         match &**n {
-            Neu::Call(f, a)
+            Term::Call(f, a)
                 if f == "len"
-                    && matches!(&a[..], [V::Neu(x)] if matches!(&**x, Neu::Var(i, _) if *i == id)) =>
+                    && matches!(&a[..], [V::Neu(x)] if matches!(&**x, Term::Var(i, _) if *i == id)) =>
             {
                 return t.clone();
             }
-            Neu::Bin(op, a, b) if matches!(*op, "+" | "-") => {
+            Term::Bin(op, a, b) if matches!(*op, "+" | "-") => {
                 return bin(op, replace_len(a, id, t), replace_len(b, id, t));
             }
             _ => {}
@@ -61,8 +76,8 @@ pub(super) fn replace_len(v: &V, id: usize, t: &V) -> V {
 pub(super) fn prove_facts<'a>(goal: &V, facts: impl Iterator<Item = &'a V> + Clone) -> bool {
     if let V::Neu(n) = goal {
         match &**n {
-            Neu::Bin("&&", a, b) => return prove_facts(a, facts.clone()) && prove_facts(b, facts.clone()),
-            Neu::Bin("||", a, b) => return prove_facts(a, facts.clone()) || prove_facts(b, facts.clone()),
+            Term::Bin("&&", a, b) => return prove_facts(a, facts.clone()) && prove_facts(b, facts.clone()),
+            Term::Bin("||", a, b) => return prove_facts(a, facts.clone()) || prove_facts(b, facts.clone()),
             _ => {}
         }
     }
@@ -90,7 +105,7 @@ pub(super) fn prove_facts<'a>(goal: &V, facts: impl Iterator<Item = &'a V> + Clo
             return false;
         };
         match (&**f, &**g) {
-            (Neu::Bin("<", a, b), Neu::Bin("!=", c, d)) => {
+            (Term::Bin("<", a, b), Term::Bin("!=", c, d)) => {
                 (a == c && b == d) || (a == d && b == c)
             }
             _ => false,
@@ -104,7 +119,7 @@ pub(super) fn prove<'a>(goal: &V, facts: impl Iterator<Item = &'a V> + Clone, sm
     if prove_facts(goal, facts.clone()) { return true; }
     let eqs: Vec<_> = facts.clone().filter_map(|f| match f {
         V::Neu(n) => match &**n {
-            Neu::Bin("==", x, c @ V::Int(_)) | Neu::Bin("==", c @ V::Int(_), x) => Some((x, c)),
+            Term::Bin("==", x, c @ V::Int(_)) | Term::Bin("==", c @ V::Int(_), x) => Some((x, c)),
             _ => None,
         },
         _ => None,
@@ -118,7 +133,7 @@ pub(super) fn prove<'a>(goal: &V, facts: impl Iterator<Item = &'a V> + Clone, sm
 
 pub(super) fn un(op: &'static str, v: V) -> V {
     if let V::Neu(n) = &v
-        && let (true, Neu::Bin(o, a, b)) = (op == "!", &**n)
+        && let (true, Term::Bin(o, a, b)) = (op == "!", &**n)
     {
         // 否定は比較を反転させて、証明で照合しやすい形にする
         let flip = match *o {
@@ -135,7 +150,7 @@ pub(super) fn un(op: &'static str, v: V) -> V {
     match (op, v) {
         ("-", V::Int(n)) if n != i64::MIN => V::Int(-n),
         ("!", V::Bool(b)) => V::Bool(!b),
-        (op, v) => neu(Neu::Un(op, v)),
+        (op, v) => neu(Term::Un(op, v)),
     }
 }
 
@@ -172,9 +187,9 @@ pub(super) fn bin(op: &'static str, a: V, b: V) -> V {
     }
     // > と >= は向きを揃えて < と <= にする
     match op {
-        ">" => neu(super::typeck::Neu::Bin("<", b, a)),
-        ">=" => neu(super::typeck::Neu::Bin("<=", b, a)),
-        _ => neu(super::typeck::Neu::Bin(op, a, b)),
+        ">" => neu(Term::Bin("<", b, a)),
+        ">=" => neu(Term::Bin("<=", b, a)),
+        _ => neu(Term::Bin(op, a, b)),
     }
 }
 
@@ -184,12 +199,12 @@ pub(super) fn len(v: V) -> V {
         V::Str(s) => V::Int(s.chars().count() as i64),
         V::Neu(n) => match &**n {
             // push は 1 つ増やし、set_at は変えない
-            Neu::Call(f, a) if f == "push" && a.len() == 2 => {
+            Term::Call(f, a) if f == "push" && a.len() == 2 => {
                 bin("+", len(a[0].clone()), V::Int(1))
             }
-            Neu::Call(f, a) if f == "set_at" && a.len() == 3 => len(a[0].clone()),
-            _ => neu(Neu::Call("len".into(), vec![v.clone()])),
+            Term::Call(f, a) if f == "set_at" && a.len() == 3 => len(a[0].clone()),
+            _ => neu(Term::Call("len".into(), vec![v.clone()])),
         },
-        _ => neu(Neu::Call("len".into(), vec![v])),
+        _ => neu(Term::Call("len".into(), vec![v])),
     }
 }
