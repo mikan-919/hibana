@@ -2,11 +2,11 @@
 use std -> *
 
 effect Log {
-    fn log(msg: str)
+    fn log(msg: String)
 }
 
 effect Fail {
-    fn fail(m: str) -> never
+    fn fail(m: String) -> never
 }
 
 fn double(x: int) -> int { x * 2 }

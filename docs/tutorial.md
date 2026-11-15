@@ -39,7 +39,7 @@ Hibana の Git 依存を更新するには `hibana update` を実行します。
 `hibana <ファイル>` でインタプリタが実行します。JavaScript の生成は Rust API の `hibana::to_js` で行えます。
 
 ```
-fn greet(name: str) -> str {
+fn greet(name: String) -> String {
     'hello, ' + name
 }
 
@@ -56,7 +56,7 @@ fn main() {
 - 文の区切りの `;` は省けます。改行が区切りになり、行末が演算子なら次の行へ続きます。
 - ブロックの最後の式がその値です。`return` は途中で抜ける時だけ使います。
 - `let` で束縛した変数は変更できません。変更する変数は `let mut` で宣言します。
-- 整数の `int` は 64 ビットで、範囲を超えると実行時エラーです。ほかの基本の型は `bool`、`str`（文字列）、`unit`（値が無いこと）です。
+- 整数の `int` は 64 ビットで、範囲を超えると実行時エラーです。ほかの基本の型は `bool`、`String`（文字列）、`unit`（値が無いこと）です。
 
 ## 2. 型
 
@@ -126,17 +126,17 @@ fn main() {
 use std -> *
 
 trait Describe<A> {
-    fn describe(x: A) -> str
+    fn describe(x: A) -> String
 }
 
 impl Describe<int> {
-    fn describe(x: int) -> str { 'int ' + to_str(x) }
+    fn describe(x: int) -> String { 'int ' + to_str(x) }
 }
 
-fn twice<A: Describe>(x: A) -> str { describe(x) + ', ' + describe(x) }
+fn twice<A: Describe>(x: A) -> String { describe(x) + ', ' + describe(x) }
 
 effect Log {
-    fn log(msg: str)
+    fn log(msg: String)
 }
 
 fn work() ! Log {

@@ -4,8 +4,8 @@ fn work() ! Count { tick()
     tick() }
 fn main() {
     let n = new_ref(0)
-    let log: Ref<Vec<str>> = new_ref([])
-    let add = fn(s: str) { write(log, push(read(log), s)) }
+    let log: Ref<Vec<String>> = new_ref([])
+    let add = fn(s: String) { write(log, push(read(log), s)) }
     handle work() {
         tick() -> {
             write(n, read(n) + 1)

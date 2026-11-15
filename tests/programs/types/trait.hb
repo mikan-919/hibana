@@ -4,23 +4,23 @@ use std -> *
 struct Point { x: int, y: int }
 
 trait Describe<A> {
-    fn describe(x: A) -> str
+    fn describe(x: A) -> String
     // 既定の実装。impl で省ける
-    fn shout(x: A) -> str { describe(x) + '!' }
+    fn shout(x: A) -> String { describe(x) + '!' }
 }
 
 impl Describe<int> {
-    fn describe(x: int) -> str { 'int ' + to_str(x) }
+    fn describe(x: int) -> String { 'int ' + to_str(x) }
 }
 
 impl Describe<Point> {
-    fn describe(p: Point) -> str { '(' + to_str(p.x) + ', ' + to_str(p.y) + ')' }
-    fn shout(p: Point) -> str { 'POINT' }
+    fn describe(p: Point) -> String { '(' + to_str(p.x) + ', ' + to_str(p.y) + ')' }
+    fn shout(p: Point) -> String { 'POINT' }
 }
 
 // 条件付きの実装: 要素が Describe なら Vec も Describe
 impl<A: Describe> Describe<Vec<A>> {
-    fn describe(xs: Vec<A>) -> str {
+    fn describe(xs: Vec<A>) -> String {
         let mut s = '['
         for x in xs { s = s + describe(x) + ';' }
         s + ']'
@@ -28,7 +28,7 @@ impl<A: Describe> Describe<Vec<A>> {
 }
 
 // 制約: 実装は呼び出す側で探して渡す
-fn twice<A: Describe>(x: A) -> str { describe(x) + ' ' + describe(x) }
+fn twice<A: Describe>(x: A) -> String { describe(x) + ' ' + describe(x) }
 
 fn main() {
     put(describe(1))
@@ -50,7 +50,7 @@ impl Ord<Point> {
 }
 
 impl Show<Point> {
-    fn show(p: Point) -> str { 'P' + to_str(p.x) + ',' + to_str(p.y) }
+    fn show(p: Point) -> String { 'P' + to_str(p.x) + ',' + to_str(p.y) }
 }
 
 fn same_or_max<A: Ord>(a: A, b: A) -> A {

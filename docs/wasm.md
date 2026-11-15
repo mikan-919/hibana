@@ -39,9 +39,9 @@ console.log(api.greet("hibana"));
 ```
 
 - `int` の引数は安全な整数の `Number` または符号付き 64 ビット範囲の `BigInt`。戻り値は `BigInt` です。
-- `str` は JavaScript の文字列です。UTF-8 として WASM のメモリへ渡します。
+- `String` は JavaScript の文字列です。UTF-8 として WASM のメモリへ渡します。
 - 戻り値のない関数は `undefined` を返します。
-- `extern "browser" { fn show(message: str) }` などの外部関数は、`imports.hibana_host.show` に同期 JavaScript 関数を指定します。WASM では extern のモジュール文字列ではなく、関数名で接続します。
+- `extern "browser" { fn show(message: String) }` などの外部関数は、`imports.hibana_host.show` に同期 JavaScript 関数を指定します。WASM では extern のモジュール文字列ではなく、関数名で接続します。
 - ホスト関数も同じ型変換を使います。非同期関数や Promise は扱いません。
 - 接続コードは呼び出しごとに一時メモリをリセットします。ホスト関数から同じインスタンスの公開関数へ再入することはできません。
 

@@ -137,7 +137,7 @@ impl fmt::Display for ValueType {
         f.write_str(match self {
             Self::Int => "int",
             Self::Bool => "bool",
-            Self::Str => "str",
+            Self::Str => "String",
             Self::Unit => "unit",
             Self::Other => "other",
         })
@@ -261,7 +261,7 @@ fn value_type(e: &Ast) -> ValueType {
     match e.peel() {
         Ast::Var(n) if n == "int" => ValueType::Int,
         Ast::Var(n) if n == "bool" => ValueType::Bool,
-        Ast::Var(n) if n == "str" => ValueType::Str,
+        Ast::Var(n) if n == "String" => ValueType::Str,
         Ast::Var(n) if n == "unit" => ValueType::Unit,
         Ast::Refine(base, _, _) => value_type(base),
         _ => ValueType::Other,

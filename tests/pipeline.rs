@@ -69,13 +69,13 @@ try { x.twice(); throw Error('accepted missing argument'); } catch (e) { if (!(e
 fn inspection_and_glue_preserve_boundary_signatures_and_order() {
     let source = r#"
 extern 'host' {
-    fn show(message: str)
-    fn decorate(message: str, n: int) -> str
+    fn show(message: String)
+    fn decorate(message: String, n: int) -> String
     fn count() -> int
     fn unused_host() -> int
 }
-fn greet(message: str, n: int) -> str { decorate(message, n) }
-fn log(message: str) { show(message) }
+fn greet(message: String, n: int) -> String { decorate(message, n) }
+fn log(message: String) { show(message) }
 fn answer() -> int { count() }
 fn unused() -> int { unused_host() }
 "#;
@@ -88,12 +88,12 @@ fn unused() -> int { unused_host() }
         serde_json::json!({
             "exports": [
                 ["answer", [], "int"],
-                ["log", ["str"], "unit"],
-                ["greet", ["str", "int"], "str"]
+                ["log", ["String"], "unit"],
+                ["greet", ["String", "int"], "String"]
             ],
             "imports": [
-                ["show", ["str"], "unit"],
-                ["decorate", ["str", "int"], "str"],
+                ["show", ["String"], "unit"],
+                ["decorate", ["String", "int"], "String"],
                 ["count", [], "int"]
             ]
         })

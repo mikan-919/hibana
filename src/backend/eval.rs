@@ -644,7 +644,7 @@ impl Interp<'_> {
                     let str_arg = |i: usize| -> R<String> {
                         match vs.get(i) {
                             Some(Value::Str(s)) => Ok(s.to_string()),
-                            _ => Err(Flow::Error(format!("{name} の引数は str"))),
+                            _ => Err(Flow::Error(format!("{name} の引数は String"))),
                         }
                     };
                     let bytes_value = |bytes: Vec<u8>| {
@@ -678,13 +678,13 @@ impl Interp<'_> {
                             } else { input.clone() };
                             let index = if name == "compile" || name == "compile_file" { 2 } else { 1 };
                             let Some(Value::Arr(values)) = vs.get(index) else {
-                                return Err(Flow::Error(format!("{name} の公開名は Vec<str>")));
+                                return Err(Flow::Error(format!("{name} の公開名は Vec<String>")));
                             };
                             let exports = values
                                 .iter()
                                 .map(|v| match v {
                                     Value::Str(s) => Ok(s.to_string()),
-                                    _ => Err(Flow::Error(format!("{name} の公開名は str"))),
+                                    _ => Err(Flow::Error(format!("{name} の公開名は String"))),
                                 })
                                 .collect::<R<Vec<String>>>()?;
                             let compile = || -> R<Value> {

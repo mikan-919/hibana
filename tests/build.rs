@@ -15,12 +15,12 @@ fn temp() -> PathBuf {
 
 #[test]
 fn compiler_services_return_data() {
-    let source = "extern { fn notify(s: str) }\nextern { fn unused() }\nfn echo(s: str) -> str { notify(s); s }";
+    let source = "extern { fn notify(s: String) }\nextern { fn unused() }\nfn echo(s: String) -> String { notify(s); s }";
     let names = vec!["echo".into()];
     assert!(hibana::pipeline::compile(source, "wasm", &names).unwrap().starts_with(b"\0asm"));
     let metadata: serde_json::Value = serde_json::from_str(&hibana::pipeline::inspect_exports(source, &names).unwrap()).unwrap();
-    assert_eq!(metadata["exports"], serde_json::json!([["echo", ["str"], "str"]]));
-    assert_eq!(metadata["imports"], serde_json::json!([["notify", ["str"], "unit"]]));
+    assert_eq!(metadata["exports"], serde_json::json!([["echo", ["String"], "String"]]));
+    assert_eq!(metadata["imports"], serde_json::json!([["notify", ["String"], "unit"]]));
     assert!(hibana::pipeline::compile(source, "unknown", &names).is_err());
     assert!(hibana::pipeline::compile(source, "wasm", &[]).is_err());
     assert!(hibana::pipeline::compile("fn main() {}", "js", &names).is_err());
@@ -41,7 +41,7 @@ fn script_builds_files_and_preserves_arguments() {
     std::fs::write(dir.join("src/app.hb"), "use './lib.hb' -> *\nfn main() { put(answer()) }\n").unwrap();
     std::fs::write(dir.join("src/wasm.hb"), "use './lib.hb' -> *\nfn answer2() -> int { answer() }\n").unwrap();
     std::fs::write(dir.join("build.hb"), r#"
-fn arguments() -> Vec<str> { args() }
+fn arguments() -> Vec<String> { args() }
 fn main() {
     put(arguments())
     write_bytes('dist/app.mjs', compile_file('src/app.hb', 'js', []))
@@ -75,7 +75,7 @@ fn compiled_targets_reject_script_functions() {
             assert!(err.contains("スクリプト実行"), "{call}: {err}");
         }
     }
-    let source = "fn exported() -> str { read_text('x') }";
+    let source = "fn exported() -> String { read_text('x') }";
     let err = hibana::to_wasm_library(source, &["exported".into()]).unwrap_err().to_string();
     assert!(err.contains("スクリプト実行"), "{err}");
 }

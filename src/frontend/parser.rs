@@ -504,7 +504,7 @@ fn parse_toks(src: &str, toks: Vec<Token>) -> R<Program> {
         "error",
         "int",
         "bool",
-        "str",
+        "String",
         "syn",
         "unit",
         "ident",

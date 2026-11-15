@@ -1,7 +1,7 @@
 // 代数的エフェクト。効果は effect で宣言し、関数の型の ! の後ろに書く。handle で処理すると型から消える
 
-struct NotFound { id: str }
-struct User { name: str, age: int }
+struct NotFound { id: String }
+struct User { name: String, age: int }
 
 // 失敗。resume しない腕は handle 全体の値になる
 effect Fail<E> {
@@ -14,12 +14,12 @@ effect Need<T> {
 }
 
 effect Log {
-    fn log(msg: str)
+    fn log(msg: String)
 }
 
-struct Db { prefix: str }
+struct Db { prefix: String }
 
-fn find(id: str) -> User ! Fail<NotFound>, Need<Db>, Log {
+fn find(id: String) -> User ! Fail<NotFound>, Need<Db>, Log {
     let db = need()
     log('find ' + id)
     if id == '0' {
@@ -29,21 +29,21 @@ fn find(id: str) -> User ! Fail<NotFound>, Need<Db>, Log {
     }
 }
 
-fn describe_or(id: str) -> str {
+fn describe_or(id: String) -> String {
     handle describe(id) {
         need() -> resume(Db { prefix: 'u' })
         log(msg) -> resume()
     }
 }
 
-fn describe(id: str) -> str ! Need<Db>, Log {
+fn describe(id: String) -> String ! Need<Db>, Log {
     handle find(id).name {
         fail(e) -> 'not found: ' + e.id
     }
 }
 
 // 関数型にも効果を書ける。効果の無い関数は、効果を持つ関数型の値として渡せる
-fn each(xs: Vec<str>, f: (str) -> unit ! Log) ! Log {
+fn each(xs: Vec<String>, f: (String) -> unit ! Log) ! Log {
     for x in xs { f(x) }
 }
 

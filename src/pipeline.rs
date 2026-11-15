@@ -184,7 +184,7 @@ export async function instantiate(bytes, imports = {}) {
       if (value !== undefined) throw new TypeError("unit の戻り値は undefined が必要");
       return undefined;
     }
-    if (type === "str") {
+    if (type === "String") {
       if (typeof value !== "string") throw new TypeError("文字列が必要");
       const data = encoder.encode(value);
       const ptr = instance.exports.__hibana_alloc(data.length) >>> 0;
@@ -260,7 +260,7 @@ fn boundary_signature<'a>(
     fn ty(t: &ir::ValueType) -> &'static str {
         match t {
             ir::ValueType::Int => "int",
-            ir::ValueType::Str => "str",
+            ir::ValueType::Str => "String",
             ir::ValueType::Unit => "unit",
             ir::ValueType::Bool => "bool",
             ir::ValueType::Other => "other",

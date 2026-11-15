@@ -59,7 +59,7 @@ type Pos = int[x -> x > 0]
 - 構築子は `Shape::Circle(p, 2)` のように型の名前を付けても書けます。`match` の腕でも同じです（`Shape::Circle(c, r) -> ...`）。
 - 構造体の値のフィールドの順序は自由です。構造体は、構築子を1つ持つ型として扱います。`struct Name(型, ...)` のフィールドの名前は `0`、`1`、... で、`Name(1, 2)` と表示します。
 - `type Name = { ... }` と `type Name = A | B` はエラーで、`struct` と `enum` を使うよう伝えます。
-- 名前の決まり: 組み込みのプリミティブ型は小文字（`int bool str syn unit`）、それ以外の型は大文字で始めます。
+- 名前の決まり: 組み込みの型は `int bool String syn unit`、利用者が宣言する型は大文字で始めます。
 
 ### 3.3 モジュール
 
@@ -105,7 +105,7 @@ fn main() {
 | TypeScript の型 | hibana の型 | 境界での変換 |
 |---|---|---|
 | `number` | `int` | number と BigInt（整数でなければ実行時エラー） |
-| `string` `boolean` `void` | `str` `bool` `unit` | そのまま |
+| `string` `boolean` `void` | `String` `bool` `unit` | そのまま |
 | `T[]` `Array<T>` | `Vec<T>` | 要素ごと |
 | `(x: A) => B` | `(A) -> B` | 引数と戻り値を変換するよう包む |
 | `interface P { ... }`、`type P = { ... }`、オブジェクト型 | 構造体 | 同じフィールド名のオブジェクト |
@@ -124,7 +124,7 @@ fn main() {
 effect Fail<E> { fn fail(e: E) -> never }
 effect Need<T> { fn need() -> T }
 
-fn find(id: str) -> User ! Fail<NotFound>, Need<Db> {
+fn find(id: String) -> User ! Fail<NotFound>, Need<Db> {
     let db = need()
     if id == '0' { fail(NotFound { id: id }) } else { User { name: db.prefix + id } }
 }
@@ -141,11 +141,11 @@ fn main() {
 - 関数が起こす効果は、戻り値の型の後ろに `! 効果, ...` と書きます。書いていない効果を起こすと型エラーです。効果を起こす関数を呼ぶ関数も、その効果を書くか `handle` で処理する必要があります。
 - `handle 式 { 操作(引数) -> 式 ... }` は、式の中で起きた腕の操作を処理します。処理した効果は、`handle` の外の型から消えます。効果の型引数（`Fail<E>` の `E`）は、本体で起こした効果の型から決まります。
 - 腕の中の操作は、その `handle` より外側で処理します（深いハンドラー）。
-- 関数型にも効果を書けます（`(str) -> unit ! Log`）。期待する型が効果を持つ関数型なら、無名関数の中でその効果を起こせます。起こす効果の少ない関数は、多い関数型の値として使えます（効果の無い関数を `! Log` の引数に渡せる）。
+- 関数型にも効果を書けます（`(String) -> unit ! Log`）。期待する型が効果を持つ関数型なら、無名関数の中でその効果を起こせます。起こす効果の少ない関数は、多い関数型の値として使えます（効果の無い関数を `! Log` の引数に渡せる）。
 - 効果の多相: `<E: Effect>` は効果の並びを表す型引数です。`fn map<A, B, E: Effect>(xs: Vec<A>, f: (A) -> B ! E) -> Vec<B> ! E` を呼ぶと、`E` は渡した関数の効果になり（効果の無い関数なら空）、`map` もその効果を起こします。関数の中では `E` を1つの効果として扱い、`E` の値の関数を呼べます。std の `map` `filter` `fold` がこの形です（例は `tests/programs/effects/poly.hb`）。
   - 渡す無名関数の引数の型は、前の引数から決まった関数型の引数の型から推論します（`map([1, 2], fn(x) { x * 2 })`）。戻り値の型と効果は本体から求め、`E` は本体で起きた効果になります。書けば、書いた型と効果を使います。
   - 効果の変数に `Async` も入れられます。JavaScript では、効果の多相な関数ごとに、効果の変数を通した呼び出しを待つ async 版（`f_map$a`）も出力し、`E` に `Async` が入る呼び出しはそちらを呼んで待ちます（async かどうかだけの単相化）。
-- 引数の並びの中で、効果を持つ関数型の後に名前の無い引数が続く時は、関数型を括弧で囲みます（`(int, ((int) -> int ! Log), str) -> int`）。
+- 引数の並びの中で、効果を持つ関数型の後に名前の無い引数が続く時は、関数型を括弧で囲みます（`(int, ((int) -> int ! Log), String) -> int`）。
 - `resume(値)`（unit なら `resume()`）は続きを1回だけ再開します。腕の最後（腕の値になる位置）にだけ書けます。戻り値の型が `never` の操作は再開できません。
 - `main` が起こせる効果は `Async` だけです。
 - `all(fs)` は、`() -> T ! Async` の `Vec` の関数を並行に実行し、結果を `Vec<T>` で返します（`Async` の効果を起こす）。`all([fn() { ... }, ...])` と書けば、無名関数の中で `Async` を起こせます。すべての処理が終わるまで `all` から戻りません（構造化並行性）。インタプリタでは順に実行します。
@@ -207,19 +207,19 @@ greet = { git = "https://github.com/someone/hibana-greet", tag = "v0.1.0" }   # 
 
 ```
 trait Show<A> {
-    fn show(x: A) -> str
-    fn loud(x: A) -> str { show(x) + '!' }   // 既定の実装。impl で省ける
+    fn show(x: A) -> String
+    fn loud(x: A) -> String { show(x) + '!' }   // 既定の実装。impl で省ける
 }
 
 impl Show<int> {
-    fn show(x: int) -> str { to_str(x) }
+    fn show(x: int) -> String { to_str(x) }
 }
 
 impl<A: Show> Show<Vec<A>> {                 // 条件付きの実装
-    fn show(xs: Vec<A>) -> str { ... }
+    fn show(xs: Vec<A>) -> String { ... }
 }
 
-fn twice<A: Show>(x: A) -> str { show(x) + show(x) }   // 制約。<A: Show + Eq> で複数
+fn twice<A: Show>(x: A) -> String { show(x) + show(x) }   // 制約。<A: Show + Eq> で複数
 
 trait Ord<A>: Eq<A> {                        // 親のトレイト。Ord の実装には Eq の実装が要る
     fn lt(a: A, b: A) -> bool
@@ -232,7 +232,7 @@ trait Ord<A>: Eq<A> {                        // 親のトレイト。Ord の実�
 - 同じトレイトと型の組に `impl` が二つあると、名前の順で最初のものを使います（重なりは検査しません）。
 - メソッドは自分のジェネリック引数を持てません。トレイトの型引数で書きます。
 
-`std` の `Eq` と `Show` は演算子と組み込み関数に結びついています。`Eq` の実装がある型では `==` と `!=` がその実装の `eq` を、`Show` の実装がある型では `to_str` と `put` がその実装の `show` を使います。実装が無い型では、組み込みの比較と文字列化のままです。`int` `str` `bool` は、細分化型の検査が `==` を直接扱うので、いつも組み込みです。
+`std` の `Eq` と `Show` は演算子と組み込み関数に結びついています。`Eq` の実装がある型では `==` と `!=` がその実装の `eq` を、`Show` の実装がある型では `to_str` と `put` がその実装の `show` を使います。実装が無い型では、組み込みの比較と文字列化のままです。`int` `String` `bool` は、細分化型の検査が `==` を直接扱うので、いつも組み込みです。
 
 ### 3.8 テスト
 
@@ -261,10 +261,10 @@ test '引き算' {
 ### 3.9 型に属する関数とメソッド
 
 ```
-struct Param { value: str }
+struct Param { value: String }
 
-fn Param::get(p: Param) -> str { p.value }     // 型 Param に属する関数
-fn str::twice(s: str) -> str { s + s }         // 組み込みの型にも書ける
+fn Param::get(p: Param) -> String { p.value }     // 型 Param に属する関数
+fn String::twice(s: String) -> String { s + s }         // 組み込みの型にも書ける
 
 fn main() {
     let id = Param { value: 'u7' }
@@ -274,7 +274,7 @@ fn main() {
 ```
 
 - `型の名前::名前` は1つの名前です。関数の宣言・呼び出し・`use ... -> { 名前 }` のどこでも書けます。
-- `x.f(a)` は、`x` の型を求めてから `T::f(x, a)` の呼び出しに書き換えます。`T::f` が無ければエラーです。`str`・`int`・`Vec` などの組み込みの型のメソッドは、どのモジュールで宣言しても使えます。
+- `x.f(a)` は、`x` の型を求めてから `T::f(x, a)` の呼び出しに書き換えます。`T::f` が無ければエラーです。`String`・`int`・`Vec` などの組み込みの型のメソッドは、どのモジュールで宣言しても使えます。
 - ponytail: 名前は内部で `T__f` になり、エラーにもその名前で出ます。同じ組み込みの型に同じ名前のメソッドを複数のモジュールが宣言すると、名前の順で最初のものを使います。
 
 ## 4. 式
@@ -301,7 +301,7 @@ fn main() {
 
 | 型 | 意味 |
 |---|---|
-| `int` `bool` `str` `unit` | 64ビット整数・真偽値・文字列・値の無いこと |
+| `int` `bool` `String` `unit` | 64ビット整数・真偽値・文字列・値の無いこと |
 | `Vec<T>` | 配列。書き換えられないので、`Vec<int[x -> x > 0]>` は `Vec<int>` として使える |
 | `Ref<T>` | 書き換えられる参照。`new_ref(x)` で作り、`read(r)` で読み、`write(r, x)` で書く。無名関数や handle の腕が写し取っても同じ値を指す（`mut` 変数は写し取った時の値になる） |
 | `(x: A, B) -> C` | 関数型。引数名は省ける。細分化型の条件では前の引数の値を参照できる |
@@ -364,7 +364,7 @@ macro pow ('pow' '(' x:Expr ',' n:Int ')') {
 }
 ```
 
-- `quote { ... }` はコード片を作ります。中では `$x`（変数の値）、`$x.f`（フィールド）、`${式}`（式の値）、`$( ... ) 区切り? *`（配列を繰り返す）が使えます。差し込める値は `syn`・`int`・`str`・`bool` です。
+- `quote { ... }` はコード片を作ります。中では `$x`（変数の値）、`$x.f`（フィールド）、`${式}`（式の値）、`$( ... ) 区切り? *`（配列を繰り返す）が使えます。差し込める値は `syn`・`int`・`String`・`bool` です。
 - パターンで束縛した式は、括弧で囲んで差し込みます（`-sum(1 + 2)` は `-(1 + 2)`）。`quote` で作った断片は囲みません。
 - 束縛の型は、パターンから決まる `syn<種類>` です（`p:Pair` は `syn<Pair>`、`ps:(Pair % ',')` は `syn<[Pair]>`、`x:Expr` は `syn<Expr>`）。存在しないフィールドの参照や、配列でない値への `at` は、マクロ定義の時点で型エラーになります。
 - 組み込み関数: `len(x)`、`at(xs, i)`、`is_null(x)`、`int_of(x)`、`str_of(x)`、`ident(s)`（文字列から識別子を作る）、`error(msg)`（コンパイルエラーにする）。文字列の関数（9 節）も使えます。マクロ本体の `put` は標準エラーに出ます。
@@ -393,13 +393,13 @@ macro unless('unless' expr:Expr block:Block) {
 | 関数 | 型 |
 |---|---|
 | `put(x)` | 任意の値を表示する |
-| `len(v)` | `Vec<T>` か `str` の長さ。`mut` の変数は、初期値と `push`・`set_at` の代入から長さを追う（ループと分岐の後は分からなくなる） |
+| `len(v)` | `Vec<T>` か `String` の長さ。`mut` の変数は、初期値と `push`・`set_at` の代入から長さを追う（ループと分岐の後は分からなくなる） |
 | `to_str(x)` | 任意の値を文字列にする |
-| `split(s, sep)` | `(str, str) -> Vec<str>` |
-| `starts_with(s, p)` | `(str, str) -> bool` |
-| `slice(s, i, j)` | `(str, int, int) -> str`。範囲外は実行時エラー |
-| `chars(s)` `code(c)` | `str -> Vec<str>`（1 文字ずつ）、`str -> int`（先頭の文字の番号。空なら -1） |
-| `panic(msg)` | `str -> never`。実行時エラーにする |
+| `split(s, sep)` | `(String, String) -> Vec<String>` |
+| `starts_with(s, p)` | `(String, String) -> bool` |
+| `slice(s, i, j)` | `(String, int, int) -> String`。範囲外は実行時エラー |
+| `chars(s)` `code(c)` | `String -> Vec<String>`（1 文字ずつ）、`String -> int`（先頭の文字の番号。空なら -1） |
+| `panic(msg)` | `String -> never`。実行時エラーにする |
 | `now_ms()` | `() -> int`。1970 年 1 月 1 日（UTC）からのミリ秒 |
 | `new_ref(x)` `read(r)` `write(r, x)` | `T -> Ref<T>`、`Ref<T> -> T`、`(Ref<T>, T) -> unit` |
 | `push(v, x)` | `(Vec<T>, T) -> Vec<T>`。`v` の後ろに `x` を足した新しい `Vec`（`v` は変わらない）。`xs = push(xs, x)` の形で、`xs` の配列を他から指していなければ、写さずにその場で足す（平均 O(1)） |
@@ -411,11 +411,11 @@ macro unless('unless' expr:Expr block:Block) {
 
 | 関数 | 型と動作 |
 |---|---|
-| `args()` | `() -> Vec<str>`。`--` の後の引数 |
-| `read_text(path)` / `read_bytes(path)` | `str -> str` / `str -> Vec<int>`。UTF-8 とバイト列の読み込み |
-| `write_text(path, text)` / `write_bytes(path, bytes)` | `(str, str) -> unit` / `(str, Vec<int>) -> unit`。親ディレクトリを作って書き込む。バイトは 0〜255 |
-| `compile_file(path, target, exports)` | `(str, str, Vec<str>) -> Vec<int>`。ファイルのディレクトリを基準に `use` を解決してコンパイル |
-| `inspect_file_exports(path, exports)` | `(str, Vec<str>) -> str`。ファイルの公開関数の型情報を返す |
+| `args()` | `() -> Vec<String>`。`--` の後の引数 |
+| `read_text(path)` / `read_bytes(path)` | `String -> String` / `String -> Vec<int>`。UTF-8 とバイト列の読み込み |
+| `write_text(path, text)` / `write_bytes(path, bytes)` | `(String, String) -> unit` / `(String, Vec<int>) -> unit`。親ディレクトリを作って書き込む。バイトは 0〜255 |
+| `compile_file(path, target, exports)` | `(String, String, Vec<String>) -> Vec<int>`。ファイルのディレクトリを基準に `use` を解決してコンパイル |
+| `inspect_file_exports(path, exports)` | `(String, Vec<String>) -> String`。ファイルの公開関数の型情報を返す |
 | `compile(source, target, exports)` / `inspect_exports(source, exports)` | ソース文字列をコンパイルし、または型情報を返す |
 | `utf8(text)` / `js_glue(metadata)` | 文字列をバイト列に変換 / 型情報から JavaScript 接続コードを生成 |
 
@@ -429,7 +429,7 @@ macro unless('unless' expr:Expr block:Block) {
 |---|---|
 | `Option<A>` = `None` \| `Some(value)`、`o.unwrap()`（`None` なら実行時エラー）、`unwrap_or(o, d)` | 値が無いかもしれないこと |
 | `Result<A, E>` = `Ok(value)` \| `Err(error)` | 成功か失敗 |
-| `Eq<A>`（`eq`）、`Ord<A>: Eq<A>`（`lt`）、`Show<A>`（`show`） | トレイト（3.7 節）。`int` `str` `bool` の `Eq` と `Show`、`int` の `Ord`、`Vec<A>` の `Eq` と `Show` の実装がある（`put` と `to_str` での `Vec` の表示は組み込みのまま） |
+| `Eq<A>`（`eq`）、`Ord<A>: Eq<A>`（`lt`）、`Show<A>`（`show`） | トレイト（3.7 節）。`int` `String` `bool` の `Eq` と `Show`、`int` の `Ord`、`Vec<A>` の `Eq` と `Show` の実装がある（`put` と `to_str` での `Vec` の表示は組み込みのまま） |
 | `max(a, b)` `min(a, b)` `contains(xs, x)` | `Ord` と `Eq` を使う関数 |
 | `assert(ok)` `assert_eq(got, want)` | テスト（3.8 節）。偽か等しくなければ実行時エラー |
 | `map(xs, f)` `filter(xs, f)` `fold(xs, init, f)` | `Vec` の高階関数。`f` の効果をそのまま起こす（効果の多相） |
@@ -563,7 +563,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-IR は WASM とネイティブの共通の中間表現です。制御フローは WASM と同じ入れ子の形（`if`・`while`・`return`）で持ちます。値はすべて、型の番号と中身の 2 つの 64 ビット整数で表します。文字列の連結・比較・表示や組み込み関数は、hibana の構文で書いたランタイム（`src/backend/runtime.hb`）にあり、同じ変換で IR にします。ランタイムは型検査を通さず、`__load` などの組み込みを IR の命令に直接変換します。効果の `handle` は、腕の値で抜ける時に中断の印を置き、呼び出しの後の検査で 1 段ずつ戻って本体を抜けます。`resume` は腕の末尾でだけ使えます。全関数が IR に対応していない場合は、`lower(&checked, Some(&exports))` に公開関数を渡すと、使う関数だけを変換できます。WASM の境界（公開関数と外部関数）は `int`・`str`・`unit` だけを渡せます。任意の外部関数、配列の受け渡し、WASM モジュール同士のリンクには未対応です。
+IR は WASM とネイティブの共通の中間表現です。制御フローは WASM と同じ入れ子の形（`if`・`while`・`return`）で持ちます。値はすべて、型の番号と中身の 2 つの 64 ビット整数で表します。文字列の連結・比較・表示や組み込み関数は、hibana の構文で書いたランタイム（`src/backend/runtime.hb`）にあり、同じ変換で IR にします。ランタイムは型検査を通さず、`__load` などの組み込みを IR の命令に直接変換します。効果の `handle` は、腕の値で抜ける時に中断の印を置き、呼び出しの後の検査で 1 段ずつ戻って本体を抜けます。`resume` は腕の末尾でだけ使えます。全関数が IR に対応していない場合は、`lower(&checked, Some(&exports))` に公開関数を渡すと、使う関数だけを変換できます。WASM の境界（公開関数と外部関数）は `int`・`String`・`unit` だけを渡せます。任意の外部関数、配列の受け渡し、WASM モジュール同士のリンクには未対応です。
 
 ネイティブの出力（`hibana::to_native`）は、IR を Cranelift（Rust で書かれたコード生成器）で機械語にし、libc を使わない静的な ELF の実行ファイルを返します。リンカーは使わず、出力・終了・メモリの確保（mmap）・時刻は Linux の syscall を直接呼びます。現在は x86-64 の Linux だけに対応し、外部関数は使えません。実行時エラーでは、標準エラーにメッセージを書いて終了コード 1 で終わります。
 

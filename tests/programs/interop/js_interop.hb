@@ -11,10 +11,10 @@ fn twice_later(x: int) -> int ! Async {
 
 // all は並行に待つ。並行に動く処理の handle は互いに混ざらない
 effect Tag {
-    fn tag() -> str
+    fn tag() -> String
 }
 
-fn job(name: str, n: int) -> str ! Async {
+fn job(name: String, n: int) -> String ! Async {
     handle {
         let a = tag()
         let x = util.later(n)

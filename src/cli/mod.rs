@@ -9,7 +9,7 @@ struct Report {
     msg: String,
     #[source_code]
     src: miette::NamedSource<String>,
-    // 下線に付ける説明。メッセージの一番内側の部分（"関数 f: 引数 x: int が必要だが str" の "int が必要だが str"）
+    // 下線に付ける説明。メッセージの一番内側の部分（"関数 f: 引数 x: int が必要だが String" の "int が必要だが String"）
     #[label("{label}")]
     span: Option<miette::SourceSpan>,
     label: String,
@@ -253,7 +253,7 @@ fn report(path: &str, src: &str, e: error::Error) -> miette::Report {
     {
         let label = e.msg.rsplit(": ").next().unwrap_or("ここ").to_string();
         // 文字列が必要な所の数値・真偽値には to_str を提案する
-        let to_str = ["str が必要だが int", "str が必要だが bool"]
+        let to_str = ["String が必要だが int", "String が必要だが bool"]
             .iter()
             .any(|s| e.msg.contains(s))
             .then(|| "to_str(値) で文字列にする".to_string());
@@ -646,7 +646,7 @@ fn main() {
             out(src).unwrap(),
             "[\"u7\", \"not found: 0\"]\neach a\neach b\n[log] find 1\nuser1\n[log] find 0\nnot found: 0\n[log] find 2\nuser2\n3\n"
         );
-        let p = "effect Log { fn log(msg: str) }\neffect Ask { fn ask() -> int }\neffect Fail { fn fail(m: str) -> never }\n";
+        let p = "effect Log { fn log(msg: String) }\neffect Ask { fn ask() -> int }\neffect Fail { fn fail(m: String) -> never }\n";
         for (src, msg) in [
             (
                 "fn main() { log('x') }",
@@ -663,7 +663,7 @@ fn main() {
             ),
             (
                 "fn main() { let x = handle ask() + 1 { ask() -> resume('s') } }",
-                "int が必要だが str",
+                "int が必要だが String",
             ),
             (
                 "fn main() { handle fail('a') { fail(m) -> resume() } }",
@@ -727,8 +727,8 @@ fn main() {
         let src = "use std -> *\nstruct P { x: int, y: int }\nimpl Eq<P> {\n fn eq(a: P, b: P) -> bool { a.x == b.x }\n}\nfn main() { put(P { x: 1, y: 2 } == P { x: 1, y: 3 }) }";
         assert_eq!(out(src).unwrap(), "true\n");
         let e = out("use std -> *\nfn main() { put(max('a', 'b')) }").unwrap_err();
-        assert!(e.msg.contains("Ord<str> の実装が無い"), "{}", e.msg);
-        let e = out("use std -> *\nimpl Show<int> {\n fn shw(x: int) -> str { '' }\n}\nfn main() {}").unwrap_err();
+        assert!(e.msg.contains("Ord<String> の実装が無い"), "{}", e.msg);
+        let e = out("use std -> *\nimpl Show<int> {\n fn shw(x: int) -> String { '' }\n}\nfn main() {}").unwrap_err();
         assert!(e.msg.contains("メソッド shw は無い"), "{}", e.msg);
     }
 
@@ -739,7 +739,7 @@ fn main() {
         assert!(e.msg.contains("構造体は struct"), "{}", e.msg);
         let e = out("type S = A | B\nfn main() {}").unwrap_err();
         assert!(e.msg.contains("直和型は enum"), "{}", e.msg);
-        let src = "enum S {\n    A\n    B(n: int)\n}\nstruct W(int, str)\nfn main() {\n put(B(1))\n let w = W(1, 'a')\n put(w.1)\n put(w)\n}";
+        let src = "enum S {\n    A\n    B(n: int)\n}\nstruct W(int, String)\nfn main() {\n put(B(1))\n let w = W(1, 'a')\n put(w.1)\n put(w)\n}";
         assert_eq!(out(src).unwrap(), "B(1)\na\nW(1, \"a\")\n");
     }
 
@@ -773,7 +773,7 @@ fn main() {
         assert_eq!(e.help.as_deref(), Some("count のことか"));
         let e = out("fn main() { prnt(1) }").unwrap_err();
         assert_eq!(e.help.as_deref(), Some("put のことか"));
-        let src = "effect Log {\n fn log(m: str)\n}\nfn n() ! Log { log('a') }\nfn main() { n() }";
+        let src = "effect Log {\n fn log(m: String)\n}\nfn n() ! Log { log('a') }\nfn main() { n() }";
         let e = out(src).unwrap_err();
         assert_eq!(e.help.as_deref(), Some("関数 n の型が ! Log を持つ"));
         let (at, n) = e.origin.unwrap();
@@ -823,7 +823,7 @@ fn main() {
     // impl の型エラーは、impl の行を指す（生成した構築子の引数の検査。impl は 5 行目）
     #[test]
     fn impl_error_has_line() {
-        let src = "fn main() {}\ntrait Show<A> {\n    fn show(x: A) -> int\n}\nimpl Show<int> {\n    fn show(x: int) -> str { 'a' }\n}\n";
+        let src = "fn main() {}\ntrait Show<A> {\n    fn show(x: A) -> int\n}\nimpl Show<int> {\n    fn show(x: int) -> String { 'a' }\n}\n";
         let e = out(src).unwrap_err();
         assert!(e.msg.starts_with("行 5: 関数 Show#impl0: "), "{e:?}");
     }

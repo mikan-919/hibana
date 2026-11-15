@@ -1,5 +1,5 @@
 // 文字列と整数のパターン。_ の腕が要る
-fn color(s: str) -> str {
+fn color(s: String) -> String {
     match s {
         'red'  -> 'nice'
         'blue' -> 'cool'

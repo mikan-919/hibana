@@ -464,7 +464,7 @@ mod tests {
         let data = t.0.join("data");
         let (lib, first, second) = (t.0.join("hibana-greet"), t.0.join("app"), t.0.join("other"));
         std::fs::create_dir_all(lib.join("src")).unwrap();
-        std::fs::write(lib.join("src/lib.hb"), "fn hi() -> str { 'hi' }\n").unwrap();
+        std::fs::write(lib.join("src/lib.hb"), "fn hi() -> String { 'hi' }\n").unwrap();
         git(&lib, &["init", "-q"]).unwrap();
         let rev1 = commit(&lib);
         let url = format!("file://{}", lib.display());
@@ -540,7 +540,7 @@ mod tests {
         let lib = t.0.join("lib");
         let root = t.0.join("app");
         std::fs::create_dir_all(lib.join("src")).unwrap();
-        std::fs::write(lib.join("src/lib.hb"), "fn hi() -> str { 'first' }\n").unwrap();
+        std::fs::write(lib.join("src/lib.hb"), "fn hi() -> String { 'first' }\n").unwrap();
         git(&lib, &["init", "-q"]).unwrap();
         let first = commit(&lib);
         let url = format!("file://{}", lib.display());
@@ -552,7 +552,7 @@ mod tests {
         std::fs::write(root.join(MANIFEST), manifest("rev", &first)).unwrap();
         install_in(&root, &data, false).unwrap();
         let lock = std::fs::read(root.join(LOCK)).unwrap();
-        std::fs::write(lib.join("src/lib.hb"), "fn hi() -> str { 'second' }\n").unwrap();
+        std::fs::write(lib.join("src/lib.hb"), "fn hi() -> String { 'second' }\n").unwrap();
         let second = commit(&lib);
         let empty_data = t.0.join("fresh-data");
         install_in(&root, &empty_data, true).unwrap();

@@ -17,22 +17,22 @@ fn reserved_wasm_exports_are_rejected() {
 fn web_strings_and_host_functions() {
     let source = r#"
 extern 'browser' {
-    fn decorate(s: str) -> str
-    fn show(s: str)
+    fn decorate(s: String) -> String
+    fn show(s: String)
     fn increment(n: int) -> int
     fn unused_host(n: int) -> int
-    fn __EXPORTS__(s: str) -> str
+    fn __EXPORTS__(s: String) -> String
 }
-fn echo(s: str) -> str { __EXPORTS__(s) }
-fn literal() -> str { 'こんにちは🌸' }
-fn run(s: str) -> str {
+fn echo(s: String) -> String { __EXPORTS__(s) }
+fn literal() -> String { 'こんにちは🌸' }
+fn run(s: String) -> String {
     let result = decorate(s)
     show(result)
     result
 }
 fn add(n: int) -> int { increment(n) }
-fn notify(s: str) { show(s) }
-fn unused(s: str) -> str { s }
+fn notify(s: String) { show(s) }
+fn unused(s: String) -> String { s }
 "#;
     let checked = pipeline::check(pipeline::parse(source).unwrap(), Kind::Library).unwrap();
     let all = pipeline::lower(&checked, None).unwrap();

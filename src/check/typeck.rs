@@ -36,7 +36,7 @@ pub(crate) enum V {
     Data(Rc<(String, Vec<V>)>),
     // data の型 (型名, 引数)
     DataT(Rc<(String, Vec<V>)>),
-    // int・bool・str・syn・unit・never。never は return の型で、どの型とも一致する
+    // int・bool・String・syn・unit・never。never は return の型で、どの型とも一致する
     Prim(&'static str),
     // Vec<要素の型>
     VecT(Rc<V>),
@@ -61,20 +61,20 @@ pub(crate) struct PiV {
 
 // js は JavaScript の値をそのまま持ち回る型（extern で使う）。never は戻らない効果の操作（fail など）の戻り値の型
 // Effect は効果の並びの型（<E: Effect> の効果の変数に使う）
-pub(super) const PRIMS: &[&str] = &["int", "bool", "str", "syn", "unit", "js", "never", "Effect"];
+pub(super) const PRIMS: &[&str] = &["int", "bool", "String", "syn", "unit", "js", "never", "Effect"];
 
 // マクロ本体の中でだけ使える組み込み関数 (名前, 引数, 戻り値)
 pub(super) const SYN_FNS: &[(&str, &[&str], &str)] = &[
     ("at", &["syn", "int"], "syn"),
     ("is_null", &["syn"], "bool"),
     ("int_of", &["syn"], "int"),
-    ("str_of", &["syn"], "str"),
-    ("error", &["str"], "never"),
+    ("str_of", &["syn"], "String"),
+    ("error", &["String"], "never"),
     // 文字列から識別子のコード片を作る。呼び出し側から見える名前を導入する時に使う
-    ("ident", &["str"], "syn"),
+    ("ident", &["String"], "syn"),
 ];
 
-// マクロ専用。Vec<str> の引数は個別に検査する
+// マクロ専用。Vec<String> の引数は個別に検査する
 pub(crate) const BUILD_FNS: &[&str] = &["compile", "inspect_exports", "utf8", "args", "read_text", "read_bytes", "write_text", "write_bytes", "compile_file", "inspect_file_exports", "js_glue"];
 
 // どこでも使える組み込み関数
@@ -103,19 +103,19 @@ const BUILTINS: &[&str] = &[
     "Async",
 ];
 
-// 文字列の組み込み関数 (名前, 引数, 戻り値)。split の戻り値は Vec<str>
+// 文字列の組み込み関数 (名前, 引数, 戻り値)。split の戻り値は Vec<String>
 const STR_FNS: &[(&str, &[&str], &str)] = &[
-    ("split", &["str", "str"], "Vec<str>"),
-    ("starts_with", &["str", "str"], "bool"),
-    ("slice", &["str", "int", "int"], "str"),
+    ("split", &["String", "String"], "Vec<String>"),
+    ("starts_with", &["String", "String"], "bool"),
+    ("slice", &["String", "int", "int"], "String"),
     // 1文字ずつの Vec と、先頭の文字の番号（空なら -1）
-    ("chars", &["str"], "Vec<str>"),
-    ("code", &["str"], "int"),
-    ("char_from_codepoint", &["int"], "str"),
+    ("chars", &["String"], "Vec<String>"),
+    ("code", &["String"], "int"),
+    ("char_from_codepoint", &["int"], "String"),
     // 1970 年からのミリ秒
     ("now_ms", &[], "int"),
     // 実行時エラーにする
-    ("panic", &["str"], "never"),
+    ("panic", &["String"], "never"),
 ];
 
 pub(super) fn prim(name: &str) -> V {
@@ -1319,9 +1319,9 @@ impl Ck {
             self.expr(&mut r)?
         };
         let ty = match op {
-            "+" if base(&lt) == prim("str") => {
-                want(&prim("str"), &rt, &op)?;
-                prim("str")
+            "+" if base(&lt) == prim("String") => {
+                want(&prim("String"), &rt, &op)?;
+                prim("String")
             }
             "+" | "-" | "*" | "**" | "/" | "%" | "<" | "<=" | ">" | ">=" => {
                 want(&int, &lt, &op)?;
@@ -1381,7 +1381,7 @@ impl Ck {
             _ => return Err(format!("{} の値にはメソッドを呼べない", show(&t)).into()),
         };
         let mut name = format!("{ty}__{f}");
-        // 組み込みの型（str など）のメソッドは、どのモジュールで宣言してもよい
+        // 組み込みの型（String など）のメソッドは、どのモジュールで宣言してもよい
         // ponytail: 同じ名前を複数のモジュールが宣言すれば最初の1つ。重なりの検査はトレイトに寄せる時に足す
         if !self.norm.fns.contains_key(name.as_str()) && !ty.contains('.') {
             let tail = format!(".{name}");
@@ -1431,7 +1431,7 @@ impl Ck {
             }
             None => *e = Expr::Call("to_str".into(), args),
         }
-        Ok(prim("str"))
+        Ok(prim("String"))
     }
 
     #[inline(never)]
@@ -1451,7 +1451,7 @@ impl Ck {
             Expr::Method(..) => unreachable!("expr_inner の先頭で分けている"),
             Expr::Int(_) => int,
             Expr::Bool(_) => boolean,
-            Expr::Str(_) => prim("str"),
+            Expr::Str(_) => prim("String"),
             Expr::Var(n) => match self.lookup(n) {
                 Some(en) => en.ty.clone(),
                 None if n == "Type" => V::Type,
@@ -1707,7 +1707,7 @@ impl Ck {
                     return Ok(V::Type);
                 }
                 match base(&self.expr(&mut args[0])?) {
-                    V::VecT(_) | V::Prim("str") => int,
+                    V::VecT(_) | V::Prim("String") => int,
                     t if self.in_macro && same(&prim("syn"), &t) => int,
                     t => return Err(format!("len は Vec に使う（実際は {}）", show(&t)).into()),
                 }
@@ -1723,7 +1723,7 @@ impl Ck {
                 }
             }
             Expr::Call(name, args) if BUILD_FNS.contains(&name.as_str()) => {
-                let str_t = prim("str");
+                let str_t = prim("String");
                 let bytes = V::VecT(Rc::new(prim("int")));
                 let names = V::VecT(Rc::new(str_t.clone()));
                 let (ps, ret) = match name.as_str() {
@@ -1841,8 +1841,8 @@ impl Ck {
                 for (p, a) in params.iter().zip(args.iter_mut()) {
                     self.check(a, &prim(p))?;
                 }
-                if *ret == "Vec<str>" {
-                    V::VecT(Rc::new(prim("str")))
+                if *ret == "Vec<String>" {
+                    V::VecT(Rc::new(prim("String")))
                 } else {
                     prim(ret)
                 }
@@ -2921,7 +2921,7 @@ mod tests {
 
     #[test]
     fn rejects_value_type_parameters_and_indexed_constructors() {
-        for source in ["type T<b: bool> = int", "enum Eq<A: Type, x: A> { Refl }", "enum Box<A> { MkBox(x: A) -> Box<A> }", "enum Box { MkBox(x: Type) }", "struct Box { x: Type }", "fn id(A: Type) {}", "type T = if true { int } else { str }"] {
+        for source in ["type T<b: bool> = int", "enum Eq<A: Type, x: A> { Refl }", "enum Box<A> { MkBox(x: A) -> Box<A> }", "enum Box { MkBox(x: Type) }", "struct Box { x: Type }", "fn id(A: Type) {}", "type T = if true { int } else { String }"] {
             assert!(check(source).is_err(), "{source}");
         }
         check("type Items<A> = Vec<A>\nfn main() { let xs: Items<int> = [1] }").unwrap();
@@ -2978,8 +2978,8 @@ mod tests {
         .unwrap();
         for (body, msg) in [
             ("let x = non()", "推論できない"),
-            ("let y: int = id<int>('s')", "int が必要だが str"),
-            ("let z: str = id(3)", "str が必要だが int"),
+            ("let y: int = id<int>('s')", "int が必要だが String"),
+            ("let z: String = id(3)", "String が必要だが int"),
             ("let w = id<int, int>(3)", "引数は1個"),
         ] {
             let e = check(&format!("{g}fn main() {{ {body} }}")).unwrap_err();
@@ -3009,7 +3009,7 @@ mod tests {
             ),
             ("Size { w: 3, h: 4 }", "Size { w: 0, h: 4 }", "証明できない"),
             ("put(q.x + q.y)", "put(q.z)", "フィールド z は無い"),
-            ("put(pr.snd)", "put(pr.snd + 1)", "str が必要だが int"),
+            ("put(pr.snd)", "put(pr.snd + 1)", "String が必要だが int"),
         ] {
             let e = check(&src.replace(from, to)).unwrap_err();
             assert!(e.contains(msg), "{to} => {e}");
@@ -3034,13 +3034,13 @@ mod tests {
             (
                 "'Hello, ' + name",
                 "'Hello, ' + 1",
-                "str が必要だが int",
+                "String が必要だが int",
             ),
             ("for p in parts {", "for p in 3 {", "Vec か a..b"),
             (
                 "slice('hibana', 0, 3)",
                 "slice('hibana', '0', 3)",
-                "int が必要だが str",
+                "int が必要だが String",
             ),
         ] {
             let e = check(&src.replace(from, to)).unwrap_err();

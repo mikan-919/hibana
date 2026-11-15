@@ -735,7 +735,7 @@ mod tests {
 
     #[test]
     fn string_memory_grows_resets_and_preserves_literals() {
-        let bytes = crate::to_wasm_library("fn literal() -> str { '日本語' }", &["literal".into()])
+        let bytes = crate::to_wasm_library("fn literal() -> String { '日本語' }", &["literal".into()])
             .unwrap();
         let script = r#"const x = new WebAssembly.Instance(new WebAssembly.Module(require('fs').readFileSync(0)), {}).exports;
 const packed = x.literal(); const ptr = Number(packed & 0xffffffffn), len = Number(packed >> 32n);
@@ -752,7 +752,7 @@ x.__hibana_reset(); if (x.__hibana_alloc(1) !== first || x.literal() !== packed 
     fn library_exports_only_requested_reachable_functions() {
         let used = "fn plus(a: int, b: int) -> int { a + b }\nfn twice(n: int) -> int { plus(n, n) }\nfn result(n: int) -> int { twice(n) + 1 }\n";
         let with_unused = format!(
-            "{used}fn unused() -> str {{ 'unused' }}\nfn unused_print() {{ put(999) }}\n"
+            "{used}fn unused() -> String {{ 'unused' }}\nfn unused_print() {{ put(999) }}\n"
         );
         let names = vec!["result".to_string()];
         let bytes = crate::to_wasm_library(&with_unused, &names).unwrap();

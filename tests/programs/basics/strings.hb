@@ -1,5 +1,5 @@
 // 文字列の連結・長さ・分割・部分文字列と、for ループ
-fn greet(name: str) -> str { 'Hello, ' + name + '!' }
+fn greet(name: String) -> String { 'Hello, ' + name + '!' }
 
 fn main() {
     put(greet('hibana'))

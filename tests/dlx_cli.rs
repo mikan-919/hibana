@@ -129,7 +129,7 @@ fn hibana_dlx_accepts_prefix_bare_url_args_and_offline_reuse() {
 fn hibana_dlx_resolves_dependencies_without_mutating_store() {
     let f = Fixture::new();
     let dep = f.package("greet", None);
-    std::fs::write(dep.join("src/lib.hb"), "fn message() -> str { 'from dependency' }\n").unwrap();
+    std::fs::write(dep.join("src/lib.hb"), "fn message() -> String { 'from dependency' }\n").unwrap();
     commit(&dep);
     let source = f.package("app", Some("use greet\nfn main() { put(greet.message()) }\n"));
     std::fs::write(

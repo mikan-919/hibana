@@ -2,14 +2,14 @@
 // 型検査は通さず、構文解析だけして IR に変換する。演算子はすべて値の中身（64 ビット整数）の演算になる。
 // __load などの __ で始まる組み込みは、IR の命令に直接変換する（src/backend/ir.rs の prim）。
 //
-// 値の型の番号: 0 unit, 1 int, 2 bool, 3 str, 4 Vec, 5 type の値・構造体, 6 関数, 7 型, 8 Ref
+// 値の型の番号: 0 unit, 1 int, 2 bool, 3 String, 4 Vec, 5 type の値・構造体, 6 関数, 7 型, 8 Ref
 // ヒープ上の形（各欄は 8 バイト、値は型の番号と中身の 16 バイト）:
-//   str: [長さ][UTF-8 のバイト列]
+//   String: [長さ][UTF-8 のバイト列]
 //   Vec: [要素数][値...]
 //   type の値・構造体: [構築子の番号][フィールド数][値...]
 //   関数: [関数の番号][写し取った変数の数][値...]
 //   Ref: [値]
-//   型: 中身は型の名前の str
+//   型: 中身は型の名前の String
 //
 // ponytail: 確保した領域を回収しない（GC が無い）。長く動くプログラムでは、ここにシャドースタックを使う GC を足す
 
@@ -38,7 +38,7 @@ fn __alloc(n: int) -> int {
     p
 }
 
-fn __die(msg: str) {
+fn __die(msg: String) {
     __fail(msg)
 }
 
@@ -90,19 +90,19 @@ fn __str_new(n: int) -> int {
     p
 }
 
-fn __bytes(src: int, n: int) -> str {
+fn __bytes(src: int, n: int) -> String {
     let p = __str_new(n)
     __copy(p + 8, src, n)
     __mkv(3, p)
 }
 
-fn __byte(b: int) -> str {
+fn __byte(b: int) -> String {
     let p = __str_new(1)
     __store8(p + 8, b)
     __mkv(3, p)
 }
 
-fn __cat(a: str, b: str) -> str {
+fn __cat(a: String, b: String) -> String {
     let pa = __payload(a)
     let pb = __payload(b)
     let la = __load(pa)
@@ -114,7 +114,7 @@ fn __cat(a: str, b: str) -> str {
 }
 
 // + の整数以外。文字列の連結
-fn __add(a: str, b: str) -> str {
+fn __add(a: String, b: String) -> String {
     __cat(a, b)
 }
 
@@ -146,7 +146,7 @@ fn __utf8_len(p: int) -> int {
     c
 }
 
-fn __int_str(n: int) -> str {
+fn __int_str(n: int) -> String {
     let p = __str_new(20)
     let mut pos = 20
     let mut u = n
@@ -215,7 +215,7 @@ fn __eq(a: int, b: int) -> bool {
 }
 
 // 文字列の中の値として表示する。インタプリタ（Rust の {:?}）と同じ記号を逃がす
-fn __quote(s: str) -> str {
+fn __quote(s: String) -> String {
     let p = __payload(s)
     let n = __load(p)
     let mut out = '"'
@@ -251,7 +251,7 @@ fn __quote(s: str) -> str {
     __cat(__cat(out, __bytes(p + 8 + start, n - start)), '"')
 }
 
-fn __join_shown(p: int, n: int) -> str {
+fn __join_shown(p: int, n: int) -> String {
     let mut out = ''
     let mut i = 0
     while i < n {
@@ -264,7 +264,7 @@ fn __join_shown(p: int, n: int) -> str {
     out
 }
 
-fn __show(v: int) -> str {
+fn __show(v: int) -> String {
     let t = __tag(v)
     let p = __payload(v)
     if t == 0 {
@@ -297,7 +297,7 @@ fn __show(v: int) -> str {
     '<ref>'
 }
 
-fn __show_data(p: int) -> str {
+fn __show_data(p: int) -> String {
     let ctor = __load(p)
     let n = __load(p + 8)
     let name = __ctor_name(ctor)
@@ -327,7 +327,7 @@ fn __show_data(p: int) -> str {
     __cat(__cat(__cat(name, '('), __join_shown(p + 16, n)), ')')
 }
 
-fn __to_str(v: int) -> str {
+fn __to_str(v: int) -> String {
     let t = __tag(v)
     if t == 3 {
         return v
@@ -338,7 +338,7 @@ fn __to_str(v: int) -> str {
     __show(v)
 }
 
-fn __write_str(fd: int, s: str) {
+fn __write_str(fd: int, s: String) {
     let p = __payload(s)
     __sys_write(fd, p + 8, __load(p))
 }
@@ -348,7 +348,7 @@ fn __put(v: int) {
     __write_str(1, __cat(__to_str(v), '\n'))
 }
 
-fn __panic(msg: str) {
+fn __panic(msg: String) {
     __die(msg)
 }
 
@@ -361,7 +361,7 @@ fn __len(v: int) -> int {
     __load(__payload(v))
 }
 
-fn __starts_with(s: str, pre: str) -> bool {
+fn __starts_with(s: String, pre: String) -> bool {
     let ps = __payload(s)
     let pp = __payload(pre)
     let n = __load(pp)
@@ -372,7 +372,7 @@ fn __starts_with(s: str, pre: str) -> bool {
 }
 
 // 区切りで分ける。空の区切りは 1 文字ずつ、前後に空の文字列を付ける（インタプリタと同じ）
-fn __split(s: str, sep: str) -> Vec<str> {
+fn __split(s: String, sep: String) -> Vec<String> {
     let ps = __payload(s)
     let pp = __payload(sep)
     let n = __load(ps)
@@ -405,7 +405,7 @@ fn __split(s: str, sep: str) -> Vec<str> {
     __mkv(4, __arr_push(out, __bytes(ps + 8 + start, n - start)))
 }
 
-fn __chars(s: str) -> Vec<str> {
+fn __chars(s: String) -> Vec<String> {
     let ps = __payload(s)
     let n = __load(ps)
     let mut out = __arr_new(0)
@@ -421,7 +421,7 @@ fn __chars(s: str) -> Vec<str> {
     __mkv(4, out)
 }
 
-fn __code(s: str) -> int {
+fn __code(s: String) -> int {
     let p = __payload(s)
     let n = __load(p)
     if n == 0 {
@@ -447,7 +447,7 @@ fn __code(s: str) -> int {
     c
 }
 
-fn __char_from_codepoint(c: int) -> str {
+fn __char_from_codepoint(c: int) -> String {
     if c < 0 || c > 1114111 || c >= 55296 && c <= 57343 {
         return ''
     }
@@ -477,7 +477,7 @@ fn __char_from_codepoint(c: int) -> str {
 }
 
 // 文字の位置 i..j の部分。範囲外は実行時エラー
-fn __slice(s: str, i: int, j: int) -> str {
+fn __slice(s: String, i: int, j: int) -> String {
     let p = __payload(s)
     let n = __load(p)
     if !(0 <= i && i <= j && j <= __utf8_len(p)) {
@@ -590,11 +590,11 @@ fn __fn_new(code: int, n: int) -> int {
 
 // WASM の境界。文字列は (長さ << 32) | バイト列の位置 の 1 つの整数で渡す
 
-fn __str_in(packed: int) -> str {
+fn __str_in(packed: int) -> String {
     __bytes(__and(packed, 4294967295), __shr(packed, 32))
 }
 
-fn __str_out(s: str) -> int {
+fn __str_out(s: String) -> int {
     let p = __payload(s)
     __or(__shl(__load(p), 32), p + 8)
 }
@@ -638,7 +638,7 @@ fn __resume(v: int) -> int {
 }
 
 // 操作を、内側の handle から探して腕を呼ぶ。腕はその handle より外で処理する
-fn __perform(name: str, args: int) -> int {
+fn __perform(name: String, args: int) -> int {
     let st = __static()
     let mut h = __load(st + 48)
     while h != 0 {

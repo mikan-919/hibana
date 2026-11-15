@@ -7,7 +7,7 @@ fn web_api_emits_pair_and_runs_generated_module() {
     let source = dir.join("hello.web.hb");
     std::fs::write(
         &source,
-        "fn echo(s: str) -> str { s }\nfn answer(n: int) -> int { n + 1 }\n",
+        "fn echo(s: String) -> String { s }\nfn answer(n: int) -> int { n + 1 }\n",
     )
     .unwrap();
     let out = dir.join("artifacts");
@@ -61,5 +61,5 @@ fn removed_codegen_commands_are_rejected() {
 
 #[test]
 fn web_api_rejects_empty_exports() {
-    assert!(hibana::to_web("fn echo(s: str) -> str { s }", &[]).is_err());
+    assert!(hibana::to_web("fn echo(s: String) -> String { s }", &[]).is_err());
 }

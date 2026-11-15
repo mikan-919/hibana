@@ -15,7 +15,7 @@ test 'vec' {
     assert_eq(find([1, 2, 3], fn(x) { x > 1 }), Some(2))
 }
 
-test 'str' {
+test 'String' {
     assert_eq(join(['a', 'b', 'c'], ', '), 'a, b, c')
     assert_eq(repeat('ab', 3), 'ababab')
     assert(ends_with('hibana', 'ana'))

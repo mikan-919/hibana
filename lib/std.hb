@@ -19,15 +19,15 @@ trait Ord<A>: Eq<A> {
 
 // 文字列にする。実装がある型では to_str と put がこれを使う
 trait Show<A> {
-    fn show(x: A) -> str
+    fn show(x: A) -> String
 }
 
 impl Eq<int> {
     fn eq(a: int, b: int) -> bool { a == b }
 }
 
-impl Eq<str> {
-    fn eq(a: str, b: str) -> bool { a == b }
+impl Eq<String> {
+    fn eq(a: String, b: String) -> bool { a == b }
 }
 
 impl Eq<bool> {
@@ -39,15 +39,15 @@ impl Ord<int> {
 }
 
 impl Show<int> {
-    fn show(x: int) -> str { to_str(x) }
+    fn show(x: int) -> String { to_str(x) }
 }
 
-impl Show<str> {
-    fn show(x: str) -> str { x }
+impl Show<String> {
+    fn show(x: String) -> String { x }
 }
 
 impl Show<bool> {
-    fn show(x: bool) -> str { to_str(x) }
+    fn show(x: bool) -> String { to_str(x) }
 }
 
 impl<A: Eq> Eq<Vec<A>> {
@@ -61,7 +61,7 @@ impl<A: Eq> Eq<Vec<A>> {
 }
 
 impl<A: Show> Show<Vec<A>> {
-    fn show(xs: Vec<A>) -> str {
+    fn show(xs: Vec<A>) -> String {
         let mut s = '['
         for i in 0..len(xs) {
             if i > 0 { s = s + ', ' }
@@ -87,7 +87,7 @@ impl<A: Eq> Eq<Option<A>> {
 }
 
 impl<A: Show> Show<Option<A>> {
-    fn show(o: Option<A>) -> str {
+    fn show(o: Option<A>) -> String {
         match o {
             None -> 'None'
             Some(x) -> 'Some(' + show(x) + ')'
@@ -229,7 +229,7 @@ fn find<A, E: Effect>(xs: Vec<A>, f: (A) -> bool ! E) -> Option<A> ! E {
 
 // ---- 文字列 ----
 
-fn join(xs: Vec<str>, sep: str) -> str {
+fn join(xs: Vec<String>, sep: String) -> String {
     let mut s = ''
     for i in 0..len(xs) {
         if i > 0 { s = s + sep }
@@ -238,28 +238,28 @@ fn join(xs: Vec<str>, sep: str) -> str {
     s
 }
 
-fn repeat(s: str, n: int) -> str {
+fn repeat(s: String, n: int) -> String {
     let mut r = ''
     for i in 0..n { r = r + s }
     r
 }
 
-fn ends_with(s: str, w: str) -> bool {
+fn ends_with(s: String, w: String) -> bool {
     starts_at(s, len(s) - len(w), w)
 }
 
 // s の中に w があるか
-fn includes(s: str, w: str) -> bool {
+fn includes(s: String, w: String) -> bool {
     for i in 0..len(s) + 1 {
         if starts_at(s, i, w) { return true }
     }
     false
 }
 
-fn is_space(c: str) -> bool { c == ' ' || c == '\n' || c == '\t' || c == '\r' }
+fn is_space(c: String) -> bool { c == ' ' || c == '\n' || c == '\t' || c == '\r' }
 
 // 前後の空白を除く
-fn trim(s: str) -> str {
+fn trim(s: String) -> String {
     let mut a = 0
     let mut b = len(s)
     while a < b && is_space(char_at(s, a)) { a = a + 1 }
@@ -268,7 +268,7 @@ fn trim(s: str) -> str {
 }
 
 // from を to に置き換える（from が空なら変えない）
-fn replace(s: str, from: str, to: str) -> str {
+fn replace(s: String, from: String, to: String) -> String {
     if len(from) == 0 { return s }
     let mut out = ''
     let mut i = 0
@@ -284,12 +284,12 @@ fn replace(s: str, from: str, to: str) -> str {
     out
 }
 
-fn lines(s: str) -> Vec<str> { split(s, '\n') }
+fn lines(s: String) -> Vec<String> { split(s, '\n') }
 
 // ---- Map（文字列のキーから値へ） ----
 
 // ponytail: 線形探索。大きくなるならハッシュ表にする
-struct Entry<V> { key: str, value: V }
+struct Entry<V> { key: String, value: V }
 struct Map<V> { entries: Vec<Entry<V>> }
 
 fn empty<V>() -> Map<V> {
@@ -297,7 +297,7 @@ fn empty<V>() -> Map<V> {
     Map { entries: es }
 }
 
-fn get<V>(m: Map<V>, key: str) -> Option<V> {
+fn get<V>(m: Map<V>, key: String) -> Option<V> {
     let mut r: Option<V> = None
     for e in m.entries {
         if e.key == key { r = Some(e.value) }
@@ -306,7 +306,7 @@ fn get<V>(m: Map<V>, key: str) -> Option<V> {
 }
 
 // key の値を value にした新しい Map
-fn set<V>(m: Map<V>, key: str, value: V) -> Map<V> {
+fn set<V>(m: Map<V>, key: String, value: V) -> Map<V> {
     let mut es: Vec<Entry<V>> = []
     for e in m.entries {
         if e.key != key { es = push(es, e) }
@@ -314,19 +314,19 @@ fn set<V>(m: Map<V>, key: str, value: V) -> Map<V> {
     Map { entries: push(es, Entry { key: key, value: value }) }
 }
 
-fn keys<V>(m: Map<V>) -> Vec<str> {
-    let mut ks: Vec<str> = []
+fn keys<V>(m: Map<V>) -> Vec<String> {
+    let mut ks: Vec<String> = []
     for e in m.entries { ks = push(ks, e.key) }
     ks
 }
 
 // ---- JSON ----
 
-enum Json { JNull, JBool(b: bool), JInt(n: int), JStr(s: str), JArr(items: Vec<Json>), JObj(fields: Vec<Field>) }
-struct Field { key: str, value: Json }
+enum Json { JNull, JBool(b: bool), JInt(n: int), JStr(s: String), JArr(items: Vec<Json>), JObj(fields: Vec<Field>) }
+struct Field { key: String, value: Json }
 
 // JSON の文字列リテラル
-fn quote_str(s: str) -> str {
+fn quote_str(s: String) -> String {
     let mut out = '"'
     for i in 0..len(s) {
         let c = slice(s, i, i + 1)
@@ -350,7 +350,7 @@ fn quote_str(s: str) -> str {
     out + '"'
 }
 
-fn stringify(j: Json) -> str {
+fn stringify(j: Json) -> String {
     match j {
         JNull -> 'null'
         JBool(b) -> to_str(b)
@@ -389,11 +389,11 @@ fn no_parse() -> Parsed {
 }
 
 // i 文字目（範囲外なら ''）
-fn char_at(s: str, i: int) -> str {
+fn char_at(s: String, i: int) -> String {
     if 0 <= i && i < len(s) { slice(s, i, i + 1) } else { '' }
 }
 
-fn skip_ws(s: str, i: int) -> int {
+fn skip_ws(s: String, i: int) -> int {
     let mut j = i
     while char_at(s, j) == ' ' || char_at(s, j) == '\n' || char_at(s, j) == '\t' || char_at(s, j) == '\r' {
         j = j + 1
@@ -402,7 +402,7 @@ fn skip_ws(s: str, i: int) -> int {
 }
 
 // 数字なら 0 から 9、それ以外は -1
-fn digit(c: str) -> int {
+fn digit(c: String) -> int {
     let ds = '0123456789'
     let mut r = -1
     for k in 0..10 {
@@ -411,12 +411,12 @@ fn digit(c: str) -> int {
     r
 }
 
-fn starts_at(s: str, i: int, w: str) -> bool {
+fn starts_at(s: String, i: int, w: String) -> bool {
     0 <= i && i + len(w) <= len(s) && slice(s, i, i + len(w)) == w
 }
 
 // ponytail: 整数だけを読む（小数・指数は読めない）
-fn parse_int(s: str, i: int) -> Parsed {
+fn parse_int(s: String, i: int) -> Parsed {
     let mut j = i
     let neg = char_at(s, j) == '-'
     if neg { j = j + 1 }
@@ -451,7 +451,7 @@ fn parse_int(s: str, i: int) -> Parsed {
 }
 
 // JSON の Unicode エスケープを4桁読む。途中で切れているものも拒否する。
-fn json_hex4(s: str, i: int) -> int {
+fn json_hex4(s: String, i: int) -> int {
     let mut n = 0
     for k in 0..4 {
         let c = char_at(s, i + k)
@@ -467,7 +467,7 @@ fn json_hex4(s: str, i: int) -> int {
     n
 }
 
-fn parse_string(s: str, i: int) -> Parsed {
+fn parse_string(s: String, i: int) -> Parsed {
     let mut j = i + 1
     let mut out = ''
     let mut done = false
@@ -525,7 +525,7 @@ fn parse_string(s: str, i: int) -> Parsed {
     if bad { no_parse() } else { Parsed { ok: true, value: JStr(out), pos: j } }
 }
 
-fn parse_value(s: str, i0: int) -> Parsed {
+fn parse_value(s: String, i0: int) -> Parsed {
     let i = skip_ws(s, i0)
     let c = char_at(s, i)
     if starts_at(s, i, 'null') {
@@ -546,7 +546,7 @@ fn parse_value(s: str, i0: int) -> Parsed {
 }
 
 // [ の後ろから読む
-fn parse_array(s: str, i: int) -> Parsed {
+fn parse_array(s: String, i: int) -> Parsed {
     let mut items: Vec<Json> = []
     let mut j = skip_ws(s, i)
     let mut done = char_at(s, j) == ']'
@@ -574,7 +574,7 @@ fn parse_array(s: str, i: int) -> Parsed {
 }
 
 // { の後ろから読む
-fn parse_object(s: str, i: int) -> Parsed {
+fn parse_object(s: String, i: int) -> Parsed {
     let mut fields: Vec<Field> = []
     let mut j = skip_ws(s, i)
     let mut done = char_at(s, j) == '}'
@@ -611,13 +611,13 @@ fn parse_object(s: str, i: int) -> Parsed {
 }
 
 // 文字列全体を JSON として読む。読めなければ None
-fn parse_json(s: str) -> Option<Json> {
+fn parse_json(s: String) -> Option<Json> {
     let p = parse_value(s, 0)
     if p.ok && skip_ws(s, p.pos) == len(s) { Some(p.value) } else { None }
 }
 
 // オブジェクトのフィールド。無ければ None
-fn field(j: Json, key: str) -> Option<Json> {
+fn field(j: Json, key: String) -> Option<Json> {
     let mut r: Option<Json> = None
     match j {
         JObj(fs) -> {
@@ -631,7 +631,7 @@ fn field(j: Json, key: str) -> Option<Json> {
 }
 
 // 文字列なら、その値。違えば d
-fn str_or(j: Option<Json>, d: str) -> str {
+fn str_or(j: Option<Json>, d: String) -> String {
     match j {
         Some(v) -> match v {
             JStr(s) -> s
