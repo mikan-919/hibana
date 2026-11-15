@@ -224,4 +224,3 @@ console.log(app.add(2n, 3n));
 
 - 言語の規則と既知の制約: `docs/spec.md`
 - [カテゴリ別の例](../tests/programs/README.md)（効果は `tests/programs/effects/effects.hb`、トレイトは `tests/programs/types/trait.hb`、Web サーバーは `tests/programs/web/server.hb`、依存型は `tests/programs/types/dependent.hb`、マクロは `tests/programs/macros/macros.hb`）
-- hibana で書いたコンパイラー: `selfhost/`。字句解析・構文解析・型検査・コード生成・整形があり、自分自身をコンパイルして同じ出力になります（`compile.hb` が入口）。

@@ -13,7 +13,7 @@ nix develop -c cargo run -q -- <ファイル>   # 実行（run / fmt / test / ls
 ```
 
 - `cargo test` は `target/debug/hibana` を作り直しません。CLI を試す前に `cargo build` を実行します。
-- `cargo test <名前>` で絞れます（例: `cargo test selfhost_codegen`）。
+- `cargo test <名前>` で絞れます（例: `cargo test builtin_prover`）。
 
 ## 構成
 
@@ -30,32 +30,17 @@ nix develop -c cargo run -q -- <ファイル>   # 実行（run / fmt / test / ls
 | `lib/` | 標準ライブラリ（`std.hb`）と web ライブラリ（`web.hb`）。hibana で書いてある |
 | `examples/` | 利用者が書く正本。動作と書き方の基準。エージェントは書き換えない |
 | `tests/programs/` | カテゴリ別の例（一覧は `tests/programs/README.md`）。テストの入力になる |
-| `selfhost/` | hibana で書いたコンパイラー。機能の実証用で、本流は Rust の実装 |
 | `editors/` | VS Code・Zed の拡張機能と tree-sitter の文法 |
 
 ## 規約
 
-- 新しい言語機能は先に Rust 版へ入れます。selfhost に Rust 版の全機能を移す予定はありません（実証用です）。
 - インタプリタ・JavaScript・C は同じ出力になることをテストで確かめています。バックエンドに手を入れたら、3 つとも確認します。
 - 組み込み関数を足す時は `src/check/typeck.rs` の `BUILTINS`、`src/frontend/parser.rs` の `globals`、3 つのバックエンド、`docs/spec.md` の 9 章を更新します。`std` に足した名前が組み込み（`all`、`resume` など）と衝突しないか確認します。
-- `lib/std.hb` に関数を足したら `tests/programs/stdlib/stdlib.hb` にテストを足します。`std` を読む selfhost のコンパイラーも通る必要があります。
+- `lib/std.hb` に関数を足したら `tests/programs/stdlib/stdlib.hb` にテストを足します。
 - 簡略化して上限がある所には `ponytail:` で始まるコメントに、上限と改善の方向を書きます。
 - コメント・エラーメッセージ・ドキュメントは日本語です。修飾表現（「非常に」など）は使わず、事実を書きます。
 - `examples/` は利用者が書く正本です。実装の動作と書き方はこれに合わせます。`examples/` のファイルは利用者の指示なしに作成・変更・削除しません。正本と実装が食い違う時は、実装を直すか、利用者に報告します。`x.hb` の横に `x.out` があれば、インタプリタの出力がその中身と同じかをテストが確かめます。
 - `.hb` のファイルは `hibana fmt` で整形します。`lib/`・`tests/programs/`・`examples/` は整形済みで、テストが確かめます。
-
-## selfhost のテスト
-
-`src/cli/mod.rs` の `selfhost_*` テストが次を確かめます。
-
-- 字句（`selfhost_lexer_matches`）と構文木（`selfhost_parser_matches`）が Rust 版と同じ。
-- 型検査（`selfhost_checker_matches`）が Rust 版と同じく通すか止める。
-- 生成した JavaScript の出力がインタプリタと同じ（`selfhost_codegen_matches`）。自分自身をコンパイルした 2 段目と 3 段目の出力が同じ（固定点）であることも確かめます。
-- 整形（`selfhost_fmt_matches`）が Rust 版と同じ。
-
-selfhost は埋め込み付きの文字列（`` `...` ``）と `T::f` を読めません。字句と整形のテストは、これらを含むファイルを対象から外します（`src/cli/mod.rs` の `selfhost_reads`）。
-
-selfhost の `.hb` を変えたら `cargo test selfhost_` を実行します。selfhost のコードは、添字の範囲を証明できる形（`if i < len(xs)` の保護、`tk()` のような安全な取り出し関数）で書きます。相互再帰は `partial fn` にします。
 
 ## Git
 

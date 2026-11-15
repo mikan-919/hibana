@@ -1,4 +1,4 @@
-// selfhost が読める型（string・number・boolean・void とその配列）だけの TypeScript モジュール
+// 使用する型（string・number・boolean・void とその配列）だけの TypeScript モジュール
 export function add(a: number, b: number): number {
   return a + b;
 }

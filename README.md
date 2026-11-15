@@ -55,7 +55,7 @@ Rust の実装は `src/` 内で役割ごとに分けています。
 - `project/`: ビルド、スクリプト、パッケージ管理（`pkg/`）、外部ツール管理（`tools/`）
 - `cli/`: CLI のコマンド処理と統合的なテスト
 
-`src/lib.rs` と `src/main.rs` が入口で、`pipeline.rs` はコンパイルの各段階、`error.rs` は共通のエラー表現を扱います。標準ライブラリは `lib/`、Hibana で書いたコンパイラーは `selfhost/`、エディター連携は `editors/` にあります。
+`src/lib.rs` と `src/main.rs` が入口で、`pipeline.rs` はコンパイルの各段階、`error.rs` は共通のエラー表現を扱います。標準ライブラリは `lib/`、エディター連携は `editors/` にあります。
 
 ## 文書
 
