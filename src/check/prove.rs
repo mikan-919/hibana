@@ -99,3 +99,19 @@ pub(super) fn prove_facts<'a>(goal: &V, facts: impl Iterator<Item = &'a V> + Clo
     *goal == V::Bool(true) || facts.clone().any(implies)
 }
 
+// 事実との照合と定数の代入で示し、残りを Z3 に問い合わせる。
+pub(super) fn prove<'a>(goal: &V, facts: impl Iterator<Item = &'a V> + Clone, smt: &mut super::smt::Smt) -> bool {
+    if prove_facts(goal, facts.clone()) { return true; }
+    let eqs: Vec<_> = facts.clone().filter_map(|f| match f {
+        V::Neu(n) => match &**n {
+            Neu::Bin("==", x, c @ V::Int(_)) | Neu::Bin("==", c @ V::Int(_), x) => Some((x, c)),
+            _ => None,
+        },
+        _ => None,
+    }).collect();
+    if !eqs.is_empty() {
+        let g = eqs.iter().fold(goal.clone(), |g, (x, c)| replace(&g, x, c));
+        if g == V::Bool(true) || prove_facts(&g, facts.clone()) { return true; }
+    }
+    smt.prove(&facts.cloned().collect::<Vec<_>>(), goal)
+}

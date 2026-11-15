@@ -2,7 +2,7 @@
 use crate::meta::{Kinds, Q};
 use crate::parser::{Arm, Block, Ctor, Data, Expr, Fn, Program, Stmt};
 use crate::smt::Smt;
-use super::prove::{replace, replace_len};
+use super::prove::replace_len;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -1741,42 +1741,8 @@ impl Ck<'_> {
         Ok(())
     }
 
-    // まず事実との字面の照合と a <= b + k の弱めで示し、次に x == 定数 の事実で x を置き換えて計算する。
-    // それでもだめなら Z3 に問い合わせる
     fn prove(&mut self, goal: &V) -> bool {
-        if self.prove_facts(goal) {
-            return true;
-        }
-        let eqs: Vec<(V, V)> = self
-            .scopes
-            .iter()
-            .flat_map(|s| &s.facts)
-            .filter_map(|f| match f {
-                V::Neu(n) => match &**n {
-                    Neu::Bin("==", x, c @ V::Int(_)) | Neu::Bin("==", c @ V::Int(_), x) => {
-                        Some((x.clone(), c.clone()))
-                    }
-                    _ => None,
-                },
-                _ => None,
-            })
-            .collect();
-        if !eqs.is_empty() {
-            let g = eqs.iter().fold(goal.clone(), |g, (x, c)| replace(&g, x, c));
-            if g == V::Bool(true) || self.prove_facts(&g) {
-                return true;
-            }
-        }
-        let facts: Vec<V> = self
-            .scopes
-            .iter()
-            .flat_map(|s| s.facts.iter().cloned())
-            .collect();
-        self.smt.prove(&facts, goal)
-    }
-
-    fn prove_facts(&self, goal: &V) -> bool {
-        super::prove::prove_facts(goal, self.scopes.iter().flat_map(|s| &s.facts))
+        super::prove::prove(goal, self.scopes.iter().flat_map(|s| &s.facts), &mut self.smt)
     }
 
     // got 型の式 e を expected 型として使えるか。expected の細分化の条件は証明する
