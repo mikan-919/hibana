@@ -4,12 +4,12 @@ Hibana の Web ライブラリを使う、単一管理者向けのブログ CMS 
 
 ## 起動
 
-リポジトリ直下で実行します。Rust / Node.js などの開発環境は Nix flake で用意できます。
+`apps/cms` で実行します。Rust / Node.js などの開発環境は Nix flake で用意できます。
 
 ```sh
-nix develop -c cargo run --example cms-build
+nix develop -c cargo run -q -- build
 # 例の文字列ではなく、自分専用の十分長いパスワードに置き換える
-CMS_PASSWORD='replace-with-a-long-random-secret' nix develop -c node apps/cms/start.mjs
+CMS_PASSWORD='replace-with-a-long-random-secret' nix develop -c node start.mjs
 ```
 
 表示された URL（既定は `http://localhost:3000`）を開き、`/login` でログインします。`/admin` から記事の新規作成・編集・削除ができます。「公開」を選択して保存するとトップページと `/posts/{id}` に表示され、下書きは公開 URL からは読めません。本文は HTML / Markdown として実行せず、プレーンテキストとして表示します。

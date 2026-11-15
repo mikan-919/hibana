@@ -480,6 +480,7 @@ fn parse_toks(src: &str, toks: Vec<Token>, round: usize) -> R<Program> {
         "compile",
         "inspect_exports",
         "utf8",
+        "args", "read_text", "read_bytes", "write_text", "write_bytes", "compile_file", "inspect_file_exports", "js_glue",
         "error",
         "int",
         "bool",

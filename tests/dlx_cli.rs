@@ -113,15 +113,15 @@ fn error(output: &Output) -> String {
 #[test]
 fn hibana_dlx_accepts_prefix_bare_url_args_and_offline_reuse() {
     let f = Fixture::new();
-    let source = f.package("app", Some("fn main() { print('native dlx') }\n"));
+    let source = f.package("app", Some("fn main() { print(args()) }\n"));
     let url = format!("file://{}", source.display());
     let spec = format!("hibana:{url}");
     assert_eq!(
         stdout(&f.run(&["dlx", &spec, "--version", "--bin", "ignored", "a b"])),
-        "native dlx\n"
+        "[\"--version\", \"--bin\", \"ignored\", \"a b\"]\n"
     );
     std::fs::rename(&source, f.0.join("source-offline")).unwrap();
-    assert_eq!(stdout(&f.run(&["dlx", &url, "--", "--rev", "HEAD"])), "native dlx\n");
+    assert_eq!(stdout(&f.run(&["dlx", &url, "--", "--rev", "HEAD"])), "[\"--rev\", \"HEAD\"]\n");
     f.check_clean();
 }
 

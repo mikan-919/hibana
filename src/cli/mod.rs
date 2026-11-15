@@ -1,7 +1,7 @@
 use crate::{error, eval, fmt, lexer, lsp, parser, pkg, typeck, wasm};
-use crate::{run, to_wasm};
+use crate::to_wasm;
 #[cfg(test)]
-use crate::{to_c, to_js, to_web};
+use crate::{run, to_c, to_js, to_web};
 
 // バックエンドのテスト用に、C からネイティブの実行ファイルを作る。
 #[cfg(test)]
@@ -222,6 +222,7 @@ fn run_cli() {
         [p] => ("eval", p.clone()),
         [p, sep, _rest @ ..] if sep == "--" => ("eval", p.clone()),
         [cmd, p] if cmd == "run" || cmd == "fmt" => (cmd.as_str(), p.clone()),
+        [p, ..] if p.ends_with(".hb") => ("eval", p.clone()),
         _ => {
             eprintln!(
                 "使い方: hibana install [--frozen-lockfile]（依存を取得） | hibana update [依存名|npm:名前|cargo:名前]（依存を更新） | hibana remove [-g] <依存名|npm:名前|cargo:名前>（依存を削除） | hibana <build|dev> [-- 引数...] | hibana <ファイル> [-- 引数...]（実行） | hibana run <ファイル>（WASM で実行） | hibana fmt <ファイル>（整形して書き戻す） | hibana lsp（Language Server を標準入出力で動かす） | hibana new <名前> | hibana add <git の URL> [tag] | hibana add [-g] <npm:名前[@版]|cargo:名前[@版]> | hibana dlx [--bin コマンド | --rev Gitの版] <識別子> [--] 引数... | hibana fetch（依存を取ってくる） | hibana test [ファイル]（test を実行する）"
@@ -257,7 +258,10 @@ fn run_cli() {
                 });
             }
         }),
-        _ => run(&src, &mut std::io::stdout()).map(|_| ()),
+        _ => {
+            let rest = match args.as_slice() { [_, sep, rest @ ..] if sep == "--" => rest, [_, rest @ ..] => rest, _ => &[] };
+            crate::run_with_args(&src, &mut std::io::stdout(), rest).map(|_| ())
+        },
     };
     if let Err(e) = r {
         eprintln!("{:?}", report(&path, &src, e));

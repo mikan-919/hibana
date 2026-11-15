@@ -8,10 +8,11 @@ hibana は静的型付けの言語です。型検査を通ったプログラム�
 
 ```toml
 [scripts]
+build = "hibana build.hb"
 dev = "hibana src/main.hb"
 ```
 
-この例では `hibana dev` が設定した開発用コマンドを呼びます。値にはシェルコマンドを書けます。引数を足す場合は `hibana dev -- 引数...` と書きます。
+この例では `hibana build` と `hibana dev` が設定したコマンドを呼びます。値にはシェルコマンドを書けます。引数を足す場合は `hibana dev -- 引数...` と書きます。
 
 設定は現在のディレクトリから親へ探し、見つかったファイルのディレクトリで `sh -c` に渡します。コマンドの終了コードも引き継ぎます。パッケージ用の `hibana.toml` とは別の設定です。
 
@@ -19,7 +20,7 @@ dev = "hibana src/main.hb"
 
 事前の追加なしで実行するには `hibana dlx npm:vite --help`、常用のコマンドとして追加するには `hibana add -g cargo:ripgrep` とします。グローバルの配置先 `${XDG_DATA_HOME:-$HOME/.local/share}/hibana/bin` は自分で `PATH` に追加してください。パッケージと実行コマンドの名前が違っていても扱えます。複数のコマンドから選ぶ場合は `hibana dlx --bin コマンド npm:名前 引数` とします。Hibana 側のオプションは識別子より前に書き、後ろはすべて実行先の引数として渡します。区切りの `--` は省略できます。
 
-Hibana パッケージは `hibana dlx hibana:GitのURL`（または `hibana dlx GitのURL`）で実行します。取得元に `hibana.toml` と `src/main.hb` を用意してください。版を選ぶ場合は `hibana dlx --rev v1.0.0 hibana:GitのURL` とします。依存も共通ストアから読み込み、呼び出し元のプロジェクト設定は変更しません。現状の言語にはコマンドライン引数を読み出す API はありません。
+Hibana パッケージは `hibana dlx hibana:GitのURL`（または `hibana dlx GitのURL`）で実行します。取得元に `hibana.toml` と `src/main.hb` を用意してください。版を選ぶ場合は `hibana dlx --rev v1.0.0 hibana:GitのURL` とします。依存も共通ストアから読み込み、呼び出し元のプロジェクト設定は変更しません。渡した引数は `args()` で取得できます。
 
 取得したツールもファイル単位の共通ストアを使います。版は `npm:vite@6.1.0` のように指定できます。プロジェクトに追加すると、設定ファイルの隣の `config.hibana.lock.toml` に取得した正確な版を記録します。設定と lock を共有すれば、別環境のスクリプト実行でもその版を取得します。npm は `npm_lock` に推移依存の版・取得 URL・整合性ハッシュも保存し、再取得は `npm ci` で行います。古い lock は通常の `hibana install` で補完してください（`--frozen-lockfile` は `npm_lock` の無い npm 記録を拒否します）。Cargo は `cargo_lock` に Cargo.lock を保存し、取得した crate ソースへ復元して `--locked` でビルドします。`cargo_lock` の無い旧記録も通常の install で補完し、frozen では拒否します。ビルド環境や生成バイナリの同一性までは保証しません。`dlx`・グローバル追加はプロジェクトの lock を使わず初回取得結果を再利用します。自動更新は行いません。プロジェクト依存の npm/Cargo ツールは `hibana update npm:名前` / `hibana update cargo:名前` で明示的に更新できます（後述）。`dlx`・グローバル追加の個別更新は未対応です。依存は `hibana remove 名前`（Git）、`hibana remove npm:名前` / `hibana remove cargo:名前`（プロジェクトの外部ツール）で設定と lock から外せます。`hibana remove -g npm:名前` / `hibana remove -g cargo:名前` は global shim だけを削除します。どの remove も共通ストアは消さず、store の GC は未実装です。
 
@@ -182,6 +183,16 @@ test 'join' {
 
 ## 7. ビルドだけで成果物を作る
 
+次の `build.hb` はソースから JavaScript を生成します。`hibana build` または `hibana build.hb` で実行します。
+
+```
+fn main() {
+    write_bytes('dist/app.mjs', compile_file('src/main.hb', 'js', []))
+}
+```
+
+`compile_file` は対象ファイルを基準に `use` を解決します。`write_bytes` は親ディレクトリを作成します。引数は `hibana build -- a b` と渡し、`args()` で読めます。これらの関数はインタプリタとマクロで使い、生成したプログラムからは呼べません。
+
 マクロは実行時のコードを返すだけでなく、ビルド時に成果物を登録できます。次は `build_web` ライブラリのマクロで WASM・JS 接続コード・静的ファイルをまとめて登録する例です。
 
 ```
@@ -205,7 +216,7 @@ console.log(app.add(2n, 3n));
 
 生成処理は通常の hibana 関数です。`build_web` は `compile(source, 'wasm', exports)` でバイト列を作り、`inspect_exports` で得た関数の型情報から `web_javascript` が JS の文字列を生成します。`artifact(path, bytes)` が成果物を登録する汎用 API で、テキストなら `utf8(text)` でバイト列にします。
 
-自分のマクロからも通常の関数を呼んで生成処理を組み合わせ、最後に `quote {}` を返せます。ビルド時 API を使う関数は実行時には残りません。API はマクロ実行中にはファイルを書かず、生成・型検査・成果物名の検査を終えてから結果を返します。保存先が安全かどうかの検査と書き込みは呼び出し側の責任です。
+自分のマクロからも通常の関数を呼んで生成処理を組み合わせ、最後に `quote {}` を返せます。`artifact` はマクロで成果物を収集する場合だけ使えます。`artifact` はマクロ実行中にはファイルを書かず、生成・型検査・成果物名の検査を終えてから結果を返します。保存先が安全かどうかの検査と書き込みは呼び出し側の責任です。
 
 この例のコンパイル対象は `source` に明示した文字列です。現在のファイルの宣言を自動的に読み取る仕組みではありません。型情報から構造体の受け渡しを自動生成する機能、ビルドの依存グラフ、外部ツールの実行はまだありません。詳しくは仕様の 8.5 節と `lib/build_web.hb`、ブラウザ用の例は `tests/fixtures/build_artifacts.hb` を参照してください。
 

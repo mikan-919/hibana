@@ -123,7 +123,7 @@ const SYN_FNS: &[(&str, &[&str], &str)] = &[
 ];
 
 // マクロ専用。Vec<str> の引数は個別に検査する
-const BUILD_FNS: &[&str] = &["artifact", "compile", "inspect_exports", "utf8"];
+pub(crate) const BUILD_FNS: &[&str] = &["artifact", "compile", "inspect_exports", "utf8", "args", "read_text", "read_bytes", "write_text", "write_bytes", "compile_file", "inspect_file_exports", "js_glue"];
 
 // どこでも使える組み込み関数
 const BUILTINS: &[&str] = &[
@@ -1226,7 +1226,7 @@ fn components<'a>(graph: &HashMap<&'a str, Vec<String>>) -> HashMap<&'a str, usi
 }
 
 // 関数の本体から呼ぶ関数名を集める
-fn callees(f: &Fn) -> Vec<String> {
+pub(crate) fn callees(f: &Fn) -> Vec<String> {
     let mut out = Vec::new();
     walk(&Expr::Block(f.body.clone()), &mut |x| {
         if let Expr::Call(n, _) | Expr::Var(n) = x {
@@ -1234,6 +1234,23 @@ fn callees(f: &Fn) -> Vec<String> {
         }
     });
     out
+}
+
+pub(crate) fn reject_script_calls(prog: &Program, roots: &[String]) -> R<()> {
+    let mut pending = roots.to_vec();
+    let mut seen = std::collections::HashSet::new();
+    while let Some(name) = pending.pop() {
+        if !seen.insert(name.clone()) { continue; }
+        if let Some(f) = prog.fns.iter().find(|f| f.name == name) {
+            let mut forbidden = None;
+            walk(&Expr::Block(f.body.clone()), &mut |e| {
+                if let Expr::Call(n, _) = e && BUILD_FNS.contains(&n.as_str()) { forbidden = Some(n.clone()); }
+            });
+            if let Some(n) = forbidden { return Err(format!("{n} はスクリプト実行（hibana <ファイル>）でだけ使えます").into()); }
+            pending.extend(callees(f).into_iter().filter(|n| prog.fns.iter().any(|f| f.name == *n)));
+        }
+    }
+    Ok(())
 }
 
 // 型検査の結果のうち、出力に使うもの
@@ -2471,7 +2488,7 @@ impl Ck<'_> {
                 }
             }
             Expr::Call(name, args) if BUILD_FNS.contains(&name.as_str()) => {
-                if !self.in_macro {
+                if name == "artifact" && !self.in_macro {
                     return Err(format!("{name} はマクロ本体でだけ使えます").into());
                 }
                 let str_t = prim("str");
@@ -2481,6 +2498,13 @@ impl Ck<'_> {
                     "artifact" => (vec![str_t.clone(), bytes.clone()], prim("unit")),
                     "compile" => (vec![str_t.clone(), str_t.clone(), names], bytes),
                     "inspect_exports" => (vec![str_t.clone(), names], str_t.clone()),
+                    "args" => (vec![], names),
+                    "read_text" | "js_glue" => (vec![str_t.clone()], str_t.clone()),
+                    "read_bytes" => (vec![str_t.clone()], bytes),
+                    "write_text" => (vec![str_t.clone(), str_t.clone()], prim("unit")),
+                    "write_bytes" => (vec![str_t.clone(), bytes], prim("unit")),
+                    "compile_file" => (vec![str_t.clone(), str_t.clone(), names], bytes),
+                    "inspect_file_exports" => (vec![str_t.clone(), names], str_t.clone()),
                     "utf8" => (vec![str_t.clone()], bytes),
                     _ => unreachable!(),
                 };
@@ -4291,10 +4315,9 @@ fn main() {
     }
 }
 
-// ホスト機能へ到達する関数はコンパイル時専用。
+// artifact に到達するマクロ専用関数を、実行側から到達する関数を残して除く。
 pub(crate) fn compile_only(prog: &Program) -> std::collections::HashSet<String> {
-    let mut names: std::collections::HashSet<String> =
-        BUILD_FNS.iter().map(|n| n.to_string()).collect();
+    let mut names: std::collections::HashSet<String> = ["artifact".to_string()].into_iter().collect();
     loop {
         let before = names.len();
         for f in &prog.fns {
@@ -4306,7 +4329,6 @@ pub(crate) fn compile_only(prog: &Program) -> std::collections::HashSet<String> 
             break;
         }
     }
-    let host = names.clone();
     // ビルド専用関数からだけ呼ばれる純粋な補助関数も実行時に残さない。
     loop {
         let before = names.len();
@@ -4323,7 +4345,7 @@ pub(crate) fn compile_only(prog: &Program) -> std::collections::HashSet<String> 
     let mut pending: Vec<String> = prog
         .fns
         .iter()
-        .filter(|f| f.name == "main" || !names.contains(&f.name))
+        .filter(|f| f.name == "main" || prog.tests.iter().any(|(_, n)| n == &f.name) || !names.contains(&f.name))
         .map(|f| f.name.clone())
         .collect();
     while let Some(n) = pending.pop() {
@@ -4334,6 +4356,6 @@ pub(crate) fn compile_only(prog: &Program) -> std::collections::HashSet<String> 
             pending.extend(callees(f));
         }
     }
-    names.retain(|n| host.contains(n) || !runtime.contains(n));
+    names.retain(|n| !runtime.contains(n));
     names
 }

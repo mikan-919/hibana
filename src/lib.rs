@@ -26,15 +26,19 @@ fn checked(src: &str, kind: pipeline::Kind) -> error::R<pipeline::Checked> {
 }
 
 pub fn run(src: &str, out: &mut dyn Write) -> error::R<eval::Value> {
+    run_with_args(src, out, &[])
+}
+
+pub fn run_with_args(src: &str, out: &mut dyn Write, args: &[String]) -> error::R<eval::Value> {
     let checked = checked(src, pipeline::Kind::Executable)?;
-    eval::run(&checked.program, out)
+    eval::run_fn_args(&checked.program, "main", usize::MAX, out, args)
 }
 
 pub fn to_js(src: &str) -> error::R<String> {
-    Ok(pipeline::emit_js(&checked(
+    pipeline::emit_js(&checked(
         src,
         pipeline::Kind::Executable,
-    )?))
+    )?)
 }
 
 pub fn to_ir(src: &str) -> error::R<String> {

@@ -346,6 +346,8 @@ pub fn lower(p: &parser::Program) -> R<Program> {
 
 /// exports から辿れる関数だけを変換する。None はすべての関数を変換する。
 pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>) -> R<Program> {
+    let roots = exports.map(|v| v.to_vec()).unwrap_or_else(|| p.fns.iter().map(|f| f.name.clone()).collect());
+    crate::typeck::reject_script_calls(p, &roots)?;
     let runtime = parser::parse(RUNTIME)?;
     let mut sources = HashMap::new();
     for f in &runtime.fns {

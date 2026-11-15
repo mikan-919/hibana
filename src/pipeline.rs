@@ -84,11 +84,17 @@ pub fn compile(source: &str, target: &str, exports: &[String]) -> R<Vec<u8>> {
             }
             let program = compiler_input(source, Kind::Executable)?;
             let text = if target == "js" {
-                emit_js(&program)
+                emit_js(&program)?
             } else {
                 emit_c(&program)?
             };
             Ok(text.into_bytes())
+        }
+        "native" => {
+            if !exports.is_empty() { return Err("native の公開関数一覧は空にしてください".into()); }
+            let program = compiler_input(source, Kind::Executable)?;
+            let roots = ["main".to_string()];
+            crate::native::emit(&lower(&program, Some(&roots))?)
         }
         _ => Err(format!("未対応のコンパイル先: {target}").into()),
     }
@@ -203,9 +209,15 @@ pub fn emit_wasm(program: &ir::Program, exports: Option<&[String]>) -> R<Vec<u8>
 /// int は BigInt、str は文字列、unit は undefined として渡す。
 pub fn emit_js_glue(program: &ir::Program, exports: &[String]) -> R<String> {
     let signatures = boundary_signatures(program, exports)?;
-    let names = serde_json::to_string(&signatures.exports).expect("関数の型を JSON に変換できる");
-    let hosts =
-        serde_json::to_string(&signatures.imports).expect("外部関数の型を JSON に変換できる");
+    let metadata = serde_json::json!({"exports": signatures.exports, "imports": signatures.imports}).to_string();
+    js_glue(&metadata)
+}
+
+/// 境界の型情報から JavaScript 接続コードを作る。
+pub fn js_glue(metadata: &str) -> R<String> {
+    let metadata: serde_json::Value = serde_json::from_str(metadata).map_err(|e| format!("接続コードの型情報: {e}"))?;
+    let hosts = serde_json::to_string(metadata.get("imports").ok_or("imports が必要")?).unwrap();
+    let names = serde_json::to_string(metadata.get("exports").ok_or("exports が必要")?).unwrap();
     let template = r#"// hibana が生成した JavaScript 接続コード
 export async function instantiate(bytes, imports = {}) {
   let instance;
@@ -343,12 +355,14 @@ fn select_exports<'a>(program: &'a ir::Program, names: &[String]) -> R<Vec<&'a i
 }
 
 /// 型検査済みプログラムから JavaScript を作る。
-pub fn emit_js(checked: &Checked) -> String {
-    js::emit(&checked.program, &checked.info)
+pub fn emit_js(checked: &Checked) -> R<String> {
+    typeck::reject_script_calls(&checked.program, &["main".into()])?;
+    Ok(js::emit(&checked.program, &checked.info))
 }
 
 /// 型検査済みプログラムから C を作る。
 pub fn emit_c(checked: &Checked) -> R<String> {
+    typeck::reject_script_calls(&checked.program, &["main".into()])?;
     if let Some(f) = checked
         .program
         .fns

@@ -25,7 +25,7 @@ fn load_posts() -> Vec<Post> {
         JArr(items) => {
             for item in items {
                 let published = match field(item, 'published') {
-                    Some(JBool(b)) => b
+                    Some(value) => match value { JBool(b) => b, _ => false }
                     _ => false
                 }
                 posts = push(posts, Post {

@@ -68,6 +68,7 @@ struct Interp<'a> {
     // ソースのこの位置より後（読み込んだライブラリ）で起きたエラーは、ここより前の、呼び出した側の位置にする
     user_end: usize,
     in_macro: bool,
+    args: &'a [String],
 }
 
 // 型検査を通ったプログラムを前提とする
@@ -81,6 +82,12 @@ pub fn run_fn(
     entry: &str,
     user_end: usize,
     out: &mut dyn Write,
+) -> Result<Value, Error> {
+    run_fn_args(prog, entry, user_end, out, &[])
+}
+
+pub fn run_fn_args(
+    prog: &Program, entry: &str, user_end: usize, out: &mut dyn Write, args: &[String],
 ) -> Result<Value, Error> {
     let mut it = Interp {
         fns: prog.fns.iter().map(|f| (f.name.as_str(), f)).collect(),
@@ -101,6 +108,7 @@ pub fn run_fn(
         err_at: None,
         user_end,
         in_macro: false,
+        args,
     };
     match it.call(entry, vec![]) {
         Ok(v) | Err(Flow::Return(v)) => Ok(v),
@@ -137,6 +145,7 @@ pub fn run_macro(b: &Block, vars: Vec<(String, Value)>, prog: &Program) -> Resul
         err_at: None,
         user_end: usize::MAX,
         in_macro: true,
+        args: &[],
     };
     match it.block(b, &mut vec![vars.into_iter().collect()]) {
         Ok(v) | Err(Flow::Return(v)) => Ok(v),
@@ -627,9 +636,9 @@ impl Interp<'_> {
                     Value::Ty(name.as_str().into())
                 } else if matches!(
                     name.as_str(),
-                    "artifact" | "compile" | "inspect_exports" | "utf8"
+                    "artifact" | "compile" | "inspect_exports" | "utf8" | "args" | "read_text" | "read_bytes" | "write_text" | "write_bytes" | "compile_file" | "inspect_file_exports" | "js_glue"
                 ) {
-                    if !self.in_macro {
+                    if name == "artifact" && !self.in_macro {
                         return Err(Flow::Error(format!("{name} はコンパイル時だけ使えます")));
                     }
                     let str_arg = |i: usize| -> R<String> {
@@ -644,6 +653,21 @@ impl Interp<'_> {
                         ))
                     };
                     match name.as_str() {
+                        "args" => Value::Arr(Rc::new(self.args.iter().map(|s| Value::Str(s.as_str().into())).collect())),
+                        "read_text" => Value::Str(std::fs::read_to_string(str_arg(0)?).map_err(|e| Flow::Error(e.to_string()))?.into()),
+                        "read_bytes" => bytes_value(std::fs::read(str_arg(0)?).map_err(|e| Flow::Error(e.to_string()))?),
+                        "write_text" | "write_bytes" => {
+                            let path = str_arg(0)?;
+                            let bytes = if name == "write_text" { str_arg(1)?.into_bytes() } else {
+                                let Some(Value::Arr(values)) = vs.get(1) else { return Err(Flow::Error("write_bytes の内容は Vec<int>".into())); };
+                                values.iter().map(|v| match v { Value::Int(n) => u8::try_from(*n).map_err(|_| Flow::Error("バイトは 0..255".into())), _ => Err(Flow::Error("write_bytes の内容は Vec<int>".into())) }).collect::<R<Vec<_>>>()?
+                            };
+                            let p = std::path::Path::new(&path);
+                            if let Some(parent) = p.parent().filter(|p| !p.as_os_str().is_empty()) { std::fs::create_dir_all(parent).map_err(|e| Flow::Error(e.to_string()))?; }
+                            std::fs::write(p, bytes).map_err(|e| Flow::Error(e.to_string()))?;
+                            Value::Unit
+                        }
+                        "js_glue" => Value::Str(crate::pipeline::js_glue(&str_arg(0)?).map_err(|e| Flow::Error(e.to_string()))?.into()),
                         "utf8" => bytes_value(str_arg(0)?.into_bytes()),
                         "artifact" => {
                             let path = str_arg(0)?;
@@ -664,8 +688,13 @@ impl Interp<'_> {
                             Value::Unit
                         }
                         _ => {
-                            let source = str_arg(0)?;
-                            let index = if name == "compile" { 2 } else { 1 };
+                            let input = str_arg(0)?;
+                            let file = name == "compile_file" || name == "inspect_file_exports";
+                            let source = if file {
+                                let path = std::path::Path::new(&input);
+                                std::fs::read_to_string(path).map_err(|e| Flow::Error(format!("{input}: {e}")))?
+                            } else { input.clone() };
+                            let index = if name == "compile" || name == "compile_file" { 2 } else { 1 };
                             let Some(Value::Arr(values)) = vs.get(index) else {
                                 return Err(Flow::Error(format!("{name} の公開名は Vec<str>")));
                             };
@@ -676,18 +705,14 @@ impl Interp<'_> {
                                     _ => Err(Flow::Error(format!("{name} の公開名は str"))),
                                 })
                                 .collect::<R<Vec<String>>>()?;
-                            if name == "compile" {
-                                bytes_value(
-                                    crate::pipeline::compile(&source, &str_arg(1)?, &exports)
-                                        .map_err(|e| Flow::Error(e.to_string()))?,
-                                )
-                            } else {
-                                Value::Str(
-                                    crate::pipeline::inspect_exports(&source, &exports)
-                                        .map_err(|e| Flow::Error(e.to_string()))?
-                                        .into(),
-                                )
-                            }
+                            let compile = || -> R<Value> {
+                                if name == "compile" || name == "compile_file" {
+                                    Ok(bytes_value(crate::pipeline::compile(&source, &str_arg(1)?, &exports).map_err(|e| Flow::Error(e.to_string()))?))
+                                } else {
+                                    Ok(Value::Str(crate::pipeline::inspect_exports(&source, &exports).map_err(|e| Flow::Error(e.to_string()))?.into()))
+                                }
+                            };
+                            if file { crate::parser::with_base_dir(std::path::Path::new(&input).parent().unwrap_or(std::path::Path::new(".")), compile)? } else { compile()? }
                         }
                     }
                 } else if let Some(v) = self.syn_fn(name, &mut vs)? {

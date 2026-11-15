@@ -46,9 +46,12 @@ pub(crate) fn run(name: &str, args: &[String]) -> Result<i32, String> {
     };
     let tool_path = crate::tools::script_path(&config, &path)?;
     let mut shell = Command::new("sh");
-    if let Some((_, path)) = &tool_path {
-        shell.env("PATH", path);
-    }
+    let original = tool_path.as_ref().map(|(_, p)| p.clone()).unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
+    let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+    let mut paths: Vec<_> = std::env::split_paths(&original).collect();
+    let position = usize::from(tool_path.is_some());
+    paths.insert(position.min(paths.len()), executable.parent().ok_or("実行ファイルのディレクトリが無い")?.to_path_buf());
+    shell.env("PATH", std::env::join_paths(paths).map_err(|e| e.to_string())?);
     let status = shell
         .arg("-c")
         .arg(command)
