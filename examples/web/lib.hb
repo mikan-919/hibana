@@ -1,5 +1,6 @@
 // hanabi: Cloudflare Workers 向けの Web の枠組み。経路の構文は syntax.hb の route
 use web
+use std -> { Option, Some }
 
 type Response = web.Response
 
@@ -8,7 +9,7 @@ struct Param { value: str }
 
 fn Param::of(value: str) -> Param { Param { value: value } }
 
-fn Param::get(p: Param) -> str { p.value }
+fn Param::get(p: Param) -> Option<str> { Some(p.value) }
 
 fn Response::text(body: str) -> web.Response { web.ok(body) }
 
@@ -66,9 +67,9 @@ struct DurableObject { binding: str, id: str, stamps: Ref<Vec<int>> }
 fn durable_object(binding: str) -> DurableObjectNamespace { DurableObjectNamespace { binding: binding } }
 
 // ponytail: Durable Object の状態を実行中のメモリに置くので、要求ごとに消える。Workers の binding（env.ACCOUNT）につなぐ時に置き換える
-fn DurableObjectNamespace::get(ns: DurableObjectNamespace, id: Param) -> DurableObject {
+fn DurableObjectNamespace::get(ns: DurableObjectNamespace, id: str) -> DurableObject {
     let stamps: Vec<int> = []
-    DurableObject { binding: ns.binding, id: id.value, stamps: new_ref(stamps) }
+    DurableObject { binding: ns.binding, id: id, stamps: new_ref(stamps) }
 }
 
 // 時刻（ミリ秒）を記録する

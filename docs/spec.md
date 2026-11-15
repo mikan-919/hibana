@@ -454,7 +454,7 @@ enum Shape { Circle(r: int), Rect(w: int, h: int), Dot }
 
 | 名前 | 内容 |
 |---|---|
-| `Option<A>` = `None` \| `Some(value)`、`unwrap_or(o, d)` | 値が無いかもしれないこと |
+| `Option<A>` = `None` \| `Some(value)`、`o.unwrap()`（`None` なら実行時エラー）、`unwrap_or(o, d)` | 値が無いかもしれないこと |
 | `Result<A, E>` = `Ok(value)` \| `Err(error)` | 成功か失敗 |
 | `Eq<A>`（`eq`）、`Ord<A>: Eq<A>`（`lt`）、`Show<A>`（`show`） | トレイト（3.7 節）。`int` `str` `bool` の `Eq` と `Show`、`int` の `Ord`、`Vec<A>` の `Eq` と `Show` の実装がある（`put` と `to_str` での `Vec` の表示は組み込みのまま） |
 | `max(a, b)` `min(a, b)` `contains(xs, x)` | `Ord` と `Eq` を使う関数 |

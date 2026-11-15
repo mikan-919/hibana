@@ -211,6 +211,14 @@ fn assert_eq<A: Eq + Show>(got: A, want: A) {
     if got != want { panic('assert_eq が失敗した: ' + to_str(got) + ' と ' + to_str(want)) }
 }
 
+// 中の値。None なら実行時エラーにする
+fn Option::unwrap<A>(o: Option<A>) -> A {
+    match o {
+        Some(x) => x
+        None => panic('None を unwrap した')
+    }
+}
+
 fn unwrap_or<A>(o: Option<A>, d: A) -> A {
     match o {
         Some(x) => x

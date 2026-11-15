@@ -9,6 +9,7 @@ test 'vec' {
     assert_eq(range(2, 5), [2, 3, 4])
     assert_eq(sum(range(0, 5)), 10)
     assert_eq(last([1, 2]), Some(2))
+    assert_eq(last([1, 2]).unwrap(), 2)
     assert(some([1, 2, 3], fn(x) { x > 2 }))
     assert(every([1, 2, 3], fn(x) { x > 0 }))
     assert_eq(find([1, 2, 3], fn(x) { x > 1 }), Some(2))
