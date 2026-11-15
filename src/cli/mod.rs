@@ -508,7 +508,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let tmp = std::env::temp_dir().join(format!("hibana-ir-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
-        let (mut total, mut native, mut wasm) = (0, Vec::new(), Vec::new());
+        let (mut total, mut native, mut wasm, mut reasons) = (0, Vec::new(), Vec::new(), Vec::new());
         for p in program_files() {
             let src = std::fs::read_to_string(&p).unwrap();
             if src.contains(".ts'") || src.contains(".js'") || src.contains("\nextern") || src.contains("web.serve(") {
@@ -527,7 +527,10 @@ mod tests {
                     assert_eq!(String::from_utf8(r.stdout).unwrap(), want, "ネイティブ: {}", p.display());
                     native.push(name.clone());
                 }
-                Err(e) => assert!(e.msg.contains("未対応"), "ネイティブ: {}: {}", p.display(), e.msg),
+                Err(e) => {
+                    assert!(e.msg.contains("未対応"), "ネイティブ: {}: {}", p.display(), e.msg);
+                    reasons.push(format!("{name}: {}", e.msg));
+                }
             }
             match crate::to_wasm(&src) {
                 Ok(bytes) => {
@@ -539,7 +542,7 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(&tmp).unwrap();
-        eprintln!("ネイティブ {}/{total}: {native:?}\nWASM {}/{total}: {wasm:?}", native.len(), wasm.len());
+        eprintln!("ネイティブ {}/{total}: {native:?}\nWASM {}/{total}: {wasm:?}\n未対応:\n{}", native.len(), wasm.len(), reasons.join("\n"));
         assert_eq!(native, wasm, "2 つの出力が対応するプログラムは同じ");
         assert!(native.iter().any(|n| n == "fib"), "{native:?}");
     }

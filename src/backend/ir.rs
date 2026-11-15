@@ -1,11 +1,23 @@
 // 型検査後の構文木から、WASM とネイティブの両方へ出す構造化した中間表現を作る。
 // 制御フローは WASM と同じ入れ子の形（if・while・return）で持ち、goto を持たない。
-// 値はすべて 64 ビット整数で表す。bool は 0 と 1、unit は 0。文字列は出力先ごとに表し方を決める値。
-// ponytail: 整数・真偽値・文字列のリテラル・if・while・範囲の for・関数呼び出し・print に対応する。ヒープ・Vec・構造体・クロージャ・効果は未対応
+// 値はすべて V（型の番号 tag と中身 payload の 2 つの 64 ビット整数）で表す。番号は runtime.hb の先頭を参照。
+// 文字列の連結・比較・表示などはランタイム（runtime.hb）の関数を呼ぶ。ランタイムも同じ変換で IR にする。
+// ponytail: 効果（handle と操作）は未対応。Vec の push は毎回写す（runtime.hb の __arr_push）
 use crate::error::R;
 use crate::parser::{self, Expr as Ast, Stmt as AstStmt};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+
+pub const UNIT: i64 = 0;
+pub const INT: i64 = 1;
+pub const BOOL: i64 = 2;
+pub const STR: i64 = 3;
+pub const ARR: i64 = 4;
+pub const DATA: i64 = 5;
+pub const FN: i64 = 6;
+pub const TY: i64 = 7;
+
+const RUNTIME: &str = include_str!("runtime.hb");
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
@@ -13,12 +25,14 @@ pub struct Program {
     pub(crate) imports: Vec<Import>,
 }
 
+/// WASM の境界で渡せる型。それ以外は Other
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueType {
     Int,
     Bool,
     Str,
     Unit,
+    Other,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -31,6 +45,8 @@ pub struct Import {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Function {
     pub(crate) name: String,
+    // 引数の数。無名関数とその入口は、先頭に関数の値そのもの（写し取った変数を持つ）を受け取る
+    pub(crate) params: u32,
     pub(crate) param_types: Vec<ValueType>,
     pub(crate) result_type: ValueType,
     // 引数を含む局所変数の数。引数は 0 から順に並ぶ
@@ -38,32 +54,61 @@ pub struct Function {
     pub(crate) body: Vec<Stmt>,
 }
 
+/// 値の中身に対する演算。結果の型の番号は演算ごとに決まる
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Op {
-    // 算術は 64 ビット整数で、範囲外と 0 による除算は実行時エラー
+pub enum Prim {
+    // 型の番号と中身（int）、型の番号と中身から作る値
+    Tag,
+    Payload,
+    MakeV,
+    // int。範囲外は __overflow、0 による除算は __div_zero を呼ぶ
     Add,
     Sub,
     Mul,
     Div,
     Rem,
-    // 比較は 0 か 1 を返す
+    // bool
     Eq,
     Ne,
     Lt,
     Le,
     Gt,
     Ge,
+    Not,
+    // int。ビット演算（右は論理シフト）
+    And,
+    Or,
+    Shl,
+    Shr,
+    // メモリ。番地は中身。Load は int、Store は unit
+    Load,
+    Store,
+    Load8,
+    Store8,
+    // 新しいメモリ（引数のバイト数以上）の先頭の番地
+    Pages,
+    // 確保の状態を置く 16 バイトの番地
+    Static,
+    // (fd, 番地, 長さ) を書く
+    Write,
+    // 文字列を実行時エラーとして出し、終わる
+    Fail,
+    // 1970 年からのミリ秒
+    Now,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
-    Int(i64),
+    Const(i64, i64),
     Str(String),
     Local(u32),
-    Binary(Op, Box<Expr>, Box<Expr>),
-    Not(Box<Expr>),
-    // unit を返す関数の呼び出しは 0 になる
+    // 関数を間接に呼ぶための番号（int）。関数の値の先頭に入れる
+    Func(String),
+    Prim(Prim, Vec<Expr>),
     Call(String, Vec<Expr>),
+    // 関数の値を呼ぶ。関数の値そのものを先頭の引数に渡す
+    CallIndirect(Box<Expr>, Vec<Expr>),
+    // 条件は中身が 0 でなければ真
     If(Box<Expr>, Box<Block>, Box<Block>),
     Block(Box<Block>),
 }
@@ -78,10 +123,8 @@ pub struct Block {
 pub enum Stmt {
     Set(u32, Expr),
     Eval(Expr),
-    // 値と改行を出力する。型は Int か Str
-    Print(ValueType, Expr),
     While(Expr, Vec<Stmt>),
-    Return(Option<Expr>),
+    Return(Expr),
 }
 
 impl fmt::Display for ValueType {
@@ -91,6 +134,7 @@ impl fmt::Display for ValueType {
             Self::Bool => "bool",
             Self::Str => "str",
             Self::Unit => "unit",
+            Self::Other => "other",
         })
     }
 }
@@ -116,6 +160,10 @@ impl Import {
     }
 }
 
+fn boundary(t: ValueType) -> bool {
+    matches!(t, ValueType::Int | ValueType::Str | ValueType::Unit)
+}
+
 impl Function {
     pub fn name(&self) -> &str {
         &self.name
@@ -129,16 +177,33 @@ impl Function {
     pub fn body(&self) -> &[Stmt] {
         &self.body
     }
+    /// 利用者が書いた関数で、引数と戻り値を WASM の境界で渡せるか
+    pub fn boundary(&self) -> bool {
+        !self.name.starts_with("__")
+            && self.param_types.len() == self.params as usize
+            && self
+                .param_types
+                .iter()
+                .all(|t| boundary(*t) && *t != ValueType::Unit)
+            && boundary(self.result_type)
+    }
     // 本体に現れるすべての文と式（入れ子を含む）を、出現順に f に渡す
     pub fn each<'a>(&'a self, f: &mut impl FnMut(Node<'a>)) {
         each_stmts(&self.body, f)
     }
+    /// 呼ぶ関数の名前。算術の範囲外などで呼ぶランタイムの関数も含む
     pub fn calls(&self) -> Vec<&str> {
         let mut names = Vec::new();
-        self.each(&mut |n| {
-            if let Node::Expr(Expr::Call(n, _)) = n {
-                names.push(n.as_str())
+        self.each(&mut |n| match n {
+            Node::Expr(Expr::Call(n, _) | Expr::Func(n)) => names.push(n.as_str()),
+            Node::Expr(Expr::Prim(Prim::Add | Prim::Sub | Prim::Mul, _)) => {
+                names.push("__overflow")
             }
+            Node::Expr(Expr::Prim(Prim::Div | Prim::Rem, _)) => {
+                names.push("__overflow");
+                names.push("__div_zero")
+            }
+            _ => {}
         });
         names
     }
@@ -154,14 +219,11 @@ fn each_stmts<'a>(stmts: &'a [Stmt], f: &mut impl FnMut(Node<'a>)) {
     for s in stmts {
         f(Node::Stmt(s));
         match s {
-            Stmt::Set(_, e) | Stmt::Eval(e) | Stmt::Print(_, e) | Stmt::Return(Some(e)) => {
-                each_expr(e, f)
-            }
+            Stmt::Set(_, e) | Stmt::Eval(e) | Stmt::Return(e) => each_expr(e, f),
             Stmt::While(c, body) => {
                 each_expr(c, f);
                 each_stmts(body, f);
             }
-            Stmt::Return(None) => {}
         }
     }
 }
@@ -169,13 +231,12 @@ fn each_stmts<'a>(stmts: &'a [Stmt], f: &mut impl FnMut(Node<'a>)) {
 fn each_expr<'a>(e: &'a Expr, f: &mut impl FnMut(Node<'a>)) {
     f(Node::Expr(e));
     match e {
-        Expr::Int(_) | Expr::Str(_) | Expr::Local(_) => {}
-        Expr::Binary(_, a, b) => {
-            each_expr(a, f);
-            each_expr(b, f);
+        Expr::Const(..) | Expr::Str(_) | Expr::Local(_) | Expr::Func(_) => {}
+        Expr::Prim(_, args) | Expr::Call(_, args) => args.iter().for_each(|a| each_expr(a, f)),
+        Expr::CallIndirect(g, args) => {
+            each_expr(g, f);
+            args.iter().for_each(|a| each_expr(a, f));
         }
-        Expr::Not(a) => each_expr(a, f),
-        Expr::Call(_, args) => args.iter().for_each(|a| each_expr(a, f)),
         Expr::If(c, t, e) => {
             each_expr(c, f);
             each_block(t, f);
@@ -190,34 +251,87 @@ fn each_block<'a>(b: &'a Block, f: &mut impl FnMut(Node<'a>)) {
     each_expr(&b.value, f);
 }
 
-fn value_type(e: &Ast) -> Option<ValueType> {
+fn value_type(e: &Ast) -> ValueType {
     match e.peel() {
-        Ast::Var(n) if n == "int" => Some(ValueType::Int),
-        Ast::Var(n) if n == "bool" => Some(ValueType::Bool),
-        Ast::Var(n) if n == "str" => Some(ValueType::Str),
-        Ast::Var(n) if n == "unit" => Some(ValueType::Unit),
+        Ast::Var(n) if n == "int" => ValueType::Int,
+        Ast::Var(n) if n == "bool" => ValueType::Bool,
+        Ast::Var(n) if n == "str" => ValueType::Str,
+        Ast::Var(n) if n == "unit" => ValueType::Unit,
         Ast::Refine(base, _, _) => value_type(base),
-        _ => None,
+        _ => ValueType::Other,
     }
 }
 
-// 関数の引数と戻り値の型。IR で表せなければ None
-type Signature = Option<(Vec<ValueType>, ValueType)>;
+fn ret_type(f: &parser::Fn) -> ValueType {
+    f.ret.as_ref().map_or(ValueType::Unit, value_type)
+}
 
-fn signature(f: &parser::Fn) -> Signature {
-    if f.alias || f.op.is_some() || f.implicit != 0 || f.insts != 0 || !f.effects.is_empty() {
-        return None;
-    }
-    let params = f
-        .params
-        .iter()
-        .map(|(_, t)| value_type(t).filter(|t| *t != ValueType::Unit))
-        .collect::<Option<Vec<_>>>()?;
-    let result = match &f.ret {
-        Some(t) => value_type(t)?,
-        None => ValueType::Unit,
-    };
-    Some((params, result))
+// IR を組み立てる短い名前
+fn int(n: i64) -> Expr {
+    Expr::Const(INT, n)
+}
+fn prim(p: Prim, args: Vec<Expr>) -> Expr {
+    Expr::Prim(p, args)
+}
+fn call(n: &str, args: Vec<Expr>) -> Expr {
+    Expr::Call(n.to_string(), args)
+}
+fn add(a: Expr, b: Expr) -> Expr {
+    prim(Prim::Add, vec![a, b])
+}
+fn mkv(tag: i64, p: Expr) -> Expr {
+    prim(Prim::MakeV, vec![int(tag), p])
+}
+fn block(stmts: Vec<Stmt>, value: Expr) -> Expr {
+    Expr::Block(Box::new(Block { stmts, value }))
+}
+fn leaf(value: Expr) -> Box<Block> {
+    Box::new(Block {
+        stmts: vec![],
+        value,
+    })
+}
+fn unit() -> Expr {
+    Expr::Const(UNIT, 0)
+}
+// 番地の値を読む・書く。番地は何度も読むので、局所変数か定数にしておく
+fn getv(addr: Expr) -> Expr {
+    prim(
+        Prim::MakeV,
+        vec![
+            prim(Prim::Load, vec![addr.clone()]),
+            prim(Prim::Load, vec![add(addr, int(8))]),
+        ],
+    )
+}
+fn setv(addr: Expr, v: Expr) -> Vec<Stmt> {
+    vec![
+        Stmt::Eval(prim(
+            Prim::Store,
+            vec![addr.clone(), prim(Prim::Tag, vec![v.clone()])],
+        )),
+        Stmt::Eval(prim(
+            Prim::Store,
+            vec![add(addr, int(8)), prim(Prim::Payload, vec![v])],
+        )),
+    ]
+}
+
+// 型検査した関数（利用者と std）とランタイムの関数
+struct Source<'a> {
+    f: &'a parser::Fn,
+    runtime: bool,
+}
+
+struct Ctx<'a> {
+    sources: HashMap<&'a str, Source<'a>>,
+    // 構築子の名前から (番号, フィールド名)
+    ctors: HashMap<&'a str, (i64, Vec<&'a str>)>,
+    ctor_list: Vec<(&'a str, Vec<&'a str>)>,
+    types: HashSet<&'a str>,
+    // 変換の途中で作った関数（無名関数）
+    made: Vec<Function>,
+    lambdas: usize,
 }
 
 pub fn lower(p: &parser::Program) -> R<Program> {
@@ -226,20 +340,45 @@ pub fn lower(p: &parser::Program) -> R<Program> {
 
 /// exports から辿れる関数だけを変換する。None はすべての関数を変換する。
 pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>) -> R<Program> {
+    let runtime = parser::parse(RUNTIME)?;
     let mut sources = HashMap::new();
-    let mut signatures = HashMap::new();
-    for (i, f) in p.fns.iter().enumerate() {
-        sources.insert(f.name.as_str(), (i, f));
-        signatures.insert(f.name.as_str(), signature(f));
+    for f in &runtime.fns {
+        sources.insert(f.name.as_str(), Source { f, runtime: true });
     }
+    for f in &p.fns {
+        sources.insert(f.name.as_str(), Source { f, runtime: false });
+    }
+    let ctor_list: Vec<(&str, Vec<&str>)> = p
+        .datas
+        .iter()
+        .flat_map(|d| &d.ctors)
+        .map(|c| {
+            (
+                c.name.as_str(),
+                c.fields.iter().map(|f| f.0.as_str()).collect(),
+            )
+        })
+        .collect();
+    let mut cx = Ctx {
+        ctors: ctor_list
+            .iter()
+            .enumerate()
+            .map(|(i, (n, fs))| (*n, (i as i64, fs.clone())))
+            .collect(),
+        ctor_list,
+        types: p.datas.iter().map(|d| d.name.as_str()).collect(),
+        sources,
+        made: Vec::new(),
+        lambdas: 0,
+    };
     if exports.is_none() && (!p.datas.is_empty() || !p.tests.is_empty()) {
         return Err("IR は型宣言とテスト宣言に未対応".into());
     }
-    let mut pending = match exports {
+    let mut pending: Vec<String> = match exports {
         Some(names) => {
             let mut seen = HashSet::new();
             for name in names {
-                if !signatures.contains_key(name.as_str()) {
+                if !p.fns.iter().any(|f| f.name == *name) {
                     return Err(format!("公開する関数 {name} が無い").into());
                 }
                 if matches!(
@@ -252,350 +391,642 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>) -> R<Prog
                     return Err(format!("公開する関数 {name} が重複している").into());
                 }
             }
-            names.iter().map(String::as_str).collect::<Vec<_>>()
+            names.to_vec()
         }
-        None => p.fns.iter().map(|f| f.name.as_str()).collect(),
+        None => p.fns.iter().map(|f| f.name.clone()).collect(),
     };
     let exported = |name: &str| exports.is_some_and(|names| names.iter().any(|n| n == name));
     let mut visited = HashSet::new();
     let mut functions = Vec::new();
     let mut imports = Vec::new();
     while let Some(name) = pending.pop() {
-        if !visited.insert(name) {
+        if !visited.insert(name.clone()) {
             continue;
         }
-        let f = sources[name].1;
-        let Some((param_types, result_type)) = signatures[name].clone() else {
-            return Err(format!("IR は関数 {} の宣言に未対応", f.name).into());
-        };
-        // ponytail: WASM の境界（公開関数と外部関数）は int・str・unit だけ。bool を渡すなら接続コードに変換を足す
-        if (exported(name) || f.js.is_some())
-            && (param_types.contains(&ValueType::Bool) || result_type == ValueType::Bool)
-        {
-            return Err(format!("IR は関数 {} の境界の bool に未対応", f.name).into());
-        }
-        if f.js.is_some() {
-            if exported(name) {
-                return Err("外部関数を直接公開できない".into());
+        let js = cx
+            .sources
+            .get(name.as_str())
+            .map(|s| s.f)
+            .filter(|f| f.js.is_some());
+        let function = match js {
+            Some(f) => {
+                let param_types: Vec<_> = f.params.iter().map(|(_, t)| value_type(t)).collect();
+                let result_type = ret_type(f);
+                if exported(&name) {
+                    return Err("外部関数を直接公開できない".into());
+                }
+                // ponytail: WASM の境界（公開関数と外部関数）は int・str・unit だけ。ほかの型は接続コードに変換を足す
+                if !param_types
+                    .iter()
+                    .chain([&result_type])
+                    .all(|t| boundary(*t))
+                {
+                    return Err(format!("IR は関数 {} の境界の型に未対応", f.name).into());
+                }
+                if param_types.contains(&ValueType::Str) || result_type == ValueType::Str {
+                    pending.extend(["__str_in".to_string(), "__str_out".to_string()]);
+                }
+                imports.push(Import {
+                    name: f.name.clone(),
+                    param_types,
+                    result_type,
+                });
+                continue;
             }
-            imports.push(Import {
-                name: f.name.clone(),
-                param_types,
-                result_type,
-            });
-            continue;
-        }
-        let mut l = Lower {
-            signatures: &signatures,
-            vars: HashMap::new(),
-            locals: 0,
+            None if cx.sources.contains_key(name.as_str()) => cx.function(&name)?,
+            None => cx.generated(&name)?,
         };
-        for ((n, _), t) in f.params.iter().zip(&param_types) {
-            let i = l.local();
-            l.vars.insert(n.clone(), (i, *t));
+        if exported(&name) {
+            if !function.boundary() {
+                return Err(format!("IR は関数 {} の境界の型に未対応", function.name).into());
+            }
+            if function.param_types.contains(&ValueType::Str)
+                || function.result_type == ValueType::Str
+            {
+                pending.extend(["__str_in".to_string(), "__str_out".to_string()]);
+            }
         }
-        let (block, ty) = l.block(&f.body)?;
-        let mut body = block.stmts;
-        match ty {
-            None => {}
-            Some(_) if result_type == ValueType::Unit => eval(&mut body, block.value),
-            Some(t) if t == result_type => body.push(Stmt::Return(Some(block.value))),
-            Some(_) => return Err(format!("IR は関数 {} の戻り値に未対応", f.name).into()),
-        }
-        let function = Function {
-            name: f.name.clone(),
-            param_types,
-            result_type,
-            locals: l.locals,
-            body,
-        };
-        for callee in function.calls() {
-            pending.push(sources[callee].1.name.as_str());
+        pending.extend(function.calls().into_iter().map(String::from));
+        for f in std::mem::take(&mut cx.made) {
+            pending.extend(f.calls().into_iter().map(String::from));
+            visited.insert(f.name.clone());
+            functions.push(f);
         }
         functions.push(function);
     }
-    functions.sort_by_key(|f| sources[f.name.as_str()].0);
-    imports.sort_by_key(|f| sources[f.name.as_str()].0);
+    // 宣言の順（ランタイム、利用者の関数）に並べ、出力を決まった形にする
+    let order: HashMap<&str, usize> = runtime
+        .fns
+        .iter()
+        .chain(&p.fns)
+        .enumerate()
+        .map(|(i, f)| (f.name.as_str(), i))
+        .collect();
+    functions.sort_by(|a, b| {
+        let key = |f: &Function| {
+            (
+                order.get(f.name.as_str()).copied().unwrap_or(usize::MAX),
+                f.name.clone(),
+            )
+        };
+        key(a).cmp(&key(b))
+    });
+    imports.sort_by_key(|f| order[f.name.as_str()]);
     Ok(Program { functions, imports })
 }
 
-struct Lower<'a> {
-    signatures: &'a HashMap<&'a str, Signature>,
-    vars: HashMap<String, (u32, ValueType)>,
-    locals: u32,
+impl<'a> Ctx<'a> {
+    fn function(&mut self, name: &str) -> R<Function> {
+        let src = &self.sources[name];
+        let (f, runtime) = (src.f, src.runtime);
+        if f.op.is_some() {
+            return Err(format!("IR は効果の操作 {} に未対応", f.name).into());
+        }
+        let mut l = Lower {
+            cx: self,
+            vars: HashMap::new(),
+            locals: 0,
+            raw: runtime,
+        };
+        for (n, _) in &f.params {
+            let i = l.local();
+            l.vars.insert(n.clone(), i);
+        }
+        let b = l.block(&f.body)?;
+        let locals = l.locals;
+        let mut body = b.stmts;
+        body.push(Stmt::Return(b.value));
+        Ok(Function {
+            name: f.name.clone(),
+            params: f.params.len() as u32,
+            param_types: f.params.iter().map(|(_, t)| value_type(t)).collect(),
+            result_type: ret_type(f),
+            locals,
+            body,
+        })
+    }
+
+    // 変換の中で名前だけを決めて呼ぶ関数を作る
+    fn generated(&mut self, name: &str) -> R<Function> {
+        let other = |params: u32| Function {
+            name: name.to_string(),
+            params,
+            param_types: vec![],
+            result_type: ValueType::Other,
+            locals: params,
+            body: vec![],
+        };
+        let eq = |a: Expr, n: i64| prim(Prim::Eq, vec![a, int(n)]);
+        // 構築子の番号から名前、(番号, 位置) からフィールド名
+        if name == "__ctor_name" || name == "__ctor_field" {
+            let mut f = other(if name == "__ctor_name" { 1 } else { 2 });
+            for (i, (cn, fields)) in self.ctor_list.iter().enumerate() {
+                if name == "__ctor_name" {
+                    f.body.push(if_return(
+                        eq(Expr::Local(0), i as i64),
+                        Expr::Str(cn.to_string()),
+                    ));
+                    continue;
+                }
+                for (k, field) in fields.iter().enumerate() {
+                    let cond = Expr::If(
+                        Box::new(eq(Expr::Local(0), i as i64)),
+                        leaf(eq(Expr::Local(1), k as i64)),
+                        leaf(Expr::Const(BOOL, 0)),
+                    );
+                    f.body.push(if_return(cond, Expr::Str(field.to_string())));
+                }
+            }
+            f.body.push(Stmt::Return(Expr::Str(String::new())));
+            return Ok(f);
+        }
+        // 名前でフィールドを読む。構築子ごとに位置が違うので番号で振り分ける
+        if let Some(field) = name.strip_prefix("__field_") {
+            let mut f = other(1);
+            f.locals = 2;
+            f.body
+                .push(Stmt::Set(1, prim(Prim::Load, vec![Expr::Local(0)])));
+            for (i, (_, fields)) in self.ctor_list.iter().enumerate() {
+                if let Some(k) = fields.iter().position(|x| *x == field) {
+                    let at = add(Expr::Local(0), int(16 + 16 * k as i64));
+                    f.body
+                        .push(if_return(eq(Expr::Local(1), i as i64), getv(at)));
+                }
+            }
+            f.body.push(Stmt::Return(call(
+                "__die",
+                vec![Expr::Str(format!("フィールド {field} が無い"))],
+            )));
+            return Ok(f);
+        }
+        // 名前の付いた関数を値として使う時の入口
+        if let Some(target) = name.strip_prefix("__w_") {
+            let g = self
+                .sources
+                .get(target)
+                .ok_or_else(|| format!("IR に関数 {target} が無い"))?
+                .f;
+            let n = (g.params.len() - g.implicit) as u32;
+            let mut f = other(1 + n);
+            let mut args: Vec<Expr> = (0..g.implicit).map(|_| unit()).collect();
+            args.extend((1..=n).map(Expr::Local));
+            f.body.push(Stmt::Return(call(target, args)));
+            return Ok(f);
+        }
+        Err(format!("IR に関数 {name} が無い").into())
+    }
 }
 
-// 式の型。None は値を返さずに抜ける（return を通る）
-type Ty = Option<ValueType>;
+fn if_return(cond: Expr, v: Expr) -> Stmt {
+    Stmt::Eval(Expr::If(
+        Box::new(cond),
+        Box::new(Block {
+            stmts: vec![Stmt::Return(v)],
+            value: unit(),
+        }),
+        leaf(unit()),
+    ))
+}
 
-fn join(a: Ty, b: Ty) -> R<Ty> {
-    match (a, b) {
-        (None, t) | (t, None) => Ok(t),
-        (Some(a), Some(b)) if a == b => Ok(Some(a)),
-        _ => Err("IR は分岐で型の違う if に未対応".into()),
-    }
+struct Lower<'c, 'a> {
+    cx: &'c mut Ctx<'a>,
+    vars: HashMap<String, u32>,
+    locals: u32,
+    // ランタイムの関数。演算子は中身の演算になる
+    raw: bool,
 }
 
 // 値を捨てる。unit の塊は中の文を並べ直す
 fn eval(out: &mut Vec<Stmt>, e: Expr) {
     match e {
-        Expr::Int(0) => {}
-        Expr::Block(b) if b.value == Expr::Int(0) => out.extend(b.stmts),
+        Expr::Const(..) => {}
+        Expr::Block(b) if matches!(b.value, Expr::Const(..)) => out.extend(b.stmts),
         e => out.push(Stmt::Eval(e)),
     }
 }
 
-fn unit(stmts: Vec<Stmt>) -> Expr {
-    Expr::Block(Box::new(Block {
-        stmts,
-        value: Expr::Int(0),
-    }))
-}
-
-impl Lower<'_> {
+impl Lower<'_, '_> {
     fn local(&mut self) -> u32 {
         self.locals += 1;
         self.locals - 1
     }
 
-    fn block(&mut self, b: &parser::Block) -> R<(Block, Ty)> {
+    // 値を一時変数に置き、何度でも読めるようにする
+    fn temp(&mut self, e: Expr, out: &mut Vec<Stmt>) -> Expr {
+        if let Expr::Local(_) | Expr::Const(..) = e {
+            return e;
+        }
+        let t = self.local();
+        out.push(Stmt::Set(t, e));
+        Expr::Local(t)
+    }
+
+    fn block(&mut self, b: &parser::Block) -> R<Block> {
         let saved = self.vars.clone();
         let mut stmts = Vec::new();
         for s in &b.stmts {
             match s {
                 AstStmt::Let { name, init, .. } => {
-                    let (e, t) = self.expr(init)?;
-                    let t = t.ok_or("IR は return を初期値に持つ let に未対応")?;
+                    let e = self.expr(init)?;
                     let i = self.local();
                     stmts.push(Stmt::Set(i, e));
-                    self.vars.insert(name.clone(), (i, t));
+                    self.vars.insert(name.clone(), i);
                 }
                 AstStmt::Expr(e) => self.effect(e, &mut stmts)?,
             }
         }
-        let (value, ty) = match &b.tail {
+        let value = match &b.tail {
             Some(e) => self.expr(e)?,
-            None if matches!(stmts.last(), Some(Stmt::Return(_))) => (Expr::Int(0), None),
-            None => (Expr::Int(0), Some(ValueType::Unit)),
+            None => unit(),
         };
         self.vars = saved;
-        Ok((Block { stmts, value }, ty))
+        Ok(Block { stmts, value })
+    }
+
+    fn body(&mut self, b: &parser::Block) -> R<Vec<Stmt>> {
+        let b = self.block(b)?;
+        let mut stmts = b.stmts;
+        eval(&mut stmts, b.value);
+        Ok(stmts)
     }
 
     // 文の位置の式。値は捨てる
     fn effect(&mut self, e: &Ast, out: &mut Vec<Stmt>) -> R<()> {
         match e.peel() {
-            Ast::Call(n, args) if n == "print" && args.len() == 1 => {
-                let (v, t) = self.expr(&args[0])?;
-                out.push(match t.ok_or("IR は print の引数の return に未対応")? {
-                    ValueType::Int => Stmt::Print(ValueType::Int, v),
-                    ValueType::Str => Stmt::Print(ValueType::Str, v),
-                    ValueType::Bool => Stmt::Print(
-                        ValueType::Str,
-                        Expr::If(
-                            Box::new(v),
-                            Box::new(Block {
-                                stmts: vec![],
-                                value: Expr::Str("true".into()),
-                            }),
-                            Box::new(Block {
-                                stmts: vec![],
-                                value: Expr::Str("false".into()),
-                            }),
-                        ),
-                    ),
-                    ValueType::Unit => return Err("IR は unit の print に未対応".into()),
-                });
-            }
             Ast::Assign(n, v) => {
-                let (i, t) = *self
+                let i = *self
                     .vars
                     .get(n)
                     .ok_or_else(|| format!("IR は変数 {n} に未対応"))?;
-                let (v, vt) = self.expr(v)?;
-                join(Some(t), vt)?;
+                let v = self.expr(v)?;
                 out.push(Stmt::Set(i, v));
             }
             Ast::While(c, body) => {
-                let (c, _) = self.expr(c)?;
-                let (body, _) = self.block(body)?;
-                let mut stmts = body.stmts;
-                eval(&mut stmts, body.value);
-                out.push(Stmt::While(c, stmts));
+                let c = self.expr(c)?;
+                let body = self.body(body)?;
+                out.push(Stmt::While(c, body));
             }
-            Ast::For(x, from, Some(to), body) => {
-                let (from, _) = self.expr(from)?;
-                let (to, _) = self.expr(to)?;
-                let (i, end) = (self.local(), self.local());
-                out.push(Stmt::Set(i, from));
-                out.push(Stmt::Set(end, to));
+            Ast::For(x, from, to, body) => {
                 let saved = self.vars.clone();
-                self.vars.insert(x.clone(), (i, ValueType::Int));
-                let (body, _) = self.block(body)?;
+                let i = self.local();
+                let end = self.local();
+                let (start, limit, item) = match to {
+                    Some(to) => {
+                        let from = self.expr(from)?;
+                        let to = self.expr(to)?;
+                        self.vars.insert(x.clone(), i);
+                        (from, to, None)
+                    }
+                    None => {
+                        let v = self.expr(from)?;
+                        let v = self.temp(v, out);
+                        let x_local = self.local();
+                        self.vars.insert(x.clone(), x_local);
+                        let at = add(
+                            add(v.clone(), int(8)),
+                            prim(Prim::Mul, vec![Expr::Local(i), int(16)]),
+                        );
+                        (
+                            int(0),
+                            prim(Prim::Load, vec![v]),
+                            Some(Stmt::Set(x_local, getv(at))),
+                        )
+                    }
+                };
+                out.push(Stmt::Set(i, start));
+                out.push(Stmt::Set(end, limit));
+                let mut stmts: Vec<Stmt> = item.into_iter().collect();
+                stmts.extend(self.body(body)?);
                 self.vars = saved;
-                let mut stmts = body.stmts;
-                eval(&mut stmts, body.value);
-                let next = Expr::Binary(Op::Add, Box::new(Expr::Local(i)), Box::new(Expr::Int(1)));
-                stmts.push(Stmt::Set(i, next));
-                let c = Expr::Binary(Op::Lt, Box::new(Expr::Local(i)), Box::new(Expr::Local(end)));
+                stmts.push(Stmt::Set(i, add(Expr::Local(i), int(1))));
+                let c = prim(Prim::Lt, vec![Expr::Local(i), Expr::Local(end)]);
                 out.push(Stmt::While(c, stmts));
             }
             Ast::Return(v) => {
-                let v = v.as_ref().map(|v| self.expr(v)).transpose()?;
-                out.push(Stmt::Return(v.map(|(v, _)| v)));
+                let v = match v {
+                    Some(v) => self.expr(v)?,
+                    None => unit(),
+                };
+                out.push(Stmt::Return(v));
             }
             _ => {
-                let (v, _) = self.expr(e)?;
+                let v = self.expr(e)?;
                 eval(out, v);
             }
         }
         Ok(())
     }
 
-    fn expr(&mut self, e: &Ast) -> R<(Expr, Ty)> {
-        use ValueType::*;
+    fn args(&mut self, args: &[Ast]) -> R<Vec<Expr>> {
+        args.iter().map(|a| self.expr(a)).collect()
+    }
+
+    // 値を並べて確保した領域に書き、型の番号を付ける
+    fn object(&mut self, tag: i64, new: Expr, header: i64, items: Vec<Expr>) -> Expr {
+        let mut stmts = Vec::new();
+        let t = self.local();
+        stmts.push(Stmt::Set(t, new));
+        for (k, item) in items.into_iter().enumerate() {
+            let item = self.temp(item, &mut stmts);
+            stmts.extend(setv(add(Expr::Local(t), int(header + 16 * k as i64)), item));
+        }
+        block(stmts, mkv(tag, Expr::Local(t)))
+    }
+
+    fn expr(&mut self, e: &Ast) -> R<Expr> {
         Ok(match e.peel() {
-            Ast::Int(n) => (Expr::Int(*n), Some(Int)),
-            Ast::Bool(b) => (Expr::Int(*b as i64), Some(Bool)),
-            Ast::Str(s) => (Expr::Str(s.clone()), Some(Str)),
+            Ast::Int(n) => int(*n),
+            Ast::Bool(b) => Expr::Const(BOOL, *b as i64),
+            Ast::Str(s) => Expr::Str(s.clone()),
             Ast::Var(n) => {
-                let (i, t) = *self
-                    .vars
-                    .get(n)
-                    .ok_or_else(|| format!("IR は変数 {n} に未対応"))?;
-                (Expr::Local(i), Some(t))
+                if let Some(i) = self.vars.get(n) {
+                    return Ok(Expr::Local(*i));
+                }
+                if let Some((i, _)) = self.cx.ctors.get(n.as_str()) {
+                    return Ok(mkv(DATA, call("__data_new", vec![int(*i), int(0)])));
+                }
+                match self.cx.sources.get(n.as_str()) {
+                    Some(s) if s.f.alias && s.f.params.is_empty() => call(n, vec![]),
+                    Some(_) => mkv(
+                        FN,
+                        call("__fn_new", vec![Expr::Func(format!("__w_{n}")), int(0)]),
+                    ),
+                    // 型は名前だけ
+                    None => mkv(TY, Expr::Str(n.clone())),
+                }
             }
-            Ast::Unary("-", a) => {
-                let (a, _) = self.expr(a)?;
-                (
-                    Expr::Binary(Op::Sub, Box::new(Expr::Int(0)), Box::new(a)),
-                    Some(Int),
-                )
-            }
-            Ast::Unary("!", a) => (Expr::Not(Box::new(self.expr(a)?.0)), Some(Bool)),
+            Ast::Unary("-", a) => prim(Prim::Sub, vec![int(0), self.expr(a)?]),
+            Ast::Unary(_, a) => prim(Prim::Not, vec![self.expr(a)?]),
             Ast::Binary(op @ ("&&" | "||"), a, b) => {
-                let (a, _) = self.expr(a)?;
-                let (b, _) = self.expr(b)?;
-                let leaf = |value| {
-                    Box::new(Block {
-                        stmts: vec![],
-                        value,
-                    })
-                };
+                let (a, b) = (self.expr(a)?, self.expr(b)?);
                 let (t, f) = if *op == "&&" {
-                    (leaf(b), leaf(Expr::Int(0)))
+                    (leaf(b), leaf(Expr::Const(BOOL, 0)))
                 } else {
-                    (leaf(Expr::Int(1)), leaf(b))
+                    (leaf(Expr::Const(BOOL, 1)), leaf(b))
                 };
-                (Expr::If(Box::new(a), t, f), Some(Bool))
+                Expr::If(Box::new(a), t, f)
             }
             Ast::Binary(op, a, b) => {
-                let (a, at) = self.expr(a)?;
-                let (b, bt) = self.expr(b)?;
-                let (op, ty) = match *op {
-                    "+" => (Op::Add, Int),
-                    "-" => (Op::Sub, Int),
-                    "*" => (Op::Mul, Int),
-                    "/" => (Op::Div, Int),
-                    "%" => (Op::Rem, Int),
-                    "==" => (Op::Eq, Bool),
-                    "!=" => (Op::Ne, Bool),
-                    "<" => (Op::Lt, Bool),
-                    "<=" => (Op::Le, Bool),
-                    ">" => (Op::Gt, Bool),
-                    ">=" => (Op::Ge, Bool),
+                let (a, b) = (self.expr(a)?, self.expr(b)?);
+                let p = match *op {
+                    "+" => Prim::Add,
+                    "-" => Prim::Sub,
+                    "*" => Prim::Mul,
+                    "/" => Prim::Div,
+                    "%" => Prim::Rem,
+                    "==" => Prim::Eq,
+                    "!=" => Prim::Ne,
+                    "<" => Prim::Lt,
+                    "<=" => Prim::Le,
+                    ">" => Prim::Gt,
+                    ">=" => Prim::Ge,
                     op => return Err(format!("IR は演算子 {op} に未対応").into()),
                 };
-                let operand = join(at, bt)?;
-                let ok = match op {
-                    Op::Eq | Op::Ne => matches!(operand, Some(Int | Bool)),
-                    _ => operand == Some(Int),
-                };
-                if !ok {
-                    return Err("IR は整数と真偽値以外の演算に未対応".into());
+                if self.raw || !matches!(p, Prim::Add | Prim::Eq | Prim::Ne) {
+                    return Ok(prim(p, vec![a, b]));
                 }
-                (Expr::Binary(op, Box::new(a), Box::new(b)), Some(ty))
-            }
-            Ast::Call(n, args) if n == "print" && args.len() == 1 => {
+                // 整数と真偽値はその場で計算し、ほかはランタイムを呼ぶ
                 let mut stmts = Vec::new();
-                self.effect(e, &mut stmts)?;
-                (unit(stmts), Some(Unit))
-            }
-            Ast::Call(n, args) => {
-                let Some(Some((params, result))) = self.signatures.get(n.as_str()) else {
-                    return Err(format!("IR は関数 {n} の呼び出しに未対応").into());
+                let a = self.temp(a, &mut stmts);
+                let b = self.temp(b, &mut stmts);
+                let tag = prim(Prim::Tag, vec![a.clone()]);
+                let (cond, fast, slow) = if p == Prim::Add {
+                    (
+                        prim(Prim::Eq, vec![tag, int(INT)]),
+                        add(a.clone(), b.clone()),
+                        call("__add", vec![a, b]),
+                    )
+                } else {
+                    (
+                        prim(Prim::Le, vec![tag, int(BOOL)]),
+                        prim(Prim::Eq, vec![a.clone(), b.clone()]),
+                        call("__eq", vec![a, b]),
+                    )
                 };
-                if params.len() != args.len() {
-                    return Err(format!("IR は関数 {n} の省略した引数に未対応").into());
-                }
-                let result = *result;
-                let args = args
-                    .iter()
-                    .map(|a| self.expr(a).map(|(a, _)| a))
-                    .collect::<R<Vec<_>>>()?;
-                (Expr::Call(n.clone(), args), Some(result))
+                let v = Expr::If(Box::new(cond), leaf(fast), leaf(slow));
+                let v = if p == Prim::Ne {
+                    prim(Prim::Not, vec![v])
+                } else {
+                    v
+                };
+                block(stmts, v)
+            }
+            Ast::Call(n, args) => self.call(n, args)?,
+            Ast::Apply(f, args) => {
+                let f = self.expr(f)?;
+                Expr::CallIndirect(Box::new(f), self.args(args)?)
+            }
+            Ast::Field(x, f) => call(&format!("__field_{f}"), vec![self.expr(x)?]),
+            Ast::Index(v, i) => {
+                let mut stmts = Vec::new();
+                let (v, i) = (self.expr(v)?, self.expr(i)?);
+                let at = add(add(v, int(8)), prim(Prim::Mul, vec![i, int(16)]));
+                let at = self.temp(at, &mut stmts);
+                block(stmts, getv(at))
+            }
+            Ast::Array(items) => {
+                let items = self.args(items)?;
+                let new = call("__arr_new", vec![int(items.len() as i64)]);
+                self.object(ARR, new, 8, items)
             }
             Ast::If(c, t, f) => {
-                let (c, _) = self.expr(c)?;
-                let (t, tt) = self.block(t)?;
-                let (f, ft) = match f {
-                    Some(f) => {
-                        let (f, ft) = self.expr(f)?;
-                        let f = match f {
-                            Expr::Block(b) => *b,
-                            value => Block {
-                                stmts: vec![],
-                                value,
-                            },
-                        };
-                        (f, ft)
+                let c = self.expr(c)?;
+                let t = self.block(t)?;
+                let f = match f {
+                    Some(f) => match self.expr(f)? {
+                        Expr::Block(b) => *b,
+                        value => *leaf(value),
+                    },
+                    None => *leaf(unit()),
+                };
+                Expr::If(Box::new(c), Box::new(t), Box::new(f))
+            }
+            Ast::Block(b) => Expr::Block(Box::new(self.block(b)?)),
+            Ast::Match(s, arms) => {
+                let mut stmts = Vec::new();
+                let s = self.expr(s)?;
+                let s = self.temp(s, &mut stmts);
+                let ctor = self.local();
+                stmts.push(Stmt::Set(ctor, prim(Prim::Load, vec![s.clone()])));
+                let mut rest = unit();
+                for arm in arms.iter().rev() {
+                    let saved = self.vars.clone();
+                    let mut binds = Vec::new();
+                    for (i, b) in arm.binds.iter().enumerate() {
+                        if b != "_" {
+                            let x = self.local();
+                            binds.push(Stmt::Set(x, getv(add(s.clone(), int(16 + 16 * i as i64)))));
+                            self.vars.insert(b.clone(), x);
+                        }
                     }
-                    None => (
-                        Block {
-                            stmts: vec![],
-                            value: Expr::Int(0),
-                        },
-                        Some(Unit),
-                    ),
-                };
-                // else の無い if は unit。then の値は捨てる
-                let ty = if f.value == Expr::Int(0) && ft == Some(Unit) && tt.is_some() {
-                    Some(Unit)
-                } else {
-                    join(tt, ft)?
-                };
-                (Expr::If(Box::new(c), Box::new(t), Box::new(f)), ty)
+                    let body = Box::new(Block {
+                        stmts: binds,
+                        value: self.expr(&arm.body)?,
+                    });
+                    self.vars = saved;
+                    if arm.ctor == "_" {
+                        rest = Expr::Block(body);
+                        continue;
+                    }
+                    let (k, _) = self
+                        .cx
+                        .ctors
+                        .get(arm.ctor.as_str())
+                        .ok_or_else(|| format!("IR は腕 {} に未対応", arm.ctor))?;
+                    let cond = prim(Prim::Eq, vec![Expr::Local(ctor), int(*k)]);
+                    rest = Expr::If(Box::new(cond), body, leaf(rest));
+                }
+                block(stmts, rest)
             }
-            Ast::Block(b) => {
-                let (b, t) = self.block(b)?;
-                (Expr::Block(Box::new(b)), t)
-            }
+            Ast::Lam(params, _, _, body) => self.lambda(params, body)?,
+            Ast::Pi(..) => mkv(TY, Expr::Str("fn".into())),
+            Ast::Refine(..) => mkv(TY, Expr::Str("refine".into())),
             Ast::Assign(..) | Ast::While(..) | Ast::For(..) | Ast::Return(_) => {
                 let mut stmts = Vec::new();
                 self.effect(e, &mut stmts)?;
-                let diverges = matches!(e.peel(), Ast::Return(_));
-                (unit(stmts), if diverges { None } else { Some(Unit) })
+                block(stmts, unit())
             }
+            Ast::Handle(..) => return Err("IR は handle に未対応".into()),
             _ => return Err("IR はこの式に未対応".into()),
         })
     }
+
+    fn call(&mut self, n: &str, args: &[Ast]) -> R<Expr> {
+        if let Some(i) = self.vars.get(n) {
+            let i = *i;
+            return Ok(Expr::CallIndirect(
+                Box::new(Expr::Local(i)),
+                self.args(args)?,
+            ));
+        }
+        let mut args = self.args(args)?;
+        if let Some(p) = intrinsic(n) {
+            return Ok(match n {
+                "__getv" => {
+                    let mut stmts = Vec::new();
+                    let a = self.temp(args.remove(0), &mut stmts);
+                    block(stmts, getv(a))
+                }
+                "__setv" => {
+                    let mut stmts = Vec::new();
+                    let a = self.temp(args.remove(0), &mut stmts);
+                    let v = self.temp(args.remove(0), &mut stmts);
+                    stmts.extend(setv(a, v));
+                    block(stmts, unit())
+                }
+                // __mkv(番号, 中身)
+                "__mkv" => prim(Prim::MakeV, args),
+                _ => prim(p.unwrap(), args),
+            });
+        }
+        if let Some((i, fields)) = self.cx.ctors.get(n) {
+            let (i, nf) = (*i, fields.len() as i64);
+            let new = call("__data_new", vec![int(i), int(nf)]);
+            return Ok(self.object(DATA, new, 16, args));
+        }
+        if let Some(src) = self.cx.sources.get(n) {
+            if src.f.op.is_some() {
+                return Err(format!("IR は効果の操作 {n} に未対応").into());
+            }
+            // 推論したジェネリック引数は実行時には要らないので unit で埋める
+            if args.len() + src.f.implicit == src.f.params.len() {
+                let mut full: Vec<Expr> = (0..src.f.implicit).map(|_| unit()).collect();
+                full.append(&mut args);
+                args = full;
+            }
+            return Ok(call(n, args));
+        }
+        if matches!(n, "Vec" | "Type" | "Ref" | "Async") || self.cx.types.contains(n) {
+            return Ok(mkv(TY, Expr::Str(n.to_string())));
+        }
+        let rt = format!("__{n}");
+        if self.cx.sources.get(rt.as_str()).is_some_and(|s| s.runtime) {
+            return Ok(Expr::Call(rt, args));
+        }
+        // 変換の中で作る関数（__ctor_name など）。無ければ作る時に誤りにする
+        if self.raw && n.starts_with("__") {
+            return Ok(call(n, args));
+        }
+        Err(format!("IR は関数 {n} の呼び出しに未対応").into())
+    }
+
+    // 無名関数。見えている局所変数をすべて写し取り、別の関数にする
+    fn lambda(&mut self, params: &[(String, Option<Ast>)], body: &parser::Block) -> R<Expr> {
+        let mut caps: Vec<(String, u32)> = self.vars.iter().map(|(n, i)| (n.clone(), *i)).collect();
+        caps.sort();
+        self.cx.lambdas += 1;
+        let name = format!("__lam{}", self.cx.lambdas);
+        let mut l = Lower {
+            cx: &mut *self.cx,
+            vars: HashMap::new(),
+            locals: 1,
+            raw: self.raw,
+        };
+        let mut stmts = Vec::new();
+        for (p, _) in params {
+            let i = l.local();
+            l.vars.insert(p.clone(), i);
+        }
+        for (k, (n, _)) in caps.iter().enumerate() {
+            let i = l.local();
+            stmts.push(Stmt::Set(
+                i,
+                getv(add(Expr::Local(0), int(16 + 16 * k as i64))),
+            ));
+            l.vars.insert(n.clone(), i);
+        }
+        let b = l.block(body)?;
+        stmts.extend(b.stmts);
+        stmts.push(Stmt::Return(b.value));
+        let locals = l.locals;
+        self.cx.made.push(Function {
+            name: name.clone(),
+            params: 1 + params.len() as u32,
+            param_types: vec![],
+            result_type: ValueType::Other,
+            locals,
+            body: stmts,
+        });
+        let new = call("__fn_new", vec![Expr::Func(name), int(caps.len() as i64)]);
+        let items = caps.into_iter().map(|(_, i)| Expr::Local(i)).collect();
+        Ok(self.object(FN, new, 16, items))
+    }
+}
+
+// runtime.hb で使う組み込み。Some(None) は変換の中で組み立てるもの
+fn intrinsic(n: &str) -> Option<Option<Prim>> {
+    Some(Some(match n {
+        "__tag" => Prim::Tag,
+        "__payload" => Prim::Payload,
+        "__load" => Prim::Load,
+        "__store" => Prim::Store,
+        "__load8" => Prim::Load8,
+        "__store8" => Prim::Store8,
+        "__pages" => Prim::Pages,
+        "__static" => Prim::Static,
+        "__sys_write" => Prim::Write,
+        "__fail" => Prim::Fail,
+        "__now" => Prim::Now,
+        "__and" => Prim::And,
+        "__or" => Prim::Or,
+        "__shl" => Prim::Shl,
+        "__shr" => Prim::Shr,
+        "__getv" | "__setv" | "__mkv" => return Some(None),
+        _ => return None,
+    }))
 }
 
 impl fmt::Display for Program {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for fun in &self.functions {
+        for fun in self.functions.iter().filter(|f| !f.name.starts_with("__")) {
             write!(f, "fn {}(", fun.name)?;
-            for (i, t) in fun.param_types.iter().enumerate() {
+            for i in 0..fun.params {
                 if i > 0 {
                     f.write_str(", ")?;
                 }
-                write!(f, "%{i}: {t}")?;
+                write!(f, "%{i}")?;
             }
-            f.write_str(")")?;
-            if fun.result_type != ValueType::Unit {
-                write!(f, " -> {}", fun.result_type)?;
-            }
-            writeln!(f, " {{")?;
+            writeln!(f, ") {{")?;
             stmts(f, &fun.body, 1)?;
             writeln!(f, "}}")?;
         }
@@ -609,9 +1040,7 @@ fn stmts(f: &mut fmt::Formatter<'_>, ss: &[Stmt], depth: usize) -> fmt::Result {
         match s {
             Stmt::Set(i, e) => writeln!(f, "{pad}%{i} = {e}")?,
             Stmt::Eval(e) => writeln!(f, "{pad}{e}")?,
-            Stmt::Print(t, e) => writeln!(f, "{pad}print {t} {e}")?,
-            Stmt::Return(Some(e)) => writeln!(f, "{pad}return {e}")?,
-            Stmt::Return(None) => writeln!(f, "{pad}return")?,
+            Stmt::Return(e) => writeln!(f, "{pad}return {e}")?,
             Stmt::While(c, body) => {
                 writeln!(f, "{pad}while {c} {{")?;
                 stmts(f, body, depth + 1)?;
@@ -633,21 +1062,27 @@ impl fmt::Display for Block {
     }
 }
 
+fn list(f: &mut fmt::Formatter<'_>, head: &str, args: &[Expr]) -> fmt::Result {
+    write!(f, "({head}")?;
+    for a in args {
+        write!(f, " {a}")?;
+    }
+    f.write_str(")")
+}
+
 impl fmt::Display for Expr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Expr::Int(n) => write!(f, "{n}"),
+            Expr::Const(INT, n) => write!(f, "{n}"),
+            Expr::Const(UNIT, _) => write!(f, "()"),
+            Expr::Const(BOOL, b) => write!(f, "{}", *b != 0),
+            Expr::Const(t, n) => write!(f, "(const {t} {n})"),
             Expr::Str(s) => write!(f, "{s:?}"),
             Expr::Local(i) => write!(f, "%{i}"),
-            Expr::Binary(op, a, b) => write!(f, "({op:?} {a} {b})"),
-            Expr::Not(a) => write!(f, "(not {a})"),
-            Expr::Call(n, args) => {
-                write!(f, "(call {n}")?;
-                for a in args {
-                    write!(f, " {a}")?;
-                }
-                f.write_str(")")
-            }
+            Expr::Func(n) => write!(f, "(func {n})"),
+            Expr::Prim(p, args) => list(f, &format!("{p:?}"), args),
+            Expr::Call(n, args) => list(f, &format!("call {n}"), args),
+            Expr::CallIndirect(g, args) => list(f, &format!("call_indirect {g}"), args),
             Expr::If(c, t, e) => write!(f, "(if {c} {t} {e})"),
             Expr::Block(b) => write!(f, "{b}"),
         }
@@ -658,33 +1093,27 @@ impl fmt::Display for Expr {
 mod tests {
     #[test]
     fn lowers_checked_program_in_evaluation_order() {
-        let src = "fn add(x: int, y: int) -> int { x + y }\nfn main() { let x = add(1, 2)\n let x = x * 3\n x + 4; }";
+        let src = "fn add(x: int, y: int) -> int { x - y }\nfn main() { let x = add(1, 2)\n let x = x * 3\n x / 4; }";
         let ir = crate::to_ir(src).unwrap();
         assert_eq!(
             ir,
-            "fn add(%0: int, %1: int) -> int {\n  return (Add %0 %1)\n}\nfn main() {\n  %0 = (call add 1 2)\n  %1 = (Mul %0 3)\n  (Add %1 4)\n}\n"
+            "fn add(%0, %1) {\n  return (Sub %0 %1)\n}\nfn main() {\n  %0 = (call add 1 2)\n  %1 = (Mul %0 3)\n  (Div %1 4)\n  return ()\n}\n"
         );
     }
 
     #[test]
     fn lowers_control_flow() {
-        let src = "fn f(n: int) -> bool {\n let mut i = 0\n while i < n { if i == 3 { return true }\n i = i + 1 }\n false\n}\nfn main() { print(f(5)) }";
+        let src = "fn f(n: int) -> bool {\n let mut i = 0\n while i < n { if i > 3 { return true }\n i = i - 1 }\n false\n}\nfn main() { print(f(5)) }";
         let ir = crate::to_ir(src).unwrap();
         assert!(ir.contains("while (Lt %1 %0) {"), "{ir}");
-        assert!(ir.contains("(if (Eq %1 3) {"), "{ir}");
-        assert!(
-            ir.contains("print str (if (call f 5) \"true\" \"false\")"),
-            "{ir}"
-        );
+        assert!(ir.contains("(if (Gt %1 3) {"), "{ir}");
+        assert!(ir.contains("(call __print (call f 5))"), "{ir}");
     }
 
     #[test]
     fn rejects_unsupported_and_invalid_programs() {
-        assert!(
-            crate::to_ir("fn main() { let x = [1] }")
-                .unwrap_err()
-                .contains("未対応")
-        );
+        let src = "effect Log {\n    fn log(msg: str)\n}\nfn main() { handle log('x') { log(m) => resume() } }";
+        assert!(crate::to_ir(src).unwrap_err().contains("未対応"));
         assert!(crate::to_ir("fn main() { let x = 1 + true }").is_err());
     }
 }

@@ -55,4 +55,4 @@ console.log(api.greet("hibana"));
 
 `hibana::to_web(source, &exports)` は一度の型検査と IR 変換から `WebOutput { wasm, javascript }` を返します。ファイルの保存は呼び出し側で行います。
 
-WASM 単体は `hibana::to_wasm_library(source, &exports)`、接続コード単体は `hibana::to_js_glue(source, &exports)` で生成できます。`hibana run file.hb` の実行環境は整数・文字列・真偽値の `print` を備えた CLI 用であり、ブラウザのホスト関数を提供するものではありません。
+WASM 単体は `hibana::to_wasm_library(source, &exports)`、接続コード単体は `hibana::to_js_glue(source, &exports)` で生成できます。`hibana run file.hb` の実行環境は`print` と `now_ms` を備えた CLI 用であり、ブラウザのホスト関数を提供するものではありません。

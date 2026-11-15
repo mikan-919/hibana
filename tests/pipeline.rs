@@ -10,19 +10,21 @@ fn builds_and_links_as_independent_steps() {
     let checked = pipeline::check(parsed, Kind::Library).unwrap();
     assert_eq!(checked.program().fns.len(), 4);
     let all = pipeline::lower(&checked, None).unwrap();
-    assert_eq!(all.functions().len(), 4);
+    // ランタイムの関数（__ で始まる）を除いた、利用者の関数
+    let user = |p: &hibana::ir::Program| {
+        p.functions()
+            .iter()
+            .filter(|f| !f.name().starts_with("__"))
+            .map(|f| f.name().to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(user(&all).len(), 4);
     let exports = vec!["twice".to_string(), "log".to_string()];
     let linked = pipeline::link(&all, &exports).unwrap();
-    assert_eq!(
-        linked
-            .functions()
-            .iter()
-            .map(|f| f.name())
-            .collect::<Vec<_>>(),
-        ["add", "twice", "log"]
-    );
-    assert_eq!(linked.functions()[1].param_types().len(), 1);
-    assert!(!linked.functions()[1].body().is_empty());
+    assert_eq!(user(&linked), ["add", "twice", "log"]);
+    let twice = linked.functions().iter().find(|f| f.name() == "twice").unwrap();
+    assert_eq!(twice.param_types().len(), 1);
+    assert!(!twice.body().is_empty());
     assert!(pipeline::link(&all, &["missing".into()]).is_err());
     assert!(pipeline::emit_wasm(&linked, Some(&["unused".into()])).is_err());
     assert!(pipeline::emit_js_glue(&linked, &["twice".into(), "twice".into()]).is_err());
@@ -43,7 +45,7 @@ const printed = [];
 const x = await instantiate(fs.readFileSync(process.argv[1]), { hibana: { print: n => printed.push(n) } });
 if (Object.keys(x).join(',') !== 'twice,log' || x.twice(21) !== 42n) throw Error('unexpected exports');
 x.log(-5n);
-if (printed[0] !== -5n) throw Error('print');
+if (printed[0] !== '-5') throw Error('print');
 for (const value of [1.5, Number.MAX_SAFE_INTEGER + 1, 1n << 63n, '1']) {
   try { x.twice(value); throw Error('accepted invalid input'); } catch (e) { if (!(e instanceof TypeError || e instanceof RangeError)) throw e; }
 }
