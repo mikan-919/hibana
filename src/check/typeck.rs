@@ -347,7 +347,7 @@ enum Halt {
 type H<T> = Result<T, Halt>;
 
 // 型の計算をする評価器
-// ponytail: 停止性を検査しない。燃料が尽きたらエラーにする
+// ponytail: 展開は燃料と深さに上限があり、超えると記号として残す
 pub(super) struct Norm<'a> {
     fns: HashMap<&'a str, &'a Fn>,
     datas: HashMap<&'a str, &'a Data>,
@@ -561,8 +561,8 @@ impl Norm<'_> {
             }
             _ => {}
         }
-        // partial fn は止まるとは限らないので展開しない
-        let Some(f) = self.fns.get(name).copied().filter(|f| !f.partial) else {
+        // 未知の関数と外部関数は記号として残す
+        let Some(f) = self.fns.get(name).copied().filter(|f| f.js.is_none() && f.op.is_none()) else {
             return Ok(neu(Neu::Call(name.into(), args)));
         };
         // 制約の実装を省いた呼び出しは展開しない
@@ -578,7 +578,7 @@ impl Norm<'_> {
             args
         };
         if self.fuel == 0 || self.depth >= 64 {
-            return Err(format!("型の計算が終わらない（{name} の展開）").into());
+            return Ok(neu(Neu::Call(name.into(), args)));
         }
         self.fuel -= 1;
         let mut env = vec![
@@ -865,12 +865,6 @@ struct Ck<'a> {
     smt: Smt,
     // data の型の階層
     levels: HashMap<String, u32>,
-    // 停止性の検査。検査中の関数、その引数の (最初の値, 型)、どの引数が再帰呼び出しで減り続けているか
-    cur_fn: Option<String>,
-    cur_params: Vec<(V, V)>,
-    decr: Vec<bool>,
-    // match で取り出したフィールドの変数から、取り出し元の変数へ
-    sub: HashMap<usize, usize>,
     // マクロ本体の検査で使う、syntax 規則ごとのフィールドの種類
     rules: HashMap<String, Kinds>,
     // 今起こしてよい効果 (効果の名前, 型)。handle の本体の効果の型は、本体で初めて起こした時に決まる
@@ -1081,27 +1075,6 @@ fn assigned(e: &Expr, out: &mut Vec<String>) {
     });
 }
 
-// 型 name が関数型の引数の側に現れるか（正値性の検査）
-fn negative(v: &V, name: &str) -> bool {
-    match v {
-        V::Pi(p) => p.doms.iter().any(|x| occurs(x, name)) || negative(&p.cod, name),
-        V::DataT(d) => d.1.iter().any(|x| negative(x, name)),
-        V::VecT(a) => negative(a, name),
-        V::Refine(r) => negative(&r.0, name),
-        _ => false,
-    }
-}
-
-fn occurs(v: &V, name: &str) -> bool {
-    match v {
-        V::DataT(d) => d.0 == name || d.1.iter().any(|x| occurs(x, name)),
-        V::Pi(p) => p.doms.iter().any(|x| occurs(x, name)) || occurs(&p.cod, name),
-        V::VecT(a) => occurs(a, name),
-        V::Refine(r) => occurs(&r.0, name),
-        _ => false,
-    }
-}
-
 // quote の中の $x.y の先頭の名前を集める
 fn q_names(q: &[Q], out: &mut Vec<String>) {
     for x in q {
@@ -1111,62 +1084,6 @@ fn q_names(q: &[Q], out: &mut Vec<String>) {
             _ => {}
         }
     }
-}
-
-// 呼び出しの関係を辿って from から to に着くか
-// 呼び出しの図の強連結成分（互いに呼び合える関数の組）の番号。Tarjan の方法で、関数と呼び出しの数に比例する
-fn components<'a>(graph: &HashMap<&'a str, Vec<String>>) -> HashMap<&'a str, usize> {
-    struct T<'a, 'g> {
-        graph: &'g HashMap<&'a str, Vec<String>>,
-        index: HashMap<&'a str, (usize, usize)>,
-        stack: Vec<&'a str>,
-        on: std::collections::HashSet<&'a str>,
-        comp: HashMap<&'a str, usize>,
-    }
-    fn visit<'a>(t: &mut T<'a, '_>, v: &'a str) {
-        let k = t.index.len();
-        t.index.insert(v, (k, k));
-        t.stack.push(v);
-        t.on.insert(v);
-        for g in &t.graph[v] {
-            let Some((&w, _)) = t.graph.get_key_value(g.as_str()) else {
-                continue;
-            };
-            if !t.index.contains_key(w) {
-                visit(t, w);
-                let low = t.index[w].1.min(t.index[v].1);
-                t.index.get_mut(v).unwrap().1 = low;
-            } else if t.on.contains(w) {
-                let low = t.index[w].0.min(t.index[v].1);
-                t.index.get_mut(v).unwrap().1 = low;
-            }
-        }
-        if t.index[v].0 == t.index[v].1 {
-            let c = t.comp.len();
-            while let Some(w) = t.stack.pop() {
-                t.on.remove(w);
-                t.comp.insert(w, c);
-                if w == v {
-                    break;
-                }
-            }
-        }
-    }
-    let mut t = T {
-        graph,
-        index: HashMap::new(),
-        stack: vec![],
-        on: Default::default(),
-        comp: HashMap::new(),
-    };
-    let mut names: Vec<&str> = graph.keys().copied().collect();
-    names.sort();
-    for v in names {
-        if !t.index.contains_key(v) {
-            visit(&mut t, v);
-        }
-    }
-    t.comp
 }
 
 // 関数の本体から呼ぶ関数名を集める
@@ -1355,10 +1272,6 @@ fn check_prog(prog: &Program, require_main: bool) -> R<Info> {
         in_macro: false,
         smt: Smt::new(),
         levels: HashMap::new(),
-        cur_fn: None,
-        cur_params: Vec::new(),
-        decr: Vec::new(),
-        sub: HashMap::new(),
         rules: HashMap::new(),
         avail: Vec::new(),
         resume: Vec::new(),
@@ -1413,20 +1326,6 @@ fn check_prog(prog: &Program, require_main: bool) -> R<Info> {
     for f in fns {
         ck.norm.fns.insert(&f.name, f);
     }
-    // 相互再帰は減る引数の対応を追えないので、partial fn にしてもらう
-    let graph: HashMap<&str, Vec<String>> =
-        fns.iter().map(|f| (f.name.as_str(), callees(f))).collect();
-    let comp = components(&graph);
-    for f in fns.iter().filter(|f| !f.partial) {
-        for g in graph[f.name.as_str()]
-            .iter()
-            .filter(|g| **g != f.name && graph.contains_key(g.as_str()))
-        {
-            if comp[g.as_str()] == comp[f.name.as_str()] {
-                return Err(format!("関数 {} と {g} が互いに呼び合っている。停止性を検査できないので partial fn にする", f.name).into());
-            }
-        }
-    }
     // data は自分自身を含みうるので、階層が変わらなくなるまで計算し直す
     for _ in 0..8 {
         let mut changed = false;
@@ -1460,7 +1359,6 @@ fn check_prog(prog: &Program, require_main: bool) -> R<Info> {
 fn check_fn(ck: &mut Ck, f: &Fn) -> R<()> {
     let r = |e: &str| format!("関数 {}: {e}", f.name);
     ck.scopes = vec![Scope::default()];
-    ck.cur_fn = None;
     for (n, t) in &f.params {
         let ty = ck.eval_type(t).ctx(|e| r(&format!("引数 {n}: {e}")))?;
         let id = ck.norm.fresh();
@@ -1508,23 +1406,10 @@ fn check_fn(ck: &mut Ck, f: &Fn) -> R<()> {
     if !f.alias && matches!(base(&ck.ret), V::Univ(_)) {
         return Err(r("関数は型を返せない。型を計算するなら type で定義する").into());
     }
-    if f.partial && ck.is_proof_type(&ck.ret) {
-        return Err(r("partial fn は証明の型（添字付きの型族）を返せない。止まらない関数で偽の証明が作れてしまうため").into());
-    }
     // extern の関数と効果の操作は本体が無いので、型の宣言だけを検査する
     if f.js.is_some() || f.op.is_some() {
         return Ok(());
     }
-    ck.cur_fn = (!f.partial).then(|| f.name.clone());
-    ck.cur_params = f
-        .params
-        .iter()
-        .map(|(n, _)| {
-            let e = ck.lookup(n).unwrap();
-            (e.val.clone(), e.ty.clone())
-        })
-        .collect();
-    ck.decr = vec![true; f.params.len()];
     let ret = ck.ret.clone();
     // 戻り値が unit の関数は最後の式の値を捨てる
     if ret == prim("unit") {
@@ -1565,10 +1450,6 @@ fn check_macro_body(
         in_macro: true,
         smt: Smt::new(),
         levels: HashMap::new(),
-        cur_fn: None,
-        cur_params: Vec::new(),
-        decr: Vec::new(),
-        sub: HashMap::new(),
         rules: rules.clone(),
         avail: Vec::new(),
         resume: Vec::new(),
@@ -1610,8 +1491,6 @@ fn check_macro_body(
     }
     ck.scopes = vec![Scope::default()];
     ck.ret = prim("syn");
-    ck.cur_fn = None;
-    ck.cur_params.clear();
     for (p, k) in params {
         let v = ck.norm.opaque();
         ck.bind(p, syn_of(k), v, false)?;
@@ -2563,64 +2442,6 @@ impl Ck<'_> {
         })
     }
 
-    // 添字付きの型族（構築子が戻り値の型を指定する型）か。こうした型の値は証明になりうる
-    fn is_proof_type(&self, t: &V) -> bool {
-        match base(t) {
-            V::DataT(d) => self
-                .norm
-                .datas
-                .get(d.0.as_str())
-                .is_some_and(|data| data.ctors.iter().any(|c| c.ret.is_some())),
-            _ => false,
-        }
-    }
-
-    // v は match で p から取り出した部分（を何段か辿ったもの）か
-    fn is_subterm(&self, v: &V, p: &V) -> bool {
-        let (V::Neu(v), V::Neu(p)) = (v, p) else {
-            return false;
-        };
-        let (Neu::Var(id, _), Neu::Var(pid, _)) = (&**v, &**p) else {
-            return false;
-        };
-        let mut id = *id;
-        while let Some(parent) = self.sub.get(&id) {
-            if parent == pid {
-                return true;
-            }
-            id = *parent;
-        }
-        false
-    }
-
-    // 再帰呼び出しで、少なくとも1つの引数がすべての呼び出しを通して小さくなっているか
-    fn check_decrease(&mut self, vals: &[V]) -> R<()> {
-        for (i, v) in vals.iter().enumerate() {
-            if !self.decr[i] {
-                continue;
-            }
-            let (p, t) = self.cur_params[i].clone();
-            self.decr[i] = match base(&t) {
-                // int は 0 以上で、元の値より小さければよい
-                V::Prim("int") => {
-                    let goal = Norm::bin(
-                        "&&",
-                        Norm::bin("<=", V::Int(0), v.clone()),
-                        Norm::bin("<", v.clone(), p),
-                    );
-                    self.prove(&goal)
-                }
-                V::DataT(_) => self.is_subterm(v, &p),
-                _ => false,
-            };
-        }
-        if self.decr.iter().any(|d| *d) {
-            Ok(())
-        } else {
-            Err("再帰呼び出しで小さくなる引数が無いので、停止することを示せない（match で取り出した部分か、0 以上で元より小さい int を渡す。検査しないなら partial fn にする）".into())
-        }
-    }
-
     // トップレベルの関数の呼び出し。ジェネリック引数を省いた時は、メタ変数にして引数と期待する型から求める
     fn call_fn(&mut self, name: &str, args: &[Expr], expected: Option<&V>, e: &Expr) -> R<V> {
         let f = self.norm.fns[name];
@@ -2733,9 +2554,6 @@ impl Ck<'_> {
                 vals.push(v);
             }
             self.elab.insert(e as *const Expr as usize, add);
-        }
-        if self.cur_fn.as_deref() == Some(name) {
-            self.check_decrease(&vals)?;
         }
         if let Some(eff) = &f.op {
             let args = f.params[..f.implicit]
@@ -3027,13 +2845,6 @@ impl Ck<'_> {
         if f.op.is_some() {
             return Err(format!(
                 "効果の操作 {} は値として使えない（呼び出しだけができる）",
-                f.name
-            )
-            .into());
-        }
-        if self.cur_fn.as_deref() == Some(f.name.as_str()) {
-            return Err(format!(
-                "再帰する関数 {} を値として使えない（停止性を検査できないため）",
                 f.name
             )
             .into());
@@ -3391,13 +3202,6 @@ impl Ck<'_> {
             for (n, t) in &c.fields {
                 level = level.max(self.type_level(t).ctx(r)?);
                 let ty = self.eval_value(t)?;
-                if negative(&ty, &d.name) {
-                    return Err(r(&format!(
-                        "型 {} が関数型の引数の側に現れる（正値でない型は矛盾を導けるので禁止）",
-                        d.name
-                    ))
-                    .into());
-                }
                 let id = self.norm.fresh();
                 self.bind(n, ty, neu(Neu::Var(id, n.clone())), false)?;
             }
@@ -3745,16 +3549,6 @@ impl Ck<'_> {
                     self.pop();
                     continue;
                 };
-                // 取り出したフィールドは match した値より小さい（停止性の検査に使う）
-                if let Some(sid) = svar {
-                    for fv in &fvals {
-                        if let V::Neu(n) = fv
-                            && let Neu::Var(fid, _) = &**n
-                        {
-                            self.sub.insert(*fid, sid);
-                        }
-                    }
-                }
                 if let Some(id) = svar {
                     substs.push((id, V::Data(Rc::new((c.name.clone(), fvals)))));
                 }
@@ -3914,112 +3708,18 @@ mod tests {
     }
 
     #[test]
-    fn dependent() {
-        // 引数の値で戻り値の型が決まる
-        let src = r#"
-type T<b: bool> = if b { int } else { str }
-fn f(b: bool) -> T<b> { if b { 1 } else { 'one' } }
-fn id(A: Type, x: A) -> A { x }
-fn main() {
-    let x: int = f(true)
-    let s: str = f(false)
-    let y: T<(1 < 2)> = id(int, 3)
-    print(x + y)
-}
-"#;
-        check(src).unwrap();
-        for (bad, msg) in [
-            ("let x: int = f(true)", "let x: int = f(false)"),
-            (
-                "let y: T<(1 < 2)> = id(int, 3)",
-                "let y: T<(1 < 2)> = id(int, true)",
-            ),
-            ("let s: str = f(false)", "let s: str = f(1 == 1)"),
-        ] {
-            let e = check(&src.replace(bad, msg)).unwrap_err();
-            assert!(e.contains("が必要"), "{msg} => {e}");
+    fn rejects_value_type_parameters_and_indexed_constructors() {
+        for source in ["type T<b: bool> = int", "enum Eq<A: Type, x: A> { Refl }", "enum Box<A> { MkBox(x: A) -> Box<A> }"] {
+            assert!(check(source).is_err(), "{source}");
         }
-        let e = check(&src.replace("{ 'one' }", "{ 2 }")).unwrap_err();
-        assert!(e.contains("str が必要だが int"), "{e}");
+        check("type Items<A> = Vec<A>\nfn main() { let xs: Items<int> = [1] }").unwrap();
+        assert!(check("partial fn f() {}\nfn main() {}").is_err());
     }
 
     #[test]
-    fn type_level_loop_is_bounded() {
-        let e =
-            check("type Loop<n: int> = Loop<n + 1>\nfn main() { let x: Loop<0> = 1 }").unwrap_err();
-        assert!(e.contains("停止することを示せない"), "{e}");
-        // 関数は型を返せない
-        let e = check("fn f() -> Type { int } fn main() {}").unwrap_err();
-        assert!(e.contains("関数は型を返せない"), "{e}");
-        let e = check("fn main() { let f = fn() { int } }").unwrap_err();
-        assert!(e.contains("関数は型を返せない"), "{e}");
-        // 型には <> で引数を渡す
-        let e =
-            check("enum Box<A: Type> { MkBox(x: A) }\nfn main() { let b: Box(int) = MkBox(1) }")
-                .unwrap_err();
-        assert!(e.contains("<> で引数を渡す"), "{e}");
-    }
-
-    #[test]
-    fn inductive() {
-        let src = include_str!("../../tests/programs/types/inductive.hb");
-        check(src).unwrap();
-        let extra = "enum TBox { MkT(t: Type) }\nfn id(A: Type, x: A) -> A { x }\nfn two() -> Eq<int, 1 + 1, 2> { Refl }\n";
-        check(&format!("{src}{extra}")).unwrap();
-        for (from, to, msg) in [
-            ("Succ(k) => Succ(add(k, n))", "Succ(k) => n", "が必要だが"),
-            ("        Some(x) => x\n", "", "Some の場合が無い"),
-            (
-                "Succ(k) => cong(add(k, Zero), k, add_zero(k))",
-                "Succ(k) => Refl",
-                "が必要だが",
-            ),
-            ("let o = Some(3)", "let o = None", "推論できない"),
-            (
-                "fn zero_add(n: Nat) -> Eq<Nat, add(Zero, n), n>",
-                "fn zero_add(n: Nat) -> Eq<Nat, add(n, Zero), n>",
-                "が必要だが",
-            ),
-        ] {
-            let e = check(&src.replace(from, to)).unwrap_err();
-            assert!(e.contains(msg), "{to} => {e}");
-        }
-        // Type を含む data は Type<1> なので、Type を求める所には渡せない
-        let e = check(&format!(
-            "{src}{extra}fn f() -> int {{ let b = id(TBox, MkT(int))\n 0 }}"
-        ))
-        .unwrap_err();
-        assert!(e.contains("Type が必要だが Type<1>"), "{e}");
-        let e = check(&format!("{src}{extra}fn bad() -> Eq<int, 1, 2> {{ Refl }}")).unwrap_err();
-        assert!(e.contains("が必要だが"), "{e}");
-        // 停止性: 止まらない関数で偽の証明を作れない
-        for (bad, msg) in [
-            (
-                "fn bad() -> Eq<int, 1, 2> { bad() }",
-                "停止することを示せない",
-            ),
-            ("partial fn bad() -> Eq<int, 1, 2> { bad() }", "証明の型"),
-            ("fn bad(n: Nat) -> Nat { bad(n) }", "停止することを示せない"),
-            (
-                "fn bad(n: int) -> int { bad(n - 1) }",
-                "停止することを示せない",
-            ),
-            (
-                "fn ev(n: Nat) -> bool { match n { Zero => true, Succ(k) => od(k) } }\nfn od(n: Nat) -> bool { match n { Zero => false, Succ(k) => ev(k) } }",
-                "互いに呼び合っている",
-            ),
-        ] {
-            let e = check(&format!("{src}{bad}")).unwrap_err();
-            assert!(e.contains(msg), "{bad} => {e}");
-        }
-        check(&format!(
-            "{src}partial fn spin(n: int) -> int {{ spin(n) }}"
-        ))
-        .unwrap();
-        check(&format!(
-            "{src}fn down(n: int) -> int {{ if n > 0 {{ down(n - 1) }} else {{ 0 }} }}"
-        ))
-        .unwrap();
+    fn recursive_functions_and_negative_types_are_allowed() {
+        check("enum Bad { MkBad(f: (Bad) -> int) }\nfn even(n: int) -> bool { if n == 0 { true } else { odd(n - 1) } }\nfn odd(n: int) -> bool { if n == 0 { false } else { even(n - 1) } }\nfn main() { print(even(4)) }").unwrap();
+        check("fn f(n: int) -> int { let g = f\n g(n) }\nfn main() {}").unwrap();
     }
 
     #[test]
@@ -4028,11 +3728,6 @@ fn main() {
         check(src).unwrap();
         for (from, to, msg) in [
             ("print(twice(inc)(3))", "print(twice(add)(3))", "が必要だが"),
-            (
-                "fn(b) { if b { 1 } else { 'no' } }",
-                "fn(b) { if b { 'no' } else { 1 } }",
-                "int が必要だが str",
-            ),
             (
                 "let inc = fn(x: int) -> int { x + 1 }",
                 "let inc = fn(x) { x + 1 }",
@@ -4059,16 +3754,6 @@ fn main() {
             let e = check(&format!("{g}fn main() {{ {body} }}")).unwrap_err();
             assert!(e.contains(msg), "{body} => {e}");
         }
-        // 正値性: 自分を関数型の引数に持つ型は矛盾を導ける
-        let e = check("enum Bad { MkBad(f: (Bad) -> int) }\nfn main() {}").unwrap_err();
-        assert!(e.contains("正値でない"), "{e}");
-        check("enum Ok { MkOk(f: (int) -> Ok) }\nfn main() {}").unwrap();
-        // 再帰する関数を値にすると、減る引数の検査をすり抜けられる
-        let e = check(&format!(
-            "{src}fn bad(n: int) -> int {{ let g = bad\n g(n) }}"
-        ))
-        .unwrap_err();
-        assert!(e.contains("値として使えない"), "{e}");
     }
 
     #[test]

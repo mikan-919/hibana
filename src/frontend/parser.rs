@@ -104,7 +104,7 @@ pub struct Block {
 
 #[derive(Debug, Clone)]
 pub struct Fn {
-    // 宣言の位置（partial fn 名 まで）。利用者が書いた関数だけ Some。展開で作った関数は呼び出し位置
+    // 宣言の位置（fn 名 まで）。利用者が書いた関数だけ Some。展開で作った関数は呼び出し位置
     pub span: Option<Span>,
     pub name: String,
     pub params: Vec<(String, Expr)>,
@@ -115,8 +115,6 @@ pub struct Fn {
     pub alias: bool,
     // 定義したモジュール（利用者のファイルは ""）
     pub module: String,
-    // partial fn。停止性を検査しない代わりに、型の計算で展開しない
-    pub partial: bool,
     // params の先頭の何個がジェネリック引数か
     pub implicit: usize,
     // extern で宣言した JavaScript の関数。Some(モジュール)、グローバルの関数は Some("")
@@ -613,12 +611,8 @@ fn parse_toks(src: &str, toks: Vec<Token>, round: usize) -> R<Program> {
                     }
                 }
             }
-            Tok::Punct("fn" | "partial") => {
-                let k = if p.peek() == &Tok::Punct("partial") {
-                    2
-                } else {
-                    1
-                };
+            Tok::Punct("fn") => {
+                let k = 1;
                 if let Some(Tok::Ident(n)) = p.toks.get(p.pos + k).map(|t| t.tok.clone()) {
                     if p.toks.get(p.pos + k + 1).map(|t| &t.tok) == Some(&Tok::Punct("<")) {
                         generic_fns.insert(qual(&cur, &n));
@@ -800,7 +794,7 @@ fn parse_toks(src: &str, toks: Vec<Token>, round: usize) -> R<Program> {
             body: p.block()?,
             alias: false,
             module,
-            partial: true,
+
             implicit: 0,
             js: None,
             effects: vec![],
@@ -1085,11 +1079,10 @@ impl Parser<'_> {
 
     fn func(&mut self) -> R<Fn> {
         let start = self.pos;
-        let partial = self.eat("partial");
         self.expect("fn")?;
         let module = self.cur_module();
         let name = qual(&module, &self.ident()?);
-        // 行番号の表示に使う。partial fn 名 までを指す
+        // 行番号の表示に使う。fn 名 までを指す
         let span = self.span_of(start);
         // ジェネリック引数は引数の先頭に置き、呼び出しで省けるようにする
         let mut params = if self.eat("<") {
@@ -1121,7 +1114,7 @@ impl Parser<'_> {
             body: self.block()?,
             alias: false,
             module,
-            partial,
+
             implicit,
             js: None,
             effects,
@@ -1193,7 +1186,7 @@ impl Parser<'_> {
                 },
                 alias: false,
                 module: module.clone(),
-                partial: true,
+
                 implicit: params.len(),
                 js: None,
                 effects: vec![],
@@ -1283,7 +1276,7 @@ impl Parser<'_> {
                 body,
                 alias: false,
                 module: module.clone(),
-                partial: false,
+
                 implicit: params.len(),
                 js: None,
                 effects: effects.clone(),
@@ -1318,7 +1311,7 @@ impl Parser<'_> {
             },
             alias: false,
             module: module.clone(),
-            partial: false,
+
             implicit: params.len(),
             js: None,
             effects: vec![],
@@ -1423,8 +1416,7 @@ impl Parser<'_> {
             },
             alias: false,
             module,
-            // 既定の実装は自分の実装を探して呼ぶので、この関数は自分を呼びうる（値を作るだけで止まる）
-            partial: true,
+
             implicit: generics.len(),
             js: None,
             effects: vec![],
@@ -1464,7 +1456,6 @@ impl Parser<'_> {
                 stmts: vec![],
                 tail: None,
             };
-            // 中身が分からないので、停止性は検査せず、型の計算でも展開しない
             fns.push(Fn {
                 span: Some(span),
                 name,
@@ -1473,7 +1464,7 @@ impl Parser<'_> {
                 body,
                 alias: false,
                 module,
-                partial: true,
+
                 implicit: 0,
                 js: Some(js.clone()),
                 effects,
@@ -1532,6 +1523,9 @@ impl Parser<'_> {
                     ));
                 }
             } else {
+                if !matches!(t.peel(), Expr::Var(name) if name == "Type" || name == "Effect") {
+                    return self.err("型引数には型、Effect、またはトレイトの制約が必要");
+                }
                 params.push((n, t));
             }
             if !self.eat(",") {
@@ -1565,15 +1559,13 @@ impl Parser<'_> {
                 } else {
                     vec![]
                 };
-                let ret = if self.eat("->") {
-                    Some(self.ty()?)
-                } else {
-                    None
-                };
+                if self.eat("->") {
+                    return self.err("構築子の戻り値の型は指定できない");
+                }
                 ctors.push(Ctor {
                     name: qual(&module, &c),
                     fields,
-                    ret,
+                    ret: None,
                 });
                 self.eat(",");
             }
@@ -1636,7 +1628,7 @@ impl Parser<'_> {
                 body,
                 alias: true,
                 module,
-                partial: false,
+
                 js: None,
                 implicit: 0,
                 effects: vec![],
@@ -1655,7 +1647,7 @@ impl Parser<'_> {
                 Tok::Punct(")" | "]" | "}") => depth -= 1,
                 Tok::Punct("|") if depth == 0 => return true,
                 Tok::Punct(
-                    "fn" | "partial" | "type" | "syntax" | "macro" | "use" | "module" | "extern"
+                    "fn" | "type" | "syntax" | "macro" | "use" | "module" | "extern"
                     | "effect" | "trait" | "impl" | "struct" | "enum",
                 )
                 | Tok::Eof
@@ -1679,7 +1671,7 @@ impl Parser<'_> {
                 Tok::Punct("(" | "[" | "{") => depth += 1,
                 Tok::Punct(")" | "]" | "}") => depth -= 1,
                 Tok::Punct(
-                    "fn" | "partial" | "type" | "syntax" | "macro" | "use" | "module" | "extern"
+                    "fn" | "type" | "syntax" | "macro" | "use" | "module" | "extern"
                     | "effect" | "trait" | "impl" | "struct" | "enum",
                 ) if depth == 0 => {
                     return;

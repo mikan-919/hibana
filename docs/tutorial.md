@@ -208,4 +208,4 @@ fn main() {
 ## 8. 次に読むもの
 
 - 言語の規則と既知の制約: `docs/spec.md`
-- [カテゴリ別の例](../tests/programs/README.md)（効果は `tests/programs/effects/effects.hb`、トレイトは `tests/programs/types/trait.hb`、Web サーバーは `tests/programs/web/server.hb`、依存型は `tests/programs/types/dependent.hb`、マクロは `tests/programs/macros/macros.hb`）
+- [カテゴリ別の例](../tests/programs/README.md)（効果は `tests/programs/effects/effects.hb`、トレイトは `tests/programs/types/trait.hb`、Web サーバーは `tests/programs/web/server.hb`、マクロは `tests/programs/macros/macros.hb`）

@@ -467,7 +467,7 @@ mod tests {
             #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
             match crate::to_native(&src) {
                 Ok(bytes) => {
-                    let exe = tmp.join(&name);
+                    let exe = tmp.join(format!("{name}-{total}"));
                     std::fs::write(&exe, bytes).unwrap();
                     std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
                     let r = std::process::Command::new(&exe).output().unwrap();
@@ -859,7 +859,6 @@ fn main() {
                 "fn twice(f: (int) -> int, x: int) -> int { f(f(x)) }\nfn n(x: int) -> int ! Log { x }\nfn main() { handle twice(n, 1) { log(m) => resume() } }",
                 "(int) -> int が必要だが (int) -> int ! Log",
             ),
-            ("fn g() -> never { g() }\nfn main() {}", "停止することを示せない"),
             ("fn g() -> never { 1 }\nfn main() {}", "戻らない式で終わる"),
             ("fn g() -> never { return panic('x') }\nfn main() {}", "return を使えない"),
             // 効果の多相: E は渡した関数の効果になり、呼ぶ側で処理する必要がある
@@ -914,7 +913,7 @@ fn main() {
         assert!(e.msg.contains("構造体は struct"), "{}", e.msg);
         let e = out("type S = A | B\nfn main() {}").unwrap_err();
         assert!(e.msg.contains("直和型は enum"), "{}", e.msg);
-        let src = "enum S {\n    A\n    B(n: int) -> S\n}\nstruct W(int, str)\nfn main() {\n print(B(1))\n let w = W(1, 'a')\n print(w.1)\n print(w)\n}";
+        let src = "enum S {\n    A\n    B(n: int)\n}\nstruct W(int, str)\nfn main() {\n print(B(1))\n let w = W(1, 'a')\n print(w.1)\n print(w)\n}";
         assert_eq!(out(src).unwrap(), "B(1)\na\nW(1, \"a\")\n");
     }
 
@@ -984,17 +983,17 @@ fn main() {
     // data の宣言の型エラーは、宣言の行を指す（struct P は 2 行目。フィールドの式には位置が無い）
     #[test]
     fn data_error_has_line() {
-        let src = "fn main() {}\nstruct P {\n    f: (x: P) -> int,\n}\n";
+        let src = "fn main() {}\nstruct P {\n    f: Missing,\n}\n";
         let e = out(src).unwrap_err();
-        assert!(e.msg.starts_with("行 2: 構築子 P{}: "), "{e:?}");
+        assert!(e.msg.starts_with("行 3: 構築子 P{}: "), "{e:?}");
     }
 
     // trait の宣言の型エラーは、trait の行を指す（trait Show は 2 行目）
     #[test]
     fn trait_error_has_line() {
-        let src = "fn main() {}\ntrait Show<A> {\n    fn show(f: (x: Show<A>) -> int) -> int\n}\n";
+        let src = "fn main() {}\ntrait Show<A> {\n    fn show(f: Missing) -> int\n}\n";
         let e = out(src).unwrap_err();
-        assert!(e.msg.starts_with("行 2: "), "{e:?}");
+        assert!(e.msg.starts_with("行 3: "), "{e:?}");
     }
 
     // impl の型エラーは、impl の行を指す（生成した構築子の引数の検査。impl は 5 行目）
@@ -1024,7 +1023,7 @@ fn main() {
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 
-    // よくある条件（routes の添字、fib の停止性など）は Z3 なしで証明できる
+    // よくある条件（routes の添字など）は Z3 なしで証明できる
     #[test]
     fn builtin_prover() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/programs");

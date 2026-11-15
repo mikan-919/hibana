@@ -10,7 +10,7 @@ const CLOSE: &[&str] = &[")", "]", "}"];
 const BIN: &[&str] = &["=", "==", "!=", "<=", ">=", "&&", "||", "=>", "->"];
 // 新しい宣言や文を始めるキーワード（続きの行にしない）
 const STARTS: &[&str] = &[
-    "fn", "let", "type", "syntax", "macro", "effect", "use", "module", "extern", "partial", "return",
+    "fn", "let", "type", "syntax", "macro", "effect", "use", "module", "extern", "return",
     "trait", "impl", "struct", "enum",
 ];
 

@@ -143,8 +143,7 @@ pub fn build(src: &str, combined: &str, prog: &Program) -> Index {
             let Tok::Ident(n) = &toks[i + 1].tok else {
                 continue;
             };
-            // partial fn は partial から
-            let at = if i > 0 && toks[i - 1].tok == Tok::Punct("partial") { i - 1 } else { i };
+            let at = i;
             let q = crate::parser::qual(&module, n);
             decls.entry(q).or_insert((
                 signature(combined, &toks, at),

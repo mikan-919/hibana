@@ -129,7 +129,7 @@ fn name_at(toks: &[Token], ix: &Index, off: usize) -> Option<(String, usize, usi
 
 const KEYWORDS: &[&str] = &[
     "fn", "let", "mut", "if", "else", "while", "for", "in", "return", "match", "type", "effect",
-    "handle", "resume", "use", "macro", "syntax", "quote", "partial", "extern", "trait", "impl", "struct",
+    "handle", "resume", "use", "macro", "syntax", "quote", "extern", "trait", "impl", "struct",
     "enum", "true",
     "false",
 ];

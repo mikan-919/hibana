@@ -432,8 +432,7 @@ fn quote_str(s: str) -> str {
     out + '"'
 }
 
-// ponytail: 要素ごとの再帰は停止性を示せないので partial fn。Vec の要素を部分項とみなせば fn にできる
-partial fn stringify(j: Json) -> str {
+fn stringify(j: Json) -> str {
     match j {
         JNull => 'null'
         JBool(b) => to_str(b)
@@ -608,7 +607,7 @@ fn parse_string(s: str, i: int) -> Parsed {
     if bad { no_parse() } else { Parsed { ok: true, value: JStr(out), pos: j } }
 }
 
-partial fn parse_value(s: str, i0: int) -> Parsed {
+fn parse_value(s: str, i0: int) -> Parsed {
     let i = skip_ws(s, i0)
     let c = char_at(s, i)
     if starts_at(s, i, 'null') {
@@ -629,7 +628,7 @@ partial fn parse_value(s: str, i0: int) -> Parsed {
 }
 
 // [ の後ろから読む
-partial fn parse_array(s: str, i: int) -> Parsed {
+fn parse_array(s: str, i: int) -> Parsed {
     let mut items: Vec<Json> = []
     let mut j = skip_ws(s, i)
     let mut done = char_at(s, j) == ']'
@@ -657,7 +656,7 @@ partial fn parse_array(s: str, i: int) -> Parsed {
 }
 
 // { の後ろから読む
-partial fn parse_object(s: str, i: int) -> Parsed {
+fn parse_object(s: str, i: int) -> Parsed {
     let mut fields: Vec<Field> = []
     let mut j = skip_ws(s, i)
     let mut done = char_at(s, j) == '}'
