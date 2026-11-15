@@ -158,15 +158,19 @@ fn scripts_reject_missing_invalid_and_undefined_configuration() {
 }
 
 #[test]
-fn removed_build_and_script_commands_do_not_execute() {
+fn build_runs_script_and_script_command_is_rejected() {
     let fixture = Fixture::new();
     fixture.write(
         "config.hibana.toml",
-        "[scripts]\nbuild = \"touch script-ran\"\ncheck = \"touch script-ran\"\n",
+        "[scripts]\nbuild = \"printf '<%s>'\"\ncheck = \"touch script-ran\"\n",
     );
+    fixture.write("build", "must not execute");
+    assert_eq!(stdout(&fixture.run(&["build", "--", "a b", "$(touch injected)"])), "<a b><$(touch injected)>");
+    assert!(!fixture.0.join("injected").exists());
+    fixture.write("config.hibana.toml", "[scripts]\n");
+    assert_error(&fixture.run(&["build"]));
     fixture.write("script", "println(\"must not execute\")\n");
     for args in [
-        vec!["build"],
         vec!["script"],
         vec!["script", "build"],
         vec!["script", "check", "--", "arg"],

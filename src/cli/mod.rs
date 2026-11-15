@@ -50,7 +50,7 @@ pub fn main() {
 const STACK: usize = 256 << 20;
 
 fn script_usage() -> ! {
-    eprintln!("使い方: hibana dev [-- 引数...]");
+    eprintln!("使い方: hibana <build|dev> [-- 引数...]");
     std::process::exit(2);
 }
 
@@ -136,11 +136,11 @@ fn run_cli() {
         lsp::serve();
         return;
     }
-    // dev は、設定した開発用シェルスクリプトを実行する。
+    // build と dev は、設定したシェルスクリプトを実行する。
     let script = match args.as_slice() {
-        [name] if name == "dev" => Some((name.as_str(), &[][..])),
-        [name, sep, rest @ ..] if name == "dev" && sep == "--" => Some((name.as_str(), rest)),
-        [cmd, ..] if cmd == "dev" => script_usage(),
+        [name] if matches!(name.as_str(), "dev" | "build") => Some((name.as_str(), &[][..])),
+        [name, sep, rest @ ..] if matches!(name.as_str(), "dev" | "build") && sep == "--" => Some((name.as_str(), rest)),
+        [cmd, ..] if matches!(cmd.as_str(), "dev" | "build") => script_usage(),
         _ => None,
     };
     if let Some((name, extra)) = script {
@@ -214,7 +214,7 @@ fn run_cli() {
         }
         return;
     }
-    if let Some(cmd) = args.first().filter(|s| matches!(s.as_str(), "ir" | "wasm" | "glue" | "web" | "js" | "c" | "build" | "script")) {
+    if let Some(cmd) = args.first().filter(|s| matches!(s.as_str(), "ir" | "wasm" | "glue" | "web" | "js" | "c" | "script")) {
         eprintln!("不明なサブコマンド: {cmd}");
         std::process::exit(2);
     }
@@ -224,7 +224,7 @@ fn run_cli() {
         [cmd, p] if cmd == "run" || cmd == "fmt" => (cmd.as_str(), p.clone()),
         _ => {
             eprintln!(
-                "使い方: hibana install [--frozen-lockfile]（依存を取得） | hibana update [依存名|npm:名前|cargo:名前]（依存を更新） | hibana remove [-g] <依存名|npm:名前|cargo:名前>（依存を削除） | hibana dev [-- 引数...] | hibana <ファイル>（実行） | hibana run <ファイル>（WASM で実行） | hibana fmt <ファイル>（整形して書き戻す） | hibana lsp（Language Server を標準入出力で動かす） | hibana new <名前> | hibana add <git の URL> [tag] | hibana add [-g] <npm:名前[@版]|cargo:名前[@版]> | hibana dlx [--bin コマンド | --rev Gitの版] <識別子> [--] 引数... | hibana fetch（依存を取ってくる） | hibana test [ファイル]（test を実行する）"
+                "使い方: hibana install [--frozen-lockfile]（依存を取得） | hibana update [依存名|npm:名前|cargo:名前]（依存を更新） | hibana remove [-g] <依存名|npm:名前|cargo:名前>（依存を削除） | hibana <build|dev> [-- 引数...] | hibana <ファイル> [-- 引数...]（実行） | hibana run <ファイル>（WASM で実行） | hibana fmt <ファイル>（整形して書き戻す） | hibana lsp（Language Server を標準入出力で動かす） | hibana new <名前> | hibana add <git の URL> [tag] | hibana add [-g] <npm:名前[@版]|cargo:名前[@版]> | hibana dlx [--bin コマンド | --rev Gitの版] <識別子> [--] 引数... | hibana fetch（依存を取ってくる） | hibana test [ファイル]（test を実行する）"
             );
             std::process::exit(2);
         }
