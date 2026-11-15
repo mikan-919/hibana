@@ -31,7 +31,6 @@ fn main() {
 - 実行: インタプリタ、JavaScript、整数 IR を経由した WebAssembly とネイティブ出力
 - 道具: フォーマッタ、テストランナー、Language Server、VS Code と Zed の拡張機能、tree-sitter の文法
 - パッケージ: Git のパッケージ、npm と Cargo のツールの追加と実行、ロックファイル
-- 自己ホスト: hibana で書いた字句解析、構文解析、型検査、JavaScript 生成、フォーマッタ。Rust 版と同じ結果になることをテストで確かめている（実証用で、主な実装は Rust 版）
 
 ## 動かす
 

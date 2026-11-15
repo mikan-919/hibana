@@ -20,7 +20,7 @@ nix develop -c cargo run -q -- <ファイル>   # 実行（fmt / test / lsp は�
 | 場所 | 内容 |
 |---|---|
 | `src/frontend/` | 字句解析（`lexer.rs`）、構文解析（`parser.rs`）、名前解決（`resolve.rs`）、マクロ展開（`meta.rs`）、TypeScript の宣言の読み込み（`ts.rs`） |
-| `src/check/` | 型検査（`typeck.rs`）。細分化型の証明、効果、トレイト。`smt.rs` は Z3 の FFI |
+| `src/check/` | 型検査（`typeck.rs`）。細分化型の証明、効果、トレイト。`prove.rs` は型の評価と細分化型の証明、`smt.rs` は Z3 の FFI |
 | `src/backend/` | インタプリタ（`eval.rs`）、JavaScript（`js.rs`）、WASM とネイティブの共通の構造化 IR（`ir.rs`）、WebAssembly（`wasm.rs`）、Cranelift によるネイティブ（`native.rs`。libc なしの静的 ELF） |
 | `src/tooling/` | フォーマッタ（`fmt.rs`）、Language Server（`lsp.rs`）、シンボルの索引（`index.rs`） |
 | `src/project/` | スクリプト（`scripts.rs`）、パッケージ管理（`pkg/`）、外部ツール管理（`tools/`） |

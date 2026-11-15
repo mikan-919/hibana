@@ -47,7 +47,7 @@ fn each(xs: Vec<str>, f: (str) -> unit ! Log) ! Log {
     for x in xs { f(x) }
 }
 
-// all は Async の効果。インタプリタと C では順に実行する
+// all は Async の効果。インタプリタでは順に実行する
 fn main() ! Async {
     print(all([fn() { describe_or('7') }, fn() { describe_or('0') }]))
     handle each(['a', 'b'], fn(x) { log('each ' + x) }) {
