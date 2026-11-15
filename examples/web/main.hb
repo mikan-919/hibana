@@ -3,7 +3,7 @@ use './lib'
     -> { hanabi }
     -> { Response, Clock }
 
-fn main(){
+fn main() {
     let app = hanabi(
         route {
             GET '/' {
