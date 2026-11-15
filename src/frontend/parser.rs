@@ -2126,8 +2126,22 @@ impl Parser<'_> {
                 let s = self.expr()?;
                 self.expect("{")?;
                 let mut arms = Vec::new();
+                // 文字列・整数のパターンの腕（値, 本体）
+                let mut lits = Vec::new();
                 while !self.eat("}") {
                     let astart = self.pos;
+                    if let Tok::Str(_) | Tok::Int(_) = self.peek() {
+                        let v = match self.next() {
+                            Tok::Str(s) => Expr::Str(s),
+                            Tok::Int(n) => Expr::Int(n),
+                            _ => unreachable!(),
+                        };
+                        let v = self.wrap(astart, v);
+                        self.expect("->")?;
+                        lits.push((v, self.expr()?));
+                        self.eat(",");
+                        continue;
+                    }
                     let ctor = self.ident()?;
                     let mut binds = Vec::new();
                     if self.eat("(") {
@@ -2150,7 +2164,28 @@ impl Parser<'_> {
                     });
                     self.eat(",");
                 }
-                Expr::Match(Box::new(s), arms)
+                if lits.is_empty() {
+                    Expr::Match(Box::new(s), arms)
+                } else {
+                    // { let match#k = 対象; if match#k == 値 { 本体 } else if ... else { _ の本体 } } にする
+                    let [Arm { ctor, binds, body, .. }] = arms.as_slice() else {
+                        return self.err_at("文字列・整数の match には、_ の腕を1つだけ置く".into());
+                    };
+                    if ctor != "_" || !binds.is_empty() {
+                        return self.err_at("文字列・整数のパターンと構築子のパターンは混ぜられない".into());
+                    }
+                    let name = format!("match#{}", self.pos);
+                    let leaf = |e: Expr| Block { stmts: vec![], tail: Some(Box::new(e)) };
+                    let mut acc = Expr::Block(leaf(body.clone()));
+                    for (v, body) in lits.into_iter().rev() {
+                        let cond = Expr::Binary("==", Box::new(Expr::Var(name.clone())), Box::new(v));
+                        acc = Expr::If(Box::new(cond), leaf(body), Some(Box::new(acc)));
+                    }
+                    Expr::Block(Block {
+                        stmts: vec![Stmt::Let { name, mutable: false, ty: None, init: s }],
+                        tail: Some(Box::new(acc)),
+                    })
+                }
             }
             Tok::Punct("handle") => {
                 let body = self.expr()?;
