@@ -1,4 +1,4 @@
-// 依存型の型検査。型は式であり、検査中に評価（正規化）して比べる
+// 型検査。型別名と細分化型の条件を評価して比べる
 use crate::meta::{Kinds, Q};
 use crate::parser::{Arm, Block, Ctor, Data, Expr, Fn, Program, Stmt};
 use crate::smt::Smt;
