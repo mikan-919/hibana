@@ -421,7 +421,9 @@ mod tests {
         for p in names {
             let src = std::fs::read_to_string(&p).unwrap();
             // extern を使う例はインタプリタでは動かないので、js_extern で確かめる。サーバーは web_server で確かめる
-            if src.contains(".ts'")
+            // main の無いファイル（ライブラリとテスト）は実行しない
+            if !src.contains("fn main(")
+                || src.contains(".ts'")
                 || src.contains(".js'")
                 || src.contains("\nextern")
                 || src.contains("web.serve(")
@@ -941,6 +943,17 @@ fn main() {
         std::fs::write(&ng, "use std -> *\ntest 'b' { assert(false) }\nfn main() { put(1) }\n").unwrap();
         assert_eq!(super::test_cmd(&[ok.to_str().unwrap()]), Ok(true));
         assert_eq!(super::test_cmd(&[ok.to_str().unwrap(), ng.to_str().unwrap()]), Ok(false));
+        // it ごとに 1 件。前に書いた文は、それより後の it の前置きになる。it は変数名にも使える
+        let nested = dir.join("nested.hb");
+        let src = "use std -> *\ntest 'a' {\n let it = 1\n describe 'b' {\n  let y = it + 1\n  it 'c' { assert_eq(y, 2) }\n  it 'd' { assert(y > it) }\n }\n it 'e' { assert(it == 1) }\n}\n";
+        std::fs::write(&nested, src).unwrap();
+        assert_eq!(super::test_cmd(&[nested.to_str().unwrap()]), Ok(true));
+        let labels: Vec<String> = crate::parser::parse(src).unwrap().tests.into_iter().map(|t| t.0).collect();
+        assert_eq!(labels, ["a / b / c", "a / b / d", "a / e"]);
+        let e = out("test 'a' {\n describe 'b' { let y = 1 }\n}\nfn main() {}").unwrap_err();
+        assert!(e.msg.contains("describe 'b' に it が無い"), "{e}");
+        let e = out("test 'a' {\n it 'b' { }\n let y = 1\n}\nfn main() {}").unwrap_err();
+        assert!(e.msg.contains("どの it でも実行されない"), "{e}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

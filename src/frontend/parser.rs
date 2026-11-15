@@ -805,14 +805,22 @@ fn parse_toks(src: &str, toks: Vec<Token>, round: usize) -> R<Program> {
         p.helpers = Rc::new(helpers);
     }
     p.check_macros()?;
-    // test "名前" { 本体 } は引数の無い関数 test#k にする
-    for (k, s) in test_starts.into_iter().enumerate() {
+    // test "名前" { 本体 } は引数の無い関数 test#k にする。中に it があれば it ごとに 1 つ
+    let mut cases = Vec::new();
+    for s in test_starts {
         p.pos = s + 1;
         let Tok::Str(label) = p.next() else {
             unreachable!()
         };
-        let module = p.cur_module();
         p.expect("{")?;
+        let before = cases.len();
+        let module = p.cur_module();
+        let setup = p.test_cases(&label, Vec::new(), &module, &mut cases)?;
+        if cases.len() == before {
+            cases.push((label, s, module, Block { stmts: setup, tail: None }));
+        }
+    }
+    for (k, (label, s, module, body)) in cases.into_iter().enumerate() {
         let name = qual(&module, &format!("test#{k}"));
         prog.tests.push((label, name.clone()));
         prog.fns.push(Fn {
@@ -820,7 +828,7 @@ fn parse_toks(src: &str, toks: Vec<Token>, round: usize) -> R<Program> {
             name,
             params: vec![],
             ret: None,
-            body: p.block()?,
+            body,
             alias: false,
             module,
 
@@ -1771,6 +1779,67 @@ impl Parser<'_> {
     }
 
     // "{" は読み終えた状態で呼ぶ
+    // test と describe の本体（"{" は読み終えた状態で呼ぶ）。it '名前' { } ごとに、前に書いた文を前置きにした本体を cases に足す。
+    // describe '名前' { } は名前をまとめるだけ。返り値は、この本体の文（it が無い test の本体になる）
+    fn test_cases(
+        &mut self,
+        label: &str,
+        mut setup: Vec<Stmt>,
+        module: &str,
+        cases: &mut Vec<(String, usize, String, Block)>,
+    ) -> R<Vec<Stmt>> {
+        let mut groups = 0;
+        // 最後の it・describe より後にある最初の文の位置
+        let mut trailing = None;
+        while !self.eat("}") {
+            let at = self.pos;
+            if let Tok::Ident(w) = self.peek().clone()
+                && (w == "describe" || w == "it")
+                && let Some(Tok::Str(name)) = self.toks.get(at + 1).map(|t| t.tok.clone())
+                && self.toks.get(at + 2).is_some_and(|t| t.tok == Tok::Punct("{"))
+            {
+                self.pos += 3;
+                let label = format!("{label} / {name}");
+                let before = cases.len();
+                if w == "it" {
+                    let body = self.block()?;
+                    let mut stmts = setup.clone();
+                    stmts.extend(body.stmts);
+                    cases.push((label, at, module.to_string(), Block { stmts, tail: body.tail }));
+                } else {
+                    self.test_cases(&label, setup.clone(), module, cases)?;
+                    if cases.len() == before {
+                        self.pos = at;
+                        return self.err_at(format!("describe '{name}' に it が無い"));
+                    }
+                }
+                self.end_stmt()?;
+                groups += 1;
+                trailing = None;
+                continue;
+            }
+            if groups > 0 && trailing.is_none() {
+                trailing = Some(at);
+            }
+            if let Some(e) = self.try_macros(true)? {
+                self.end_stmt()?;
+                setup.push(Stmt::Expr(e));
+            } else if self.peek() == &Tok::Punct("let") {
+                setup.push(self.let_stmt()?);
+            } else {
+                setup.push(Stmt::Expr(self.expr()?));
+                if !self.eat(";") {
+                    self.end_stmt()?;
+                }
+            }
+        }
+        if let Some(at) = trailing {
+            self.pos = at;
+            return self.err_at("最後の it・describe の後の文はどの it でも実行されない（前に置く）".into());
+        }
+        Ok(setup)
+    }
+
     pub fn block(&mut self) -> R<Block> {
         let mut stmts = Vec::new();
         loop {
