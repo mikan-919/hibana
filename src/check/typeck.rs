@@ -44,10 +44,6 @@ pub(crate) enum V {
     Refine(Rc<(V, V)>),
     // 関数型 (x: A, ...) -> B
     Pi(Rc<PiV>),
-    // 無名関数の値
-    Lam(Rc<Clo>),
-    // トップレベルの関数を値として使ったもの
-    FnRef(String),
     // 種類の分かっているコード片 syn<種類>。種類の分からないものは Prim("syn")
     Syn(Rc<str>),
     // 値が分からず計算が止まった項
@@ -71,21 +67,6 @@ impl PartialEq for PiV {
     }
 }
 
-// 無名関数。作った時の変数の値を持つ
-#[derive(Debug)]
-pub(crate) struct Clo {
-    params: Vec<String>,
-    body: Block,
-    env: HashMap<String, V>,
-}
-
-// ponytail: 無名関数は同じ値の時だけ等しいとみなす。中身を比べるなら本体を正規化して比べる
-impl PartialEq for Clo {
-    fn eq(&self, o: &Self) -> bool {
-        std::ptr::eq(self, o)
-    }
-}
-
 // 関数型の引数を表す変数の番号。入れ子の深さ level ごとに分け、内側の関数型の引数と混ざらないようにする
 // ponytail: 深さの違う所で書いた同じ依存関数型は別の型になる。α同値で比べるなら de Bruijn 添字にする
 fn binder(level: usize, i: usize) -> usize {
@@ -100,8 +81,6 @@ pub(crate) enum Neu {
     Bin(&'static str, V, V),
     // 展開しきれなかった関数呼び出し
     Call(String, Vec<V>),
-    // 値の分からない関数の呼び出し
-    App(V, Vec<V>),
     // 値の分からない構造体のフィールド
     Proj(V, String),
     // 型の計算で扱えない式（while・代入・print など）。どの値とも等しくない
@@ -243,9 +222,7 @@ fn show(v: &V) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        V::Lam(_) => "<fn>".into(),
         V::Syn(k) => format!("syn<{k}>"),
-        V::FnRef(n) => n.clone(),
         V::Neu(n) => match &**n {
             Neu::Var(_, name) => name.clone(),
             Neu::Un(op, x) => format!("{op}{}", show(x)),
@@ -266,11 +243,6 @@ fn show(v: &V) -> String {
                     .map(show)
                     .collect::<Vec<_>>()
                     .join(", ")
-            ),
-            Neu::App(f, args) => format!(
-                "{}({})",
-                show(f),
-                args.iter().map(show).collect::<Vec<_>>().join(", ")
             ),
             Neu::Proj(x, f) => format!("{}.{f}", show(x)),
             Neu::Opaque(_) => "?".into(),
@@ -323,12 +295,10 @@ fn mentions(v: &V, id: usize) -> bool {
         V::VecT(a) => mentions(a, id),
         V::Refine(r) => mentions(&r.0, id) || mentions(&r.1, id),
         V::Pi(p) => p.doms.iter().chain(&p.effs).any(|x| mentions(x, id)) || mentions(&p.cod, id),
-        V::Lam(c) => c.env.values().any(|x| mentions(x, id)),
         V::Neu(n) => match &**n {
             Neu::Var(i, _) => *i == id,
             Neu::Un(_, x) => mentions(x, id),
             Neu::Bin(_, a, b) => mentions(a, id) || mentions(b, id),
-            Neu::App(f, args) => mentions(f, id) || args.iter().any(|a| mentions(a, id)),
             Neu::Proj(x, _) => mentions(x, id),
             Neu::Call(_, args) => args.iter().any(|a| mentions(a, id)),
             Neu::Opaque(_) => false,
@@ -483,31 +453,6 @@ impl Norm<'_> {
         neu(Neu::Proj(x, f.to_string()))
     }
 
-    // 関数の値を呼ぶ
-    fn app(&mut self, f: V, args: Vec<V>) -> R<V> {
-        let V::Lam(c) = &f else {
-            return match &f {
-                V::FnRef(n) => self.call(n, args),
-                _ => Ok(neu(Neu::App(f.clone(), args))),
-            };
-        };
-        if self.fuel == 0 || self.depth >= 64 {
-            return Err("型の計算が終わらない（無名関数の展開）".into());
-        }
-        self.fuel -= 1;
-        let mut scope = c.env.clone();
-        scope.extend(c.params.iter().cloned().zip(args.iter().cloned()));
-        let mut env = vec![scope];
-        self.depth += 1;
-        let r = self.block(&c.body, &mut env);
-        self.depth -= 1;
-        match r {
-            Ok(v) => Ok(v),
-            Err(Halt::Stuck) => Ok(neu(Neu::App(f.clone(), args))),
-            Err(Halt::Err(e)) => Err(e),
-        }
-    }
-
     // 関数型の式を評価する。引数は Var(binder(深さ, i)) にする
     fn eval_pi(
         &mut self,
@@ -587,38 +532,12 @@ impl Norm<'_> {
                 .collect(),
         ];
         self.depth += 1;
-        let r = self.block(&f.body, &mut env);
+        let r = match &f.body.tail { Some(t) => self.eval(t, &mut env), None => Err(Halt::Stuck) };
         self.depth -= 1;
         match r {
             Ok(v) => Ok(v),
             Err(Halt::Stuck) => Ok(neu(Neu::Call(name.into(), args))),
             Err(Halt::Err(e)) => Err(e),
-        }
-    }
-
-    fn block(&mut self, b: &Block, env: &mut Env) -> H<V> {
-        env.push(HashMap::new());
-        let r = self.block_inner(b, env);
-        env.pop();
-        r
-    }
-
-    fn block_inner(&mut self, b: &Block, env: &mut Env) -> H<V> {
-        for s in &b.stmts {
-            match s {
-                Stmt::Let { mutable: true, .. } => return Err(Halt::Stuck),
-                Stmt::Let { name, init, .. } => {
-                    let v = self.eval(init, env)?;
-                    env.last_mut().unwrap().insert(name.clone(), v);
-                }
-                Stmt::Expr(e) => {
-                    self.eval(e, env)?;
-                }
-            }
-        }
-        match &b.tail {
-            Some(e) => self.eval(e, env),
-            None => Ok(V::Unit),
         }
     }
 
@@ -644,7 +563,7 @@ impl Norm<'_> {
                 {
                     self.call(n, vec![]).map_err(Halt::Err)?
                 }
-                None if self.fns.contains_key(n.as_str()) => V::FnRef(n.clone()),
+                None if self.fns.contains_key(n.as_str()) => return Err(Halt::Stuck),
                 None => return Err(Halt::Err(format!("未定義の変数 {n}").into())),
             },
             Expr::Unary(op, x) => Self::un(op, self.eval(x, env)?),
@@ -667,26 +586,10 @@ impl Norm<'_> {
                     vs.push(self.eval(a, env)?);
                 }
                 match env.iter().rev().find_map(|s| s.get(name)).cloned() {
-                    Some(f) => self.app(f, vs).map_err(Halt::Err)?,
+                    Some(_) => return Err(Halt::Stuck),
                     None => self.call(name, vs).map_err(Halt::Err)?,
                 }
             }
-            Expr::Apply(f, args) => {
-                let f = self.eval(f, env)?;
-                let mut vs = Vec::new();
-                for a in args {
-                    vs.push(self.eval(a, env)?);
-                }
-                self.app(f, vs).map_err(Halt::Err)?
-            }
-            Expr::Lam(params, _, _, body) => V::Lam(Rc::new(Clo {
-                params: params.iter().map(|p| p.0.clone()).collect(),
-                body: body.clone(),
-                env: env
-                    .iter()
-                    .flat_map(|s| s.iter().map(|(k, v)| (k.clone(), v.clone())))
-                    .collect(),
-            })),
             Expr::Pi(binders, ret, effs) => self.eval_pi(binders, ret, effs, env)?,
             Expr::Array(items) => {
                 let mut vs = Vec::new();
@@ -701,23 +604,6 @@ impl Norm<'_> {
                     return Err(Halt::Stuck);
                 }
                 self.proj(v, f)
-            }
-            Expr::Match(s, arms) => {
-                let V::Data(d) = self.eval(s, env)? else {
-                    return Err(Halt::Stuck);
-                };
-                let arm = arms
-                    .iter()
-                    .find(|a| a.ctor == d.0 || a.ctor == "_")
-                    .ok_or(Halt::Stuck)?;
-                let mut scope = HashMap::new();
-                if arm.ctor != "_" {
-                    scope.extend(arm.binds.iter().cloned().zip(d.1.iter().cloned()));
-                }
-                env.push(scope);
-                let r = self.eval(&arm.body, env);
-                env.pop();
-                r?
             }
             Expr::Index(v, i) => match (self.eval(v, env)?, self.eval(i, env)?) {
                 (V::Arr(xs), V::Int(i)) if usize::try_from(i).is_ok_and(|i| i < xs.len()) => {
@@ -734,16 +620,7 @@ impl Norm<'_> {
                 env.pop();
                 V::Refine(Rc::new((b, p.map_err(Halt::Err)?)))
             }
-            Expr::If(c, then, els) => match self.eval(c, env)? {
-                V::Bool(true) => self.block(then, env)?,
-                V::Bool(false) => match els {
-                    Some(x) => self.eval(x, env)?,
-                    None => V::Unit,
-                },
-                _ => return Err(Halt::Stuck),
-            },
-            Expr::Block(b) => self.block(b, env)?,
-            Expr::Assign(..)
+            Expr::Apply(..) | Expr::Lam(..) | Expr::Match(..) | Expr::If(..) | Expr::Block(..) | Expr::Assign(..)
             | Expr::For(..)
             | Expr::While(..)
             | Expr::Return(_)
@@ -792,17 +669,6 @@ impl Norm<'_> {
                     .collect::<R<_>>()?,
                 level: p.level,
             })),
-            V::Lam(c) if c.env.values().any(|x| mentions(x, id)) => {
-                let mut env = HashMap::new();
-                for (k, x) in &c.env {
-                    env.insert(k.clone(), self.subst(x, id, by)?);
-                }
-                V::Lam(Rc::new(Clo {
-                    params: c.params.clone(),
-                    body: c.body.clone(),
-                    env,
-                }))
-            }
             V::Neu(n) => match &**n {
                 Neu::Var(i, _) if *i == id => by.clone(),
                 Neu::Var(..) | Neu::Opaque(_) => v.clone(),
@@ -822,21 +688,12 @@ impl Norm<'_> {
                     let x = self.subst(x, id, by)?;
                     self.proj(x, f)
                 }
-                Neu::App(f, args) => {
-                    let f = self.subst(f, id, by)?;
-                    let args = args
-                        .iter()
-                        .map(|a| self.subst(a, id, by))
-                        .collect::<R<_>>()?;
-                    self.app(f, args)?
-                }
+
             },
             v => v.clone(),
         })
     }
 }
-
-// match の場合に入った時の (添字の照合で得た代入, フィールドの値)
 
 // 変数の (型, 値, 可変か)
 struct Entry {
