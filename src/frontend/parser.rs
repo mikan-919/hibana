@@ -1480,7 +1480,11 @@ impl Parser<'_> {
         while !self.eat(")") {
             let n = self.ident()?;
             self.expect(":")?;
-            params.push((n, self.ty()?));
+            let ty = self.ty()?;
+            if matches!(ty.peel(), Expr::Var(name) if name == "Type") {
+                return self.err("型の値を関数や構築子の引数にできない");
+            }
+            params.push((n, ty));
             if !self.eat(",") {
                 self.expect(")")?;
                 break;
@@ -1589,11 +1593,19 @@ impl Parser<'_> {
             // struct Name(型, ...) のフィールドは 0, 1, ... で、x.0 で取り出す
             while !self.eat(if tuple { ")" } else { "}" }) {
                 if tuple {
-                    fields.push((fields.len().to_string(), self.ty()?));
+                    let ty = self.ty()?;
+                    if matches!(ty.peel(), Expr::Var(name) if name == "Type") {
+                        return self.err("型の値をフィールドにできない");
+                    }
+                    fields.push((fields.len().to_string(), ty));
                 } else {
                     let n = self.ident()?;
                     self.expect(":")?;
-                    fields.push((n, self.ty()?));
+                    let ty = self.ty()?;
+                    if matches!(ty.peel(), Expr::Var(name) if name == "Type") {
+                        return self.err("型の値をフィールドにできない");
+                    }
+                    fields.push((n, ty));
                 }
                 self.eat(",");
             }
@@ -1611,6 +1623,9 @@ impl Parser<'_> {
         }
         {
             let e = self.ty()?;
+            if matches!(e.peel(), Expr::If(..)) {
+                return self.err("型別名には型を指定する");
+            }
             let body = Block {
                 stmts: vec![],
                 tail: Some(Box::new(e)),

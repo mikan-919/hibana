@@ -30,8 +30,8 @@ pub(crate) enum V {
     Str(Rc<str>),
     Unit,
     Arr(Rc<Vec<V>>),
-    // 型の階層 Type(n)。Type は Type(0) で、Type(n) : Type(n + 1)
-    Univ(u32),
+    // 型を表す印
+    Type,
     // data の値 (構築子, フィールド)
     Data(Rc<(String, Vec<V>)>),
     // data の型 (型名, 引数)
@@ -213,8 +213,7 @@ fn show(v: &V) -> String {
         V::Str(s) => format!("{s:?}"),
         V::Unit => "()".into(),
         V::Arr(v) => format!("[{}]", v.iter().map(show).collect::<Vec<_>>().join(", ")),
-        V::Univ(0) => "Type".into(),
-        V::Univ(n) => format!("Type<{n}>"),
+        V::Type => "Type".into(),
         V::DataT(d) if !d.1.is_empty() => format!(
             "{}<{}>",
             d.0,
@@ -554,7 +553,6 @@ impl Norm<'_> {
             ("len", [v]) => return Ok(Self::len(v.clone())),
             ("Vec", [a]) => return Ok(V::VecT(Rc::new(a.clone()))),
             ("Ref", [a]) => return Ok(ref_t(a.clone())),
-            ("Type", [V::Int(n)]) if *n >= 0 => return Ok(V::Univ(*n as u32)),
             _ if self.ctors.contains_key(name) => return Ok(V::Data(Rc::new((name.into(), args)))),
             _ if self.datas.contains_key(name) => {
                 return Ok(V::DataT(Rc::new((name.into(), args))));
@@ -632,7 +630,7 @@ impl Norm<'_> {
             Expr::Str(s) => V::Str(s.as_str().into()),
             Expr::Var(n) => match env.iter().rev().find_map(|s| s.get(n)) {
                 Some(v) => v.clone(),
-                None if n == "Type" => V::Univ(0),
+                None if n == "Type" => V::Type,
                 None if PRIMS.contains(&n.as_str()) => prim(n),
                 None if self
                     .fns
@@ -862,8 +860,6 @@ struct Ck<'a> {
     // マクロ本体（コンパイル時に実行するコード）の中か
     in_macro: bool,
     smt: Smt,
-    // data の型の階層
-    levels: HashMap<String, u32>,
     // マクロ本体の検査で使う、syntax 規則ごとのフィールドの種類
     rules: HashMap<String, Kinds>,
     // 今起こしてよい効果 (効果の名前, 型)。handle の本体の効果の型は、本体で初めて起こした時に決まる
@@ -902,7 +898,6 @@ fn same(a: &V, b: &V) -> bool {
         // 種類の分からない syn とは互いに使える
         (V::Prim("syn"), V::Syn(_)) | (V::Syn(_), V::Prim("syn")) => true,
         // 下の階層の型は上の階層の型としても使える
-        (V::Univ(i), V::Univ(j)) => j <= i,
         // 起こす効果の少ない関数は、多い関数として使える
         (V::Pi(x), V::Pi(y)) => {
             let xe = flat(&x.effs);
@@ -1270,7 +1265,6 @@ fn check_prog(prog: &Program, require_main: bool) -> R<Info> {
         ret: V::Unit,
         in_macro: false,
         smt: Smt::new(),
-        levels: HashMap::new(),
         rules: HashMap::new(),
         avail: Vec::new(),
         resume: Vec::new(),
@@ -1320,22 +1314,11 @@ fn check_prog(prog: &Program, require_main: bool) -> R<Info> {
         for c in &d.ctors {
             ck.norm.ctors.insert(&c.name, (d, c));
         }
-        ck.levels.insert(d.name.clone(), 0);
     }
     for f in fns {
         ck.norm.fns.insert(&f.name, f);
     }
-    // data は自分自身を含みうるので、階層が変わらなくなるまで計算し直す
-    for _ in 0..8 {
-        let mut changed = false;
-        for d in &prog.datas {
-            let l = ck.data_level(d).map_err(|e| at_opt(e, d.span))?;
-            changed |= ck.levels.insert(d.name.clone(), l) != Some(l);
-        }
-        if !changed {
-            break;
-        }
-    }
+    for d in &prog.datas { ck.data_level(d).map_err(|e| at_opt(e, d.span))?; }
     if require_main {
         match ck.norm.fns.get("main") {
             Some(f) if f.params.is_empty() => {}
@@ -1402,7 +1385,7 @@ fn check_fn(ck: &mut Ck, f: &Fn) -> R<()> {
             return Err(r("戻り値が never の関数では return を使えない").into());
         }
     }
-    if !f.alias && matches!(base(&ck.ret), V::Univ(_)) {
+    if !f.alias && matches!(base(&ck.ret), V::Type) {
         return Err(r("関数は型を返せない。型を計算するなら type で定義する").into());
     }
     // extern の関数と効果の操作は本体が無いので、型の宣言だけを検査する
@@ -1448,7 +1431,6 @@ fn check_macro_body(
         ret: prim("syn"),
         in_macro: true,
         smt: Smt::new(),
-        levels: HashMap::new(),
         rules: rules.clone(),
         avail: Vec::new(),
         resume: Vec::new(),
@@ -1470,7 +1452,6 @@ fn check_macro_body(
         for c in &d.ctors {
             ck.norm.ctors.insert(&c.name, (d, c));
         }
-        ck.levels.insert(d.name.clone(), 0);
     }
     let mut pending = Vec::new();
     walk(&Expr::Block(b.clone()), &mut |e| {
@@ -1946,8 +1927,8 @@ impl Ck<'_> {
             Expr::Str(_) => prim("str"),
             Expr::Var(n) => match self.lookup(n) {
                 Some(en) => en.ty.clone(),
-                None if n == "Type" => V::Univ(1),
-                None if PRIMS.contains(&n.as_str()) => V::Univ(0),
+                None if n == "Type" => V::Type,
+                None if PRIMS.contains(&n.as_str()) => V::Type,
                 None if self
                     .norm
                     .fns
@@ -2030,7 +2011,7 @@ impl Ck<'_> {
                 (*a).clone()
             }
             Expr::Refine(b, x, p) => {
-                let level = self.type_level(b)?;
+                self.type_level(b)?;
                 let bt = self.eval_value(b)?;
                 self.push();
                 self.bind(x, bt, bound(), false)?;
@@ -2039,7 +2020,7 @@ impl Ck<'_> {
                     .and_then(|t| want(&boolean, &t, "細分化型の条件"));
                 self.pop();
                 r?;
-                V::Univ(level)
+                V::Type
             }
             Expr::Unary(op, x) => {
                 let t = if *op == "-" { int } else { boolean };
@@ -2160,13 +2141,7 @@ impl Ck<'_> {
                 self.use_trait(e, "show", &t)?;
                 prim("unit")
             }
-            Expr::Call(name, args) if name == "Type" => match args.as_slice() {
-                [a] => match a.peel() {
-                    Expr::Int(n) if *n >= 0 => V::Univ(*n as u32 + 1),
-                    _ => return Err("Type の引数は 0 以上の整数の定数".into()),
-                },
-                _ => return Err("Type の引数は1個".into()),
-            },
+            Expr::Call(name, _) if name == "Type" => return Err("Type に引数は指定できない".into()),
             Expr::Call(name, args) if self.norm.ctors.contains_key(name.as_str()) => {
                 return self.ctor_call(name, args, None);
             }
@@ -2187,8 +2162,8 @@ impl Ck<'_> {
                 let [a] = args.as_slice() else {
                     return Err("Ref の引数は1個".into());
                 };
-                let k = self.type_level(a).ctx(|e| format!("Ref の引数: {e}"))?;
-                V::Univ(k)
+                self.type_level(a).ctx(|e| format!("Ref の引数: {e}"))?;
+                V::Type
             }
             Expr::Call(name, args) if name == "new_ref" && self.lookup(name).is_none() => {
                 let [a] = args.as_slice() else {
@@ -2217,10 +2192,8 @@ impl Ck<'_> {
                     return Err(format!("{name} の引数は1個").into());
                 }
                 if name == "Vec" {
-                    let k = self
-                        .type_level(&args[0])
-                        .ctx(|e| format!("Vec の引数: {e}"))?;
-                    return Ok(V::Univ(k));
+                    self.type_level(&args[0]).ctx(|e| format!("Vec の引数: {e}"))?;
+                    return Ok(V::Type);
                 }
                 match base(&self.expr(&args[0])?) {
                     V::VecT(_) | V::Prim("str") => int,
@@ -2903,7 +2876,7 @@ impl Ck<'_> {
     // 関数の本体を、戻り値の型 rt で検査する
     // avail は本体で起こしてよい効果
     fn fn_body(&mut self, body: &Block, rt: Option<V>, avail: Vec<(String, Option<V>)>) -> R<V> {
-        if let Some(V::Univ(_)) = rt.as_ref().map(base) {
+        if let Some(V::Type) = rt.as_ref().map(base) {
             return Err("関数は型を返せない。型を計算するなら type で定義する".into());
         }
         let saved = self.ret.clone();
@@ -2928,7 +2901,7 @@ impl Ck<'_> {
         };
         self.ret = saved;
         (self.avail, self.resume) = saved_eff;
-        if let Ok(V::Univ(_)) = r.as_ref().map(base) {
+        if let Ok(V::Type) = r.as_ref().map(base) {
             return Err("関数は型を返せない。型を計算するなら type で定義する".into());
         }
         r
@@ -3155,13 +3128,12 @@ impl Ck<'_> {
         r
     }
 
-    // 関数型 (x: A, ...) -> B の型。引数と戻り値の型の階層の最大
+    // 関数型 (x: A, ...) -> B の型を検査する
     fn pi_type(&mut self, binders: &[(String, Expr)], ret: &Expr, effs: &[Expr]) -> R<V> {
         self.push();
         let r = (|| {
-            let mut level = 0;
             for (n, t) in binders {
-                level = level.max(self.type_level(t)?);
+                self.type_level(t)?;
                 let ty = self.eval_value(t)?;
                 let id = self.norm.fresh();
                 self.bind(n, ty, neu(Neu::Var(id, n.clone())), false)?;
@@ -3170,22 +3142,23 @@ impl Ck<'_> {
                 let mut env = self.val_env();
                 self.effect_inst(e, &mut env)?;
             }
-            Ok(V::Univ(level.max(self.type_level(ret)?)))
+            self.type_level(ret)?;
+            Ok(V::Type)
         })();
         self.pop();
         r
     }
 
-    // 式が型なら、その型の階層を返す
-    fn type_level(&mut self, t: &Expr) -> R<u32> {
+    // 式が型かを検査する
+    fn type_level(&mut self, t: &Expr) -> R<()> {
         match base(&self.expr(t)?) {
-            V::Univ(k) => Ok(k),
+            V::Type => Ok(()),
             other => Err(format!("型が必要だが {}", show(&other)).into()),
         }
     }
 
-    // data の階層は、フィールドの型の階層の最大。引数の型は数えない
-    fn data_level(&mut self, d: &Data) -> R<u32> {
+    // data の型引数とフィールドの型を検査する
+    fn data_level(&mut self, d: &Data) -> R<()> {
         self.scopes = vec![Scope::default()];
         for (n, t) in &d.params {
             let ty = self
@@ -3194,19 +3167,18 @@ impl Ck<'_> {
             let id = self.norm.fresh();
             self.bind(n, ty, neu(Neu::Var(id, n.clone())), false)?;
         }
-        let mut level = 0;
         for c in &d.ctors {
             let r = |e: &str| format!("構築子 {}: {e}", c.name);
             self.push();
             for (n, t) in &c.fields {
-                level = level.max(self.type_level(t).ctx(r)?);
+                self.type_level(t).ctx(r)?;
                 let ty = self.eval_value(t)?;
                 let id = self.norm.fresh();
                 self.bind(n, ty, neu(Neu::Var(id, n.clone())), false)?;
             }
             self.pop();
         }
-        Ok(level)
+        Ok(())
     }
 
     // 型名に引数を渡して型を作る。引数の型は前の引数に依存しうる
@@ -3223,7 +3195,7 @@ impl Ck<'_> {
             let v = self.eval_value(a)?;
             env[0].insert(pn.clone(), v);
         }
-        Ok(V::Univ(self.levels[name]))
+        Ok(V::Type)
     }
 
     fn apply(&mut self, sol: &HashMap<usize, V>, v: &V) -> R<V> {
@@ -3534,11 +3506,12 @@ mod tests {
 
     #[test]
     fn rejects_value_type_parameters_and_indexed_constructors() {
-        for source in ["type T<b: bool> = int", "enum Eq<A: Type, x: A> { Refl }", "enum Box<A> { MkBox(x: A) -> Box<A> }"] {
+        for source in ["type T<b: bool> = int", "enum Eq<A: Type, x: A> { Refl }", "enum Box<A> { MkBox(x: A) -> Box<A> }", "enum Box { MkBox(x: Type) }", "struct Box { x: Type }", "fn id(A: Type) {}", "type T = if true { int } else { str }"] {
             assert!(check(source).is_err(), "{source}");
         }
         check("type Items<A> = Vec<A>\nfn main() { let xs: Items<int> = [1] }").unwrap();
         assert!(check("partial fn f() {}\nfn main() {}").is_err());
+        assert!(check("fn f(x: Type<1>) {}\nfn main() {}").is_err());
     }
 
     #[test]
