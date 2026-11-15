@@ -20,7 +20,7 @@ fn main() {
     put(split('aé🙂', ''))
     put(split('a,,b', ','))
     put(split('', ','))
-    put(slice('hibana', 0, 3) + to_str(1 + 2) + to_str(starts_with('hibana', 'hi')))
+    put(slice('hibana', 0, 3) + (1 + 2).to_string() + starts_with('hibana', 'hi').to_string())
     // a && b の b では a が真と分かっている
     if len(parts) > 2 && parts[2] == '42' { put('id is 42') }
 }

@@ -8,7 +8,7 @@ hibana は、細分化型と、構文を拡張できるマクロを根幹に置�
 
 - 識別子は英字か `_` で始まり、英数字と `_` が続きます。
 - 整数（`42`、`0xFF`）と文字列（`'a\n'`）を書けます。文字列は `'...'` だけで書き、`"` は使えません。浮動小数（`3.14`）は字句解析だけ対応していて、式には書けません（マクロのパターンの `Float` で使えます）。文字列のエスケープは `\n \t \r \0 \\ \' \` \{ \}` です。
-- `` `Hello {name}!` `` は埋め込み付きの文字列です。`{ }` の中に式を1つ書き、その値を `to_str` で文字列にしてつなぎます（`'Hello ' + to_str(name) + '!'` と同じ）。`{ }` の中には `'...'` や入れ子の `` `...` `` も書けます。
+- `` `Hello {name}!` `` は埋め込み付きの文字列です。`{ }` の中に式を1つ書き、その値を文字列にしてつなぎます（`'Hello ' + name.to_string() + '!'` と同じ）。`{ }` の中には `'...'` や入れ子の `` `...` `` も書けます。
 - `型の名前::名前`（`Response::text`）は1つの名前です（3.9 節）。
 - コメントは `// 行末まで` と `/* ... */` です。
 - キーワード: `fn let mut if else while for in return match type struct enum trait impl syntax macro quote use module extern effect handle true false`
@@ -203,36 +203,38 @@ greet = { git = "https://github.com/someone/hibana-greet", tag = "v0.1.0" }   # 
 
 ### 3.7 トレイト
 
-トレイトは、型ごとに実装を書ける関数の組です（例は `tests/programs/types/trait.hb`）。
+トレイトは、型ごとに実装を書けるメソッドの組です（例は `tests/programs/types/trait.hb`）。
 
 ```
-trait Show<A> {
-    fn show(x: A) -> String
-    fn loud(x: A) -> String { show(x) + '!' }   // 既定の実装。impl で省ける
+trait Describe {
+    fn describe(self) -> String
+    fn shout(self) -> String { self.describe() + '!' }   // 既定の実装。impl で省ける
 }
 
-impl Show<int> {
-    fn show(x: int) -> String { to_str(x) }
+impl Describe for int {
+    fn describe(self) -> String { 'int ' + self.to_string() }
 }
 
-impl<A: Show> Show<Vec<A>> {                 // 条件付きの実装
-    fn show(xs: Vec<A>) -> String { ... }
+impl<A: Describe> Describe for Vec<A> {           // 条件付きの実装
+    fn describe(self) -> String { ... }
 }
 
-fn twice<A: Show>(x: A) -> String { show(x) + show(x) }   // 制約。<A: Show + Eq> で複数
+fn twice<A: Describe>(x: A) -> String { x.describe() + x.describe() }   // 制約。<A: Describe + Eq> で複数
 
-trait Ord<A>: Eq<A> {                        // 親のトレイト。Ord の実装には Eq の実装が要る
-    fn lt(a: A, b: A) -> bool
+trait Ord: Eq {                                   // 親のトレイト。Ord の実装には Eq の実装が要る
+    fn lt(self, other: Self) -> bool
 }
 ```
 
-- メソッドは、ふつうの関数として `show(x)` で呼びます。
-- 仕組みは辞書渡し（dictionary passing）です。`trait Show<A>` は構造体の型 `Show<A>`（メソッドの関数をフィールドに持つ）になり、`impl` はその型の値を作る関数になります。制約 `<A: Show>` は、実装を受け取る隠れた引数です。呼び出す側では、型検査が型引数を求めた後に実装を探して、その引数を足します。探す順は、自分が制約で受け取った実装（その親のトレイトの実装を含む）、`impl` の順です。
-- 実装は値なので、3つの実行方式は変わりません。メソッドの呼び出しは、実装のフィールドを通した間接の呼び出しになります。
+- `self` は実装する型の値です。トレイトの中の `Self` は実装する型で、`impl Describe for int` の中では `int` になります。`self` の型は省きます。
+- メソッドは `x.describe()` で呼びます。`x.f()` は、`x` の型に属する関数 `T::f`（3.9 節）を先に探し、無ければ `f` をメソッドに持つトレイトのうち `x` の型に実装があるものを呼びます。
+- `x.to_string()` は、`T::to_string` も `to_string` を持つトレイトの実装も無ければ、組み込みの文字列化になります。どの型の値にも使えます。
+- 仕組みは辞書渡し（dictionary passing）です。トレイトは、メソッドの関数をフィールドに持つ構造体の型になり、`impl` はその型の値を作る関数になります。制約 `<A: Describe>` は、実装を受け取る隠れた引数です。呼び出す側では、型検査が型引数を求めた後に実装を探して、その引数を足します。探す順は、自分が制約で受け取った実装（その親のトレイトの実装を含む）、`impl` の順です。
+- 実装は値なので、実行方式ごとの違いはありません。メソッドの呼び出しは、実装のフィールドを通した間接の呼び出しになります。
 - 同じトレイトと型の組に `impl` が二つあると、名前の順で最初のものを使います（重なりは検査しません）。
-- メソッドは自分のジェネリック引数を持てません。トレイトの型引数で書きます。
+- メソッドは自分のジェネリック引数を持てません。トレイト自体も、`Self` のほかに型引数を持てません。
 
-`std` の `Eq` と `Show` は演算子と組み込み関数に結びついています。`Eq` の実装がある型では `==` と `!=` がその実装の `eq` を、`Show` の実装がある型では `to_str` と `put` がその実装の `show` を使います。実装が無い型では、組み込みの比較と文字列化のままです。`int` `String` `bool` は、細分化型の検査が `==` を直接扱うので、いつも組み込みです。
+`std` の `Eq` と `Display` は演算子と組み込み関数に結びついています。`Eq` の実装がある型では `==` と `!=` がその実装の `eq` を、`Display` の実装がある型では `.to_string()`、埋め込み付きの文字列、`put` がその実装の `to_string` を使います。実装が無い型では、組み込みの比較と文字列化のままです。`int` `String` `bool` は、細分化型の検査が `==` を直接扱うので、いつも組み込みです。
 
 ### 3.8 テスト
 
@@ -254,7 +256,7 @@ test '引き算' {
 ```
 
 - `test '名前' { 本体 }` は、引数の無い関数として型検査します。`hibana test` でだけ実行し、ほかの実行方式では呼びません。`test` は宣言の先頭で文字列が続く時だけ特別で、変数名にも使えます。
-- 本体で実行時エラーが起きると、そのテストは失敗です。std の `assert(ok)` と `assert_eq(got, want)`（`Eq` と `Show` の実装が要る）は、組み込みの `panic` で実行時エラーにします。失敗の位置は、ライブラリの中で起きたエラーでも、テストのファイルの中の呼び出しにします。
+- 本体で実行時エラーが起きると、そのテストは失敗です。std の `assert(ok)` と `assert_eq(got, want)`（`Eq` と `Display` の実装が要る）は、組み込みの `panic` で実行時エラーにします。失敗の位置は、ライブラリの中で起きたエラーでも、テストのファイルの中の呼び出しにします。
 - `main` の無いファイルには、空の `main` を足して検査します。
 - 本体の中の `describe '名前' { ... }` はテストをまとめ、`it '名前' { ... }` は1件のテストになります。`it` があると、`it` ごとに1件として実行し、名前は `test` から順に ` / ` でつなぎます（`引き算 / 正の数 / 1 を引く`）。`it` より前に書いた文（外側の `test` と `describe` の中のもの）は、その `it` の本体の前に毎回実行します。`it` の無い `describe`、最後の `it` と `describe` の後の文はエラーです。`describe` と `it` は、後に文字列と `{` が続く時だけ特別で、変数名にも使えます。
 
@@ -394,7 +396,7 @@ macro unless('unless' expr:Expr block:Block) {
 |---|---|
 | `put(x)` | 任意の値を表示する |
 | `len(v)` | `Vec<T>` か `String` の長さ。`mut` の変数は、初期値と `push`・`set_at` の代入から長さを追う（ループと分岐の後は分からなくなる） |
-| `to_str(x)` | 任意の値を文字列にする |
+| `x.to_string()` | 任意の値を文字列にする（3.7 節） |
 | `split(s, sep)` | `(String, String) -> Vec<String>` |
 | `starts_with(s, p)` | `(String, String) -> bool` |
 | `slice(s, i, j)` | `(String, int, int) -> String`。範囲外は実行時エラー |
@@ -429,7 +431,7 @@ macro unless('unless' expr:Expr block:Block) {
 |---|---|
 | `Option<A>` = `None` \| `Some(value)`、`o.unwrap()`（`None` なら実行時エラー）、`unwrap_or(o, d)` | 値が無いかもしれないこと |
 | `Result<A, E>` = `Ok(value)` \| `Err(error)` | 成功か失敗 |
-| `Eq<A>`（`eq`）、`Ord<A>: Eq<A>`（`lt`）、`Show<A>`（`show`） | トレイト（3.7 節）。`int` `String` `bool` の `Eq` と `Show`、`int` の `Ord`、`Vec<A>` の `Eq` と `Show` の実装がある（`put` と `to_str` での `Vec` の表示は組み込みのまま） |
+| `Eq`（`eq`）、`Ord: Eq`（`lt`）、`Display`（`to_string`） | トレイト（3.7 節）。`int` `String` `bool` の `Eq` と `Display`、`int` の `Ord`、`Vec<A>` と `Option<A>` の `Eq` と `Display` の実装がある（`put` での `Vec` の表示は組み込みのまま） |
 | `max(a, b)` `min(a, b)` `contains(xs, x)` | `Ord` と `Eq` を使う関数 |
 | `assert(ok)` `assert_eq(got, want)` | テスト（3.8 節）。偽か等しくなければ実行時エラー |
 | `map(xs, f)` `filter(xs, f)` `fold(xs, init, f)` | `Vec` の高階関数。`f` の効果をそのまま起こす（効果の多相） |
@@ -577,7 +579,7 @@ IR は WASM とネイティブの共通の中間表現です。制御フロー�
 - JavaScript との境界では `int` を number に変換するので、2^53 を超える整数は正しく渡せません。
 - IR を通す WASM とネイティブの出力は、確保したメモリを回収しません（GC が無い）。
 - 実行時エラーの位置は、インタプリタではエラーを起こした一番内側の式、JavaScript では最後に通った失敗しうる式（算術・`slice`・効果の操作・JavaScript の関数の呼び出し）です。JavaScript の関数の中で投げられた例外は、その呼び出しの位置になります。
-- エラーの下線には、メッセージの一番内側の部分を説明に付けます。未定義の名前には綴りの近い名前（編集距離 2 以下）を、文字列が必要な所の数値には `to_str` を提案します。関数を呼んで未処理の効果が起きた時は、その関数の中で操作を呼んでいる位置にも下線を引きます（その関数が直接呼ぶ操作だけを探します）。
+- エラーの下線には、メッセージの一番内側の部分を説明に付けます。未定義の名前には綴りの近い名前（編集距離 2 以下）を、文字列が必要な所の数値には `.to_string()` を提案します。関数を呼んで未処理の効果が起きた時は、その関数の中で操作を呼んでいる位置にも下線を引きます（その関数が直接呼ぶ操作だけを探します）。
 - Z3 には `int` を上限の無い整数として渡します。オーバーフローは実行時に検査しています。`/` と `%` は Z3 に訳しません。
 - 細分化型の条件は、変数名が違うと別の型とみなします（`int[x -> x > 0]` と `int[y -> y > 0]`）。
 - 実行時には型引数が消えているので、型引数を値として表示すると `?` になります。

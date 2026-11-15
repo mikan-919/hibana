@@ -3,8 +3,8 @@ use std -> *
 
 struct P { x: int, y: int }
 
-impl Eq<P> {
-    fn eq(a: P, b: P) -> bool { a.x == b.x }
+impl Eq for P {
+    fn eq(self, other: P) -> bool { self.x == other.x }
 }
 
 fn main() {

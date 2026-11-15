@@ -12,7 +12,7 @@ effect Fail {
 fn double(x: int) -> int { x * 2 }
 
 fn noisy(x: int) -> int ! Log {
-    log('item ' + to_str(x))
+    log('item ' + x.to_string())
     x + 1
 }
 

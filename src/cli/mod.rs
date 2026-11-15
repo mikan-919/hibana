@@ -256,7 +256,7 @@ fn report(path: &str, src: &str, e: error::Error) -> miette::Report {
         let to_str = ["String が必要だが int", "String が必要だが bool"]
             .iter()
             .any(|s| e.msg.contains(s))
-            .then(|| "to_str(値) で文字列にする".to_string());
+            .then(|| "値.to_string() で文字列にする".to_string());
         let report = Report {
             help: e.help.clone().or(to_str),
             origin: e.origin.map(Into::into),
@@ -721,14 +721,14 @@ fn main() {
         let o = out(include_str!("../../tests/programs/types/trait.hb")).unwrap();
         assert_eq!(
             o,
-            "int 1\nint 2!\n(1, 2)\nPOINT\n[int 1;int 2;]\n[(3, 4);] [(3, 4);]\ntrue\ntrue\nP5,0\n7\nto_str: P1,2\ntrue\n"
+            "int 1\nint 2!\n(1, 2)\nPOINT\n[int 1;int 2;]\n[(3, 4);] [(3, 4);]\ntrue\ntrue\nP5,0\n7\nto_string: P1,2\ntrue\n"
         );
         // == は Eq の実装を使う（x だけ比べる実装なら y が違っても等しい）
-        let src = "use std -> *\nstruct P { x: int, y: int }\nimpl Eq<P> {\n fn eq(a: P, b: P) -> bool { a.x == b.x }\n}\nfn main() { put(P { x: 1, y: 2 } == P { x: 1, y: 3 }) }";
+        let src = "use std -> *\nstruct P { x: int, y: int }\nimpl Eq for P {\n fn eq(self, other: P) -> bool { self.x == other.x }\n}\nfn main() { put(P { x: 1, y: 2 } == P { x: 1, y: 3 }) }";
         assert_eq!(out(src).unwrap(), "true\n");
         let e = out("use std -> *\nfn main() { put(max('a', 'b')) }").unwrap_err();
         assert!(e.msg.contains("Ord<String> の実装が無い"), "{}", e.msg);
-        let e = out("use std -> *\nimpl Show<int> {\n fn shw(x: int) -> String { '' }\n}\nfn main() {}").unwrap_err();
+        let e = out("use std -> *\nimpl Display for int {\n fn shw(self) -> String { '' }\n}\nfn main() {}").unwrap_err();
         assert!(e.msg.contains("メソッド shw は無い"), "{}", e.msg);
     }
 
@@ -815,7 +815,7 @@ fn main() {
     // trait の宣言の型エラーは、trait の行を指す（trait Show は 2 行目）
     #[test]
     fn trait_error_has_line() {
-        let src = "fn main() {}\ntrait Show<A> {\n    fn show(f: Missing) -> int\n}\n";
+        let src = "fn main() {}\ntrait Show {\n    fn show(f: Missing) -> int\n}\n";
         let e = out(src).unwrap_err();
         assert!(e.msg.starts_with("行 3: "), "{e:?}");
     }
@@ -823,7 +823,7 @@ fn main() {
     // impl の型エラーは、impl の行を指す（生成した構築子の引数の検査。impl は 5 行目）
     #[test]
     fn impl_error_has_line() {
-        let src = "fn main() {}\ntrait Show<A> {\n    fn show(x: A) -> int\n}\nimpl Show<int> {\n    fn show(x: int) -> String { 'a' }\n}\n";
+        let src = "fn main() {}\ntrait Show {\n    fn show(self) -> int\n}\nimpl Show for int {\n    fn show(self) -> String { 'a' }\n}\n";
         let e = out(src).unwrap_err();
         assert!(e.msg.starts_with("行 5: 関数 Show#impl0: "), "{e:?}");
     }

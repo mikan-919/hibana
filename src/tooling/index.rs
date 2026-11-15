@@ -222,7 +222,7 @@ mod tests {
         assert_eq!(ix.get("Some").unwrap().kind, Kind::Ctor);
         assert_eq!(ix.fields["P"], ["x", "y"]);
         // トレイトのメソッドは関数、impl から作った関数は出さない
-        assert_eq!(ix.get("show").unwrap().detail, "fn show(x: A) -> String");
+        assert_eq!(ix.get("to_string").unwrap().detail, "fn to_string(self) -> String");
         assert!(ix.syms.iter().all(|s| !s.name.contains('#')));
     }
 

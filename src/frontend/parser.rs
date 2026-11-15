@@ -1233,7 +1233,7 @@ impl Parser<'_> {
         self.traits.contains_key(&q).then_some(q)
     }
 
-    // trait Name<A>: 親<A> + ... { fn メソッド(引数) -> 型 ! 効果 [{ 既定の実装 }] ... }
+    // trait Name: 親 + ... { fn メソッド(self, 引数) -> 型 ! 効果 [{ 既定の実装 }] ... }。対象の型は型引数 Self
     // 構造体の型 Name<A> と、メソッドを呼ぶ関数（実装を末尾の引数 inst#0 で受け取る）・Name#get・既定の実装の関数にする
     // ponytail: メソッドは自分のジェネリック引数を持てない。持たせるならメソッドの関数型を依存関数型にする
     fn trait_decl(&mut self) -> R<(Data, Vec<Fn>, Trait)> {
@@ -1242,8 +1242,11 @@ impl Parser<'_> {
         let module = self.cur_module();
         let name = qual(&module, &self.ident()?);
         let span = self.span_of(start);
-        self.expect("<")?;
-        let params = self.type_params()?;
+        // trait Name { fn f(self) } は、対象の型を型引数 Self に持つ trait Name<Self>
+        if self.peek() == &Tok::Punct("<") {
+            return self.err("トレイトは trait Name { fn f(self) ... } と書く（対象の型は Self）");
+        }
+        let params = vec![("Self".to_string(), Expr::Var("Type".into()))];
         let me = Expr::Call(
             name.clone(),
             params.iter().map(|p| Expr::Var(p.0.clone())).collect(),
@@ -1252,9 +1255,13 @@ impl Parser<'_> {
         let mut info = Trait::default();
         if self.eat(":") {
             loop {
-                let s = self.binary(6)?;
+                let mut s = self.binary(6)?;
+                // trait Ord: Eq の親は Eq<Self>
+                if let Expr::Var(n) = s.peel() {
+                    s = Expr::Call(n.clone(), vec![Expr::Var(params[0].0.clone())]);
+                }
                 let Expr::Call(sn, _) = s.peel() else {
-                    return self.err("親のトレイトは 名前<引数> で書く");
+                    return self.err("親のトレイトは 名前 か 名前<引数> で書く");
                 };
                 let sn = self.qualify(sn);
                 fields.push((format!("super#{sn}"), s.clone()));
@@ -1368,10 +1375,19 @@ impl Parser<'_> {
         let cons: Vec<_> = generics
             .extract_if(.., |p| p.0.starts_with("inst#"))
             .collect();
-        let head = self.ret_ty()?;
-        let Expr::Call(tn, _) = head.peel() else {
-            return self.err("impl の後には トレイト<型> が必要");
+        // impl Name for 型 は impl Name<型>
+        let tname = self.ret_ty()?;
+        let Expr::Var(tn) = tname.peel() else {
+            return self.err("impl は impl トレイト for 型 { ... } と書く");
         };
+        let tn = tn.clone();
+        self.expect("for")?;
+        let head = Expr::Call(tn.clone(), vec![self.ret_ty()?]);
+        let Expr::Call(tn, targs) = head.peel() else {
+            unreachable!()
+        };
+        // 型を省いた self の型（Self）は、対象の型にする
+        let me = targs.first().cloned();
         let Some(q) = self.trait_name(tn) else {
             return self.err_at(format!("{tn} はトレイトでない"));
         };
@@ -1384,6 +1400,13 @@ impl Parser<'_> {
         let mut given = HashMap::new();
         while !self.eat("}") {
             let mut f = self.func()?;
+            if let Some(me) = &me {
+                for (_, t) in &mut f.params {
+                    if matches!(t.peel(), Expr::Var(n) if n == "Self") {
+                        *t = me.clone();
+                    }
+                }
+            }
             let m = f.name.rsplit('.').next().unwrap().to_string();
             if !tr.methods.iter().any(|x| x.0 == m) {
                 return self.err_at(format!("トレイト {q} にメソッド {m} は無い"));
@@ -1499,8 +1522,13 @@ impl Parser<'_> {
         let mut params = Vec::new();
         while !self.eat(")") {
             let n = self.ident()?;
-            self.expect(":")?;
-            let ty = self.ty()?;
+            // 型を省いた self は Self 型（トレイトの対象の型。impl では対象の型に置き換える）
+            let ty = if n == "self" && self.peek() != &Tok::Punct(":") {
+                Expr::Var("Self".into())
+            } else {
+                self.expect(":")?;
+                self.ty()?
+            };
             let value_names: Vec<_> = params.iter().map(|(name, _): &(String, Expr)| name.clone()).collect();
             if depends_on_value(&ty, &value_names) {
                 return self.err("引数の型に前の引数の値は使えない");

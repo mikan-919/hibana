@@ -18,7 +18,7 @@ fn job(name: String, n: int) -> String ! Async {
     handle {
         let a = tag()
         let x = util.later(n)
-        a + to_str(x) + tag()
+        a + x.to_string() + tag()
     } {
         tag() -> resume(name)
     }

@@ -8,104 +8,104 @@ enum Result<A, E> { Ok(value: A), Err(error: E) }
 // ---- トレイト ----
 
 // 等しさ。実装がある型では == と != がこれを使う
-trait Eq<A> {
-    fn eq(a: A, b: A) -> bool
+trait Eq {
+    fn eq(self, other: Self) -> bool
 }
 
-// 順序。lt(a, b) は a が b より前
-trait Ord<A>: Eq<A> {
-    fn lt(a: A, b: A) -> bool
+// 順序。a.lt(b) は a が b より前
+trait Ord: Eq {
+    fn lt(self, other: Self) -> bool
 }
 
-// 文字列にする。実装がある型では to_str と put がこれを使う
-trait Show<A> {
-    fn show(x: A) -> String
+// 文字列にする。実装がある型では .to_string() と put がこれを使う
+trait Display {
+    fn to_string(self) -> String
 }
 
-impl Eq<int> {
-    fn eq(a: int, b: int) -> bool { a == b }
+impl Eq for int {
+    fn eq(self, other: int) -> bool { self == other }
 }
 
-impl Eq<String> {
-    fn eq(a: String, b: String) -> bool { a == b }
+impl Eq for String {
+    fn eq(self, other: String) -> bool { self == other }
 }
 
-impl Eq<bool> {
-    fn eq(a: bool, b: bool) -> bool { a == b }
+impl Eq for bool {
+    fn eq(self, other: bool) -> bool { self == other }
 }
 
-impl Ord<int> {
-    fn lt(a: int, b: int) -> bool { a < b }
+impl Ord for int {
+    fn lt(self, other: int) -> bool { self < other }
 }
 
-impl Show<int> {
-    fn show(x: int) -> String { to_str(x) }
+impl Display for int {
+    fn to_string(self) -> String { to_str(self) }
 }
 
-impl Show<String> {
-    fn show(x: String) -> String { x }
+impl Display for String {
+    fn to_string(self) -> String { self }
 }
 
-impl Show<bool> {
-    fn show(x: bool) -> String { to_str(x) }
+impl Display for bool {
+    fn to_string(self) -> String { to_str(self) }
 }
 
-impl<A: Eq> Eq<Vec<A>> {
-    fn eq(a: Vec<A>, b: Vec<A>) -> bool {
-        if len(a) != len(b) { return false }
-        for i in 0..len(a) {
-            if i < len(b) { if !eq(a[i], b[i]) { return false } }
+impl<A: Eq> Eq for Vec<A> {
+    fn eq(self, other: Vec<A>) -> bool {
+        if len(self) != len(other) { return false }
+        for i in 0..len(self) {
+            if i < len(other) { if !self[i].eq(other[i]) { return false } }
         }
         true
     }
 }
 
-impl<A: Show> Show<Vec<A>> {
-    fn show(xs: Vec<A>) -> String {
+impl<A: Display> Display for Vec<A> {
+    fn to_string(self) -> String {
         let mut s = '['
-        for i in 0..len(xs) {
+        for i in 0..len(self) {
             if i > 0 { s = s + ', ' }
-            s = s + show(xs[i])
+            s = s + self[i].to_string()
         }
         s + ']'
     }
 }
 
-impl<A: Eq> Eq<Option<A>> {
-    fn eq(a: Option<A>, b: Option<A>) -> bool {
-        match a {
-            None -> match b {
+impl<A: Eq> Eq for Option<A> {
+    fn eq(self, other: Option<A>) -> bool {
+        match self {
+            None -> match other {
                 None -> true
                 Some(y) -> false
             }
-            Some(x) -> match b {
+            Some(x) -> match other {
                 None -> false
-                Some(y) -> eq(x, y)
+                Some(y) -> x.eq(y)
             }
         }
     }
 }
 
-impl<A: Show> Show<Option<A>> {
-    fn show(o: Option<A>) -> String {
-        match o {
+impl<A: Display> Display for Option<A> {
+    fn to_string(self) -> String {
+        match self {
             None -> 'None'
-            Some(x) -> 'Some(' + show(x) + ')'
+            Some(x) -> 'Some(' + x.to_string() + ')'
         }
     }
 }
 
 fn max<A: Ord>(a: A, b: A) -> A {
-    if lt(a, b) { b } else { a }
+    if a.lt(b) { b } else { a }
 }
 
 fn min<A: Ord>(a: A, b: A) -> A {
-    if lt(b, a) { b } else { a }
+    if b.lt(a) { b } else { a }
 }
 
 fn contains<A: Eq>(xs: Vec<A>, x: A) -> bool {
     for y in xs {
-        if eq(x, y) { return true }
+        if x.eq(y) { return true }
     }
     false
 }
@@ -117,8 +117,8 @@ fn assert(ok: bool) {
     if !ok { panic('assert が失敗した') }
 }
 
-fn assert_eq<A: Eq + Show>(got: A, want: A) {
-    if got != want { panic('assert_eq が失敗した: ' + to_str(got) + ' と ' + to_str(want)) }
+fn assert_eq<A: Eq + Display>(got: A, want: A) {
+    if got != want { panic('assert_eq が失敗した: ' + got.to_string() + ' と ' + want.to_string()) }
 }
 
 // 中の値。None なら実行時エラーにする
@@ -353,8 +353,8 @@ fn quote_str(s: String) -> String {
 fn stringify(j: Json) -> String {
     match j {
         JNull -> 'null'
-        JBool(b) -> to_str(b)
-        JInt(n) -> to_str(n)
+        JBool(b) -> b.to_string()
+        JInt(n) -> n.to_string()
         JStr(s) -> quote_str(s)
         JArr(items) -> {
             let mut out = '['

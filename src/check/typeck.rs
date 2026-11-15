@@ -1374,28 +1374,96 @@ impl Ck {
             unreachable!()
         };
         let t = self.expr(&mut x)?;
+        // 呼び出しの結果に対するメソッドは、結果を一時変数に置いてから呼ぶ。
+        // 検査済みの呼び出しをもう一度検査すると、制約の実装の引数を二重に足すため
+        if matches!(x.peel(), Expr::Call(..) | Expr::Apply(..)) {
+            let tmp = format!("recv#{}", &*x as *const Expr as usize);
+            let v = self.norm.opaque();
+            self.bind(&tmp, t, v, false)?;
+            let mut xa = Vec::new();
+            addrs(&x, &mut xa);
+            let old = e as *const Expr as usize;
+            *e = Expr::Method(Box::new(Expr::Var(tmp.clone())), f, xs);
+            let r = self.method(e)?;
+            let inner = std::mem::replace(e, Expr::Int(0));
+            *e = Expr::Block(Block {
+                stmts: vec![Stmt::Let { name: tmp, mutable: false, ty: None, init: *x }],
+                tail: Some(Box::new(inner)),
+            });
+            if let Expr::Block(b) = &*e
+                && let (Stmt::Let { init, .. }, Some(tail)) = (&b.stmts[0], &b.tail)
+            {
+                self.remap(&xa, init);
+                let new = &**tail as *const Expr as usize;
+                for set in [&mut self.awaits, &mut self.var_awaits, &mut self.async_inst] {
+                    if set.remove(&old) {
+                        set.insert(new);
+                    }
+                }
+            }
+            return Ok(r);
+        }
         let ty = match base(&t) {
-            V::DataT(d) => d.0.clone(),
-            V::Prim(p) => p.to_string(),
-            V::VecT(_) => "Vec".into(),
-            _ => return Err(format!("{} の値にはメソッドを呼べない", show(&t)).into()),
+            V::DataT(d) => Some(d.0.clone()),
+            V::Prim(p) => Some(p.to_string()),
+            V::VecT(_) => Some("Vec".into()),
+            _ => None,
         };
-        let mut name = format!("{ty}__{f}");
+        let mut name = ty.as_ref().map(|ty| format!("{ty}__{f}")).unwrap_or_default();
         // 組み込みの型（String など）のメソッドは、どのモジュールで宣言してもよい
         // ponytail: 同じ名前を複数のモジュールが宣言すれば最初の1つ。重なりの検査はトレイトに寄せる時に足す
-        if !self.norm.fns.contains_key(name.as_str()) && !ty.contains('.') {
+        if let Some(ty) = &ty
+            && !self.norm.fns.contains_key(name.as_str())
+            && !ty.contains('.')
+        {
             let tail = format!(".{name}");
             if let Some(k) = self.norm.fns.keys().filter(|k| k.ends_with(&tail)).min() {
                 name = k.to_string();
             }
         }
+        // T::f が無ければ、f をメソッドに持つトレイトのうち、x の型に実装があるもの
         if !self.norm.fns.contains_key(name.as_str()) {
-            return Err(format!(
-                "{} にメソッド {f} が無い（fn {}::{f} を宣言する）",
-                show(&t),
-                ty.rsplit('.').next().unwrap_or(&ty)
-            )
-            .into());
+            let mut traits: Vec<(String, String)> = self
+                .norm
+                .datas
+                .values()
+                .filter(|d| {
+                    matches!(d.ctors.as_slice(), [c] if c.name == format!("{}{{}}", d.name)
+                        && c.fields.iter().any(|(n, _)| *n == f))
+                })
+                .map(|d| (d.name.clone(), crate::parser::qual(&d.module, &f)))
+                .collect();
+            traits.sort();
+            let has_impl = traits.iter().find(|(tr, _)| {
+                let goal = V::DataT(Rc::new((tr.clone(), vec![base(&t)])));
+                self.resolve_inst(&goal, 0).is_ok()
+            });
+            match (has_impl, traits.first()) {
+                (Some((_, m)), _) => name = m.clone(),
+                // 実装が無ければ組み込みの文字列化（std.Display の実装があればそれを使う）
+                _ if f == "to_string" && xs.is_empty() => {
+                    let mut xa = Vec::new();
+                    addrs(&x, &mut xa);
+                    *e = Expr::Call("to_str".into(), vec![*x]);
+                    if let Expr::Call(_, a) = &*e {
+                        self.remap(&xa, &a[0]);
+                    }
+                    return self.to_str(e);
+                }
+                // 実装が無いことは、呼び出しの検査で報告する
+                (None, Some((_, m))) => name = m.clone(),
+                (None, None) => {
+                    let Some(ty) = ty else {
+                        return Err(format!("{} の値にはメソッドを呼べない", show(&t)).into());
+                    };
+                    return Err(format!(
+                        "{} にメソッド {f} が無い（fn {}::{f} を宣言する）",
+                        show(&t),
+                        ty.rsplit('.').next().unwrap_or(&ty)
+                    )
+                    .into());
+                }
+            }
         }
         let mut args = Vec::with_capacity(xs.len() + 1);
         let mut xa = Vec::new();
@@ -1409,7 +1477,7 @@ impl Ck {
         r
     }
 
-    // to_str(x) は、std.Show の実装があれば std.show(x, 実装) にする
+    // to_str(x) は、std.Display の実装があれば std.to_string(x, 実装) にする
     fn to_str(&mut self, e: &mut Expr) -> R<V> {
         let Expr::Call(_, mut args) = std::mem::replace(e, Expr::Int(0)) else {
             unreachable!()
@@ -1423,7 +1491,7 @@ impl Ck {
                 let mut aa = Vec::new();
                 addrs(a, &mut aa);
                 let a = args.remove(0);
-                let shown = Expr::Call("std.show".into(), vec![a, inst]);
+                let shown = Expr::Call("std.to_string".into(), vec![a, inst]);
                 if let Expr::Call(_, xs) = &shown {
                     self.remap(&aa, &xs[0]);
                 }
@@ -1644,7 +1712,7 @@ impl Ck {
                     let mut aa = Vec::new();
                     addrs(&args[0], &mut aa);
                     let a = args.remove(0);
-                    let shown = Expr::Call("std.show".into(), vec![a, inst]);
+                    let shown = Expr::Call("std.to_string".into(), vec![a, inst]);
                     if let Expr::Call(_, xs) = &shown {
                         self.remap(&aa, &xs[0]);
                     }
@@ -2083,7 +2151,7 @@ impl Ck {
     // == と to_str・put は、std の Eq・Show の実装がある型ならその実装を使う（無ければ組み込みの比較と文字列化）
     // プリミティブの型は組み込みのまま（細分化型の検査が int の == を直接扱うため）
     fn trait_inst(&mut self, method: &str, t: &V) -> R<Option<Expr>> {
-        let tr = if method == "eq" { "std.Eq" } else { "std.Show" };
+        let tr = if method == "eq" { "std.Eq" } else { "std.Display" };
         // Vec の表示は組み込みのまま（文字列の要素を引用符で囲む）。Show<Vec<A>> は制約で求められた時だけ使う
         let builtin_vec = method != "eq" && matches!(base(t), V::VecT(_));
         if builtin_vec || matches!(base(t), V::Prim(_)) || !self.norm.datas.contains_key(tr) {

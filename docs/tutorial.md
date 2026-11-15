@@ -118,22 +118,22 @@ fn main() {
 
 ## 4. トレイト・効果
 
-トレイトは、型ごとに実装を書ける関数の組です。`<A: Describe>` は、`A` に `Describe` の実装があることを要求します。実装が無い型を渡すとエラーです。
+トレイトは、型ごとに実装を書けるメソッドの組です。`<A: Describe>` は、`A` に `Describe` の実装があることを要求します。実装が無い型を渡すとエラーです。
 
 効果（代数的効果）は、関数が外部に頼む操作です。`effect` で操作を宣言し、使う関数は `! 効果名` で宣言します。`handle` が操作を受け取って処理し、`resume()` で操作の呼び出しの直後から実行を再開します（再開は 1 回だけです）。
 
 ```
 use std -> *
 
-trait Describe<A> {
-    fn describe(x: A) -> String
+trait Describe {
+    fn describe(self) -> String
 }
 
-impl Describe<int> {
-    fn describe(x: int) -> String { 'int ' + to_str(x) }
+impl Describe for int {
+    fn describe(self) -> String { 'int ' + self.to_string() }
 }
 
-fn twice<A: Describe>(x: A) -> String { describe(x) + ', ' + describe(x) }
+fn twice<A: Describe>(x: A) -> String { x.describe() + ', ' + x.describe() }
 
 effect Log {
     fn log(msg: String)
