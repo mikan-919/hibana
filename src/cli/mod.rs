@@ -1,5 +1,4 @@
-use crate::{error, eval, fmt, lexer, lsp, parser, pkg, typeck, wasm};
-use crate::to_wasm;
+use crate::{error, eval, fmt, lexer, lsp, parser, pkg, typeck};
 #[cfg(test)]
 use crate::{run, to_js, to_web};
 
@@ -195,18 +194,18 @@ fn run_cli() {
         }
         return;
     }
-    if let Some(cmd) = args.first().filter(|s| matches!(s.as_str(), "ir" | "wasm" | "glue" | "web" | "js" | "c" | "script")) {
+    if let Some(cmd) = args.first().filter(|s| matches!(s.as_str(), "ir" | "wasm" | "glue" | "web" | "js" | "c" | "script" | "run")) {
         eprintln!("不明なサブコマンド: {cmd}");
         std::process::exit(2);
     }
     let (cmd, path) = match args.as_slice() {
         [p] => ("eval", p.clone()),
         [p, sep, _rest @ ..] if sep == "--" => ("eval", p.clone()),
-        [cmd, p] if cmd == "run" || cmd == "fmt" => (cmd.as_str(), p.clone()),
+        [cmd, p] if cmd == "fmt" => (cmd.as_str(), p.clone()),
         [p, ..] if p.ends_with(".hb") => ("eval", p.clone()),
         _ => {
             eprintln!(
-                "使い方: hibana install [--frozen-lockfile]（依存を取得） | hibana update [依存名|npm:名前|cargo:名前]（依存を更新） | hibana remove [-g] <依存名|npm:名前|cargo:名前>（依存を削除） | hibana <build|dev> [-- 引数...] | hibana <ファイル> [-- 引数...]（実行） | hibana run <ファイル>（WASM で実行） | hibana fmt <ファイル>（整形して書き戻す） | hibana lsp（Language Server を標準入出力で動かす） | hibana new <名前> | hibana add <git の URL> [tag] | hibana add [-g] <npm:名前[@版]|cargo:名前[@版]> | hibana dlx [--bin コマンド | --rev Gitの版] <識別子> [--] 引数... | hibana fetch（依存を取ってくる） | hibana test [ファイル]（test を実行する）"
+                "使い方: hibana install [--frozen-lockfile]（依存を取得） | hibana update [依存名|npm:名前|cargo:名前]（依存を更新） | hibana remove [-g] <依存名|npm:名前|cargo:名前>（依存を削除） | hibana <build|dev> [-- 引数...] | hibana <ファイル> [-- 引数...]（実行） | hibana fmt <ファイル>（整形して書き戻す） | hibana lsp（Language Server を標準入出力で動かす） | hibana new <名前> | hibana add <git の URL> [tag] | hibana add [-g] <npm:名前[@版]|cargo:名前[@版]> | hibana dlx [--bin コマンド | --rev Gitの版] <識別子> [--] 引数... | hibana fetch（依存を取ってくる） | hibana test [ファイル]（test を実行する）"
             );
             std::process::exit(2);
         }
@@ -230,7 +229,6 @@ fn run_cli() {
             .unwrap_or(std::path::Path::new(".")),
     );
     let r = match cmd {
-        "run" => to_wasm(&src).and_then(|bytes| wasm::run(&bytes, std::io::stdout()).map(|_| ())),
         "fmt" => fmt::format(&src).map(|s| {
             if s != src {
                 std::fs::write(&path, s).unwrap_or_else(|e| {
@@ -452,10 +450,11 @@ mod tests {
     // IR が未対応のプログラムは飛ばし、対応した数を表示する
     #[test]
     fn ir_backends_match_interpreter() {
+        #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
         use std::os::unix::fs::PermissionsExt;
         let tmp = std::env::temp_dir().join(format!("hibana-ir-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
-        let (mut total, mut native, mut wasm, mut reasons) = (0, Vec::new(), Vec::new(), Vec::new());
+        let (mut total, mut native, mut wasm, mut reasons): (usize, Vec<String>, Vec<String>, Vec<String>) = (0, Vec::new(), Vec::new(), Vec::new());
         for p in program_files() {
             let src = std::fs::read_to_string(&p).unwrap();
             if src.contains(".ts'") || src.contains(".js'") || src.contains("\nextern") || src.contains("web.serve(") {
@@ -465,6 +464,7 @@ mod tests {
             let Ok(want) = out(&src) else { continue };
             total += 1;
             let name = p.file_stem().unwrap().to_str().unwrap().to_string();
+            #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
             match crate::to_native(&src) {
                 Ok(bytes) => {
                     let exe = tmp.join(&name);
@@ -481,8 +481,12 @@ mod tests {
             }
             match crate::to_wasm(&src) {
                 Ok(bytes) => {
-                    let got = crate::wasm::run(&bytes, Vec::new()).unwrap_or_else(|e| panic!("WASM: {}: {e}", p.display()));
-                    assert_eq!(String::from_utf8(got).unwrap(), want, "WASM: {}", p.display());
+                    let path = tmp.join("program.wasm");
+                    std::fs::write(&path, bytes).unwrap();
+                    let script = "let x; x = new WebAssembly.Instance(new WebAssembly.Module(require('fs').readFileSync(process.argv[1])), {hibana: {write: (fd,p,n) => process.stdout.write(Buffer.from(x.memory.buffer, Number(p), Number(n))), now_ms: () => BigInt(Date.now())}}).exports; x.main();";
+                    let got = std::process::Command::new("node").args(["-e", script]).arg(path).output().unwrap();
+                    assert!(got.status.success(), "WASM: {}: {}", p.display(), String::from_utf8_lossy(&got.stderr));
+                    assert_eq!(String::from_utf8(got.stdout).unwrap(), want, "WASM: {}", p.display());
                     wasm.push(name);
                 }
                 Err(e) => assert!(e.msg.contains("未対応"), "WASM: {}: {}", p.display(), e.msg),
@@ -490,11 +494,13 @@ mod tests {
         }
         std::fs::remove_dir_all(&tmp).unwrap();
         eprintln!("ネイティブ {}/{total}: {native:?}\nWASM {}/{total}: {wasm:?}\n未対応:\n{}", native.len(), wasm.len(), reasons.join("\n"));
+        #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
         assert_eq!(native, wasm, "2 つの出力が対応するプログラムは同じ");
         assert!(reasons.is_empty(), "IR が未対応のプログラムがある");
     }
 
     // 範囲外と 0 による除算は、ネイティブでもメッセージを出して終了コード 1 で終わる
+    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
     #[test]
     fn native_reports_integer_errors() {
         use std::os::unix::fs::PermissionsExt;

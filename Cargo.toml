@@ -14,11 +14,6 @@ wasm-encoder = "0.227.1"
 cranelift-codegen = "0.137.1"
 cranelift-frontend = "0.137.1"
 cranelift-native = "0.137.1"
-wasmtime = { version = "50.0.1", default-features = false, features = ["cranelift", "runtime", "std"] }
-
-[[example]]
-name = "cms-build"
-path = "apps/cms/build.rs"
 
 [features]
 # Z3 をソースからビルドして静的にリンクする（時間がかかる。実行ファイル1つで動く）

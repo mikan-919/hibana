@@ -9,7 +9,7 @@ Nix の flake で開発環境を作ります（Rust のツールチェーン、Z
 ```sh
 nix develop -c cargo build            # target/debug/hibana を作る
 nix develop -c cargo test             # 全テスト（約 10 秒）
-nix develop -c cargo run -q -- <ファイル>   # 実行（run / fmt / test / lsp は第 1 引数）
+nix develop -c cargo run -q -- <ファイル>   # 実行（fmt / test / lsp は第 1 引数）
 ```
 
 - `cargo test` は `target/debug/hibana` を作り直しません。CLI を試す前に `cargo build` を実行します。

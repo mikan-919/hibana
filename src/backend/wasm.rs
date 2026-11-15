@@ -4,7 +4,6 @@
 // メモリ: [0, 8) は使わない、[8, 72) はランタイムの状態（runtime.hb の __static）、その後に文字列のリテラル、ヒープ。
 use crate::ir::{self, Block, Expr, Node, Prim, Program, Stmt, ValueType};
 use std::collections::HashMap;
-use std::io::Write;
 use wasm_encoder::{
     BlockType, CodeSection, ConstExpr, DataSection, ElementSection, Elements, EntityType,
     ExportKind, ExportSection, Function, FunctionSection, ImportSection, Instruction as I, MemArg,
@@ -14,79 +13,6 @@ use wasm_encoder::{
 const STATIC: i64 = 8;
 const FAIL_AT: i64 = 24;
 const LITERALS: u32 = 72;
-
-struct Host<W> {
-    out: W,
-}
-
-// WASM の取り込みに出力を渡して main を呼ぶ。
-pub fn run<W: Write + 'static>(bytes: &[u8], out: W) -> crate::error::R<W> {
-    let engine = wasmtime::Engine::default();
-    let module = wasmtime::Module::new(&engine, bytes)
-        .map_err(|e| format!("WASM の読み込みに失敗した: {e}"))?;
-    let mut store = wasmtime::Store::new(&engine, Host { out });
-    let mut linker = wasmtime::Linker::new(&engine);
-    linker
-        .func_wrap(
-            "hibana",
-            "write",
-            |mut caller: wasmtime::Caller<'_, Host<W>>,
-             fd: i64,
-             ptr: i64,
-             len: i64|
-             -> wasmtime::Result<()> {
-                let memory = caller
-                    .get_export("memory")
-                    .and_then(|e| e.into_memory())
-                    .ok_or_else(|| wasmtime::Error::msg("WASM に memory が無い"))?;
-                let (ptr, len) = (ptr as usize, len as usize);
-                let bytes = memory
-                    .data(&caller)
-                    .get(ptr..ptr + len)
-                    .ok_or_else(|| wasmtime::Error::msg("文字列が memory の範囲外"))?
-                    .to_vec();
-                if fd == 1 {
-                    caller.data_mut().out.write_all(&bytes)?;
-                } else {
-                    std::io::stderr().write_all(&bytes)?;
-                }
-                Ok(())
-            },
-        )
-        .and_then(|l| {
-            l.func_wrap("hibana", "now_ms", || -> i64 {
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_millis() as i64)
-            })
-        })
-        .map_err(|e| format!("WASM の出力関数を登録できない: {e}"))?;
-    let instance = linker
-        .instantiate(&mut store, &module)
-        .map_err(|e| format!("WASM の初期化に失敗した: {e}"))?;
-    let main = instance
-        .get_typed_func::<(), ()>(&mut store, "main")
-        .map_err(|e| format!("WASM の main を呼べない: {e}"))?;
-    if let Err(e) = main.call(&mut store, ()) {
-        if let Some(error) = e.downcast_ref::<std::io::Error>() {
-            return Err(format!("出力に失敗した: {error}").into());
-        }
-        // ランタイムの __fail が書いた文字列があれば、それを実行時エラーにする
-        let message = instance.get_memory(&mut store, "memory").and_then(|m| {
-            let data = m.data(&store);
-            let word = |at: usize| {
-                Some(u64::from_le_bytes(data.get(at..at + 8)?.try_into().ok()?) as usize)
-            };
-            let p = word(FAIL_AT as usize).filter(|p| *p != 0)?;
-            let len = word(p)?;
-            String::from_utf8(data.get(p + 8..p + 8 + len)?.to_vec()).ok()
-        });
-        return Err(message
-            .unwrap_or_else(|| format!("WASM の実行に失敗した: {e}"))
-            .into());
-    }
-    Ok(store.into_data().out)
-}
 
 pub fn emit(program: &Program) -> Vec<u8> {
     emit_selected(program, None)
@@ -801,35 +727,25 @@ mod tests {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
+    fn node(bytes: &[u8], script: &str) -> std::process::Output {
+        let mut child = Command::new("node").args(["-e", script]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        child.stdin.take().unwrap().write_all(bytes).unwrap();
+        child.wait_with_output().unwrap()
+    }
+
     #[test]
     fn string_memory_grows_resets_and_preserves_literals() {
         let bytes = crate::to_wasm_library("fn literal() -> str { '日本語' }", &["literal".into()])
             .unwrap();
-        let engine = wasmtime::Engine::default();
-        let module = wasmtime::Module::new(&engine, bytes).unwrap();
-        let mut store = wasmtime::Store::new(&engine, ());
-        let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
-        let literal = instance
-            .get_typed_func::<(), i64>(&mut store, "literal")
-            .unwrap();
-        let alloc = instance
-            .get_typed_func::<i32, i32>(&mut store, "__hibana_alloc")
-            .unwrap();
-        let reset = instance
-            .get_typed_func::<(), ()>(&mut store, "__hibana_reset")
-            .unwrap();
-        let memory = instance.get_memory(&mut store, "memory").unwrap();
-        let packed = literal.call(&mut store, ()).unwrap() as u64;
-        let ptr = packed as u32 as usize;
-        let len = (packed >> 32) as usize;
-        assert_eq!(&memory.data(&store)[ptr..ptr + len], "日本語".as_bytes());
-        let first = alloc.call(&mut store, 200_000).unwrap();
-        assert!(memory.data_size(&store) >= first as usize + 200_000);
-        assert!(alloc.call(&mut store, -1).is_err());
-        reset.call(&mut store, ()).unwrap();
-        assert_eq!(alloc.call(&mut store, 1).unwrap(), first);
-        assert_eq!(literal.call(&mut store, ()).unwrap() as u64, packed);
-        assert_eq!(&memory.data(&store)[ptr..ptr + len], "日本語".as_bytes());
+        let script = r#"const x = new WebAssembly.Instance(new WebAssembly.Module(require('fs').readFileSync(0)), {}).exports;
+const packed = x.literal(); const ptr = Number(packed & 0xffffffffn), len = Number(packed >> 32n);
+const read = () => Buffer.from(x.memory.buffer, ptr, len).toString();
+if (read() !== '日本語') throw Error('literal');
+const first = x.__hibana_alloc(200000); if (x.memory.buffer.byteLength < first + 200000) throw Error('grow');
+let trapped = false; try { x.__hibana_alloc(-1); } catch { trapped = true; } if (!trapped) throw Error('allocation');
+x.__hibana_reset(); if (x.__hibana_alloc(1) !== first || x.literal() !== packed || read() !== '日本語') throw Error('reset');"#;
+        let result = node(&bytes, script);
+        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     }
 
     #[test]
@@ -862,23 +778,10 @@ if (Object.keys(x).join(',') !== 'result' || x.result(20n) !== 41n) throw Error(
         );
 
         let bytes = crate::to_wasm_library(used, &["result".into(), "plus".into()]).unwrap();
-        let engine = wasmtime::Engine::default();
-        let module = wasmtime::Module::new(&engine, bytes).unwrap();
-        let names: Vec<_> = module
-            .exports()
-            .map(|export| export.name().to_string())
-            .collect();
-        assert_eq!(names, ["plus", "result"]);
-        let mut store = wasmtime::Store::new(&engine, ());
-        let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
-        assert_eq!(
-            instance
-                .get_typed_func::<(i64, i64), i64>(&mut store, "plus")
-                .unwrap()
-                .call(&mut store, (20, 22))
-                .unwrap(),
-            42
-        );
+        let result = node(&bytes, r#"const m = new WebAssembly.Module(require('fs').readFileSync(0));
+const x = new WebAssembly.Instance(m, {}).exports;
+if (Object.keys(x).join(',') !== 'plus,result' || x.plus(20n, 22n) !== 42n) throw Error('exports');"#);
+        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
 
         assert!(
             crate::to_wasm_library(used, &["missing".into()])
@@ -891,7 +794,7 @@ if (Object.keys(x).join(',') !== 'result' || x.result(20n) !== 41n) throw Error(
                 .contains("重複")
         );
         let strings = crate::to_wasm_library(&with_unused, &["unused".into()]).unwrap();
-        assert!(wasmtime::Module::new(&engine, strings).is_ok());
+        assert!(node(&strings, "new WebAssembly.Module(require('fs').readFileSync(0))").status.success());
         assert!(
             crate::to_wasm_library(&format!("{used}fn bad() -> int {{ true }}"), &names).is_err()
         );
@@ -899,37 +802,22 @@ if (Object.keys(x).join(',') !== 'result' || x.result(20n) !== 41n) throw Error(
     }
 
     #[test]
-    fn embedded_runtime_matches_interpreter_and_reports_errors() {
-        let src = "fn add(a: int, b: int) -> int { a + b }\nfn main() { print(add(19, 23)) }";
-        let mut expected = Vec::new();
-        crate::run(src, &mut expected).unwrap();
-        let output = super::run(&crate::to_wasm(src).unwrap(), Vec::new()).unwrap();
-        assert_eq!(output, expected);
-
-        let src = "fn div(a: int, b: int) -> int { a / b }\nfn main() { print(div(1, 0)) }";
-        let err = super::run(&crate::to_wasm(src).unwrap(), Vec::new()).unwrap_err();
-        assert!(err.contains("0 で除算した"), "{err}");
-
-        let src = "fn add(a: int, b: int) -> int { a + b }\nfn main() { print(add(9223372036854775807, 1)) }";
-        let err = super::run(&crate::to_wasm(src).unwrap(), Vec::new()).unwrap_err();
-        assert!(err.contains("オーバーフロー"), "{err}");
-
-        struct Fails;
-        impl Write for Fails {
-            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
-                Err(std::io::Error::other("出力失敗"))
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
+    fn runtime_reports_errors() {
+        let script = r#"
+let x; x = new WebAssembly.Instance(new WebAssembly.Module(require('fs').readFileSync(0)),
+ { hibana: { write() {}, now_ms: () => 0n } }).exports;
+try { x.main(); throw Error('trap expected'); } catch (e) { if (!(e instanceof WebAssembly.RuntimeError)) throw e; }
+const v = new DataView(x.memory.buffer), p = Number(v.getBigUint64(24, true)), n = Number(v.getBigUint64(p, true));
+process.stdout.write(Buffer.from(x.memory.buffer, p + 8, n));
+"#;
+        for (src, expected) in [
+            ("fn f(a: int, b: int) -> int { a / b } fn main() { print(f(1, 0)) }", "0 で除算した"),
+            ("fn f(a: int, b: int) -> int { a + b } fn main() { print(f(9223372036854775807, 1)) }", "オーバーフロー"),
+        ] {
+            let result = node(&crate::to_wasm(src).unwrap(), script);
+            assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+            assert!(String::from_utf8_lossy(&result.stdout).contains(expected));
         }
-        let src = "fn main() { print(1) }";
-        assert!(
-            super::run(&crate::to_wasm(src).unwrap(), Fails)
-                .err()
-                .unwrap()
-                .contains("出力失敗")
-        );
     }
 
     #[test]
