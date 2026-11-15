@@ -170,7 +170,7 @@ pub struct Trait {
 use crate::error::Error;
 pub use crate::error::R;
 
-// data 宣言。構築子の ret は添字付きの型族の戻り値の型（無ければ Name(params)）
+// data 宣言。
 #[derive(Debug, Clone)]
 pub struct Data {
     // 宣言の位置（キーワードから名前まで）。型検査の誤りに行番号を付けるのに使う
@@ -185,7 +185,6 @@ pub struct Data {
 pub struct Ctor {
     pub name: String,
     pub fields: Vec<(String, Expr)>,
-    pub ret: Option<Expr>,
 }
 
 // match の腕。ctor が "_" なら残りすべて
@@ -1321,7 +1320,6 @@ impl Parser<'_> {
         let ctor = Ctor {
             name: format!("{name}{{}}"),
             fields,
-            ret: None,
         };
         Ok((
             Data {
@@ -1565,7 +1563,6 @@ impl Parser<'_> {
                 ctors.push(Ctor {
                     name: qual(&module, &c),
                     fields,
-                    ret: None,
                 });
                 self.eat(",");
             }
@@ -1603,7 +1600,6 @@ impl Parser<'_> {
             let ctor = Ctor {
                 name: format!("{name}{{}}"),
                 fields,
-                ret: None,
             };
             return Ok(TypeDecl::Data(Data {
                 span: Some(span),

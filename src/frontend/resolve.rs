@@ -40,9 +40,6 @@ pub fn resolve(prog: &mut Program, uses: &HashMap<String, Vec<Use>>, known: &Has
                 r.expr(t);
                 r.locals.last_mut().unwrap().push(n.clone());
             }
-            if let Some(t) = &mut c.ret {
-                r.expr(t);
-            }
             r.locals.pop();
         }
     }

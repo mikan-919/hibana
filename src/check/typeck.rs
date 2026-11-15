@@ -839,7 +839,6 @@ impl Norm<'_> {
 }
 
 // match の場合に入った時の (添字の照合で得た代入, フィールドの値)
-type Entered = (Vec<(usize, V)>, Vec<V>);
 
 // 変数の (型, 値, 可変か)
 struct Entry {
@@ -3205,12 +3204,6 @@ impl Ck<'_> {
                 let id = self.norm.fresh();
                 self.bind(n, ty, neu(Neu::Var(id, n.clone())), false)?;
             }
-            if let Some(rt) = &c.ret {
-                let rt = self.eval_type(rt).ctx(r)?;
-                if !matches!(&rt, V::DataT(x) if x.0 == d.name) {
-                    return Err(r(&format!("戻り値は {} 型でなければならない", d.name)).into());
-                }
-            }
             self.pop();
         }
         Ok(level)
@@ -3231,17 +3224,6 @@ impl Ck<'_> {
             env[0].insert(pn.clone(), v);
         }
         Ok(V::Univ(self.levels[name]))
-    }
-
-    // 構築子の戻り値の型。env には型の引数とフィールドの値が入っている
-    fn ctor_ret(&mut self, d: &Data, c: &Ctor, env: &mut Env) -> R<V> {
-        match &c.ret {
-            Some(r) => self.norm.eval_or_opaque(r, env),
-            None => {
-                let args = d.params.iter().map(|(p, _)| env[0][p].clone()).collect();
-                Ok(V::DataT(Rc::new((d.name.clone(), args))))
-            }
-        }
     }
 
     fn apply(&mut self, sol: &HashMap<usize, V>, v: &V) -> R<V> {
@@ -3325,22 +3307,10 @@ impl Ck<'_> {
             metas.push((id, p.clone()));
             env[0].insert(p.clone(), neu(Neu::Var(id, format!("?{p}"))));
         }
-        let mut field_metas = HashMap::new();
         let mut sol = HashMap::new();
         if let Some(exp) = expected {
-            // フィールドもメタ変数にして戻り値の型を作り、期待する型と合わせる
-            let mut env1 = env.clone();
-            for (f, _) in &c.fields {
-                let id = self.norm.fresh();
-                field_metas.insert(f.clone(), id);
-                env1[0].insert(f.clone(), neu(Neu::Var(id, format!("?{f}"))));
-            }
-            let ret1 = self.ctor_ret(d, c, &mut env1)?;
-            let ids: Vec<usize> = metas
-                .iter()
-                .map(|m| m.0)
-                .chain(field_metas.values().copied())
-                .collect();
+            let ret1 = V::DataT(Rc::new((d.name.clone(), d.params.iter().map(|(p, _)| env[0][p].clone()).collect())));
+            let ids: Vec<usize> = metas.iter().map(|m| m.0).collect();
             if !self.unify(&ret1, &base(exp), &ids, &mut sol)? {
                 return Err(format!(
                     "{} が必要だが、{name} の型は {}",
@@ -3367,15 +3337,9 @@ impl Ck<'_> {
                 self.check(a, &t).ctx(r)?;
             }
             let v = self.eval_value(a)?;
-            if let Some(id) = field_metas.get(f)
-                && let Some(want_v) = sol.get(id).cloned()
-                && !self.unify(&want_v, &v, &ids, &mut sol)?
-            {
-                return Err(r(&format!("{} が必要だが {}", show(&want_v), show(&v))).into());
-            }
             env[0].insert(f.clone(), v);
         }
-        let ret = self.ctor_ret(d, c, &mut env)?;
+        let ret = V::DataT(Rc::new((d.name.clone(), d.params.iter().map(|(p, _)| env[0][p].clone()).collect())));
         let ret = self.apply(&sol, &ret)?;
         if let Some((_, p)) = metas.iter().find(|(id, _)| mentions(&ret, *id)) {
             return Err(format!("構築子 {name} の型引数 {p} を推論できない。型注釈を書く").into());
@@ -3383,123 +3347,7 @@ impl Ck<'_> {
         Ok(ret)
     }
 
-    // 添字を照合する。match する値の側の変数は、構築子の添字に置き換える代入として out に積む。
-    // 照合できない（別の構築子・別の定数）なら false で、その場合は起こらない
-    fn unify_index(&mut self, c: &V, s: &V, out: &mut Vec<(usize, V)>) -> R<bool> {
-        let (mut c, mut s) = (c.clone(), s.clone());
-        for (id, v) in out.iter() {
-            c = self.norm.subst(&c, *id, v)?;
-            s = self.norm.subst(&s, *id, v)?;
-        }
-        if c == s {
-            return Ok(true);
-        }
-        for (x, y) in [(&s, &c), (&c, &s)] {
-            if let V::Neu(n) = x
-                && let Neu::Var(id, _) = &**n
-                && *id != 0
-            {
-                out.push((*id, y.clone()));
-                return Ok(true);
-            }
-        }
-        Ok(match (&c, &s) {
-            (V::Data(x), V::Data(y)) | (V::DataT(x), V::DataT(y)) => {
-                if x.0 != y.0 || x.1.len() != y.1.len() {
-                    return Ok(false);
-                }
-                for (p, q) in x.1.iter().zip(&y.1) {
-                    if !self.unify_index(p, q, out)? {
-                        return Ok(false);
-                    }
-                }
-                true
-            }
-            (V::Neu(_), _) | (_, V::Neu(_)) => true,
-            _ => false,
-        })
-    }
-
-    // 構築子 c の場合に入る。フィールドを束縛し、添字の照合で得た代入を返す。起こらない場合は None
-    fn enter_ctor(
-        &mut self,
-        d: &Data,
-        c: &Ctor,
-        sargs: &[V],
-        binds: Option<&[String]>,
-    ) -> R<Option<Entered>> {
-        let mut env: Env = vec![
-            d.params
-                .iter()
-                .map(|(p, _)| p.clone())
-                .zip(sargs.iter().cloned())
-                .collect(),
-        ];
-        let mut fvals = Vec::new();
-        for (i, (f, ft)) in c.fields.iter().enumerate() {
-            let t = self.norm.eval_or_opaque(ft, &mut env)?;
-            let b = binds.map_or("_", |b| b[i].as_str());
-            let id = self.norm.fresh();
-            let v = neu(Neu::Var(
-                id,
-                if b == "_" { f.clone() } else { b.to_string() },
-            ));
-            env[0].insert(f.clone(), v.clone());
-            fvals.push(v.clone());
-            if b != "_" {
-                self.bind(b, t, v, false)?;
-            }
-        }
-        let V::DataT(rt) = self.ctor_ret(d, c, &mut env)? else {
-            return Err(format!("構築子 {} の戻り値の型が計算できない", c.name).into());
-        };
-        let mut out = Vec::new();
-        for (x, y) in rt.1.iter().zip(sargs) {
-            if !self.unify_index(x, y, &mut out)? {
-                return Ok(None);
-            }
-        }
-        Ok(Some((out, fvals)))
-    }
-
-    // 変数 id の値が v だと分かった。id を含む変数の型と値、事実を置き換える
-    fn refine_var(&mut self, id: usize, v: &V) -> R<()> {
-        let mut seen = Vec::new();
-        let mut redo = Vec::new();
-        for s in self.scopes.iter().rev() {
-            for (n, e) in &s.vars {
-                if seen.contains(n) {
-                    continue;
-                }
-                seen.push(n.clone());
-                if mentions(&e.ty, id) || mentions(&e.val, id) {
-                    redo.push((n.clone(), e.ty.clone(), e.val.clone(), e.mutable));
-                }
-            }
-        }
-        let facts: Vec<V> = self
-            .scopes
-            .iter()
-            .flat_map(|s| &s.facts)
-            .filter(|f| mentions(f, id))
-            .cloned()
-            .collect();
-        for (n, ty, val, mutable) in redo {
-            let (ty, val) = (self.norm.subst(&ty, id, v)?, self.norm.subst(&val, id, v)?);
-            self.scopes
-                .last_mut()
-                .unwrap()
-                .vars
-                .insert(n, Entry { ty, val, mutable });
-        }
-        for f in facts {
-            let f = self.norm.subst(&f, id, v)?;
-            self.add_fact(f);
-        }
-        Ok(())
-    }
-
-    // match を検査する。各場合では、添字の照合と、値が構築子の形であることで期待する型を絞り込む
+    // match の各腕と網羅性を検査する
     fn check_match(&mut self, s: &Expr, arms: &[Arm], expected: Option<&V>) -> R<V> {
         let st = base(&self.expr(s)?);
         let V::DataT(dt) = &st else {
@@ -3508,14 +3356,6 @@ impl Ck<'_> {
         let Some(d) = self.norm.datas.get(dt.0.as_str()).copied() else {
             return Err(format!("match は data 型の値に使う（実際は {}）", show(&st)).into());
         };
-        let sv = self.eval_value(s)?;
-        let svar = match &sv {
-            V::Neu(n) => match &**n {
-                Neu::Var(id, _) => Some(*id),
-                _ => None,
-            },
-            _ => None,
-        };
         let mut covered = Vec::new();
         let mut wildcard = false;
         let mut result: Option<V> = None;
@@ -3523,7 +3363,7 @@ impl Ck<'_> {
             let r = |e: &str| format!("{} の場合: {e}", arm.ctor);
             let at = |e: Error| at_opt(e, arm.span);
             self.push();
-            let mut exp = expected.cloned();
+            let exp = expected.cloned();
             if arm.ctor == "_" {
                 wildcard = true;
             } else {
@@ -3540,23 +3380,13 @@ impl Ck<'_> {
                     .into()));
                 }
                 covered.push(c.name.clone());
-                let Some((mut substs, fvals)) = self
-                    .enter_ctor(d, c, &dt.1, Some(&arm.binds))
-                    .ctx(r)
-                    .map_err(at)?
-                else {
-                    // 添字が合わないので、この場合は起こらない
-                    self.pop();
-                    continue;
-                };
-                if let Some(id) = svar {
-                    substs.push((id, V::Data(Rc::new((c.name.clone(), fvals)))));
-                }
-                for (id, v) in &substs {
-                    if let Some(e) = &mut exp {
-                        *e = self.norm.subst(e, *id, v).map_err(at)?;
-                    }
-                    self.refine_var(*id, v).map_err(at)?;
+                let mut env: Env = vec![d.params.iter().map(|(p, _)| p.clone()).zip(dt.1.iter().cloned()).collect()];
+                for ((field, field_type), bind) in c.fields.iter().zip(&arm.binds) {
+                    let ty = self.norm.eval_or_opaque(field_type, &mut env).ctx(r).map_err(at)?;
+                    let id = self.norm.fresh();
+                    let value = neu(Neu::Var(id, bind.clone()));
+                    env[0].insert(field.clone(), value.clone());
+                    if bind != "_" { self.bind(bind, ty, value, false)?; }
                 }
             }
             let t = match &exp {
@@ -3582,12 +3412,7 @@ impl Ck<'_> {
                 if covered.contains(&c.name) {
                     continue;
                 }
-                self.push();
-                let possible = self.enter_ctor(d, c, &dt.1, None)?.is_some();
-                self.pop();
-                if possible {
-                    return Err(format!("match に {} の場合が無い", c.name).into());
-                }
+                return Err(format!("match に {} の場合が無い", c.name).into());
             }
         }
         Ok(expected.cloned().or(result).unwrap_or(prim("never")))
