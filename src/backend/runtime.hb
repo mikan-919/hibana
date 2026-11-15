@@ -13,7 +13,10 @@
 //
 // ponytail: 確保した領域を回収しない（GC が無い）。長く動くプログラムでは、ここにシャドースタックを使う GC を足す
 
-// 確保の状態は __static() の位置に [次の位置][区画の終わり] で置く
+// ランタイムの状態は __static() から 64 バイト:
+//   +0 確保の次の位置、+8 区画の終わり、+16 実行時エラーの文字列（WASM だけ使う）
+//   +24 中断の行き先（handle の番号。0 は中断していない）、+32 中断で handle に渡す値
+//   +48 処理中のいちばん内側の handle、+56 最後に付けた handle の番号
 fn __alloc(n: int) -> int {
     let st = __static()
     let size = (n + 7) / 8 * 8
@@ -525,6 +528,9 @@ fn __all(fs: int) -> int {
     while i < n {
         let f = __getv(p + 8 + i * 16)
         __setv(q + 8 + i * 16, f())
+        if __aborting() {
+            return
+        }
         i = i + 1
     }
     __mkv(4, q)
@@ -571,4 +577,74 @@ fn __str_in(packed: int) -> str {
 fn __str_out(s: str) -> int {
     let p = __payload(s)
     __or(__shl(__load(p), 32), p + 8)
+}
+
+// 効果。handle の本体を抜ける中断は、行き先の番号を置き、呼び出しの後の検査で 1 段ずつ戻って伝える（ir.rs の checked）
+
+fn __aborting() -> bool {
+    __load(__static() + 24) != 0
+}
+
+// 処理中の handle: [外側の handle][番号][操作の名前の Vec][腕の Vec]
+fn __handle_push(ops: int, arms: int) -> int {
+    let st = __static()
+    let id = __load(st + 56) + 1
+    __store(st + 56, id)
+    let h = __alloc(48)
+    __store(h, __load(st + 48))
+    __store(h + 8, id)
+    __setv(h + 16, ops)
+    __setv(h + 32, arms)
+    __store(st + 48, h)
+    id
+}
+
+// 本体を終えた handle を外す。この handle への中断なら、腕の値が handle の値になる
+fn __handle_end(id: int, v: int) -> int {
+    let st = __static()
+    __store(st + 48, __load(__load(st + 48)))
+    if __load(st + 24) == id {
+        __store(st + 24, 0)
+        return __getv(st + 32)
+    }
+    v
+}
+
+// resume した腕の値は構築子の番号 -1 の値で表す
+fn __resume(v: int) -> int {
+    let p = __data_new(0 - 1, 1)
+    __setv(p + 16, v)
+    __mkv(5, p)
+}
+
+// 操作を、内側の handle から探して腕を呼ぶ。腕はその handle より外で処理する
+fn __perform(name: str, args: int) -> int {
+    let st = __static()
+    let mut h = __load(st + 48)
+    while h != 0 {
+        let ops = __payload(__getv(h + 16))
+        let n = __load(ops)
+        let mut k = 0
+        while k < n {
+            if __str_eq(__payload(__getv(ops + 8 + k * 16)), __payload(name)) {
+                let arm = __getv(__payload(__getv(h + 32)) + 8 + k * 16)
+                let saved = __load(st + 48)
+                __store(st + 48, __load(h))
+                let r = arm(args)
+                __store(st + 48, saved)
+                if __aborting() {
+                    return
+                }
+                if __tag(r) == 5 && __load(__payload(r)) == 0 - 1 {
+                    return __getv(__payload(r) + 16)
+                }
+                __store(st + 24, __load(h + 8))
+                __setv(st + 32, r)
+                return
+            }
+            k = k + 1
+        }
+        h = __load(h)
+    }
+    __die('操作を処理する handle が無い')
 }

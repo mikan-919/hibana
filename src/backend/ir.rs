@@ -2,7 +2,8 @@
 // 制御フローは WASM と同じ入れ子の形（if・while・return）で持ち、goto を持たない。
 // 値はすべて V（型の番号 tag と中身 payload の 2 つの 64 ビット整数）で表す。番号は runtime.hb の先頭を参照。
 // 文字列の連結・比較・表示などはランタイム（runtime.hb）の関数を呼ぶ。ランタイムも同じ変換で IR にする。
-// ponytail: 効果（handle と操作）は未対応。Vec の push は毎回写す（runtime.hb の __arr_push）
+// 効果の handle は、中断の印を置いて呼び出しの後で調べ、1 段ずつ戻って抜ける（Lower::checked）。resume は腕の末尾でだけ使える（C 版と同じ）
+// ponytail: Vec の push は毎回写す（runtime.hb の __arr_push）
 use crate::error::R;
 use crate::parser::{self, Expr as Ast, Stmt as AstStmt};
 use std::collections::{HashMap, HashSet};
@@ -111,6 +112,8 @@ pub enum Expr {
     // 条件は中身が 0 でなければ真
     If(Box<Expr>, Box<Block>, Box<Block>),
     Block(Box<Block>),
+    // 塊を評価する。中の Escape で抜けると unit になる。handle の本体に使う
+    Catch(Box<Block>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -125,6 +128,8 @@ pub enum Stmt {
     Eval(Expr),
     While(Expr, Vec<Stmt>),
     Return(Expr),
+    // いちばん内側の Catch から unit で抜ける
+    Escape,
 }
 
 impl fmt::Display for ValueType {
@@ -220,6 +225,7 @@ fn each_stmts<'a>(stmts: &'a [Stmt], f: &mut impl FnMut(Node<'a>)) {
         f(Node::Stmt(s));
         match s {
             Stmt::Set(_, e) | Stmt::Eval(e) | Stmt::Return(e) => each_expr(e, f),
+            Stmt::Escape => {}
             Stmt::While(c, body) => {
                 each_expr(c, f);
                 each_stmts(body, f);
@@ -242,7 +248,7 @@ fn each_expr<'a>(e: &'a Expr, f: &mut impl FnMut(Node<'a>)) {
             each_block(t, f);
             each_block(e, f);
         }
-        Expr::Block(b) => each_block(b, f),
+        Expr::Block(b) | Expr::Catch(b) => each_block(b, f),
     }
 }
 
@@ -487,6 +493,7 @@ impl<'a> Ctx<'a> {
             vars: HashMap::new(),
             locals: 0,
             raw: runtime,
+            catch_depth: 0,
         };
         for (n, _) in &f.params {
             let i = l.local();
@@ -594,6 +601,8 @@ struct Lower<'c, 'a> {
     locals: u32,
     // ランタイムの関数。演算子は中身の演算になる
     raw: bool,
+    // この関数の中で囲んでいる handle の本体の数。中断の検査は、あれば本体を抜け、無ければ関数から戻る
+    catch_depth: u32,
 }
 
 // 値を捨てる。unit の塊は中の文を並べ直す
@@ -606,6 +615,29 @@ fn eval(out: &mut Vec<Stmt>, e: Expr) {
 }
 
 impl Lower<'_, '_> {
+    // 中断しうる呼び出し。戻った後に中断中なら、handle の本体を抜けるか関数から戻る
+    fn checked(&mut self, c: Expr) -> Expr {
+        if self.raw {
+            return c;
+        }
+        let t = self.local();
+        let exit = if self.catch_depth > 0 {
+            Stmt::Escape
+        } else {
+            Stmt::Return(unit())
+        };
+        let aborting = prim(Prim::Load, vec![add(prim(Prim::Static, vec![]), int(24))]);
+        let check = Expr::If(
+            Box::new(aborting),
+            Box::new(Block {
+                stmts: vec![exit],
+                value: unit(),
+            }),
+            leaf(unit()),
+        );
+        block(vec![Stmt::Set(t, c), Stmt::Eval(check)], Expr::Local(t))
+    }
+
     fn local(&mut self) -> u32 {
         self.locals += 1;
         self.locals - 1
@@ -814,7 +846,8 @@ impl Lower<'_, '_> {
             Ast::Call(n, args) => self.call(n, args)?,
             Ast::Apply(f, args) => {
                 let f = self.expr(f)?;
-                Expr::CallIndirect(Box::new(f), self.args(args)?)
+                let args = self.args(args)?;
+                self.checked(Expr::CallIndirect(Box::new(f), args))
             }
             Ast::Field(x, f) => call(&format!("__field_{f}"), vec![self.expr(x)?]),
             Ast::Index(v, i) => {
@@ -878,7 +911,10 @@ impl Lower<'_, '_> {
                 }
                 block(stmts, rest)
             }
-            Ast::Lam(params, _, _, body) => self.lambda(params, body)?,
+            Ast::Lam(params, _, _, body) => {
+                let params: Vec<String> = params.iter().map(|(p, _)| p.clone()).collect();
+                self.lambda(&params, &[], body)?
+            }
             Ast::Pi(..) => mkv(TY, Expr::Str("fn".into())),
             Ast::Refine(..) => mkv(TY, Expr::Str("refine".into())),
             Ast::Assign(..) | Ast::While(..) | Ast::For(..) | Ast::Return(_) => {
@@ -886,7 +922,7 @@ impl Lower<'_, '_> {
                 self.effect(e, &mut stmts)?;
                 block(stmts, unit())
             }
-            Ast::Handle(..) => return Err("IR は handle に未対応".into()),
+            Ast::Handle(body, arms) => self.handle(body, arms)?,
             _ => return Err("IR はこの式に未対応".into()),
         })
     }
@@ -894,10 +930,8 @@ impl Lower<'_, '_> {
     fn call(&mut self, n: &str, args: &[Ast]) -> R<Expr> {
         if let Some(i) = self.vars.get(n) {
             let i = *i;
-            return Ok(Expr::CallIndirect(
-                Box::new(Expr::Local(i)),
-                self.args(args)?,
-            ));
+            let args = self.args(args)?;
+            return Ok(self.checked(Expr::CallIndirect(Box::new(Expr::Local(i)), args)));
         }
         let mut args = self.args(args)?;
         if let Some(p) = intrinsic(n) {
@@ -925,8 +959,14 @@ impl Lower<'_, '_> {
             return Ok(self.object(DATA, new, 16, args));
         }
         if let Some(src) = self.cx.sources.get(n) {
-            if src.f.op.is_some() {
-                return Err(format!("IR は効果の操作 {n} に未対応").into());
+            let f = src.f;
+            // 操作は、引数を Vec にして内側の handle から腕を探す。推論した型の引数は渡さない
+            if f.op.is_some() {
+                let k = args.len() - (f.params.len() - f.implicit);
+                let items = args.split_off(k);
+                let new = call("__arr_new", vec![int(items.len() as i64)]);
+                let items = self.object(ARR, new, 8, items);
+                return Ok(self.checked(call("__perform", vec![Expr::Str(n.to_string()), items])));
             }
             // 推論したジェネリック引数は実行時には要らないので unit で埋める
             if args.len() + src.f.implicit == src.f.params.len() {
@@ -934,14 +974,22 @@ impl Lower<'_, '_> {
                 full.append(&mut args);
                 args = full;
             }
-            return Ok(call(n, args));
+            // 効果の無い関数は中断しない
+            let effects = !f.effects.is_empty();
+            let c = call(n, args);
+            return Ok(if effects { self.checked(c) } else { c });
         }
         if matches!(n, "Vec" | "Type" | "Ref" | "Async") || self.cx.types.contains(n) {
             return Ok(mkv(TY, Expr::Str(n.to_string())));
         }
         let rt = format!("__{n}");
-        if self.cx.sources.get(rt.as_str()).is_some_and(|s| s.runtime) {
-            return Ok(Expr::Call(rt, args));
+        if let Some(s) = self.cx.sources.get(rt.as_str()).filter(|s| s.runtime) {
+            // 省いた引数（resume() など）は unit で埋める
+            while args.len() < s.f.params.len() {
+                args.push(unit());
+            }
+            let c = Expr::Call(rt, args);
+            return Ok(if n == "all" { self.checked(c) } else { c });
         }
         // 変換の中で作る関数（__ctor_name など）。無ければ作る時に誤りにする
         if self.raw && n.starts_with("__") {
@@ -951,7 +999,8 @@ impl Lower<'_, '_> {
     }
 
     // 無名関数。見えている局所変数をすべて写し取り、別の関数にする
-    fn lambda(&mut self, params: &[(String, Option<Ast>)], body: &parser::Block) -> R<Expr> {
+    // unpack は handle の腕の束縛。腕は引数の Vec を 1 つ受け取り、そこから取り出す
+    fn lambda(&mut self, params: &[String], unpack: &[String], body: &parser::Block) -> R<Expr> {
         let mut caps: Vec<(String, u32)> = self.vars.iter().map(|(n, i)| (n.clone(), *i)).collect();
         caps.sort();
         self.cx.lambdas += 1;
@@ -961,12 +1010,11 @@ impl Lower<'_, '_> {
             vars: HashMap::new(),
             locals: 1,
             raw: self.raw,
+            catch_depth: 0,
         };
         let mut stmts = Vec::new();
-        for (p, _) in params {
-            let i = l.local();
-            l.vars.insert(p.clone(), i);
-        }
+        // 引数は 1 番から並べる。名前は写し取った変数より後に入れて、外の同じ名前を隠す
+        let param_locals: Vec<u32> = params.iter().map(|_| l.local()).collect();
         for (k, (n, _)) in caps.iter().enumerate() {
             let i = l.local();
             stmts.push(Stmt::Set(
@@ -974,6 +1022,19 @@ impl Lower<'_, '_> {
                 getv(add(Expr::Local(0), int(16 + 16 * k as i64))),
             ));
             l.vars.insert(n.clone(), i);
+        }
+        for (p, i) in params.iter().zip(param_locals) {
+            l.vars.insert(p.clone(), i);
+        }
+        for (k, b) in unpack.iter().enumerate() {
+            if b != "_" {
+                let i = l.local();
+                stmts.push(Stmt::Set(
+                    i,
+                    getv(add(Expr::Local(1), int(8 + 16 * k as i64))),
+                ));
+                l.vars.insert(b.clone(), i);
+            }
         }
         let b = l.block(body)?;
         stmts.extend(b.stmts);
@@ -990,6 +1051,34 @@ impl Lower<'_, '_> {
         let new = call("__fn_new", vec![Expr::Func(name), int(caps.len() as i64)]);
         let items = caps.into_iter().map(|(_, i)| Expr::Local(i)).collect();
         Ok(self.object(FN, new, 16, items))
+    }
+
+    // handle 式 { 操作(引数) => 式 ... }。腕は無名関数にして登録し、本体は Catch の中で評価する
+    fn handle(&mut self, body: &Ast, arms: &[parser::Arm]) -> R<Expr> {
+        let mut ops = Vec::new();
+        let mut fns = Vec::new();
+        for a in arms {
+            ops.push(Expr::Str(a.ctor.clone()));
+            let b = parser::Block {
+                stmts: vec![],
+                tail: Some(Box::new(a.body.clone())),
+            };
+            fns.push(self.lambda(&["#args".to_string()], &a.binds, &b)?);
+        }
+        let n = int(ops.len() as i64);
+        let ops = self.object(ARR, call("__arr_new", vec![n.clone()]), 8, ops);
+        let fns = self.object(ARR, call("__arr_new", vec![n]), 8, fns);
+        let h = self.local();
+        let mut stmts = vec![Stmt::Set(h, call("__handle_push", vec![ops, fns]))];
+        self.catch_depth += 1;
+        let v = self.expr(body);
+        self.catch_depth -= 1;
+        let r = self.local();
+        stmts.push(Stmt::Set(r, Expr::Catch(leaf(v?))));
+        let end = call("__handle_end", vec![Expr::Local(h), Expr::Local(r)]);
+        // 外側の handle への中断なら、さらに外へ伝える
+        let end = if self.raw { end } else { self.checked(end) };
+        Ok(block(stmts, end))
     }
 }
 
@@ -1041,6 +1130,7 @@ fn stmts(f: &mut fmt::Formatter<'_>, ss: &[Stmt], depth: usize) -> fmt::Result {
             Stmt::Set(i, e) => writeln!(f, "{pad}%{i} = {e}")?,
             Stmt::Eval(e) => writeln!(f, "{pad}{e}")?,
             Stmt::Return(e) => writeln!(f, "{pad}return {e}")?,
+            Stmt::Escape => writeln!(f, "{pad}escape")?,
             Stmt::While(c, body) => {
                 writeln!(f, "{pad}while {c} {{")?;
                 stmts(f, body, depth + 1)?;
@@ -1085,6 +1175,7 @@ impl fmt::Display for Expr {
             Expr::CallIndirect(g, args) => list(f, &format!("call_indirect {g}"), args),
             Expr::If(c, t, e) => write!(f, "(if {c} {t} {e})"),
             Expr::Block(b) => write!(f, "{b}"),
+            Expr::Catch(b) => write!(f, "(catch {b})"),
         }
     }
 }
@@ -1112,7 +1203,7 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_and_invalid_programs() {
-        let src = "effect Log {\n    fn log(msg: str)\n}\nfn main() { handle log('x') { log(m) => resume() } }";
+        let src = "extern 'browser' {\n    fn show(xs: Vec<int>)\n}\nfn main() { show([1]) }";
         assert!(crate::to_ir(src).unwrap_err().contains("未対応"));
         assert!(crate::to_ir("fn main() { let x = 1 + true }").is_err());
     }

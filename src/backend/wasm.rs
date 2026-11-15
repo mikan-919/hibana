@@ -1,7 +1,7 @@
 // 構造化 IR を WebAssembly に変換する。
 // IR の値（型の番号と中身）は 2 つの i64 で表し、関数は 2 つの i64 を返す。
 // 公開関数と外部関数の境界では、int は i64、str は (長さ << 32) | 位置 の i64 に変換する。
-// メモリ: [0, 8) は使わない、[8, 32) は確保の状態（次の位置・区画の終わり・実行時エラーの文字列）、その後に文字列のリテラル、ヒープ。
+// メモリ: [0, 8) は使わない、[8, 72) はランタイムの状態（runtime.hb の __static）、その後に文字列のリテラル、ヒープ。
 use crate::ir::{self, Block, Expr, Node, Prim, Program, Stmt, ValueType};
 use std::collections::HashMap;
 use std::io::Write;
@@ -13,7 +13,7 @@ use wasm_encoder::{
 
 const STATIC: i64 = 8;
 const FAIL_AT: i64 = 24;
-const LITERALS: u32 = 32;
+const LITERALS: u32 = 72;
 
 struct Host<W> {
     out: W,
@@ -237,6 +237,8 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
             locals: 2 * f.locals,
             cx: &mut cx,
             types: &mut types,
+            depth: 0,
+            catches: Vec::new(),
         };
         e.stmts(&f.body);
         e.out.extend([I::I64Const(0), I::I64Const(0), I::End]);
@@ -339,7 +341,8 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
     let mut init = Vec::new();
     init.extend(heap.to_le_bytes());
     init.extend((pages * 65536).to_le_bytes());
-    init.extend(0u64.to_le_bytes());
+    // 実行時エラーの文字列、中断、処理中の handle は 0 から始める
+    init.extend([0u8; 48]);
     init.extend(data);
     let mut datas = DataSection::new();
     datas.active(0, &ConstExpr::i32_const(STATIC as i32), init);
@@ -424,6 +427,9 @@ struct Emit<'a, 'b> {
     locals: u32,
     cx: &'b mut Cx<'a>,
     types: &'b mut Types,
+    // 入れ子になった block・loop・if の数と、Catch の位置（br の深さを数える）
+    depth: u32,
+    catches: Vec<u32>,
 }
 
 impl Emit<'_, '_> {
@@ -458,14 +464,24 @@ impl Emit<'_, '_> {
                 Stmt::While(c, body) => {
                     self.out.push(I::Block(BlockType::Empty));
                     self.out.push(I::Loop(BlockType::Empty));
+                    self.depth += 2;
                     self.payload(c);
                     self.out.extend([I::I64Eqz, I::BrIf(1)]);
                     self.stmts(body);
+                    self.depth -= 2;
                     self.out.extend([I::Br(0), I::End, I::End]);
                 }
                 Stmt::Return(e) => {
                     self.expr(e);
                     self.out.push(I::Return);
+                }
+                Stmt::Escape => {
+                    let target = *self.catches.last().expect("Escape は Catch の中だけ");
+                    self.out.extend([
+                        I::I64Const(ir::UNIT),
+                        I::I64Const(0),
+                        I::Br(self.depth - target),
+                    ]);
                 }
             }
         }
@@ -549,12 +565,25 @@ impl Emit<'_, '_> {
                     I::I32Eqz,
                     I::If(BlockType::FunctionType(self.cx.block_type)),
                 ]);
+                self.depth += 1;
                 self.block(t);
                 self.out.push(I::Else);
                 self.block(f);
+                self.depth -= 1;
                 self.out.push(I::End);
             }
             Expr::Block(b) => self.block(b),
+            // 抜けた時は Escape が unit を積んで、この塊の終わりへ飛ぶ
+            Expr::Catch(b) => {
+                self.out
+                    .push(I::Block(BlockType::FunctionType(self.cx.block_type)));
+                self.depth += 1;
+                self.catches.push(self.depth);
+                self.block(b);
+                self.catches.pop();
+                self.depth -= 1;
+                self.out.push(I::End);
+            }
             Expr::Prim(p, args) => self.prim(*p, args),
         }
     }
@@ -945,9 +974,11 @@ trap(x.div, 1n, 0n); trap(x.div, min, -1n); trap(x.rem, 1n, 0n); trap(x.rem, min
     #[test]
     fn rejects_unsupported_programs() {
         assert!(
-            crate::to_wasm("effect Log {\n    fn log(msg: str)\n}\nfn main() { handle log('x') { log(m) => resume() } }")
-                .unwrap_err()
-                .contains("未対応")
+            crate::to_wasm(
+                "extern 'browser' {\n    fn show(xs: Vec<int>)\n}\nfn main() { show([1]) }"
+            )
+            .unwrap_err()
+            .contains("未対応")
         );
         assert!(crate::to_wasm("fn main() { let x = 1 + true }").is_err());
     }

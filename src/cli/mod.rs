@@ -544,7 +544,7 @@ mod tests {
         std::fs::remove_dir_all(&tmp).unwrap();
         eprintln!("ネイティブ {}/{total}: {native:?}\nWASM {}/{total}: {wasm:?}\n未対応:\n{}", native.len(), wasm.len(), reasons.join("\n"));
         assert_eq!(native, wasm, "2 つの出力が対応するプログラムは同じ");
-        assert!(native.iter().any(|n| n == "fib"), "{native:?}");
+        assert!(reasons.is_empty(), "IR が未対応のプログラムがある");
     }
 
     // 範囲外と 0 による除算は、ネイティブでもメッセージを出して終了コード 1 で終わる

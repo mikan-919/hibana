@@ -95,8 +95,8 @@ pub fn emit(program: &Program) -> R<Vec<u8>> {
         datas: Vec::new(),
         syscall: n,
     };
-    // 確保の状態（次の位置・区画の終わり）。最初の確保で mmap する
-    g.datas.push(vec![0; 16]);
+    // ランタイムの状態（runtime.hb の __static）。最初の確保で mmap する
+    g.datas.push(vec![0; 64]);
     for s in ["実行時エラー: ", "\n"] {
         g.literal(s);
     }
@@ -201,6 +201,7 @@ impl Gen {
             indices: &self.indices,
             literals: &self.literals,
             syscall: self.syscall,
+            catches: Vec::new(),
         };
         e.stmts(&f.body);
         let unit = e.b.ins().iconst(I64, ir::UNIT);
@@ -232,6 +233,8 @@ struct Body<'a, 'f> {
     indices: &'a HashMap<String, u32>,
     literals: &'a HashMap<String, u32>,
     syscall: u32,
+    // 入れ子の Catch の後の区画。Escape はいちばん内側へ飛ぶ
+    catches: Vec<cranelift_codegen::ir::Block>,
 }
 
 impl Body<'_, '_> {
@@ -333,6 +336,12 @@ impl Body<'_, '_> {
                     self.b.ins().return_(&[t, p]);
                     self.unreachable();
                 }
+                Stmt::Escape => {
+                    let target = *self.catches.last().expect("Escape は Catch の中だけ");
+                    let (t, p) = (self.int(ir::UNIT), self.int(0));
+                    self.b.ins().jump(target, &[t.into(), p.into()]);
+                    self.unreachable();
+                }
             }
         }
     }
@@ -402,6 +411,19 @@ impl Body<'_, '_> {
                 (ps[0], ps[1])
             }
             Expr::Block(b) => self.block(b),
+            // 抜けた時は Escape が unit を持って、この塊の後へ飛ぶ
+            Expr::Catch(b) => {
+                let merge = self.b.create_block();
+                self.b.append_block_param(merge, I64);
+                self.b.append_block_param(merge, I64);
+                self.catches.push(merge);
+                let (vt, vp) = self.block(b);
+                self.catches.pop();
+                self.b.ins().jump(merge, &[vt.into(), vp.into()]);
+                self.b.switch_to_block(merge);
+                let ps = self.b.block_params(merge);
+                (ps[0], ps[1])
+            }
             Expr::Prim(p, args) => self.prim(*p, args),
         }
     }
