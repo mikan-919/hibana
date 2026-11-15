@@ -2121,7 +2121,7 @@ impl Parser<'_> {
                         }
                     }
                     let span = Some(self.span_of(astart));
-                    self.expect("=>")?;
+                    self.expect("->")?;
                     let body = self.expr()?;
                     arms.push(Arm {
                         span,
@@ -2150,7 +2150,7 @@ impl Parser<'_> {
                         }
                     }
                     let span = Some(self.span_of(astart));
-                    self.expect("=>")?;
+                    self.expect("->")?;
                     let body = self.expr()?;
                     arms.push(Arm {
                         span,

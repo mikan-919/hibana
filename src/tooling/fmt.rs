@@ -197,7 +197,10 @@ pub fn format(src: &str) -> R<String> {
                 stack.pop();
                 line_base = line_base.min(stack.len());
             }
-            if space {
+            // 腕の -> の前に空白を2つ以上置いて揃えてあれば、そのまま残す
+            if c == "->" && gap.len() > 1 && gap.bytes().all(|b| b == b' ') {
+                out.push_str(gap);
+            } else if space {
                 out.push(' ');
             }
         }

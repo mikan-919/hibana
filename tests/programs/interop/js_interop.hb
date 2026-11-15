@@ -20,7 +20,7 @@ fn job(name: str, n: int) -> str ! Async {
         let x = util.later(n)
         a + to_str(x) + tag()
     } {
-        tag() => resume(name)
+        tag() -> resume(name)
     }
 }
 

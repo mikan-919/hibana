@@ -24,7 +24,7 @@ enum Shape {
 
 // match の腕の束縛
 macro add_circle ('add_circle' '(' s:Expr ',' y:Expr ')') -> Expr {
-    quote { match $s { Circle(total) => total + $y, Dot => $y } }
+    quote { match $s { Circle(total) -> total + $y, Dot -> $y } }
 }
 
 // 無名関数の引数

@@ -3,15 +3,15 @@ enum List<A> { Nil, Cons(x: A, xs: List<A>) }
 // 関数を受け取る関数。f の型は (A) -> B。A と B はジェネリック引数で、呼ぶ側では省ける
 fn map<A, B>(f: (A) -> B, l: List<A>) -> List<B> {
     match l {
-        Nil => Nil
-        Cons(x, xs) => Cons(f(x), map(f, xs))
+        Nil -> Nil
+        Cons(x, xs) -> Cons(f(x), map(f, xs))
     }
 }
 
 fn sum(l: List<int>) -> int {
     match l {
-        Nil => 0
-        Cons(x, xs) => x + sum(xs)
+        Nil -> 0
+        Cons(x, xs) -> x + sum(xs)
     }
 }
 

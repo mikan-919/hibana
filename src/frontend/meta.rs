@@ -454,7 +454,7 @@ fn bound_names(q: &[Q]) -> HashSet<String> {
             let j = if is(i + 1, &p("mut")) { i + 2 } else { i + 1 };
             out.extend(ident(j));
         }
-        // fn 名(引数) と fn(引数)、構築子(束縛) => の束縛。( の位置で、閉じ ) までを見る
+        // fn 名(引数) と fn(引数)、構築子(束縛) -> の束縛。( の位置で、閉じ ) までを見る
         let fn_params =
             is(i, &p("(")) && (is(i.wrapping_sub(1), &p("fn")) || is(i.wrapping_sub(2), &p("fn")));
         let arm = is(i, &p("(")) && ident(i.wrapping_sub(1)).is_some() && {
@@ -464,7 +464,7 @@ fn bound_names(q: &[Q]) -> HashSet<String> {
                 d += is(k, &p("(")) as i32 - is(k, &p(")")) as i32;
                 k += 1;
             }
-            is(k + 1, &p("=>"))
+            is(k + 1, &p("->"))
         };
         if fn_params || arm {
             // 中の名前で、直前が ( か , で、入れ子の括弧の外にあるもの

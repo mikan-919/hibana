@@ -31,14 +31,14 @@ fn find(id: str) -> User ! Fail<NotFound>, Need<Db>, Log {
 
 fn describe_or(id: str) -> str {
     handle describe(id) {
-        need() => resume(Db { prefix: 'u' })
-        log(msg) => resume()
+        need() -> resume(Db { prefix: 'u' })
+        log(msg) -> resume()
     }
 }
 
 fn describe(id: str) -> str ! Need<Db>, Log {
     handle find(id).name {
-        fail(e) => 'not found: ' + e.id
+        fail(e) -> 'not found: ' + e.id
     }
 }
 
@@ -51,7 +51,7 @@ fn each(xs: Vec<str>, f: (str) -> unit ! Log) ! Log {
 fn main() ! Async {
     put(all([fn() { describe_or('7') }, fn() { describe_or('0') }]))
     handle each(['a', 'b'], fn(x) { log('each ' + x) }) {
-        log(msg) => {
+        log(msg) -> {
             put(msg)
             resume()
         }
@@ -59,8 +59,8 @@ fn main() ! Async {
     let mut i = 0
     for id in ['1', '0', '2'] {
         let s = handle describe(id) {
-            need() => resume(Db { prefix: 'user' })
-            log(msg) => {
+            need() -> resume(Db { prefix: 'user' })
+            log(msg) -> {
                 put('[log] ' + msg)
                 resume()
             }

@@ -38,16 +38,16 @@ test 'json string escapes' {
     for n in 0..32 {
         let c = char_from_codepoint(n)
         assert_eq(str_or(parse_json(stringify(JStr(c))), 'bad'), c)
-        assert(match parse_json('"' + c + '"') { None => true _ => false })
+        assert(match parse_json('"' + c + '"') { None -> true _ -> false })
     }
     for s in ['"\\uD800"', '"\\uDC00"', '"\\uD800\\u0041"', '"\\uD800\\uDC0"', '"\\uXYZ0"', '"\\u12"', '"\\q"'] {
-        assert(match parse_json(s) { None => true _ => false })
+        assert(match parse_json(s) { None -> true _ -> false })
     }
 }
 
 test 'json int boundaries' {
-    assert(match parse_json('9223372036854775807') { Some(v) => match v { JInt(n) => n == 9223372036854775807 _ => false } None => false })
-    assert(match parse_json('-9223372036854775808') { Some(v) => match v { JInt(n) => n == -9223372036854775807 - 1 _ => false } None => false })
-    assert(match parse_json('9223372036854775808') { None => true _ => false })
-    assert(match parse_json('-9223372036854775809') { None => true _ => false })
+    assert(match parse_json('9223372036854775807') { Some(v) -> match v { JInt(n) -> n == 9223372036854775807 _ -> false } None -> false })
+    assert(match parse_json('-9223372036854775808') { Some(v) -> match v { JInt(n) -> n == -9223372036854775807 - 1 _ -> false } None -> false })
+    assert(match parse_json('9223372036854775808') { None -> true _ -> false })
+    assert(match parse_json('-9223372036854775809') { None -> true _ -> false })
 }

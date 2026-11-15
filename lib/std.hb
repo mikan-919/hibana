@@ -74,13 +74,13 @@ impl<A: Show> Show<Vec<A>> {
 impl<A: Eq> Eq<Option<A>> {
     fn eq(a: Option<A>, b: Option<A>) -> bool {
         match a {
-            None => match b {
-                None => true
-                Some(y) => false
+            None -> match b {
+                None -> true
+                Some(y) -> false
             }
-            Some(x) => match b {
-                None => false
-                Some(y) => eq(x, y)
+            Some(x) -> match b {
+                None -> false
+                Some(y) -> eq(x, y)
             }
         }
     }
@@ -89,8 +89,8 @@ impl<A: Eq> Eq<Option<A>> {
 impl<A: Show> Show<Option<A>> {
     fn show(o: Option<A>) -> str {
         match o {
-            None => 'None'
-            Some(x) => 'Some(' + show(x) + ')'
+            None -> 'None'
+            Some(x) -> 'Some(' + show(x) + ')'
         }
     }
 }
@@ -124,15 +124,15 @@ fn assert_eq<A: Eq + Show>(got: A, want: A) {
 // 中の値。None なら実行時エラーにする
 fn Option::unwrap<A>(o: Option<A>) -> A {
     match o {
-        Some(x) => x
-        None => panic('None を unwrap した')
+        Some(x) -> x
+        None -> panic('None を unwrap した')
     }
 }
 
 fn unwrap_or<A>(o: Option<A>, d: A) -> A {
     match o {
-        Some(x) => x
-        None => d
+        Some(x) -> x
+        None -> d
     }
 }
 
@@ -352,11 +352,11 @@ fn quote_str(s: str) -> str {
 
 fn stringify(j: Json) -> str {
     match j {
-        JNull => 'null'
-        JBool(b) => to_str(b)
-        JInt(n) => to_str(n)
-        JStr(s) => quote_str(s)
-        JArr(items) => {
+        JNull -> 'null'
+        JBool(b) -> to_str(b)
+        JInt(n) -> to_str(n)
+        JStr(s) -> quote_str(s)
+        JArr(items) -> {
             let mut out = '['
             let mut first = true
             for x in items {
@@ -366,7 +366,7 @@ fn stringify(j: Json) -> str {
             }
             out + ']'
         }
-        JObj(fields) => {
+        JObj(fields) -> {
             let mut out = '{'
             let mut first = true
             for f in fields {
@@ -591,8 +591,8 @@ fn parse_object(s: str, i: int) -> Parsed {
                 bad = true
             } else {
                 match k.value {
-                    JStr(key) => { fields = push(fields, Field { key: key, value: v.value }) }
-                    _ => { bad = true }
+                    JStr(key) -> { fields = push(fields, Field { key: key, value: v.value }) }
+                    _ -> { bad = true }
                 }
                 j = skip_ws(s, v.pos)
                 let c = char_at(s, j)
@@ -620,12 +620,12 @@ fn parse_json(s: str) -> Option<Json> {
 fn field(j: Json, key: str) -> Option<Json> {
     let mut r: Option<Json> = None
     match j {
-        JObj(fs) => {
+        JObj(fs) -> {
             for f in fs {
                 if f.key == key { r = Some(f.value) }
             }
         }
-        _ => {}
+        _ -> {}
     }
     r
 }
@@ -633,21 +633,21 @@ fn field(j: Json, key: str) -> Option<Json> {
 // 文字列なら、その値。違えば d
 fn str_or(j: Option<Json>, d: str) -> str {
     match j {
-        Some(v) => match v {
-            JStr(s) => s
-            _ => d
+        Some(v) -> match v {
+            JStr(s) -> s
+            _ -> d
         }
-        None => d
+        None -> d
     }
 }
 
 // 整数なら、その値。違えば d
 fn int_or(j: Option<Json>, d: int) -> int {
     match j {
-        Some(v) => match v {
-            JInt(n) => n
-            _ => d
+        Some(v) -> match v {
+            JInt(n) -> n
+            _ -> d
         }
-        None => d
+        None -> d
     }
 }

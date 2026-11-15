@@ -658,19 +658,19 @@ fn main() {
             ),
             ("fn main() ! Log { }", "Async だけ"),
             (
-                "fn main() { handle log('a') { log(m) => { resume()\nprint(m) } } }",
+                "fn main() { handle log('a') { log(m) -> { resume()\nprint(m) } } }",
                 "resume は腕の最後に置く",
             ),
             (
-                "fn main() { let x = handle ask() + 1 { ask() => resume('s') } }",
+                "fn main() { let x = handle ask() + 1 { ask() -> resume('s') } }",
                 "int が必要だが str",
             ),
             (
-                "fn main() { handle fail('a') { fail(m) => resume() } }",
+                "fn main() { handle fail('a') { fail(m) -> resume() } }",
                 "never の操作は resume できない",
             ),
             (
-                "fn main() { let x = handle 1 { ask() => resume(2) } }",
+                "fn main() { let x = handle 1 { ask() -> resume(2) } }",
                 "効果 Ask を起こしていない",
             ),
             (
@@ -682,7 +682,7 @@ fn main() {
                 "値として使えない",
             ),
             (
-                "fn twice(f: (int) -> int, x: int) -> int { f(f(x)) }\nfn n(x: int) -> int ! Log { x }\nfn main() { handle twice(n, 1) { log(m) => resume() } }",
+                "fn twice(f: (int) -> int, x: int) -> int { f(f(x)) }\nfn n(x: int) -> int ! Log { x }\nfn main() { handle twice(n, 1) { log(m) -> resume() } }",
                 "(int) -> int が必要だが (int) -> int ! Log",
             ),
             ("fn g() -> never { 1 }\nfn main() {}", "戻らない式で終わる"),
@@ -701,7 +701,7 @@ fn main() {
                 "! Log を書くか",
             ),
             (
-                "fn f() -> int { handle { return 1 } { ask() => resume(2) } }\nfn main() {}",
+                "fn f() -> int { handle { return 1 } { ask() -> resume(2) } }\nfn main() {}",
                 "return を使えない",
             ),
         ] {
@@ -710,7 +710,7 @@ fn main() {
         }
         // 腕の中の操作は外側の handle が処理し、resume しない腕は handle の値になる
         let src = format!(
-            "{p}fn main() {{\n let x = handle {{ handle {{ fail('in')\n 1 }} {{ fail(m) => {{ log(m)\n 2 }} }} }} {{ log(m) => {{ put('log ' + m)\n resume() }} }}\n put(x) }}"
+            "{p}fn main() {{\n let x = handle {{ handle {{ fail('in')\n 1 }} {{ fail(m) -> {{ log(m)\n 2 }} }} }} {{ log(m) -> {{ put('log ' + m)\n resume() }} }}\n put(x) }}"
         );
         assert_eq!(out(&src).unwrap(), "log in\n2\n");
     }
@@ -799,7 +799,7 @@ fn main() {
     // match の腕の型エラーは、腕のパターンの行を指す（Circle(a, b) は 8 行目）
     #[test]
     fn arm_error_has_line() {
-        let src = "enum Shape {\n    Circle(r: int),\n    Dot,\n}\nfn main() -> int {\n    let s = Circle(1)\n    match s {\n        Circle(a, b) => 1,\n        Dot => 0,\n    }\n}\n";
+        let src = "enum Shape {\n    Circle(r: int),\n    Dot,\n}\nfn main() -> int {\n    let s = Circle(1)\n    match s {\n        Circle(a, b) -> 1,\n        Dot -> 0,\n    }\n}\n";
         let e = out(src).unwrap_err();
         assert!(e.msg.starts_with("行 8: "), "{e:?}");
     }

@@ -24,7 +24,7 @@ fn main() {
     put(fold([1, 2, 3], 0, fn(a, x) { a + x }))
     // Log を起こす関数を渡すと、map も Log を起こす
     let r = handle map([1, 2], noisy) {
-        log(m) => {
+        log(m) -> {
             put(m)
             resume()
         }
@@ -32,7 +32,7 @@ fn main() {
     put(r)
     // 無名関数の本体が起こす Fail も、map の効果になる
     let s = handle map([1, 0, 2], fn(x) { if x == 0 { fail('zero') } else { x } }) {
-        fail(m) => []
+        fail(m) -> []
     }
     put(len(s))
 }

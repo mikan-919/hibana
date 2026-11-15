@@ -7,7 +7,7 @@ fn main() {
     let log: Ref<Vec<str>> = new_ref([])
     let add = fn(s: str) { write(log, push(read(log), s)) }
     handle work() {
-        tick() => {
+        tick() -> {
             write(n, read(n) + 1)
             resume()
         }

@@ -74,8 +74,8 @@ struct Point { x: int, y: int }
 
 fn area(s: Shape) -> int {
     match s {
-        Circle(r) => 3 * r * r
-        Rect(w, h) => w * h
+        Circle(r) -> 3 * r * r
+        Rect(w, h) -> w * h
     }
 }
 
@@ -147,7 +147,7 @@ fn work() ! Log {
 fn main() {
     put(twice(3))
     handle work() {
-        log(msg) => { put('log: ' + msg); resume() }
+        log(msg) -> { put('log: ' + msg); resume() }
     }
 }
 ```

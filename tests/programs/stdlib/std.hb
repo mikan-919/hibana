@@ -14,18 +14,18 @@ fn main() {
 fn parse_demo() {
     let src = ' { "name" : "al\\"ice", "age": -42, "tags": [1, true, null, []], "o": {} } '
     match parse_json(src) {
-        Some(j) => {
+        Some(j) -> {
             put(stringify(j))
             put(str_or(field(j, 'name'), '?'))
             put(int_or(field(j, 'age'), 0))
             put(int_or(field(j, 'nope'), 7))
         }
-        None => put('bad')
+        None -> put('bad')
     }
     for bad in ['', '[1,', '{"a" 1}', 'tru', '[1] x', '"abc'] {
         match parse_json(bad) {
-            Some(j) => put('unexpected ' + stringify(j))
-            None => put('none')
+            Some(j) -> put('unexpected ' + stringify(j))
+            None -> put('none')
         }
     }
 }
