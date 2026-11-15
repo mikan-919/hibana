@@ -144,25 +144,35 @@ pub fn link(program: &ir::Program, exports: &[String]) -> R<ir::Program> {
         .iter()
         .map(|f| (f.name.as_str(), f))
         .collect();
-    let mut pending: Vec<&str> = select_exports(program, exports)?
-        .iter()
-        .map(|f| f.name.as_str())
-        .collect();
+    let selected = select_exports(program, exports)?;
+    let mut pending: Vec<&str> = selected.iter().map(|f| f.name.as_str()).collect();
+    let has_str = |ts: &[ir::ValueType], r: ir::ValueType| {
+        ts.contains(&ir::ValueType::Str) || r == ir::ValueType::Str
+    };
     let mut visited = HashSet::new();
-    while let Some(name) = pending.pop() {
-        if !visited.insert(name) {
-            continue;
+    let mut strings = selected
+        .iter()
+        .any(|f| has_str(f.param_types(), f.result_type()));
+    // 境界で文字列を渡すなら、変換するランタイムの関数も含める
+    loop {
+        if strings {
+            pending.extend(["__str_in", "__str_out"]);
         }
-        if program.imports.iter().any(|f| f.name == name) {
-            continue;
-        }
-        let function = functions
-            .get(name)
-            .ok_or_else(|| format!("IR に呼び出し先 {name} が無い"))?;
-        for inst in &function.instructions {
-            if let ir::Instruction::Call(name, _) = inst {
-                pending.push(name);
+        while let Some(name) = pending.pop() {
+            if !visited.insert(name) {
+                continue;
             }
+            if let Some(f) = program.imports.iter().find(|f| f.name() == name) {
+                strings |= has_str(f.param_types(), f.result_type());
+                continue;
+            }
+            let function = functions
+                .get(name)
+                .ok_or_else(|| format!("IR に呼び出し先 {name} が無い"))?;
+            pending.extend(function.calls());
+        }
+        if !strings || visited.contains("__str_in") {
+            break;
         }
     }
     Ok(ir::Program {
@@ -234,7 +244,13 @@ export async function instantiate(bytes, imports = {}) {
     if (typeof callback !== "function") throw new TypeError("外部関数が必要: " + name);
     host[name] = (...args) => encode(callback(...args.map((value, i) => decode(value, params[i]))), result);
   }
-  const instantiated = await WebAssembly.instantiate(bytes, { ...imports, hibana_host: host });
+  // print の 1 行と現在時刻。print は imports.hibana.print（無ければ console.log）に渡す
+  const print = imports.hibana?.print ?? console.log;
+  const hibana = {
+    write: (fd, ptr, len) => print(decoder.decode(new Uint8Array(instance.exports.memory.buffer, Number(ptr), Number(len))).replace(/\n$/, "")),
+    now_ms: () => BigInt(Date.now()),
+  };
+  const instantiated = await WebAssembly.instantiate(bytes, { ...imports, hibana_host: host, hibana });
   instance = instantiated instanceof WebAssembly.Instance ? instantiated : instantiated.instance;
   const functions = Object.create(null);
   for (const [name, params, result] of __EXPORTS__) {
@@ -279,6 +295,8 @@ fn boundary_signature<'a>(
             ir::ValueType::Int => "int",
             ir::ValueType::Str => "str",
             ir::ValueType::Unit => "unit",
+            ir::ValueType::Bool => "bool",
+            ir::ValueType::Other => "other",
         }
     }
     (name, params.iter().map(ty).collect(), ty(result))

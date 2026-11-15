@@ -21,7 +21,7 @@ nix develop -c cargo run -q -- <ファイル>   # 実行（run / fmt / test / ls
 |---|---|
 | `src/frontend/` | 字句解析（`lexer.rs`）、構文解析（`parser.rs`）、名前解決（`resolve.rs`）、マクロ展開（`meta.rs`）、TypeScript の宣言の読み込み（`ts.rs`） |
 | `src/check/` | 型検査（`typeck.rs`）。依存型の評価、細分化型の証明、停止性・正値性の検査、効果、トレイト。`smt.rs` は Z3 の FFI |
-| `src/backend/` | インタプリタ（`eval.rs`）、JavaScript（`js.rs`）、C（`c.rs`）、整数 IR（`ir.rs`）、WebAssembly（`wasm.rs`） |
+| `src/backend/` | インタプリタ（`eval.rs`）、JavaScript（`js.rs`）、C（`c.rs`）、WASM とネイティブの共通の構造化 IR（`ir.rs`）、WebAssembly（`wasm.rs`）、Cranelift によるネイティブ（`native.rs`。libc なしの静的 ELF） |
 | `src/tooling/` | フォーマッタ（`fmt.rs`）、Language Server（`lsp.rs`）、シンボルの索引（`index.rs`） |
 | `src/project/` | ビルド（`build.rs`）、スクリプト（`scripts.rs`）、パッケージ管理（`pkg/`）、外部ツール管理（`tools/`） |
 | `src/cli/mod.rs` | CLI のコマンド処理と、全体のテスト（`mod tests`） |

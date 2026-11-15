@@ -9,7 +9,7 @@ pub mod project;
 pub mod tooling;
 
 // 既存の利用側は、機能別ディレクトリへの移動後も同じパスで参照できる。
-pub use backend::{c, eval, ir, js, wasm};
+pub use backend::{c, eval, ir, js, native, wasm};
 pub use check::{smt, typeck};
 pub use frontend::{lexer, meta, parser};
 pub use project::{build, pkg};
@@ -42,7 +42,8 @@ pub fn to_ir(src: &str) -> error::R<String> {
 }
 
 pub fn to_wasm(src: &str) -> error::R<Vec<u8>> {
-    let ir = pipeline::lower(&checked(src, pipeline::Kind::Executable)?, None)?;
+    let main = ["main".to_string()];
+    let ir = pipeline::lower(&checked(src, pipeline::Kind::Executable)?, Some(&main))?;
     pipeline::emit_wasm(&ir, None)
 }
 
@@ -76,4 +77,11 @@ pub fn to_web(src: &str, exports: &[String]) -> error::R<WebOutput> {
 
 pub fn to_c(src: &str) -> error::R<String> {
     pipeline::emit_c(&checked(src, pipeline::Kind::Executable)?)
+}
+
+/// libc を使わない静的な ELF の実行ファイルを作る。main から辿れる関数だけを含める。
+pub fn to_native(src: &str) -> error::R<Vec<u8>> {
+    let main = ["main".to_string()];
+    let ir = pipeline::lower(&checked(src, pipeline::Kind::Executable)?, Some(&main))?;
+    native::emit(&ir)
 }

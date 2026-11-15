@@ -1,29 +1,65 @@
-// 整数の IR を WebAssembly に変換する。
-use crate::ir::{Instruction as Ir, Program};
+// 構造化 IR を WebAssembly に変換する。
+// IR の値（型の番号と中身）は 2 つの i64 で表し、関数は 2 つの i64 を返す。
+// 公開関数と外部関数の境界では、int は i64、str は (長さ << 32) | 位置 の i64 に変換する。
+// メモリ: [0, 8) は使わない、[8, 72) はランタイムの状態（runtime.hb の __static）、その後に文字列のリテラル、ヒープ。
+use crate::ir::{self, Block, Expr, Node, Prim, Program, Stmt, ValueType};
 use std::collections::HashMap;
 use std::io::Write;
 use wasm_encoder::{
-    BlockType, CodeSection, ConstExpr, DataSection, EntityType, ExportKind, ExportSection,
-    Function, FunctionSection, GlobalSection, GlobalType, ImportSection, Instruction as I,
-    MemorySection, MemoryType, Module, TypeSection, ValType,
+    BlockType, CodeSection, ConstExpr, DataSection, ElementSection, Elements, EntityType,
+    ExportKind, ExportSection, Function, FunctionSection, ImportSection, Instruction as I, MemArg,
+    MemorySection, MemoryType, Module, RefType, TableSection, TableType, TypeSection, ValType,
 };
 
-// WASM の取り込みに整数の出力を渡して main を呼ぶ。
+const STATIC: i64 = 8;
+const FAIL_AT: i64 = 24;
+const LITERALS: u32 = 72;
+
+struct Host<W> {
+    out: W,
+}
+
+// WASM の取り込みに出力を渡して main を呼ぶ。
 pub fn run<W: Write + 'static>(bytes: &[u8], out: W) -> crate::error::R<W> {
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, bytes)
         .map_err(|e| format!("WASM の読み込みに失敗した: {e}"))?;
-    let mut store = wasmtime::Store::new(&engine, out);
+    let mut store = wasmtime::Store::new(&engine, Host { out });
     let mut linker = wasmtime::Linker::new(&engine);
     linker
         .func_wrap(
             "hibana",
-            "print",
-            |mut caller: wasmtime::Caller<'_, W>, value: i64| -> wasmtime::Result<()> {
-                writeln!(caller.data_mut(), "{value}")?;
+            "write",
+            |mut caller: wasmtime::Caller<'_, Host<W>>,
+             fd: i64,
+             ptr: i64,
+             len: i64|
+             -> wasmtime::Result<()> {
+                let memory = caller
+                    .get_export("memory")
+                    .and_then(|e| e.into_memory())
+                    .ok_or_else(|| wasmtime::Error::msg("WASM に memory が無い"))?;
+                let (ptr, len) = (ptr as usize, len as usize);
+                let bytes = memory
+                    .data(&caller)
+                    .get(ptr..ptr + len)
+                    .ok_or_else(|| wasmtime::Error::msg("文字列が memory の範囲外"))?
+                    .to_vec();
+                if fd == 1 {
+                    caller.data_mut().out.write_all(&bytes)?;
+                } else {
+                    std::io::stderr().write_all(&bytes)?;
+                }
                 Ok(())
             },
         )
+        .and_then(|l| {
+            l.func_wrap("hibana", "now_ms", || -> i64 {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis() as i64)
+            })
+        })
         .map_err(|e| format!("WASM の出力関数を登録できない: {e}"))?;
     let instance = linker
         .instantiate(&mut store, &module)
@@ -31,293 +67,733 @@ pub fn run<W: Write + 'static>(bytes: &[u8], out: W) -> crate::error::R<W> {
     let main = instance
         .get_typed_func::<(), ()>(&mut store, "main")
         .map_err(|e| format!("WASM の main を呼べない: {e}"))?;
-    main.call(&mut store, ()).map_err(|e| {
+    if let Err(e) = main.call(&mut store, ()) {
         if let Some(error) = e.downcast_ref::<std::io::Error>() {
-            return crate::error::Error::from(format!("出力に失敗した: {error}"));
+            return Err(format!("出力に失敗した: {error}").into());
         }
-        let msg = match e.downcast_ref::<wasmtime::Trap>() {
-            Some(wasmtime::Trap::IntegerDivisionByZero) => "0 で除算した".to_string(),
-            Some(wasmtime::Trap::IntegerOverflow | wasmtime::Trap::UnreachableCodeReached) => {
-                "オーバーフロー".to_string()
-            }
-            _ => format!("WASM の実行に失敗した: {e}"),
-        };
-        crate::error::Error::from(msg)
-    })?;
-    Ok(store.into_data())
+        // ランタイムの __fail が書いた文字列があれば、それを実行時エラーにする
+        let message = instance.get_memory(&mut store, "memory").and_then(|m| {
+            let data = m.data(&store);
+            let word = |at: usize| {
+                Some(u64::from_le_bytes(data.get(at..at + 8)?.try_into().ok()?) as usize)
+            };
+            let p = word(FAIL_AT as usize).filter(|p| *p != 0)?;
+            let len = word(p)?;
+            String::from_utf8(data.get(p + 8..p + 8 + len)?.to_vec()).ok()
+        });
+        return Err(message
+            .unwrap_or_else(|| format!("WASM の実行に失敗した: {e}"))
+            .into());
+    }
+    Ok(store.into_data().out)
 }
 
 pub fn emit(program: &Program) -> Vec<u8> {
     emit_selected(program, None)
 }
 
+fn mem(offset: u64, align: u32) -> MemArg {
+    MemArg {
+        offset,
+        align,
+        memory_index: 0,
+    }
+}
+
+// 型の並び。同じ型は 1 つにまとめる
+#[derive(Default)]
+struct Types {
+    section: TypeSection,
+    seen: HashMap<(u32, u32), u32>,
+}
+
+impl Types {
+    fn get(&mut self, params: u32, results: u32) -> u32 {
+        let n = self.seen.len() as u32;
+        *self.seen.entry((params, results)).or_insert_with(|| {
+            self.section.ty().function(
+                vec![ValType::I64; params as usize],
+                vec![ValType::I64; results as usize],
+            );
+            n
+        })
+    }
+}
+
+fn raw_results(t: ValueType) -> u32 {
+    u32::from(t != ValueType::Unit)
+}
+
+// 公開する関数は selected、None なら境界で渡せる利用者の関数すべて
 pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> {
-    let has_print = program
+    // 文字列のリテラルを並べる。[長さ][バイト列] を 8 バイト境界に置く
+    let mut literals: HashMap<String, i64> = HashMap::new();
+    let mut data = Vec::new();
+    let mut writes = false;
+    let mut now = false;
+    let mut table: Vec<&str> = Vec::new();
+    for f in &program.functions {
+        f.each(&mut |n| match n {
+            Node::Expr(Expr::Str(s)) if !literals.contains_key(s) => {
+                while data.len() % 8 != 0 {
+                    data.push(0);
+                }
+                literals.insert(s.clone(), LITERALS as i64 + data.len() as i64);
+                data.extend((s.len() as u64).to_le_bytes());
+                data.extend(s.as_bytes());
+            }
+            Node::Expr(Expr::Prim(Prim::Write, _)) => writes = true,
+            Node::Expr(Expr::Prim(Prim::Now, _)) => now = true,
+            Node::Expr(Expr::Func(name)) if !table.contains(&name.as_str()) => table.push(name),
+            _ => {}
+        });
+    }
+    while data.len() % 8 != 0 {
+        data.push(0);
+    }
+    let heap = LITERALS as u64 + data.len() as u64;
+    let pages = heap.div_ceil(65536).max(1);
+    let exported: Vec<&ir::Function> = program
         .functions
         .iter()
-        .any(|f| f.instructions.iter().any(|i| matches!(i, Ir::Print(_))));
-    let offset = u32::from(has_print) + program.imports.len() as u32;
-    let mut indices: HashMap<&str, u32> = HashMap::new();
-    let mut results = HashMap::new();
-    for (i, f) in program.imports.iter().enumerate() {
-        indices.insert(&f.name, u32::from(has_print) + i as u32);
-        results.insert(f.name.as_str(), f.result_type);
-    }
-    for (i, f) in program.functions.iter().enumerate() {
-        indices.insert(&f.name, offset + i as u32);
-        results.insert(f.name.as_str(), f.result_type);
-    }
-    let strings = program.functions.iter().any(|f| {
-        f.param_types.contains(&crate::ir::ValueType::Str)
-            || f.result_type == crate::ir::ValueType::Str
-            || f.instructions.iter().any(|i| matches!(i, Ir::Str(_)))
-    }) || program.imports.iter().any(|f| {
-        f.param_types.contains(&crate::ir::ValueType::Str)
-            || f.result_type == crate::ir::ValueType::Str
-    });
-    let mut literals = HashMap::new();
-    let mut data = DataSection::new();
-    let mut heap = 8u32;
-    for f in &program.functions {
-        for inst in &f.instructions {
-            if let Ir::Str(s) = inst {
-                if !literals.contains_key(s) {
-                    literals.insert(s.clone(), ((s.len() as u64) << 32 | heap as u64) as i64);
-                    data.active(0, &ConstExpr::i32_const(heap as i32), s.bytes());
-                    heap = heap
-                        .checked_add(s.len() as u32)
-                        .expect("文字列領域が大きすぎる");
-                }
+        .filter(|f| match selected {
+            Some(names) => names.contains(&f.name),
+            // 文字列を渡す関数は、変換するランタイムの関数がある時だけ公開する
+            None => {
+                f.boundary()
+                    && (!(f.param_types.contains(&ValueType::Str)
+                        || f.result_type == ValueType::Str)
+                        || program.functions.iter().any(|g| g.name == "__str_in"))
             }
-        }
-    }
-    let mut types = TypeSection::new();
-    if has_print {
-        types.ty().function([ValType::I64], []);
+        })
+        .collect();
+    let has_str =
+        |ts: &[ValueType], r: ValueType| ts.contains(&ValueType::Str) || r == ValueType::Str;
+    let strings = exported
+        .iter()
+        .any(|f| has_str(&f.param_types, f.result_type))
+        || program
+            .imports
+            .iter()
+            .any(|f| has_str(&f.param_types, f.result_type));
+
+    let mut types = Types::default();
+    let mut imports = ImportSection::new();
+    let mut count = 0u32;
+    let mut import = |types: &mut Types, module: &str, name: &str, params: u32, results: u32| {
+        imports.import(
+            module,
+            name,
+            EntityType::Function(types.get(params, results)),
+        );
+        count += 1;
+        count - 1
+    };
+    let write = writes.then(|| import(&mut types, "hibana", "write", 3, 0));
+    let now = now.then(|| import(&mut types, "hibana", "now_ms", 0, 1));
+    let hosts: Vec<u32> = program
+        .imports
+        .iter()
+        .map(|f| {
+            import(
+                &mut types,
+                "hibana_host",
+                &f.name,
+                f.param_types.len() as u32,
+                raw_results(f.result_type),
+            )
+        })
+        .collect();
+    let imported = count;
+    // 定義する関数の番号: IR の関数、外部関数の受け口、公開関数の入口、確保と初期化
+    let mut indices: HashMap<&str, u32> = HashMap::new();
+    for f in &program.functions {
+        indices.insert(&f.name, count);
+        count += 1;
     }
     for f in &program.imports {
-        types.ty().function(
-            vec![ValType::I64; f.param_types.len()],
-            if f.result_type != crate::ir::ValueType::Unit {
-                vec![ValType::I64]
-            } else {
-                vec![]
-            },
-        );
+        indices.insert(&f.name, count);
+        count += 1;
     }
-    for f in &program.functions {
-        types.ty().function(
-            vec![ValType::I64; f.params],
-            if f.result.is_some() {
-                vec![ValType::I64]
-            } else {
-                vec![]
-            },
-        );
-    }
-    let helper_type = offset + program.functions.len() as u32;
-    if strings {
-        types.ty().function([ValType::I32], [ValType::I32]);
-        types.ty().function([], []);
-    }
-    let mut imports = ImportSection::new();
-    if has_print {
-        imports.import("hibana", "print", EntityType::Function(0));
-    }
-    for (i, f) in program.imports.iter().enumerate() {
-        imports.import(
-            "hibana_host",
-            &f.name,
-            EntityType::Function(u32::from(has_print) + i as u32),
-        );
-    }
+    let wrappers = count;
+    count += exported.len() as u32;
+    let alloc = count;
+
     let mut functions = FunctionSection::new();
-    let mut exports = ExportSection::new();
     let mut code = CodeSection::new();
-    for (index, f) in program.functions.iter().enumerate() {
-        functions.function(index as u32 + offset);
-        if selected.is_none_or(|names| names.contains(&f.name)) {
-            exports.export(&f.name, ExportKind::Func, index as u32 + offset);
-        }
-        let mut body = Function::new([(f.instructions.len() as u32, ValType::I64)]);
-        for (i, inst) in f.instructions.iter().enumerate() {
-            let result = (f.params + i) as u32;
-            match inst {
-                Ir::Int(n) => {
-                    body.instruction(&I::I64Const(*n));
-                    body.instruction(&I::LocalSet(result));
-                }
-                Ir::Str(s) => {
-                    body.instruction(&I::I64Const(literals[s]));
-                    body.instruction(&I::LocalSet(result));
-                }
-                Ir::Call(name, args) => {
-                    for arg in args {
-                        body.instruction(&I::LocalGet(*arg as u32));
-                    }
-                    body.instruction(&I::Call(indices[name.as_str()]));
-                    if results[name.as_str()] == crate::ir::ValueType::Unit {
-                        body.instruction(&I::I64Const(0));
-                    }
-                    body.instruction(&I::LocalSet(result));
-                }
-                Ir::Print(value) => {
-                    body.instruction(&I::LocalGet(*value as u32));
-                    body.instruction(&I::Call(0));
-                }
-                Ir::Binary(op, a, b) => binary(&mut body, op, *a as u32, *b as u32, result),
+    let block_type = types.get(0, 2);
+    let mut cx = Cx {
+        indices: &indices,
+        literals: &literals,
+        table: &table,
+        write,
+        now,
+        block_type,
+    };
+    for f in &program.functions {
+        functions.function(types.get(2 * f.params, 2));
+        let mut e = Emit {
+            out: Vec::new(),
+            locals: 2 * f.locals,
+            cx: &mut cx,
+            types: &mut types,
+            depth: 0,
+            catches: Vec::new(),
+        };
+        e.stmts(&f.body);
+        e.out.extend([I::I64Const(0), I::I64Const(0), I::End]);
+        let extra = e.locals - 2 * f.params;
+        code.function(&function(&[(extra, ValType::I64)], &e.out));
+    }
+    // 外部関数の受け口。値を境界の形に変えて呼ぶ
+    for (f, host) in program.imports.iter().zip(&hosts) {
+        functions.function(types.get(2 * f.param_types.len() as u32, 2));
+        let t = 2 * f.param_types.len() as u32;
+        let mut out = Vec::new();
+        for (i, p) in f.param_types.iter().enumerate() {
+            let i = 2 * i as u32;
+            match p {
+                ValueType::Str => out.extend([
+                    I::LocalGet(i),
+                    I::LocalGet(i + 1),
+                    I::Call(indices["__str_out"]),
+                    I::LocalSet(t),
+                    I::Drop,
+                    I::LocalGet(t),
+                ]),
+                _ => out.push(I::LocalGet(i + 1)),
             }
         }
-        if let Some(value) = f.result {
-            body.instruction(&I::LocalGet(value as u32));
+        out.push(I::Call(*host));
+        out.extend(from_raw(f.result_type, t, &indices));
+        out.push(I::End);
+        code.function(&function(&[(1, ValType::I64)], &out));
+    }
+    // 公開関数の入口。境界の形から値に変えて呼ぶ
+    let mut exports = ExportSection::new();
+    for (k, f) in exported.iter().enumerate() {
+        let n = f.param_types.len() as u32;
+        functions.function(types.get(n, raw_results(f.result_type)));
+        exports.export(&f.name, ExportKind::Func, wrappers + k as u32);
+        let mut out = Vec::new();
+        for (i, p) in f.param_types.iter().enumerate() {
+            out.extend(from_raw(*p, i as u32, &indices).into_iter().skip(1));
         }
-        body.instruction(&I::End);
-        code.function(&body);
+        out.push(I::Call(indices[f.name.as_str()]));
+        match f.result_type {
+            ValueType::Unit => out.extend([I::Drop, I::Drop]),
+            ValueType::Str => out.extend([
+                I::Call(indices["__str_out"]),
+                I::LocalSet(n),
+                I::Drop,
+                I::LocalGet(n),
+            ]),
+            _ => out.extend([I::LocalSet(n), I::Drop, I::LocalGet(n)]),
+        }
+        out.push(I::End);
+        code.function(&function(&[(1, ValType::I64)], &out));
+    }
+    if strings {
+        // JavaScript の接続コードが文字列を書く領域を確保する。リセットは確保の状態を最初に戻す
+        functions.function(types_i32(&mut types));
+        let mut out = vec![I::I64Const(ir::INT), I::LocalGet(0), I::I64ExtendI32U];
+        out.extend([
+            I::Call(indices["__alloc"]),
+            I::LocalSet(1),
+            I::Drop,
+            I::LocalGet(1),
+            I::I32WrapI64,
+            I::End,
+        ]);
+        let mut f = Function::new([(1, ValType::I64)]);
+        for i in &out {
+            f.instruction(i);
+        }
+        code.function(&f);
+        functions.function(types.get(0, 0));
+        let reset = [
+            I::I32Const(STATIC as i32),
+            I::I64Const(heap as i64),
+            I::I64Store(mem(0, 3)),
+            I::I32Const(STATIC as i32 + 8),
+            I::MemorySize(0),
+            I::I64ExtendI32U,
+            I::I64Const(16),
+            I::I64Shl,
+            I::I64Store(mem(0, 3)),
+            I::End,
+        ];
+        code.function(&function(&[], &reset));
+        exports.export("__hibana_alloc", ExportKind::Func, alloc);
+        exports.export("__hibana_reset", ExportKind::Func, alloc + 1);
+    }
+    if strings || writes || selected.is_none() {
+        exports.export("memory", ExportKind::Memory, 0);
     }
     let mut memory = MemorySection::new();
-    let mut globals = GlobalSection::new();
-    if strings {
-        memory.memory(MemoryType {
-            minimum: (heap as u64).div_ceil(65536).max(1),
-            maximum: Some(65536),
-            memory64: false,
+    memory.memory(MemoryType {
+        minimum: pages,
+        maximum: Some(65536),
+        memory64: false,
+        shared: false,
+        page_size_log2: None,
+    });
+    let mut init = Vec::new();
+    init.extend(heap.to_le_bytes());
+    init.extend((pages * 65536).to_le_bytes());
+    // 実行時エラーの文字列、中断、処理中の handle は 0 から始める
+    init.extend([0u8; 48]);
+    init.extend(data);
+    let mut datas = DataSection::new();
+    datas.active(0, &ConstExpr::i32_const(STATIC as i32), init);
+    let mut tables = TableSection::new();
+    let mut elements = ElementSection::new();
+    if !table.is_empty() {
+        tables.table(TableType {
+            element_type: RefType::FUNCREF,
+            table64: false,
+            minimum: table.len() as u64,
+            maximum: Some(table.len() as u64),
             shared: false,
-            page_size_log2: None,
         });
-        globals.global(
-            GlobalType {
-                val_type: ValType::I32,
-                mutable: true,
-                shared: false,
-            },
-            &ConstExpr::i32_const(heap as i32),
+        let funcs: Vec<u32> = table.iter().map(|n| indices[n]).collect();
+        elements.active(
+            Some(0),
+            &ConstExpr::i32_const(0),
+            Elements::Functions(funcs.into()),
         );
-        exports.export("memory", ExportKind::Memory, 0);
-        exports.export("__hibana_alloc", ExportKind::Func, helper_type);
-        exports.export("__hibana_reset", ExportKind::Func, helper_type + 1);
-        functions.function(helper_type);
-        functions.function(helper_type + 1);
-        // ponytail: 呼び出し単位の領域。返却後に reset できる値だけを扱い、永続オブジェクトは未対応。
-        let mut alloc = Function::new([(2, ValType::I32)]);
-        alloc.instruction(&I::GlobalGet(0));
-        alloc.instruction(&I::LocalTee(1));
-        alloc.instruction(&I::LocalGet(0));
-        alloc.instruction(&I::I32Add);
-        alloc.instruction(&I::LocalTee(2));
-        alloc.instruction(&I::LocalGet(1));
-        alloc.instruction(&I::I32LtU);
-        trap_if(&mut alloc);
-        // 必要なページ数は i64 で計算し、32 ビットの加算の周回を避ける。
-        alloc.instruction(&I::LocalGet(2));
-        alloc.instruction(&I::I64ExtendI32U);
-        alloc.instruction(&I::I64Const(65535));
-        alloc.instruction(&I::I64Add);
-        alloc.instruction(&I::I64Const(16));
-        alloc.instruction(&I::I64ShrU);
-        alloc.instruction(&I::I32WrapI64);
-        alloc.instruction(&I::MemorySize(0));
-        alloc.instruction(&I::I32GtU);
-        alloc.instruction(&I::If(BlockType::Empty));
-        alloc.instruction(&I::LocalGet(2));
-        alloc.instruction(&I::I64ExtendI32U);
-        alloc.instruction(&I::I64Const(65535));
-        alloc.instruction(&I::I64Add);
-        alloc.instruction(&I::I64Const(16));
-        alloc.instruction(&I::I64ShrU);
-        alloc.instruction(&I::I32WrapI64);
-        alloc.instruction(&I::MemorySize(0));
-        alloc.instruction(&I::I32Sub);
-        alloc.instruction(&I::MemoryGrow(0));
-        alloc.instruction(&I::I32Const(-1));
-        alloc.instruction(&I::I32Eq);
-        trap_if(&mut alloc);
-        alloc.instruction(&I::End);
-        alloc.instruction(&I::LocalGet(2));
-        alloc.instruction(&I::GlobalSet(0));
-        alloc.instruction(&I::LocalGet(1));
-        alloc.instruction(&I::End);
-        code.function(&alloc);
-        let mut reset = Function::new([]);
-        reset.instruction(&I::I32Const(heap as i32));
-        reset.instruction(&I::GlobalSet(0));
-        reset.instruction(&I::End);
-        code.function(&reset);
     }
     let mut module = Module::new();
-    module.section(&types);
-    if has_print || !program.imports.is_empty() {
+    module.section(&types.section);
+    if imported > 0 {
         module.section(&imports);
     }
     module.section(&functions);
-    if strings {
-        module.section(&memory);
-        module.section(&globals);
+    if !table.is_empty() {
+        module.section(&tables);
     }
+    module.section(&memory);
     module.section(&exports);
-    module.section(&code);
-    if strings {
-        module.section(&data);
+    if !table.is_empty() {
+        module.section(&elements);
     }
+    module.section(&code);
+    module.section(&datas);
     module.finish()
 }
 
-// WASM の整数演算は周回するため、hibana の範囲外エラーを検査する。
-fn binary(f: &mut Function, op: &str, a: u32, b: u32, result: u32) {
-    if op == "%" {
-        f.instruction(&I::LocalGet(a));
-        f.instruction(&I::I64Const(i64::MIN));
-        f.instruction(&I::I64Eq);
-        f.instruction(&I::LocalGet(b));
-        f.instruction(&I::I64Const(-1));
-        f.instruction(&I::I64Eq);
-        f.instruction(&I::I32And);
-        trap_if(f);
-    }
-    f.instruction(&I::LocalGet(a));
-    f.instruction(&I::LocalGet(b));
-    f.instruction(&match op {
-        "+" => I::I64Add,
-        "-" => I::I64Sub,
-        "*" => I::I64Mul,
-        "/" => I::I64DivS,
-        "%" => I::I64RemS,
-        _ => unreachable!(),
-    });
-    f.instruction(&I::LocalSet(result));
-    match op {
-        "+" | "-" => {
-            f.instruction(&I::LocalGet(a));
-            f.instruction(&I::LocalGet(if op == "+" { result } else { b }));
-            f.instruction(&I::I64Xor);
-            f.instruction(&I::LocalGet(if op == "+" { b } else { a }));
-            f.instruction(&I::LocalGet(result));
-            f.instruction(&I::I64Xor);
-            f.instruction(&I::I64And);
-            f.instruction(&I::I64Const(0));
-            f.instruction(&I::I64LtS);
-            trap_if(f);
-        }
-        "*" => {
-            f.instruction(&I::LocalGet(a));
-            f.instruction(&I::I64Eqz);
-            f.instruction(&I::I32Eqz);
-            f.instruction(&I::If(BlockType::Empty));
-            f.instruction(&I::LocalGet(result));
-            f.instruction(&I::LocalGet(a));
-            f.instruction(&I::I64DivS);
-            f.instruction(&I::LocalGet(b));
-            f.instruction(&I::I64Ne);
-            trap_if(f);
-            f.instruction(&I::End);
-        }
-        _ => {}
+fn types_i32(types: &mut Types) -> u32 {
+    // (i32) -> i32 は境界の確保だけで使う。i64 の型と番号が重ならないよう最後に足す
+    let n = types.seen.len() as u32;
+    types.section.ty().function([ValType::I32], [ValType::I32]);
+    types.seen.insert((u32::MAX, u32::MAX), n);
+    n
+}
+
+// 境界の形の値（局所変数 at）を IR の値にする。先頭は捨ててよい LocalGet ではなく型の番号
+fn from_raw(t: ValueType, at: u32, indices: &HashMap<&str, u32>) -> Vec<I<'static>> {
+    match t {
+        ValueType::Unit => vec![I::Nop, I::I64Const(ir::UNIT), I::I64Const(0)],
+        ValueType::Str => vec![
+            I::LocalSet(at),
+            I::I64Const(ir::INT),
+            I::LocalGet(at),
+            I::Call(indices["__str_in"]),
+        ],
+        _ => vec![I::LocalSet(at), I::I64Const(ir::INT), I::LocalGet(at)],
     }
 }
 
-fn trap_if(f: &mut Function) {
-    f.instruction(&I::If(BlockType::Empty));
-    f.instruction(&I::Unreachable);
-    f.instruction(&I::End);
+fn function(locals: &[(u32, ValType)], body: &[I<'static>]) -> Function {
+    let mut f = Function::new(locals.iter().copied());
+    for i in body {
+        f.instruction(i);
+    }
+    f
+}
+
+struct Cx<'a> {
+    indices: &'a HashMap<&'a str, u32>,
+    literals: &'a HashMap<String, i64>,
+    table: &'a [&'a str],
+    write: Option<u32>,
+    now: Option<u32>,
+    block_type: u32,
+}
+
+struct Emit<'a, 'b> {
+    out: Vec<I<'static>>,
+    // 局所変数（値 1 つに 2 つ）と演算用の一時変数を合わせた数
+    locals: u32,
+    cx: &'b mut Cx<'a>,
+    types: &'b mut Types,
+    // 入れ子になった block・loop・if の数と、Catch の位置（br の深さを数える）
+    depth: u32,
+    catches: Vec<u32>,
+}
+
+impl Emit<'_, '_> {
+    fn temp(&mut self) -> u32 {
+        self.locals += 1;
+        self.locals - 1
+    }
+
+    fn call(&mut self, name: &str) {
+        self.out.push(I::Call(self.cx.indices[name]));
+    }
+
+    // 失敗した時にランタイムの関数を呼ぶ。その関数は戻らない
+    fn fail_if(&mut self, name: &str) {
+        self.out.push(I::If(BlockType::Empty));
+        self.call(name);
+        self.out.extend([I::Unreachable, I::End]);
+    }
+
+    fn stmts(&mut self, stmts: &[Stmt]) {
+        for s in stmts {
+            match s {
+                Stmt::Set(i, e) => {
+                    self.expr(e);
+                    self.out
+                        .extend([I::LocalSet(2 * i + 1), I::LocalSet(2 * i)]);
+                }
+                Stmt::Eval(e) => {
+                    self.expr(e);
+                    self.out.extend([I::Drop, I::Drop]);
+                }
+                Stmt::While(c, body) => {
+                    self.out.push(I::Block(BlockType::Empty));
+                    self.out.push(I::Loop(BlockType::Empty));
+                    self.depth += 2;
+                    self.payload(c);
+                    self.out.extend([I::I64Eqz, I::BrIf(1)]);
+                    self.stmts(body);
+                    self.depth -= 2;
+                    self.out.extend([I::Br(0), I::End, I::End]);
+                }
+                Stmt::Return(e) => {
+                    self.expr(e);
+                    self.out.push(I::Return);
+                }
+                Stmt::Escape => {
+                    let target = *self.catches.last().expect("Escape は Catch の中だけ");
+                    self.out.extend([
+                        I::I64Const(ir::UNIT),
+                        I::I64Const(0),
+                        I::Br(self.depth - target),
+                    ]);
+                }
+            }
+        }
+    }
+
+    fn block(&mut self, b: &Block) {
+        self.stmts(&b.stmts);
+        self.expr(&b.value);
+    }
+
+    // 値の中身だけを積む
+    fn payload(&mut self, e: &Expr) {
+        if let Expr::Const(_, n) = e {
+            self.out.push(I::I64Const(*n));
+            return;
+        }
+        if let Expr::Local(i) = e {
+            self.out.push(I::LocalGet(2 * i + 1));
+            return;
+        }
+        self.expr(e);
+        let t = self.temp();
+        self.out.extend([I::LocalSet(t), I::Drop, I::LocalGet(t)]);
+    }
+
+    // 中身を一時変数に置く
+    fn payload_temp(&mut self, e: &Expr) -> u32 {
+        if let Expr::Local(i) = e {
+            return 2 * i + 1;
+        }
+        self.payload(e);
+        let t = self.temp();
+        self.out.push(I::LocalSet(t));
+        t
+    }
+
+    fn expr(&mut self, e: &Expr) {
+        match e {
+            Expr::Const(t, n) => self.out.extend([I::I64Const(*t), I::I64Const(*n)]),
+            Expr::Str(s) => self
+                .out
+                .extend([I::I64Const(ir::STR), I::I64Const(self.cx.literals[s])]),
+            Expr::Local(i) => self
+                .out
+                .extend([I::LocalGet(2 * i), I::LocalGet(2 * i + 1)]),
+            Expr::Func(n) => {
+                let k = self.cx.table.iter().position(|x| x == n).unwrap();
+                self.out
+                    .extend([I::I64Const(ir::INT), I::I64Const(k as i64)]);
+            }
+            Expr::Call(name, args) => {
+                for a in args {
+                    self.expr(a);
+                }
+                self.call(name);
+            }
+            Expr::CallIndirect(g, args) => {
+                self.expr(g);
+                let (gt, gp) = (self.temp(), self.temp());
+                self.out
+                    .extend([I::LocalSet(gp), I::LocalTee(gt), I::LocalGet(gp)]);
+                for a in args {
+                    self.expr(a);
+                }
+                let ty = self.types.get(2 + 2 * args.len() as u32, 2);
+                self.out.extend([
+                    I::LocalGet(gp),
+                    I::I32WrapI64,
+                    I::I64Load(mem(0, 3)),
+                    I::I32WrapI64,
+                    I::CallIndirect {
+                        type_index: ty,
+                        table_index: 0,
+                    },
+                ]);
+            }
+            Expr::If(c, t, f) => {
+                self.payload(c);
+                self.out.extend([
+                    I::I64Eqz,
+                    I::I32Eqz,
+                    I::If(BlockType::FunctionType(self.cx.block_type)),
+                ]);
+                self.depth += 1;
+                self.block(t);
+                self.out.push(I::Else);
+                self.block(f);
+                self.depth -= 1;
+                self.out.push(I::End);
+            }
+            Expr::Block(b) => self.block(b),
+            // 抜けた時は Escape が unit を積んで、この塊の終わりへ飛ぶ
+            Expr::Catch(b) => {
+                self.out
+                    .push(I::Block(BlockType::FunctionType(self.cx.block_type)));
+                self.depth += 1;
+                self.catches.push(self.depth);
+                self.block(b);
+                self.catches.pop();
+                self.depth -= 1;
+                self.out.push(I::End);
+            }
+            Expr::Prim(p, args) => self.prim(*p, args),
+        }
+    }
+
+    fn prim(&mut self, p: Prim, args: &[Expr]) {
+        use Prim::*;
+        match p {
+            Tag => {
+                self.expr(&args[0]);
+                let t = self.temp();
+                self.out.extend([
+                    I::Drop,
+                    I::LocalSet(t),
+                    I::I64Const(ir::INT),
+                    I::LocalGet(t),
+                ]);
+                return;
+            }
+            Fail => {
+                let m = self.payload_temp(&args[0]);
+                self.out.extend([
+                    I::I32Const(FAIL_AT as i32),
+                    I::LocalGet(m),
+                    I::I64Store(mem(0, 3)),
+                    I::Unreachable,
+                ]);
+                return;
+            }
+            _ => {}
+        }
+        let xs: Vec<u32> = args.iter().map(|a| self.payload_temp(a)).collect();
+        let get = |k: usize| I::LocalGet(xs[k]);
+        let addr = |k: usize| [I::LocalGet(xs[k]), I::I32WrapI64];
+        let tag = match p {
+            MakeV => {
+                self.out.extend([get(0), get(1)]);
+                return;
+            }
+            Store | Store8 | Write => ir::UNIT,
+            Eq | Ne | Lt | Le | Gt | Ge | Not => ir::BOOL,
+            _ => ir::INT,
+        };
+        match p {
+            Store | Store8 => {
+                self.out.extend(addr(0));
+                self.out.push(get(1));
+                self.out.push(if p == Store {
+                    I::I64Store(mem(0, 3))
+                } else {
+                    I::I64Store8(mem(0, 0))
+                });
+                self.out.extend([I::I64Const(ir::UNIT), I::I64Const(0)]);
+                return;
+            }
+            Write => {
+                self.out
+                    .extend([get(0), get(1), get(2), I::Call(self.cx.write.unwrap())]);
+                self.out.extend([I::I64Const(ir::UNIT), I::I64Const(0)]);
+                return;
+            }
+            Add | Sub | Mul | Div | Rem => {
+                let r = self.temp();
+                self.arith(p, xs[0], xs[1], r);
+                self.out.extend([I::I64Const(ir::INT), I::LocalGet(r)]);
+                return;
+            }
+            _ => {}
+        }
+        self.out.push(I::I64Const(tag));
+        match p {
+            Payload => self.out.push(get(0)),
+            Eq | Ne | Lt | Le | Gt | Ge => {
+                self.out.extend([get(0), get(1)]);
+                self.out.extend([
+                    match p {
+                        Eq => I::I64Eq,
+                        Ne => I::I64Ne,
+                        Lt => I::I64LtS,
+                        Le => I::I64LeS,
+                        Gt => I::I64GtS,
+                        _ => I::I64GeS,
+                    },
+                    I::I64ExtendI32U,
+                ]);
+            }
+            Not => self.out.extend([get(0), I::I64Eqz, I::I64ExtendI32U]),
+            And | Or | Shl | Shr => {
+                self.out.extend([get(0), get(1)]);
+                self.out.push(match p {
+                    And => I::I64And,
+                    Or => I::I64Or,
+                    Shl => I::I64Shl,
+                    _ => I::I64ShrU,
+                });
+            }
+            Load => {
+                self.out.extend(addr(0));
+                self.out.push(I::I64Load(mem(0, 3)));
+            }
+            Load8 => {
+                self.out.extend(addr(0));
+                self.out.push(I::I64Load8U(mem(0, 0)));
+            }
+            // 足りないページを増やし、その先頭を返す。増やせなければ止める
+            Pages => {
+                let t = self.temp();
+                self.out.extend([
+                    get(0),
+                    I::I64Const(65535),
+                    I::I64Add,
+                    I::I64Const(16),
+                    I::I64ShrU,
+                    I::I32WrapI64,
+                    I::MemoryGrow(0),
+                    I::I64ExtendI32S,
+                    I::LocalTee(t),
+                    I::I64Const(-1),
+                    I::I64Eq,
+                    I::If(BlockType::Empty),
+                    I::Unreachable,
+                    I::End,
+                    I::LocalGet(t),
+                    I::I64Const(16),
+                    I::I64Shl,
+                ]);
+            }
+            Static => self.out.push(I::I64Const(STATIC)),
+            Now => self.out.push(I::Call(self.cx.now.unwrap())),
+            _ => unreachable!(),
+        }
+    }
+
+    // WASM の整数演算は周回するため、hibana の範囲外と 0 による除算を検査する
+    fn arith(&mut self, op: Prim, a: u32, b: u32, r: u32) {
+        let (a, b) = (I::LocalGet(a), I::LocalGet(b));
+        if matches!(op, Prim::Div | Prim::Rem) {
+            self.out.extend([b.clone(), I::I64Eqz]);
+            self.fail_if("__div_zero");
+            self.out.extend([
+                a.clone(),
+                I::I64Const(i64::MIN),
+                I::I64Eq,
+                b.clone(),
+                I::I64Const(-1),
+                I::I64Eq,
+                I::I32And,
+            ]);
+            self.fail_if("__overflow");
+        }
+        if op == Prim::Mul {
+            // -1 * MIN は割り算で確かめられないので先に調べる
+            self.out.extend([
+                a.clone(),
+                I::I64Const(-1),
+                I::I64Eq,
+                b.clone(),
+                I::I64Const(i64::MIN),
+                I::I64Eq,
+                I::I32And,
+            ]);
+            self.fail_if("__overflow");
+        }
+        self.out.extend([a.clone(), b.clone()]);
+        self.out.push(match op {
+            Prim::Add => I::I64Add,
+            Prim::Sub => I::I64Sub,
+            Prim::Mul => I::I64Mul,
+            Prim::Div => I::I64DivS,
+            _ => I::I64RemS,
+        });
+        self.out.push(I::LocalSet(r));
+        let res = I::LocalGet(r);
+        match op {
+            Prim::Add | Prim::Sub => {
+                let add = op == Prim::Add;
+                self.out.extend([
+                    a.clone(),
+                    if add { res.clone() } else { b.clone() },
+                    I::I64Xor,
+                    if add { b.clone() } else { a.clone() },
+                    res.clone(),
+                    I::I64Xor,
+                    I::I64And,
+                    I::I64Const(0),
+                    I::I64LtS,
+                ]);
+                self.fail_if("__overflow");
+            }
+            Prim::Mul => {
+                self.out.extend([
+                    a.clone(),
+                    I::I64Eqz,
+                    I::I32Eqz,
+                    a.clone(),
+                    I::I64Const(-1),
+                    I::I64Ne,
+                    I::I32And,
+                    I::If(BlockType::Empty),
+                    res,
+                    a,
+                    I::I64DivS,
+                    b,
+                    I::I64Ne,
+                ]);
+                self.fail_if("__overflow");
+                self.out.push(I::End);
+            }
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]
@@ -327,9 +803,8 @@ mod tests {
 
     #[test]
     fn string_memory_grows_resets_and_preserves_literals() {
-        let bytes =
-            crate::to_wasm_library("fn literal() -> str { '日本語' }", &["literal".into()])
-                .unwrap();
+        let bytes = crate::to_wasm_library("fn literal() -> str { '日本語' }", &["literal".into()])
+            .unwrap();
         let engine = wasmtime::Engine::default();
         let module = wasmtime::Module::new(&engine, bytes).unwrap();
         let mut store = wasmtime::Store::new(&engine, ());
@@ -405,9 +880,11 @@ if (Object.keys(x).join(',') !== 'result' || x.result(20n) !== 41n) throw Error(
             42
         );
 
-        assert!(crate::to_wasm_library(used, &["missing".into()])
-            .unwrap_err()
-            .contains("無い"));
+        assert!(
+            crate::to_wasm_library(used, &["missing".into()])
+                .unwrap_err()
+                .contains("無い")
+        );
         assert!(
             crate::to_wasm_library(used, &["result".into(), "result".into()])
                 .unwrap_err()
@@ -447,15 +924,17 @@ if (Object.keys(x).join(',') !== 'result' || x.result(20n) !== 41n) throw Error(
             }
         }
         let src = "fn main() { print(1) }";
-        assert!(super::run(&crate::to_wasm(src).unwrap(), Fails)
-            .err()
-            .unwrap()
-            .contains("出力失敗"));
+        assert!(
+            super::run(&crate::to_wasm(src).unwrap(), Fails)
+                .err()
+                .unwrap()
+                .contains("出力失敗")
+        );
     }
 
     #[test]
     fn executes_and_checks_integer_errors() {
-        let src = "fn add(a: int, b: int) -> int { a + b }\nfn sub(a: int, b: int) -> int { a - b }\nfn mul(a: int, b: int) -> int { a * b }\nfn div(a: int, b: int) -> int { a / b }\nfn rem(a: int, b: int) -> int { a % b }\nfn main() { print(add(2, 3))\n print(mul(7, 6)) }";
+        let src = "fn add(a: int, b: int) -> int { a + b }\nfn sub(a: int, b: int) -> int { a - b }\nfn mul(a: int, b: int) -> int { a * b }\nfn div(a: int, b: int) -> int { a / b }\nfn rem(a: int, b: int) -> int { a % b }\nfn main() { print(add(2, 3))\n print(mul(7, 6))\n print(sub(1, 2))\n print(div(7, 2))\n print(rem(7, 2)) }";
         let bytes = crate::to_wasm(src).unwrap();
         let mut expected = Vec::new();
         crate::run(src, &mut expected).unwrap();
@@ -463,7 +942,8 @@ if (Object.keys(x).join(',') !== 'result' || x.result(20n) !== 41n) throw Error(
 const fs = require('fs');
 const bytes = fs.readFileSync(0);
 const m = new WebAssembly.Module(bytes);
-const x = new WebAssembly.Instance(m, {hibana: {print: n => console.log(n.toString())}}).exports;
+let x;
+x = new WebAssembly.Instance(m, {hibana: {write: (fd, p, n) => process.stdout.write(Buffer.from(x.memory.buffer, Number(p), Number(n)))}}).exports;
 x.main();
 function eq(value, expected) { if (value !== expected) throw Error(`${value} != ${expected}`); }
 function trap(f, a, b) { try { f(a, b); } catch (e) { if (e instanceof WebAssembly.RuntimeError) return; throw e; } throw Error('trap expected'); }
@@ -493,9 +973,13 @@ trap(x.div, 1n, 0n); trap(x.div, min, -1n); trap(x.rem, 1n, 0n); trap(x.rem, min
 
     #[test]
     fn rejects_unsupported_programs() {
-        assert!(crate::to_wasm("fn main() { print('hello') }")
+        assert!(
+            crate::to_wasm(
+                "extern 'browser' {\n    fn show(xs: Vec<int>)\n}\nfn main() { show([1]) }"
+            )
             .unwrap_err()
-            .contains("未対応"));
+            .contains("未対応")
+        );
         assert!(crate::to_wasm("fn main() { let x = 1 + true }").is_err());
     }
 }

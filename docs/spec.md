@@ -177,6 +177,7 @@ fn main() ! Async { print(twice_later(5)) }
 | インタプリタ | 処理中の handle の並びから、一番内側の腕を呼ぶ | 抜け出す理由（`Flow::Abort`）として handle まで戻す | 意味を持たない |
 | JavaScript | `$op` が同じように腕を呼ぶ | 例外（`$Abort`）で handle の `try` まで戻す | `Async` を持つ関数を `async function` にし、呼び出しを `await` する |
 | C | `h_op` が同じように腕を呼ぶ | `setjmp` / `longjmp` で戻す（handle を含む関数の局所変数は `volatile`） | 意味を持たない |
+| WASM・ネイティブ（IR） | ランタイムの `__perform` が同じように腕を呼ぶ | 中断の印を置き、効果を持つ関数・関数の値の呼び出しの後で調べて 1 段ずつ戻す。handle の本体は `Catch` で抜ける | 意味を持たない（`all` は順に実行する） |
 
 制限:
 
@@ -669,13 +670,13 @@ npm ツールは各記録の `npm_lock` に npm の package-lock JSON（lockfile
 | `hibana test [ファイル...]` | `test` をインタプリタで実行し、成功した数を表示する。失敗があれば終了コード 1。ファイルを省くと、`hibana.toml` のあるディレクトリの `src` と `tests` の `.hb` すべて | テスト（3.8 節） |
 | `hibana lsp` | Language Server を標準入出力で動かす | エディタ（エラーの表示・整形・hover・定義へのジャンプ・補完・色付け）。VS Code と Zed の拡張機能は `editors/`（`editors/README.md`） |
 
-WASM 出力は関数を名前で公開します。整数は符号付き 64 ビットで、JavaScript からは `BigInt` で渡します。整数の `print` がある場合、取り込み `hibana.print` に `i64` 引数の関数を渡します。整数の範囲外や 0 による除算では WASM の実行を停止します。文字列・分岐・外部関数など、IR が扱えない構文はコンパイル時にエラーになります。
+WASM 出力は関数を名前で公開します。整数は符号付き 64 ビットで、JavaScript からは `BigInt` で渡します。`print` がある場合、取り込み `hibana.write(fd, 位置, 長さ)` で memory 上の 1 行（改行を含む UTF-8）を書きます。`now_ms` は取り込み `hibana.now_ms()` を呼びます。JavaScript の接続コードはこの 2 つを用意し、`print` の 1 行を `imports.hibana.print`（無ければ `console.log`）に渡します。整数の範囲外・0 による除算・`panic` などの実行時エラーでは、メッセージの文字列の位置を memory の 24 番地に書いて WASM の実行を停止します。IR が扱えない構文はコンパイル時にエラーになります。
 
 ライブラリは `hibana::to_wasm_library(source, &exports)` に公開する関数名を渡して生成します。`main` は必要ありません。型検査はライブラリ全体に行い、WASM には公開関数と、そこから呼ぶ関数だけを含めます。未使用の関数や型が IR に未対応でも、型検査を通れば含めません。
 
 JavaScript の接続コードは `hibana::to_js_glue(source, &exports)`、WASM と接続コードの同時生成は `hibana::to_web(source, &exports)` で行えます。`instantiate` の引数には WASM のバイト列と必要な外部関数を渡します。公開関数には安全に表せる JavaScript の整数か `BigInt` を渡し、整数の結果は `BigInt` で受け取ります。文字列やホスト関数を使う Web 向けライブラリの例は [WebAssembly](wasm.md) を参照してください。
 
-JavaScript、C、IR、実行用 WASM は、それぞれ `hibana::to_js`、`hibana::to_c`、`hibana::to_ir`、`hibana::to_wasm` で生成します。API は文字列やバイト列を返し、ファイルへの保存や C コンパイラーの起動は呼び出し側で行います。
+JavaScript、C、IR、実行用 WASM、ネイティブの実行ファイルは、それぞれ `hibana::to_js`、`hibana::to_c`、`hibana::to_ir`、`hibana::to_wasm`、`hibana::to_native` で生成します。API は文字列やバイト列を返し、ファイルへの保存や C コンパイラーの起動は呼び出し側で行います。`to_wasm` と `to_native` は `main` から辿れる関数だけを含めます。
 
 Rust のライブラリからは、`hibana::pipeline` の各関数を組み合わせられます。`load` は `use` のファイルを読み、`parse` は構文木を作り、`check` は型検査します。`lower` は IR を作り、`link` は IR から公開関数とその呼び出し先を選びます。`emit_wasm` と `emit_js_glue` はそれぞれバイト列と文字列を返すため、書き込みや外部ツールの起動は呼び出し側で決められます。
 
@@ -697,7 +698,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-現在の IR は整数の演算と呼び出しに限ります。全関数が IR に対応していない場合は、`lower(&checked, Some(&exports))` に公開関数を渡すと、使う関数だけを変換できます。任意の外部関数、文字列や配列の受け渡し、WASM モジュール同士のリンクには未対応です。
+IR は WASM とネイティブの共通の中間表現です。制御フローは WASM と同じ入れ子の形（`if`・`while`・`return`）で持ちます。値はすべて、型の番号と中身の 2 つの 64 ビット整数で表します。文字列の連結・比較・表示や組み込み関数は、hibana の構文で書いたランタイム（`src/backend/runtime.hb`）にあり、同じ変換で IR にします。ランタイムは型検査を通さず、`__load` などの組み込みを IR の命令に直接変換します。効果の `handle` は、腕の値で抜ける時に中断の印を置き、呼び出しの後の検査で 1 段ずつ戻って本体を抜けます（C の `longjmp` に当たる）。`resume` は C と同じく腕の末尾でだけ使えます。全関数が IR に対応していない場合は、`lower(&checked, Some(&exports))` に公開関数を渡すと、使う関数だけを変換できます。WASM の境界（公開関数と外部関数）は `int`・`str`・`unit` だけを渡せます。任意の外部関数、配列の受け渡し、WASM モジュール同士のリンクには未対応です。
+
+ネイティブの出力（`hibana::to_native`）は、IR を Cranelift（Rust で書かれたコード生成器）で機械語にし、libc を使わない静的な ELF の実行ファイルを返します。リンカーは使わず、出力・終了・メモリの確保（mmap）・時刻は Linux の syscall を直接呼びます。現在は x86-64 の Linux だけに対応し、外部関数は使えません。実行時エラーでは、標準エラーにメッセージを書いて終了コード 1 で終わります。
 
 `hibana::to_wasm` は `main` を持つ実行用 WASM を返します。CLI から直接実行する場合は `hibana run input.hb` を使います。
 
@@ -737,7 +740,7 @@ Rust 版にあって selfhost に無いもの: マクロ（`syntax`・`macro`）
 
 - `syntax` の規則名とマクロ名には名前空間がありません。別のモジュールで同じ名前の規則を定義すると衝突します。
 - JavaScript との境界では `int` を number に変換するので、2^53 を超える整数は正しく渡せません。
-- ネイティブのバックエンドはメモリを解放しません。長く動くプログラムには GC（Boehm GC など）を入れる必要があります。
+- C のバックエンドは Boehm GC で回収します。IR を通す WASM とネイティブの出力は、確保したメモリを回収しません（GC が無い）。
 - 実行時エラーの位置は、インタプリタではエラーを起こした一番内側の式、JavaScript と C では最後に通った失敗しうる式（算術・`slice`・効果の操作・JavaScript の関数の呼び出し）です。JavaScript の関数の中で投げられた例外は、その呼び出しの位置になります。
 - エラーの下線には、メッセージの一番内側の部分を説明に付けます。未定義の名前には綴りの近い名前（編集距離 2 以下）を、文字列が必要な所の数値には `to_str` を提案します。関数を呼んで未処理の効果が起きた時は、その関数の中で操作を呼んでいる位置にも下線を引きます（その関数が直接呼ぶ操作だけを探します）。
 - Z3 には `int` を上限の無い整数として渡します。オーバーフローは実行時に検査しています。`/` と `%` は Z3 に訳しません。
