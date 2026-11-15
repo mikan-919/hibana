@@ -125,10 +125,6 @@
         },
         {
           "type": "STRING",
-          "value": "partial"
-        },
-        {
-          "type": "STRING",
           "value": "for"
         },
         {
