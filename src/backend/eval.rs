@@ -67,7 +67,6 @@ struct Interp<'a> {
     err_at: Option<Span>,
     // ソースのこの位置より後（読み込んだライブラリ）で起きたエラーは、ここより前の、呼び出した側の位置にする
     user_end: usize,
-    in_macro: bool,
     args: &'a [String],
 }
 
@@ -107,7 +106,6 @@ pub fn run_fn_args(
         next_h: 0,
         err_at: None,
         user_end,
-        in_macro: false,
         args,
     };
     match it.call(entry, vec![]) {
@@ -144,7 +142,6 @@ pub fn run_macro(b: &Block, vars: Vec<(String, Value)>, prog: &Program) -> Resul
         next_h: 0,
         err_at: None,
         user_end: usize::MAX,
-        in_macro: true,
         args: &[],
     };
     match it.block(b, &mut vec![vars.into_iter().collect()]) {
@@ -636,11 +633,8 @@ impl Interp<'_> {
                     Value::Ty(name.as_str().into())
                 } else if matches!(
                     name.as_str(),
-                    "artifact" | "compile" | "inspect_exports" | "utf8" | "args" | "read_text" | "read_bytes" | "write_text" | "write_bytes" | "compile_file" | "inspect_file_exports" | "js_glue"
+                    "compile" | "inspect_exports" | "utf8" | "args" | "read_text" | "read_bytes" | "write_text" | "write_bytes" | "compile_file" | "inspect_file_exports" | "js_glue"
                 ) {
-                    if name == "artifact" && !self.in_macro {
-                        return Err(Flow::Error(format!("{name} はコンパイル時だけ使えます")));
-                    }
                     let str_arg = |i: usize| -> R<String> {
                         match vs.get(i) {
                             Some(Value::Str(s)) => Ok(s.to_string()),
@@ -669,24 +663,6 @@ impl Interp<'_> {
                         }
                         "js_glue" => Value::Str(crate::pipeline::js_glue(&str_arg(0)?).map_err(|e| Flow::Error(e.to_string()))?.into()),
                         "utf8" => bytes_value(str_arg(0)?.into_bytes()),
-                        "artifact" => {
-                            let path = str_arg(0)?;
-                            let Some(Value::Arr(values)) = vs.get(1) else {
-                                return Err(Flow::Error("artifact の内容は Vec<int>".into()));
-                            };
-                            let contents = values
-                                .iter()
-                                .map(|v| match v {
-                                    Value::Int(n) => u8::try_from(*n).map_err(|_| {
-                                        Flow::Error("artifact のバイトは0..255".into())
-                                    }),
-                                    _ => Err(Flow::Error("artifact の内容は Vec<int>".into())),
-                                })
-                                .collect::<R<Vec<u8>>>()?;
-                            crate::build::register(crate::build::Request { path, contents })
-                                .map_err(Flow::Error)?;
-                            Value::Unit
-                        }
                         _ => {
                             let input = str_arg(0)?;
                             let file = name == "compile_file" || name == "inspect_file_exports";

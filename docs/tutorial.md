@@ -193,32 +193,17 @@ fn main() {
 
 `compile_file` は対象ファイルを基準に `use` を解決します。`write_bytes` は親ディレクトリを作成します。引数は `hibana build -- a b` と渡し、`args()` で読めます。これらの関数はインタプリタとマクロで使い、生成したプログラムからは呼べません。
 
-マクロは実行時のコードを返すだけでなく、ビルド時に成果物を登録できます。次は `build_web` ライブラリのマクロで WASM・JS 接続コード・静的ファイルをまとめて登録する例です。
+WASM と JavaScript 接続コードもスクリプトで作れます。
 
 ```
-use build_web
-
-web_build 'app.wasm', 'app.mjs' source 'fn echo(message: str) -> str { message } fn add(a: int, b: int) -> int { a + b }' exports (echo, add)
-build_asset 'message.txt', 'ビルドで生成したファイル'
+fn main() {
+    let exports = ['echo']
+    write_bytes('dist/app.wasm', compile_file('src/lib.hb', 'wasm', exports))
+    write_text('dist/app.mjs', js_glue(inspect_file_exports('src/lib.hb', exports)))
+}
 ```
 
-`app.hb` として保存し、Rust API の `hibana::pipeline::build_artifacts` にソースを渡すと、成果物の相対パスとバイト列を受け取れます。ファイルの保存は呼び出し側で行います。たとえば `dist` の下へ保存すると、`dist/app.wasm`、`dist/app.mjs`、`dist/message.txt` ができます。`main` は不要です。`web_build` や `build_asset` の呼び出しは空の宣言列に展開されるので、それ自体の実行時処理は残りません。利用側が成果物名や公開関数を選び、ライブラリが生成の組み合わせを決めます。
-
-生成した JS は次のように使えます（WASM の取得方法は実行環境に合わせます）。
-
-```js
-import { instantiate } from "./dist/app.mjs";
-const wasm = await (await fetch("./dist/app.wasm")).arrayBuffer();
-const app = await instantiate(wasm);
-console.log(app.echo("こんにちは"));
-console.log(app.add(2n, 3n));
-```
-
-生成処理は通常の hibana 関数です。`build_web` は `compile(source, 'wasm', exports)` でバイト列を作り、`inspect_exports` で得た関数の型情報から `web_javascript` が JS の文字列を生成します。`artifact(path, bytes)` が成果物を登録する汎用 API で、テキストなら `utf8(text)` でバイト列にします。
-
-自分のマクロからも通常の関数を呼んで生成処理を組み合わせ、最後に `quote {}` を返せます。`artifact` はマクロで成果物を収集する場合だけ使えます。`artifact` はマクロ実行中にはファイルを書かず、生成・型検査・成果物名の検査を終えてから結果を返します。保存先が安全かどうかの検査と書き込みは呼び出し側の責任です。
-
-この例のコンパイル対象は `source` に明示した文字列です。現在のファイルの宣言を自動的に読み取る仕組みではありません。型情報から構造体の受け渡しを自動生成する機能、ビルドの依存グラフ、外部ツールの実行はまだありません。詳しくは仕様の 8.5 節と `lib/build_web.hb`、ブラウザ用の例は `tests/fixtures/build_artifacts.hb` を参照してください。
+公開する関数は `src/lib.hb` に書きます。接続コードの使い方は [WebAssembly](wasm.md) を参照してください。
 
 ## 8. 次に読むもの
 

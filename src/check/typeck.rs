@@ -123,7 +123,7 @@ const SYN_FNS: &[(&str, &[&str], &str)] = &[
 ];
 
 // マクロ専用。Vec<str> の引数は個別に検査する
-pub(crate) const BUILD_FNS: &[&str] = &["artifact", "compile", "inspect_exports", "utf8", "args", "read_text", "read_bytes", "write_text", "write_bytes", "compile_file", "inspect_file_exports", "js_glue"];
+pub(crate) const BUILD_FNS: &[&str] = &["compile", "inspect_exports", "utf8", "args", "read_text", "read_bytes", "write_text", "write_bytes", "compile_file", "inspect_file_exports", "js_glue"];
 
 // どこでも使える組み込み関数
 const BUILTINS: &[&str] = &[
@@ -2488,14 +2488,10 @@ impl Ck<'_> {
                 }
             }
             Expr::Call(name, args) if BUILD_FNS.contains(&name.as_str()) => {
-                if name == "artifact" && !self.in_macro {
-                    return Err(format!("{name} はマクロ本体でだけ使えます").into());
-                }
                 let str_t = prim("str");
                 let bytes = V::VecT(Rc::new(prim("int")));
                 let names = V::VecT(Rc::new(str_t.clone()));
                 let (ps, ret) = match name.as_str() {
-                    "artifact" => (vec![str_t.clone(), bytes.clone()], prim("unit")),
                     "compile" => (vec![str_t.clone(), str_t.clone(), names], bytes),
                     "inspect_exports" => (vec![str_t.clone(), names], str_t.clone()),
                     "args" => (vec![], names),
@@ -4313,49 +4309,4 @@ fn main() {
             assert!(e.contains(msg), "{to} => {e}");
         }
     }
-}
-
-// artifact に到達するマクロ専用関数を、実行側から到達する関数を残して除く。
-pub(crate) fn compile_only(prog: &Program) -> std::collections::HashSet<String> {
-    let mut names: std::collections::HashSet<String> = ["artifact".to_string()].into_iter().collect();
-    loop {
-        let before = names.len();
-        for f in &prog.fns {
-            if callees(f).iter().any(|n| names.contains(n)) {
-                names.insert(f.name.clone());
-            }
-        }
-        if before == names.len() {
-            break;
-        }
-    }
-    // ビルド専用関数からだけ呼ばれる純粋な補助関数も実行時に残さない。
-    loop {
-        let before = names.len();
-        for f in &prog.fns {
-            if names.contains(&f.name) {
-                names.extend(callees(f));
-            }
-        }
-        if before == names.len() {
-            break;
-        }
-    }
-    let mut runtime = std::collections::HashSet::new();
-    let mut pending: Vec<String> = prog
-        .fns
-        .iter()
-        .filter(|f| f.name == "main" || prog.tests.iter().any(|(_, n)| n == &f.name) || !names.contains(&f.name))
-        .map(|f| f.name.clone())
-        .collect();
-    while let Some(n) = pending.pop() {
-        if !runtime.insert(n.clone()) {
-            continue;
-        }
-        if let Some(f) = prog.fns.iter().find(|f| f.name == n) {
-            pending.extend(callees(f));
-        }
-    }
-    names.retain(|n| !runtime.contains(n));
-    names
 }

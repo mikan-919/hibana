@@ -52,7 +52,7 @@ Rust の実装は `src/` 内で役割ごとに分けています。
 - `check/`: 型検査と Z3 による証明
 - `backend/`: インタプリタ、JavaScript、整数 IR、WebAssembly
 - `tooling/`: フォーマッタ、Language Server、シンボルの索引
-- `project/`: ビルド、スクリプト、パッケージ管理（`pkg/`）、外部ツール管理（`tools/`）
+- `project/`: スクリプト、パッケージ管理（`pkg/`）、外部ツール管理（`tools/`）
 - `cli/`: CLI のコマンド処理と統合的なテスト
 
 `src/lib.rs` と `src/main.rs` が入口で、`pipeline.rs` はコンパイルの各段階、`error.rs` は共通のエラー表現を扱います。標準ライブラリは `lib/`、エディター連携は `editors/` にあります。

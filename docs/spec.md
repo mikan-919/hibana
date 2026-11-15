@@ -439,44 +439,6 @@ enum Shape { Circle(r: int), Rect(w: int, h: int), Dot }
 - 型引数を持つ型では `impl<A, B> Eq<Pair<A, B>>` を作ります。型引数に制約は付けないので、型引数の型の値は組み込みの比較と文字列化になります。
 - 添字付きの型族（構築子に `-> 型` を書く型）、`struct Name(型)` の構造体、`Ord` の derive はできません。
 
-### 8.5 ビルド時の成果物
-
-マクロから通常の hibana 関数を呼べます。読み込んだライブラリの関数や、マクロ呼び出しより後に定義した関数も使えます。関数本体は型検査されます。`artifact` はマクロと成果物収集の中でだけ使います。他の関数はインタプリタのスクリプトからも使えます。生成するプログラムから到達するとエラーになります。
-
-| 関数 | 内容 |
-|---|---|
-| `artifact(path, contents)` | `(str, Vec<int>) -> unit`。バイト列を成果物に登録する。各要素は 0〜255 |
-| `utf8(text)` | `str -> Vec<int>`。UTF-8 のバイト列を作る |
-| `compile(source, target, exports)` | `(str, str, Vec<str>) -> Vec<int>`。明示したソースをコンパイルする |
-| `inspect_exports(source, exports)` | `(str, Vec<str>) -> str`。公開関数と外部関数の ABI 情報を JSON 文字列で返す |
-
-`compile` の target は `'wasm'`・`'js'`・`'native'` です。WASM は空でない exports を受け取り、指定した関数を公開するライブラリを返します。JS・native は exports を空にし、`main` を持つプログラムを渡します（ライブラリ出力は未対応）。コンパイル対象ソースがさらに成果物を登録することはできません。
-
-`inspect_exports` は `{"exports":[[名前,[引数型,...],戻り型],...],"imports":[...]}` の形式です。型名は現在の WASM ABI の `"int"`・`"str"`・`"unit"` です。任意の型付き構文木を読むリフレクションではありません。
-
-```
-fn emit_text(path: str, text: str) {
-    artifact(path, utf8(text))
-}
-
-macro page ('page' path:String text:String) -> Decl {
-    emit_text(str_of(path), str_of(text))
-    quote {}
-}
-
-page 'index.html' '<h1>hello</h1>'
-```
-
-このマクロは空の宣言列を返します。実行時の処理も `main` も残さず、成果物だけを作れます。生成処理は通常の関数で組み合わせ、ビルド側には名前とバイト列だけを登録します。WASM や JS 接続コード専用の成果物登録関数はありません。
-
-`artifact` は呼び出した時点ではファイルを書きません。Rust API の `pipeline::build_artifacts` は、展開後のプログラム全体の型検査と生成・成果物名の検査を済ませてから結果を返します。保存先の検査とファイルへの書き込みは呼び出し側で行います。成果物を受け取るビルド処理の外で登録しようとするとエラーになります。`pipeline::build_artifacts` はファイルを書かず、名前とバイト列の一覧を返す Rust API です。
-
-出力先は `--out-dir` からの相対パスです。絶対パス、`.`・`..`、重複する名前、ファイルとディレクトリが衝突する名前、シンボリックリンクを通る出力先は拒否します。型検査・生成・出力先検査の失敗では書き出しません。ただし、書き出し途中の OS の I/O エラーを巻き戻す仕組みではありません。
-
-`lib/build_web.hb` は通常の関数 `build_text`・`build_web`・`web_javascript` と、呼び出し用のマクロ `web_build`・`build_asset` を提供します。JS の生成処理はこの hibana ライブラリにあり、コンパイラの専用組み込みではありません。ライブラリを読むだけでは成果物を登録しません。
-
-現在はコンパイル対象を明示的なソース文字列として渡します。現在のファイルの型検査済み宣言を暗黙に参照する機能はありません。JS は `instantiate(wasm, imports)` を公開し、整数には `bigint`、文字列には JS の文字列を使います。構造体の自動変換、任意のビルド依存グラフ、外部コマンド実行はまだありません。
-
 ## 9. 組み込み関数
 
 | 関数 | 型 |
@@ -505,7 +467,7 @@ page 'index.html' '<h1>hello</h1>'
 | `write_text(path, text)` / `write_bytes(path, bytes)` | `(str, str) -> unit` / `(str, Vec<int>) -> unit`。親ディレクトリを作って書き込む。バイトは 0〜255 |
 | `compile_file(path, target, exports)` | `(str, str, Vec<str>) -> Vec<int>`。ファイルのディレクトリを基準に `use` を解決してコンパイル |
 | `inspect_file_exports(path, exports)` | `(str, Vec<str>) -> str`。ファイルの公開関数の型情報を返す |
-| `compile(source, target, exports)` / `inspect_exports(source, exports)` | ソース文字列をコンパイルし、または型情報を返す（8.5 節） |
+| `compile(source, target, exports)` / `inspect_exports(source, exports)` | ソース文字列をコンパイルし、または型情報を返す |
 | `utf8(text)` / `js_glue(metadata)` | 文字列をバイト列に変換 / 型情報から JavaScript 接続コードを生成 |
 
 ## 10. ライブラリ

@@ -1,5 +1,5 @@
 //! ビルドの段階。ファイルの書き込みや外部ツールの起動は呼び出し側が行う。
-use crate::{build, error::R, ir, js, parser, typeck, wasm};
+use crate::{error::R, ir, js, parser, typeck, wasm};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -34,43 +34,7 @@ pub fn parse(source: &str) -> R<parser::Program> {
     parser::parse(source)
 }
 
-/// マクロが登録した成果物を作る。main は不要で、ファイルには書き込まない。
-/// 生成はマクロ評価中に行い、すべての宣言の型検査が通った場合だけ結果を返す。
-pub fn build_artifacts(source: &str) -> R<Vec<build::Artifact>> {
-    let source = parser::with_uses(source)?;
-    let (program, requests) = build::capture(|| parse(&source));
-    let _checked = check(program?, Kind::Library)?;
-    let mut names = Vec::new();
-    for request in &requests {
-        let path = &request.path;
-        // 区切りを / に限定し、別 OS でも同じ出力先になるようにする。
-        if path.is_empty()
-            || path.contains(['\\', ':', '\0'])
-            || path
-                .split('/')
-                .any(|p| p.is_empty() || p == "." || p == "..")
-        {
-            return Err(format!("成果物のパスは相対パスが必要: {path}").into());
-        }
-        if names.iter().any(|name: &&str| {
-            *name == path
-                || name.starts_with(&format!("{path}/"))
-                || path.starts_with(&format!("{name}/"))
-        }) {
-            return Err(format!("成果物のパスが衝突している: {path}").into());
-        }
-        names.push(path.as_str());
-    }
-    Ok(requests
-        .into_iter()
-        .map(|request| build::Artifact {
-            name: request.path,
-            contents: request.contents,
-        })
-        .collect())
-}
-
-/// 明示したソースをコンパイルする。ビルド成果物を登録するソースは受け付けない。
+/// 明示したソースをコンパイルする。
 pub fn compile(source: &str, target: &str, exports: &[String]) -> R<Vec<u8>> {
     match target {
         "wasm" => {
@@ -110,12 +74,7 @@ pub fn inspect_exports(source: &str, exports: &[String]) -> R<String> {
 
 fn compiler_input(source: &str, kind: Kind) -> R<Checked> {
     let source = parser::with_uses(source)?;
-    let (program, requests) = build::capture(|| parse(&source));
-    let program = program?;
-    if !requests.is_empty() {
-        return Err("コンパイラに渡すソースでは成果物を登録できない".into());
-    }
-    check(program, kind)
+    check(parse(&source)?, kind)
 }
 
 fn exported_ir(checked: &Checked, exports: &[String]) -> R<ir::Program> {

@@ -12,7 +12,7 @@ pub mod tooling;
 pub use backend::{eval, ir, js, native, wasm};
 pub use check::{smt, typeck};
 pub use frontend::{lexer, meta, parser};
-pub use project::{build, pkg};
+pub use project::pkg;
 pub use tooling::{fmt, index, lsp};
 
 pub(crate) use frontend::{resolve, ts};

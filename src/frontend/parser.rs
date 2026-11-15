@@ -216,7 +216,6 @@ pub struct Program {
 // 組み込みのライブラリ。実行ファイルに埋め込むので、どこからでも use できる
 const LIBS: &[(&str, &str)] = &[
     ("web", include_str!("../../lib/web.hb")),
-    ("build_web", include_str!("../../lib/build_web.hb")),
     ("std", include_str!("../../lib/std.hb")),
 ];
 
@@ -476,7 +475,6 @@ fn parse_toks(src: &str, toks: Vec<Token>, round: usize) -> R<Program> {
         "is_null",
         "int_of",
         "str_of",
-        "artifact",
         "compile",
         "inspect_exports",
         "utf8",
@@ -811,9 +809,6 @@ fn parse_toks(src: &str, toks: Vec<Token>, round: usize) -> R<Program> {
         });
     }
     crate::resolve::resolve(&mut prog, &p.uses, &p.known);
-    let compile_only = crate::typeck::compile_only(&prog);
-    prog.fns
-        .retain(|f| f.name == "main" || !compile_only.contains(&f.name));
     Ok(prog)
 }
 
