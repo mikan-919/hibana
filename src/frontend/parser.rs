@@ -187,6 +187,28 @@ pub struct Ctor {
     pub fields: Vec<(String, Expr)>,
 }
 
+// 型の形に値の引数を使う依存型は受け付けない。細分化型の条件は値を参照できる。
+fn depends_on_value(ty: &Expr, names: &[String]) -> bool {
+    match ty.peel() {
+        Expr::Var(n) => names.contains(n),
+        Expr::Call(n, xs) => names.contains(n) || xs.iter().any(|x| depends_on_value(x, names)),
+        Expr::Unary(_, x) | Expr::Field(x, _) => depends_on_value(x, names),
+        Expr::Binary(_, a, b) | Expr::Index(a, b) => depends_on_value(a, names) || depends_on_value(b, names),
+        Expr::Refine(base, _, _) => depends_on_value(base, names),
+        Expr::Pi(params, ret, effects) => {
+            let mut local = names.to_vec();
+            for (name, arg_ty) in params {
+                if depends_on_value(arg_ty, &local) { return true; }
+                if name != "_" { local.push(name.clone()); }
+            }
+            depends_on_value(ret, &local) || effects.iter().any(|x| depends_on_value(x, &local))
+        }
+        Expr::Array(xs) => xs.iter().any(|x| depends_on_value(x, names)),
+        Expr::Apply(f, xs) => depends_on_value(f, names) || xs.iter().any(|x| depends_on_value(x, names)),
+        _ => false,
+    }
+}
+
 // match の腕。ctor が "_" なら残りすべて
 #[derive(Debug, Clone)]
 pub struct Arm {
@@ -1097,7 +1119,12 @@ impl Parser<'_> {
         self.expect("(")?;
         params.extend(self.params()?);
         let ret = if self.eat("->") {
-            Some(self.ret_ty()?)
+            let ret = self.ret_ty()?;
+            let value_names: Vec<_> = params[implicit..].iter().map(|(n, _)| n.clone()).collect();
+            if depends_on_value(&ret, &value_names) {
+                return self.err("戻り値の型に引数の値は使えない");
+            }
+            Some(ret)
         } else {
             None
         };
@@ -1481,6 +1508,10 @@ impl Parser<'_> {
             let n = self.ident()?;
             self.expect(":")?;
             let ty = self.ty()?;
+            let value_names: Vec<_> = params.iter().map(|(name, _): &(String, Expr)| name.clone()).collect();
+            if depends_on_value(&ty, &value_names) {
+                return self.err("引数の型に前の引数の値は使えない");
+            }
             if matches!(ty.peel(), Expr::Var(name) if name == "Type") {
                 return self.err("型の値を関数や構築子の引数にできない");
             }
@@ -1602,6 +1633,10 @@ impl Parser<'_> {
                     let n = self.ident()?;
                     self.expect(":")?;
                     let ty = self.ty()?;
+                    let value_names: Vec<_> = fields.iter().map(|(name, _): &(String, Expr)| name.clone()).collect();
+                    if depends_on_value(&ty, &value_names) {
+                        return self.err("フィールドの型に前の値は使えない");
+                    }
                     if matches!(ty.peel(), Expr::Var(name) if name == "Type") {
                         return self.err("型の値をフィールドにできない");
                     }

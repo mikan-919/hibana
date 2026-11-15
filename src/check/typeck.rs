@@ -3280,6 +3280,19 @@ mod tests {
     }
 
     #[test]
+    fn rejects_dependent_type_shapes_but_keeps_refinement_conditions() {
+        for src in [
+            "fn f(n: int) -> Vec<n> { [] }\nfn main() {}",
+            "fn f(n: int, x: Vec<n>) {}\nfn main() {}",
+            "fn f(g: (n: int) -> Vec<n>) {}\nfn main() {}",
+            "struct S { n: int, xs: Vec<n> }\nfn main() {}",
+        ] {
+            assert!(check(src).is_err(), "{src}");
+        }
+        check("fn f(n: int, x: int[i -> i < n]) -> int[r -> r < n] { x }\nfn main() { print(f(3, 2)) }").unwrap();
+    }
+
+    #[test]
     fn recursive_functions_and_negative_types_are_allowed() {
         check("enum Bad { MkBad(f: (Bad) -> int) }\nfn even(n: int) -> bool { if n == 0 { true } else { odd(n - 1) } }\nfn odd(n: int) -> bool { if n == 0 { false } else { even(n - 1) } }\nfn main() { print(even(4)) }").unwrap();
         check("fn f(n: int) -> int { let g = f\n g(n) }\nfn main() {}").unwrap();
