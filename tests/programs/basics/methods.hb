@@ -9,9 +9,9 @@ fn str::twice(s: str) -> str { s + s }
 
 fn main() {
     let id = Param { value: 'u7' }
-    print(id.get())
-    print(id.with('!').get().twice())
-    print(Param::get(id))
+    put(id.get())
+    put(id.with('!').get().twice())
+    put(Param::get(id))
     let n = 3
-    print(`id={id.get()} n={n + 1} {if n == 3 { 'three' } else { `other {n}` }} \{x\}`)
+    put(`id={id.get()} n={n + 1} {if n == 3 { 'three' } else { `other {n}` }} \{x\}`)
 }

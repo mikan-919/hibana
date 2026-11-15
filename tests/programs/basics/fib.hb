@@ -14,8 +14,8 @@ fn is_prime(n: int) -> bool {
 fn main() {
     let mut i = 0
     while i <= 10 {
-        print(fib(i))
+        put(fib(i))
         i = i + 1
     }
-    print(is_prime(97))
+    put(is_prime(97))
 }

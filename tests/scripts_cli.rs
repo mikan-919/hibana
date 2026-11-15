@@ -187,6 +187,6 @@ fn build_runs_script_and_script_command_is_rejected() {
 fn build_can_invoke_hibana_and_forward_arguments() {
     let fixture = Fixture::new();
     fixture.write("config.hibana.toml", "[scripts]\nbuild = \"hibana build.hb\"\n");
-    fixture.write("build.hb", "fn main() { print(args()) }\n");
+    fixture.write("build.hb", "fn main() { put(args()) }\n");
     assert_eq!(stdout(&fixture.run(&["build", "--", "a", "b"])), "[\"a\", \"b\"]\n");
 }

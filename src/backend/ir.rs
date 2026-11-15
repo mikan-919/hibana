@@ -802,6 +802,9 @@ impl Lower<'_, '_> {
             }
             Ast::Binary(op, a, b) => {
                 let (a, b) = (self.expr(a)?, self.expr(b)?);
+                if *op == "**" {
+                    return Ok(call("__pow", vec![a, b]));
+                }
                 let p = match *op {
                     "+" => Prim::Add,
                     "-" => Prim::Sub,
@@ -1196,11 +1199,11 @@ mod tests {
 
     #[test]
     fn lowers_control_flow() {
-        let src = "fn f(n: int) -> bool {\n let mut i = 0\n while i < n { if i > 3 { return true }\n i = i - 1 }\n false\n}\nfn main() { print(f(5)) }";
+        let src = "fn f(n: int) -> bool {\n let mut i = 0\n while i < n { if i > 3 { return true }\n i = i - 1 }\n false\n}\nfn main() { put(f(5)) }";
         let ir = crate::to_ir(src).unwrap();
         assert!(ir.contains("while (Lt %1 %0) {"), "{ir}");
         assert!(ir.contains("(if (Gt %1 3) {"), "{ir}");
-        assert!(ir.contains("(call __print (call f 5))"), "{ir}");
+        assert!(ir.contains("(call __put (call f 5))"), "{ir}");
     }
 
     #[test]

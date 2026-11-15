@@ -507,10 +507,12 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("hibana-native-err-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let cases = [
-            ("fn f(a: int, b: int) -> int { a + b }\nfn main() { print(1)\n print(f(9223372036854775807, 1)) }", "オーバーフロー"),
-            ("fn f(a: int, b: int) -> int { a * b }\nfn main() { print(1)\n print(f(-1, -9223372036854775807 - 1)) }", "オーバーフロー"),
-            ("fn f(a: int, b: int) -> int { a / b }\nfn main() { print(1)\n print(f(1, 0)) }", "0 で除算した"),
-            ("fn f(a: int, b: int) -> int { a % b }\nfn main() { print(1)\n print(f(-9223372036854775807 - 1, -1)) }", "オーバーフロー"),
+            ("fn f(a: int, b: int) -> int { a + b }\nfn main() { put(1)\n put(f(9223372036854775807, 1)) }", "オーバーフロー"),
+            ("fn f(a: int, b: int) -> int { a * b }\nfn main() { put(1)\n put(f(-1, -9223372036854775807 - 1)) }", "オーバーフロー"),
+            ("fn f(a: int, b: int) -> int { a / b }\nfn main() { put(1)\n put(f(1, 0)) }", "0 で除算した"),
+            ("fn f(a: int, b: int) -> int { a % b }\nfn main() { put(1)\n put(f(-9223372036854775807 - 1, -1)) }", "オーバーフロー"),
+            ("fn f(a: int, b: int) -> int { a ** b }\nfn main() { put(1)\n put(f(2, -1)) }", "負の指数"),
+            ("fn f(a: int, b: int) -> int { a ** b }\nfn main() { put(1)\n put(f(3, 100)) }", "オーバーフロー"),
         ];
         for (i, (src, msg)) in cases.iter().enumerate() {
             let exe = tmp.join(format!("e{i}"));
@@ -521,8 +523,8 @@ mod tests {
             assert_eq!(String::from_utf8(r.stdout).unwrap(), "1\n", "{src}");
             assert!(String::from_utf8(r.stderr).unwrap().contains(msg), "{src}");
         }
-        let src = "fn main() { print(-9223372036854775807 - 1)\n print(0)\n print(-42)\n print(true)\n print('日本語') }";
-        let exe = tmp.join("print");
+        let src = "fn main() { put(-9223372036854775807 - 1)\n put(0)\n put(-42)\n put(true)\n put('日本語') }";
+        let exe = tmp.join("put");
         std::fs::write(&exe, crate::to_native(src).unwrap()).unwrap();
         std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
         let r = std::process::Command::new(&exe).output().unwrap();
@@ -571,7 +573,7 @@ mod tests {
         )
         .unwrap();
         crate::parser::set_base_dir(&tmp);
-        let js = super::to_js("use 'fake-pkg'\nfn main() { print(fake_pkg.twice(21)) }").unwrap();
+        let js = super::to_js("use 'fake-pkg'\nfn main() { put(fake_pkg.twice(21)) }").unwrap();
         std::fs::write(tmp.join("main.mjs"), js).unwrap();
         let r = std::process::Command::new("node")
             .arg(tmp.join("main.mjs"))
@@ -754,18 +756,18 @@ mod tests {
         let e = out("use nothing\nfn main() {}").unwrap_err();
         assert!(e.contains("ライブラリ nothing が無い"), "{e}");
         // 名前空間: use web は修飾して使い、利用者の同じ名前とは衝突しない
-        let ok = "fn ok(n: int) -> int { n + 1 }\nfn main() { print(ok(1))\n print(web.ok('a').body) }";
+        let ok = "fn ok(n: int) -> int { n + 1 }\nfn main() { put(ok(1))\n put(web.ok('a').body) }";
         assert_eq!(out(&format!("use web\n{ok}")).unwrap(), "2\na\n");
-        let e = out("use web\nfn main() { print(ok('a').body) }").unwrap_err();
+        let e = out("use web\nfn main() { put(ok('a').body) }").unwrap_err();
         assert!(e.contains("未定義の関数 ok"), "{e}");
         // use web -> * はすべて、use web -> {..} は挙げた名前だけ修飾なしで使える
-        let all = "fn main() { let r = request('GET', '/')\n print(ok(r.path).status) }";
+        let all = "fn main() { let r = request('GET', '/')\n put(ok(r.path).status) }";
         assert_eq!(out(&format!("use web -> *\n{all}")).unwrap(), "200\n");
         assert_eq!(
             out(&format!("use web -> {{ok, request}}\n{all}")).unwrap(),
             "200\n"
         );
-        let e = out("use web -> {ok}\nfn main() { print(html('a').body) }").unwrap_err();
+        let e = out("use web -> {ok}\nfn main() { put(html('a').body) }").unwrap_err();
         assert!(e.contains("未定義の関数 html"), "{e}");
         for suffix in ["*", "{ok}", " {ok}"] {
             let src = format!("use web{}{}\nfn main() {{}}", '.', suffix);
@@ -789,8 +791,8 @@ fn main() {
     let mut tmp = 1
     let mut y = 2
     swap tmp y
-    print(tmp)
-    print(y)
+    put(tmp)
+    put(y)
 }
 "#;
         assert_eq!(out(src).unwrap(), "2\n1\n");
@@ -884,12 +886,12 @@ fn main() {
         }
         // 腕の中の操作は外側の handle が処理し、resume しない腕は handle の値になる
         let src = format!(
-            "{p}fn main() {{\n let x = handle {{ handle {{ fail('in')\n 1 }} {{ fail(m) => {{ log(m)\n 2 }} }} }} {{ log(m) => {{ print('log ' + m)\n resume() }} }}\n print(x) }}"
+            "{p}fn main() {{\n let x = handle {{ handle {{ fail('in')\n 1 }} {{ fail(m) => {{ log(m)\n 2 }} }} }} {{ log(m) => {{ put('log ' + m)\n resume() }} }}\n put(x) }}"
         );
         assert_eq!(out(&src).unwrap(), "log in\n2\n");
     }
 
-    // トレイト: 既定の実装・条件付きの実装・制約・親のトレイト・== と to_str と print
+    // トレイト: 既定の実装・条件付きの実装・制約・親のトレイト・== と to_str と put
     #[test]
     fn traits() {
         let o = out(include_str!("../../tests/programs/types/trait.hb")).unwrap();
@@ -898,9 +900,9 @@ fn main() {
             "int 1\nint 2!\n(1, 2)\nPOINT\n[int 1;int 2;]\n[(3, 4);] [(3, 4);]\ntrue\ntrue\nP5,0\n7\nto_str: P1,2\ntrue\n"
         );
         // == は Eq の実装を使う（x だけ比べる実装なら y が違っても等しい）
-        let src = "use std -> *\nstruct P { x: int, y: int }\nimpl Eq<P> {\n fn eq(a: P, b: P) -> bool { a.x == b.x }\n}\nfn main() { print(P { x: 1, y: 2 } == P { x: 1, y: 3 }) }";
+        let src = "use std -> *\nstruct P { x: int, y: int }\nimpl Eq<P> {\n fn eq(a: P, b: P) -> bool { a.x == b.x }\n}\nfn main() { put(P { x: 1, y: 2 } == P { x: 1, y: 3 }) }";
         assert_eq!(out(src).unwrap(), "true\n");
-        let e = out("use std -> *\nfn main() { print(max('a', 'b')) }").unwrap_err();
+        let e = out("use std -> *\nfn main() { put(max('a', 'b')) }").unwrap_err();
         assert!(e.msg.contains("Ord<str> の実装が無い"), "{}", e.msg);
         let e = out("use std -> *\nimpl Show<int> {\n fn shw(x: int) -> str { '' }\n}\nfn main() {}").unwrap_err();
         assert!(e.msg.contains("メソッド shw は無い"), "{}", e.msg);
@@ -913,7 +915,7 @@ fn main() {
         assert!(e.msg.contains("構造体は struct"), "{}", e.msg);
         let e = out("type S = A | B\nfn main() {}").unwrap_err();
         assert!(e.msg.contains("直和型は enum"), "{}", e.msg);
-        let src = "enum S {\n    A\n    B(n: int)\n}\nstruct W(int, str)\nfn main() {\n print(B(1))\n let w = W(1, 'a')\n print(w.1)\n print(w)\n}";
+        let src = "enum S {\n    A\n    B(n: int)\n}\nstruct W(int, str)\nfn main() {\n put(B(1))\n let w = W(1, 'a')\n put(w.1)\n put(w)\n}";
         assert_eq!(out(src).unwrap(), "B(1)\na\nW(1, \"a\")\n");
     }
 
@@ -936,7 +938,7 @@ fn main() {
         std::fs::create_dir_all(&dir).unwrap();
         let (ok, ng) = (dir.join("ok.hb"), dir.join("ng.hb"));
         std::fs::write(&ok, "use std -> *\ntest 'a' {\n let test = 1\n assert_eq(test + 1, 2)\n}\n").unwrap();
-        std::fs::write(&ng, "use std -> *\ntest 'b' { assert(false) }\nfn main() { print(1) }\n").unwrap();
+        std::fs::write(&ng, "use std -> *\ntest 'b' { assert(false) }\nfn main() { put(1) }\n").unwrap();
         assert_eq!(super::test_cmd(&[ok.to_str().unwrap()]), Ok(true));
         assert_eq!(super::test_cmd(&[ok.to_str().unwrap(), ng.to_str().unwrap()]), Ok(false));
         let _ = std::fs::remove_dir_all(&dir);
@@ -945,10 +947,10 @@ fn main() {
     // 型エラーの提案と、効果を起こした操作の位置
     #[test]
     fn error_hints() {
-        let e = out("fn main() {\n let count = 1\n print(cuont)\n}").unwrap_err();
+        let e = out("fn main() {\n let count = 1\n put(cuont)\n}").unwrap_err();
         assert_eq!(e.help.as_deref(), Some("count のことか"));
         let e = out("fn main() { prnt(1) }").unwrap_err();
-        assert_eq!(e.help.as_deref(), Some("print のことか"));
+        assert_eq!(e.help.as_deref(), Some("put のことか"));
         let src = "effect Log {\n fn log(m: str)\n}\nfn n() ! Log { log('a') }\nfn main() { n() }";
         let e = out(src).unwrap_err();
         assert_eq!(e.help.as_deref(), Some("関数 n の型が ! Log を持つ"));
@@ -1007,7 +1009,7 @@ fn main() {
     // 実行時エラーの位置。インタプリタはエラーに位置を付け、JS はメッセージに行と列を足す
     #[test]
     fn runtime_error_positions() {
-        let src = "fn half(x: int, y: int) -> int {\n    x / y\n}\nfn main() {\n    print(half(1, 0))\n}\n";
+        let src = "fn half(x: int, y: int) -> int {\n    x / y\n}\nfn main() {\n    put(half(1, 0))\n}\n";
         let e = out(src).unwrap_err();
         assert_eq!(e.span, Some((37, 5)), "{e:?}");
         let tmp = std::env::temp_dir().join(format!("hibana-pos-{}", std::process::id()));
@@ -1049,11 +1051,11 @@ fn main() {
     // mut の Vec も、初期値と push・set_at から長さが分かる
     #[test]
     fn mutable_vec_length() {
-        assert_eq!(out("fn main() { let mut v = [1, 2]\n v = push(v, 3)\n v = set_at(v, 0, 5)\n print(v[2]) }").unwrap(), "3\n");
-        let e = out("fn main() { let mut v = [1, 2]\n v = push(v, 3)\n print(v[3]) }").unwrap_err();
+        assert_eq!(out("fn main() { let mut v = [1, 2]\n v = push(v, 3)\n v = set_at(v, 0, 5)\n put(v[2]) }").unwrap(), "3\n");
+        let e = out("fn main() { let mut v = [1, 2]\n v = push(v, 3)\n put(v[3]) }").unwrap_err();
         assert!(e.contains("添字の範囲"), "{e}");
         // ループの後は長さが分からない
-        let e = out("fn main() { let mut v = [1]\n for i in 0..2 { v = push(v, 1) }\n print(v[1]) }").unwrap_err();
+        let e = out("fn main() { let mut v = [1]\n for i in 0..2 { v = push(v, 1) }\n put(v[1]) }").unwrap_err();
         assert!(e.contains("添字の範囲"), "{e}");
     }
 
@@ -1064,10 +1066,10 @@ fn main() {
             ("fn main() { let x: int = true; }", "int が必要"),
             ("fn f() -> int { true } fn main() {}", "戻り値"),
             ("fn main() { if 1 { } }", "if の条件"),
-            ("fn main() { print(1 / 0); }", "0 で除算"),
+            ("fn main() { put(1 / 0); }", "0 で除算"),
             ("fn main() { y; }", "未定義の変数"),
             ("fn main() { 1 + ; }", "式が必要"),
-            ("fn main() { let x = 1 print(x) }", "文の区切り"),
+            ("fn main() { let x = 1 put(x) }", "文の区切り"),
             ("fn main() { let x = quote { 1 } }", "マクロ本体の中でだけ"),
         ] {
             let e = out(src).unwrap_err();

@@ -8,11 +8,11 @@ fn main() {
     let f = fn() -> int { len(xs) }
     xs = push(xs, 100)
     xs = push(xs, len(xs))
-    print(ys)
-    print(xs)
-    print(f())
+    put(ys)
+    put(xs)
+    put(f())
     let zs = xs
     for i in 0..len(xs) { if i < len(xs) { xs = set_at(xs, i, i * 2) } }
-    print(xs)
-    print(zs)
+    put(xs)
+    put(zs)
 }

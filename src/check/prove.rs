@@ -15,7 +15,7 @@ pub(crate) enum Term {
     Call(String, Vec<V>),
     // 値の分からない構造体のフィールド
     Proj(V, String),
-    // 型の計算で扱えない式（while・代入・print など）。どの値とも等しくない
+    // 型の計算で扱えない式（while・代入・put など）。どの値とも等しくない
     Opaque(usize),
 }
 
@@ -179,6 +179,7 @@ pub(super) fn bin(op: &'static str, a: V, b: V) -> V {
         ("*", Int(x), Int(y)) => x.checked_mul(*y).map(Int),
         ("/", Int(x), Int(y)) => x.checked_div(*y).map(Int),
         ("%", Int(x), Int(y)) => x.checked_rem(*y).map(Int),
+        ("**", Int(x), Int(y)) => u32::try_from(*y).ok().and_then(|e| x.checked_pow(e)).map(Int),
         ("<", Int(x), Int(y)) => Some(Bool(x < y)),
         ("<=", Int(x), Int(y)) => Some(Bool(x <= y)),
         (">", Int(x), Int(y)) => Some(Bool(x > y)),
@@ -404,7 +405,7 @@ impl Eval {
                 let b = self.eval(r, env)?;
                 bin(op, a, b)
             }
-            Expr::Call(name, _) if name == "print" || SYN_FNS.iter().any(|s| s.0 == name) => {
+            Expr::Call(name, _) if name == "put" || SYN_FNS.iter().any(|s| s.0 == name) => {
                 return Err(Halt::Stuck);
             }
             Expr::Call(name, args) => {

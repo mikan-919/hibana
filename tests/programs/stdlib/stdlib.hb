@@ -27,7 +27,7 @@ test 'str' {
 }
 
 fn main() {
-    print(join(map(range(1, 4), fn(x) { to_str(x * x) }), ' '))
+    put(join(map(range(1, 4), fn(x) { to_str(x * x) }), ' '))
 }
 
 test 'json string escapes' {

@@ -38,18 +38,18 @@ fn script_builds_files_and_preserves_arguments() {
     let dir = temp();
     std::fs::create_dir(dir.join("src")).unwrap();
     std::fs::write(dir.join("src/lib.hb"), "fn answer() -> int { 42 }\n").unwrap();
-    std::fs::write(dir.join("src/app.hb"), "use './lib.hb' -> *\nfn main() { print(answer()) }\n").unwrap();
+    std::fs::write(dir.join("src/app.hb"), "use './lib.hb' -> *\nfn main() { put(answer()) }\n").unwrap();
     std::fs::write(dir.join("src/wasm.hb"), "use './lib.hb' -> *\nfn answer2() -> int { answer() }\n").unwrap();
     std::fs::write(dir.join("build.hb"), r#"
 fn arguments() -> Vec<str> { args() }
 fn main() {
-    print(arguments())
+    put(arguments())
     write_bytes('dist/app.mjs', compile_file('src/app.hb', 'js', []))
     write_bytes('dist/app.native', compile_file('src/app.hb', 'native', []))
     write_bytes('dist/app.wasm', compile_file('src/wasm.hb', 'wasm', ['answer2']))
     write_text('dist/glue.mjs', js_glue(inspect_file_exports('src/wasm.hb', ['answer2'])))
     write_bytes('dist/copy', read_bytes('dist/app.wasm'))
-    print(read_text('src/lib.hb'))
+    put(read_text('src/lib.hb'))
 }
 "#).unwrap();
     let run = Command::new(env!("CARGO_BIN_EXE_hibana")).current_dir(&dir).args(["build.hb", "--", "a", "b"]).output().unwrap();

@@ -19,7 +19,7 @@ fn sum(v: Vec<Pos>) -> int {
 
 fn main() {
     let v: Vec<Pos> = [3, 1, 4]
-    print(sum(v))
+    put(sum(v))
     // let w: Vec<Pos> = [1, 0] は 0 > 0 を証明できないので型エラー
 }
 ```

@@ -412,7 +412,7 @@ pub fn new(name: &str) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
     std::fs::write(
         dir.join("src/main.hb"),
-        "use std -> *\n\nfn main() {\n    print('hello')\n}\n",
+        "use std -> *\n\nfn main() {\n    put('hello')\n}\n",
     )
     .map_err(|e| e.to_string())?;
     Ok(())

@@ -19,13 +19,13 @@ fn area(s: Size) -> Pos { s.w * s.h }
 fn main() {
     let p = Point { x: 1, y: 2 }
     let q = add(p, Point { y: 10, x: 20 })
-    print(q)
-    print(q.x + q.y)
+    put(q)
+    put(q.x + q.y)
     let pr = Pair { fst: 1, snd: 'one' }
-    print(pr.snd)
-    print(area(Size { w: 3, h: 4 }))
+    put(pr.snd)
+    put(area(Size { w: 3, h: 4 }))
     let id = UserId(42)
     let c = Rgb(255, 128, 0)
-    print(id.0 + c.1)
-    print(c)
+    put(id.0 + c.1)
+    put(c)
 }

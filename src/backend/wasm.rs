@@ -752,7 +752,7 @@ x.__hibana_reset(); if (x.__hibana_alloc(1) !== first || x.literal() !== packed 
     fn library_exports_only_requested_reachable_functions() {
         let used = "fn plus(a: int, b: int) -> int { a + b }\nfn twice(n: int) -> int { plus(n, n) }\nfn result(n: int) -> int { twice(n) + 1 }\n";
         let with_unused = format!(
-            "{used}fn unused() -> str {{ 'unused' }}\nfn unused_print() {{ print(999) }}\n"
+            "{used}fn unused() -> str {{ 'unused' }}\nfn unused_print() {{ put(999) }}\n"
         );
         let names = vec!["result".to_string()];
         let bytes = crate::to_wasm_library(&with_unused, &names).unwrap();
@@ -811,8 +811,10 @@ const v = new DataView(x.memory.buffer), p = Number(v.getBigUint64(24, true)), n
 process.stdout.write(Buffer.from(x.memory.buffer, p + 8, n));
 "#;
         for (src, expected) in [
-            ("fn f(a: int, b: int) -> int { a / b } fn main() { print(f(1, 0)) }", "0 で除算した"),
-            ("fn f(a: int, b: int) -> int { a + b } fn main() { print(f(9223372036854775807, 1)) }", "オーバーフロー"),
+            ("fn f(a: int, b: int) -> int { a / b } fn main() { put(f(1, 0)) }", "0 で除算した"),
+            ("fn f(a: int, b: int) -> int { a + b } fn main() { put(f(9223372036854775807, 1)) }", "オーバーフロー"),
+            ("fn f(a: int, b: int) -> int { a ** b } fn main() { put(f(2, -1)) }", "負の指数"),
+            ("fn f(a: int, b: int) -> int { a ** b } fn main() { put(f(2, 63)) }", "オーバーフロー"),
         ] {
             let result = node(&crate::to_wasm(src).unwrap(), script);
             assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
@@ -822,7 +824,7 @@ process.stdout.write(Buffer.from(x.memory.buffer, p + 8, n));
 
     #[test]
     fn executes_and_checks_integer_errors() {
-        let src = "fn add(a: int, b: int) -> int { a + b }\nfn sub(a: int, b: int) -> int { a - b }\nfn mul(a: int, b: int) -> int { a * b }\nfn div(a: int, b: int) -> int { a / b }\nfn rem(a: int, b: int) -> int { a % b }\nfn main() { print(add(2, 3))\n print(mul(7, 6))\n print(sub(1, 2))\n print(div(7, 2))\n print(rem(7, 2)) }";
+        let src = "fn add(a: int, b: int) -> int { a + b }\nfn sub(a: int, b: int) -> int { a - b }\nfn mul(a: int, b: int) -> int { a * b }\nfn div(a: int, b: int) -> int { a / b }\nfn rem(a: int, b: int) -> int { a % b }\nfn main() { put(add(2, 3))\n put(mul(7, 6))\n put(sub(1, 2))\n put(div(7, 2))\n put(rem(7, 2)) }";
         let bytes = crate::to_wasm(src).unwrap();
         let mut expected = Vec::new();
         crate::run(src, &mut expected).unwrap();

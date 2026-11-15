@@ -14,7 +14,7 @@ fn main() {
     }
     add('a')
     add('b')
-    print(read(n))
-    print(read(log))
-    print(n == n)
+    put(read(n))
+    put(read(log))
+    put(n == n)
 }

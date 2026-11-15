@@ -8,6 +8,6 @@ impl Eq<P> {
 }
 
 fn main() {
-    print(P { x: 1, y: 2 } == P { x: 1, y: 3 })
-    print(P { x: 1, y: 2 } != P { x: 2, y: 2 })
+    put(P { x: 1, y: 2 } == P { x: 1, y: 3 })
+    put(P { x: 1, y: 2 } != P { x: 2, y: 2 })
 }

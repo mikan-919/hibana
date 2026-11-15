@@ -14,6 +14,7 @@ function $sub(a, b) { return $chk(a - b); }
 function $mul(a, b) { return $chk(a * b); }
 function $div(a, b) { if (b === 0n) throw new Error("0 で除算した"); return $chk(a / b); }
 function $rem(a, b) { if (b === 0n) throw new Error("0 で除算した"); if (a === $MIN && b === -1n) throw new Error("オーバーフロー"); return a % b; }
+function $pow(a, b) { if (b < 0n) throw new Error("負の指数"); if (b > 64n) { if (a > 1n || a < -1n) throw new Error("オーバーフロー"); b = 64n + b % 2n; } return $chk(a ** b); }
 function $neg(a) { return $chk(-a); }
 let $w;
 // 最後に通った、失敗しうる式の位置
@@ -380,7 +381,7 @@ impl Gen<'_> {
     // 失敗しうる式か（算術・slice・操作・JavaScript の関数の呼び出し）。実行時エラーの位置を記録する所
     fn risky(&self, e: &Expr) -> bool {
         match e {
-            Expr::Binary(op, ..) => matches!(*op, "+" | "-" | "*" | "/" | "%"),
+            Expr::Binary(op, ..) => matches!(*op, "+" | "-" | "*" | "**" | "/" | "%"),
             Expr::Unary(op, _) => *op == "-",
             Expr::Call(n, _) => {
                 n == "slice"
@@ -566,6 +567,7 @@ impl Gen<'_> {
             "*" => format!("$mul({a}, {b})"),
             "/" => format!("$div({a}, {b})"),
             "%" => format!("$rem({a}, {b})"),
+            "**" => format!("$pow({a}, {b})"),
             "==" => format!("$eq({a}, {b})"),
             "!=" => format!("!$eq({a}, {b})"),
             op => format!("({a} {op} {b})"),
@@ -634,7 +636,7 @@ impl Gen<'_> {
                     "push" => format!("[...{}, {}]", vs[0], vs[1]),
                     "set_at" => format!("$set({}, {}, {})", vs[0], vs[1], vs[2]),
                     "all" => wait(true, format!("$all({})", vs[0])),
-                    "print" => format!("$print({})", vs[0]),
+                    "put" => format!("$print({})", vs[0]),
                     "to_str" => format!("$str({})", vs[0]),
                     "len" | "split" | "starts_with" | "slice" | "chars" | "code" | "char_from_codepoint" | "panic" | "now_ms" => {
                         format!("${name}({})", vs.join(", "))

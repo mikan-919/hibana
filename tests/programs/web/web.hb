@@ -12,7 +12,7 @@ fn main() {
         Hello {user}!
         <Icon name={'star'}></Icon>
     </div>
-    print(page)
+    put(page)
 
     let app = routes {
         GET '/' {
@@ -30,9 +30,9 @@ fn main() {
     }
     for path in ['/', '/user/42', '/nothing'] {
         let res = app(web.request('GET', path))
-        print(to_str(res.status) + ' ' + res.body)
+        put(to_str(res.status) + ' ' + res.body)
     }
-    print(app(web.request('POST', '/post/bob/7')))
+    put(app(web.request('POST', '/post/bob/7')))
 }
 
 // 既存コンストラクタはヘッダーなし。追加しても本文と状態を保つ

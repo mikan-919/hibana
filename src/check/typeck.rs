@@ -79,7 +79,7 @@ pub(crate) const BUILD_FNS: &[&str] = &["compile", "inspect_exports", "utf8", "a
 
 // どこでも使える組み込み関数
 const BUILTINS: &[&str] = &[
-    "print",
+    "put",
     "len",
     "Vec",
     "Type",
@@ -1323,10 +1323,10 @@ impl Ck {
                 want(&prim("str"), &rt, &op)?;
                 prim("str")
             }
-            "+" | "-" | "*" | "/" | "%" | "<" | "<=" | ">" | ">=" => {
+            "+" | "-" | "*" | "**" | "/" | "%" | "<" | "<=" | ">" | ">=" => {
                 want(&int, &lt, &op)?;
                 want(&int, &rt, &op)?;
-                if matches!(op, "+" | "-" | "*" | "/" | "%") {
+                if matches!(op, "+" | "-" | "*" | "**" | "/" | "%") {
                     int
                 } else {
                     boolean
@@ -1635,9 +1635,9 @@ impl Ck {
                 let t = self.lookup(name).unwrap().ty.clone();
                 return self.apply_type(&t, args, addr);
             }
-            Expr::Call(name, args) if name == "print" => {
+            Expr::Call(name, args) if name == "put" => {
                 if args.len() != 1 {
-                    return Err("print の引数は1個".into());
+                    return Err("put の引数は1個".into());
                 }
                 let t = self.expr(&mut args[0])?;
                 if let Some(inst) = self.trait_inst("show", &t)? {
@@ -2080,7 +2080,7 @@ impl Ck {
         self.apply(&sol, &ret)
     }
 
-    // == と to_str・print は、std の Eq・Show の実装がある型ならその実装を使う（無ければ組み込みの比較と文字列化）
+    // == と to_str・put は、std の Eq・Show の実装がある型ならその実装を使う（無ければ組み込みの比較と文字列化）
     // プリミティブの型は組み込みのまま（細分化型の検査が int の == を直接扱うため）
     fn trait_inst(&mut self, method: &str, t: &V) -> R<Option<Expr>> {
         let tr = if method == "eq" { "std.Eq" } else { "std.Show" };
@@ -2189,7 +2189,7 @@ impl Ck {
             .chain(self.norm.fns.keys().map(|k| k.as_str()))
             .chain(STR_FNS.iter().map(|s| s.0))
             .chain([
-                "print", "len", "push", "set_at", "to_str", "new_ref", "read", "write", "all",
+                "put", "len", "push", "set_at", "to_str", "new_ref", "read", "write", "all",
                 "resume",
             ])
             .map(|k| k.to_string());
@@ -2937,20 +2937,20 @@ mod tests {
         ] {
             assert!(check(src).is_err(), "{src}");
         }
-        check("fn f(n: int, x: int[i -> i < n]) -> int[r -> r < n] { x }\nfn main() { print(f(3, 2)) }").unwrap();
+        check("fn f(n: int, x: int[i -> i < n]) -> int[r -> r < n] { x }\nfn main() { put(f(3, 2)) }").unwrap();
     }
 
     #[test]
     fn recursive_functions_and_negative_types_are_allowed() {
-        check("enum Bad { MkBad(f: (Bad) -> int) }\nfn even(n: int) -> bool { if n == 0 { true } else { odd(n - 1) } }\nfn odd(n: int) -> bool { if n == 0 { false } else { even(n - 1) } }\nfn main() { print(even(4)) }").unwrap();
+        check("enum Bad { MkBad(f: (Bad) -> int) }\nfn even(n: int) -> bool { if n == 0 { true } else { odd(n - 1) } }\nfn odd(n: int) -> bool { if n == 0 { false } else { even(n - 1) } }\nfn main() { put(even(4)) }").unwrap();
         check("fn f(n: int) -> int { let g = f\n g(n) }\nfn main() {}").unwrap();
     }
 
     #[test]
     fn runtime_calls_are_opaque_to_refinement_proofs() {
-        let source = "fn items() -> Vec<int> { [1] }\nfn main() { let xs = items()\n print(xs[0]) }";
+        let source = "fn items() -> Vec<int> { [1] }\nfn main() { let xs = items()\n put(xs[0]) }";
         assert!(check(source).unwrap_err().to_string().contains("添字の範囲"));
-        check(&source.replace("print(xs[0])", "if len(xs) > 0 { print(xs[0]) }")).unwrap();
+        check(&source.replace("put(xs[0])", "if len(xs) > 0 { put(xs[0]) }")).unwrap();
     }
 
     #[test]
@@ -2958,14 +2958,14 @@ mod tests {
         let src = include_str!("../../tests/programs/basics/closure.hb");
         check(src).unwrap();
         for (from, to, msg) in [
-            ("print(twice(inc)(3))", "print(twice(add)(3))", "が必要だが"),
+            ("put(twice(inc)(3))", "put(twice(add)(3))", "が必要だが"),
             (
                 "let inc = fn(x: int) -> int { x + 1 }",
                 "let inc = fn(x) { x + 1 }",
                 "型を書く",
             ),
-            ("print(f(2, 3))", "print(f(2))", "引数は2個"),
-            ("print(adder(10)(5))", "print(inc(10)(5))", "関数でない値"),
+            ("put(f(2, 3))", "put(f(2))", "引数は2個"),
+            ("put(adder(10)(5))", "put(inc(10)(5))", "関数でない値"),
         ] {
             let e = check(&src.replace(from, to)).unwrap_err();
             assert!(e.contains(msg), "{to} => {e}");
@@ -3008,8 +3008,8 @@ mod tests {
                 "int が必要だが bool",
             ),
             ("Size { w: 3, h: 4 }", "Size { w: 0, h: 4 }", "証明できない"),
-            ("print(q.x + q.y)", "print(q.z)", "フィールド z は無い"),
-            ("print(pr.snd)", "print(pr.snd + 1)", "str が必要だが int"),
+            ("put(q.x + q.y)", "put(q.z)", "フィールド z は無い"),
+            ("put(pr.snd)", "put(pr.snd + 1)", "str が必要だが int"),
         ] {
             let e = check(&src.replace(from, to)).unwrap_err();
             assert!(e.contains(msg), "{to} => {e}");
@@ -3069,7 +3069,7 @@ fn add(x: Pos, y: Pos) -> int[r -> r > 1] { x + y }
 fn main() {
     let p: Pos = 3
     let v: NumVec<int[x -> x > 0]> = [1, 2, p]
-    print(sum(v) + get(v, 1) + v[2])
+    put(sum(v) + get(v, 1) + v[2])
 }
 "#;
         check(src).unwrap();

@@ -49,10 +49,10 @@ fn each(xs: Vec<str>, f: (str) -> unit ! Log) ! Log {
 
 // all は Async の効果。インタプリタでは順に実行する
 fn main() ! Async {
-    print(all([fn() { describe_or('7') }, fn() { describe_or('0') }]))
+    put(all([fn() { describe_or('7') }, fn() { describe_or('0') }]))
     handle each(['a', 'b'], fn(x) { log('each ' + x) }) {
         log(msg) => {
-            print(msg)
+            put(msg)
             resume()
         }
     }
@@ -61,12 +61,12 @@ fn main() ! Async {
         let s = handle describe(id) {
             need() => resume(Db { prefix: 'user' })
             log(msg) => {
-                print('[log] ' + msg)
+                put('[log] ' + msg)
                 resume()
             }
         }
-        print(s)
+        put(s)
         i = i + 1
     }
-    print(i)
+    put(i)
 }

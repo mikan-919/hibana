@@ -511,10 +511,10 @@ mod tests {
 
     #[test]
     fn positions_and_definition() {
-        let src = "fn f(x: int) -> int { x }\nfn main() {\n let y = f(1)\n print('あ' + to_str(y))\n}\n";
+        let src = "fn f(x: int) -> int { x }\nfn main() {\n let y = f(1)\n put('あ' + to_str(y))\n}\n";
         let use_at = src.rfind("y)").unwrap();
-        assert_eq!(position(src, use_at), json!({ "line": 3, "character": 20 }));
-        assert_eq!(offset(src, &json!({ "line": 3, "character": 20 })), use_at);
+        assert_eq!(position(src, use_at), json!({ "line": 3, "character": 18 }));
+        assert_eq!(offset(src, &json!({ "line": 3, "character": 18 })), use_at);
         let (a, _) = definition(src, use_at).unwrap();
         assert_eq!(a, src.find("y =").unwrap());
         let (a, _) = definition(src, src.find("f(1)").unwrap()).unwrap();
@@ -534,7 +534,7 @@ mod completion_tests {
 
     #[test]
     fn completes_modules_fields_and_names() {
-        let src = "use web\nstruct P { x: int, y: int }\nfn main() {\n let p = P { x: 1, y: 2 }\n print(p.x)\n}\n";
+        let src = "use web\nstruct P { x: int, y: int }\nfn main() {\n let p = P { x: 1, y: 2 }\n put(p.x)\n}\n";
         let (err, ts, ix) = analyze("file:///tmp/a.hb", src);
         assert!(err.is_none());
         let ix = ix.unwrap();
@@ -542,13 +542,13 @@ mod completion_tests {
             v.as_array().unwrap().iter().map(|i| i["label"].as_str().unwrap().to_string()).collect()
         };
         // 書きかけの文書でも、前に解析した型と名前の表を使う
-        let typing = src.replace("print(p.x)", "print(p.");
+        let typing = src.replace("put(p.x)", "put(p.");
         let at = typing.find("p.").unwrap() + 2;
         assert_eq!(labels(completion(&typing, at, &ix, &ts)), ["x", "y"]);
-        let typing = src.replace("print(p.x)", "web.");
+        let typing = src.replace("put(p.x)", "web.");
         let at = typing.find("web.").unwrap() + 4;
         assert!(labels(completion(&typing, at, &ix, &ts)).contains(&"json".to_string()));
-        let all = labels(completion(src, src.find("print").unwrap(), &ix, &ts));
+        let all = labels(completion(src, src.find("put").unwrap(), &ix, &ts));
         assert!(all.contains(&"p".to_string()) && all.contains(&"web".to_string()));
         // P は型の宣言（種類 1、宣言の印 1）
         let data = semantic_tokens(src, &ix)["data"].clone();
@@ -557,22 +557,22 @@ mod completion_tests {
 
     #[test]
     fn colors_names_in_templates_and_paths() {
-        let src = "fn P::f(x: int) -> int { x }\nfn main() { print(`a{P::f(1)}`) }\n";
+        let src = "fn P::f(x: int) -> int { x }\nfn main() { put(`a{P::f(1)}`) }\n";
         let (err, _, ix) = analyze("file:///tmp/b.hb", src);
         assert!(err.is_none(), "{err:?}");
         let data = semantic_tokens(src, &ix.unwrap())["data"].clone();
-        // 最後は 2 行目の P::f（main から 18 列先、長さ 4、関数）
+        // 最後は 2 行目の P::f（main から 16 列先、長さ 4、関数）
         let d = data.as_array().unwrap();
-        assert_eq!(d[d.len() - 5..], [json!(0), json!(18), json!(4), json!(3), json!(0)]);
+        assert_eq!(d[d.len() - 5..], [json!(0), json!(16), json!(4), json!(3), json!(0)]);
     }
 
     #[test]
     fn selected_imports_are_visible() {
-        let src = "use web -> { ok, Request }\nfn main() { print(ok('x').status) }\n";
+        let src = "use web -> { ok, Request }\nfn main() { put(ok('x').status) }\n";
         let (err, types, ix) = analyze("file:///tmp/imports.hb", src);
         assert!(err.is_none(), "{err:?}");
         let ix = ix.unwrap();
-        let items = completion(src, src.find("print").unwrap(), &ix, &types);
+        let items = completion(src, src.find("put").unwrap(), &ix, &types);
         let labels: Vec<_> = items.as_array().unwrap().iter().filter_map(|x| x["label"].as_str()).collect();
         assert!(labels.contains(&"ok") && labels.contains(&"Request"));
         assert!(!labels.contains(&"html") && !labels.contains(&"web"));

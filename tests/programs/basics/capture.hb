@@ -3,6 +3,6 @@ fn main() {
     let mut n = 1
     let f = fn() -> int { n }
     n = 2
-    print(f())
-    print(n)
+    put(f())
+    put(n)
 }

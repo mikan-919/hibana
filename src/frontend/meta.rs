@@ -1578,7 +1578,7 @@ fn main() {
             ("macro m ('m') { quote { $x } }", "未定義の変数 x"),
             ("macro m ('m') { 1 }", "マクロ本体の値"),
             (
-                "syntax P = k:Ident '=' v:Expr\nmacro m ('m' p:P) -> Stmt { quote { print($p.vv) } }",
+                "syntax P = k:Ident '=' v:Expr\nmacro m ('m' p:P) -> Stmt { quote { put($p.vv) } }",
                 "フィールド vv は無い",
             ),
             (

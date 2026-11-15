@@ -33,15 +33,15 @@ macro sum ('sum' '(' xs:(Expr % ',') ')') {
 syntax Pair = key:Ident '=' value:Expr
 
 macro show ('show' '{' ps:(Pair % ',') '}') -> Stmt {
-    quote { $( print(${str_of(ps.key)}); print($ps.value); )* }
+    quote { $( put(${str_of(ps.key)}); put($ps.value); )* }
 }
 
 fn main() {
-    unless false { print(1) }
-    unless true { print(2) }
-    print(pow(3, 4))
-    print(sum(1, 2 * 3, 4))
+    unless false { put(1) }
+    unless true { put(2) }
+    put(pow(3, 4))
+    put(sum(1, 2 * 3, 4))
     // 束縛した式は括弧で囲んで差し込むので -(1 + 2) になる
-    print(-sum(1 + 2))
+    put(-sum(1 + 2))
     show { a = 10, b = 20 }
 }

@@ -90,9 +90,9 @@ use 'some-package'        // npm のパッケージ。node_modules の package.j
 use 'node:path'           // Node.js の組み込み。node_modules/@types/node が要る
 
 fn main() {
-    print(util.add(2, 3))
+    put(util.add(2, 3))
     let p = util.point(1, 2)       // interface Point は構造体 util.Point になる
-    print(p.x + p.y)
+    put(p.x + p.y)
 }
 ```
 
@@ -158,7 +158,7 @@ fn twice_later(x: int) -> int ! Async {
     util.later(x) + util.later(x)       // await は書かない
 }
 
-fn main() ! Async { print(twice_later(5)) }
+fn main() ! Async { put(twice_later(5)) }
 ```
 
 実装:
@@ -230,7 +230,7 @@ trait Ord<A>: Eq<A> {                        // 親のトレイト。Ord の実�
 - 同じトレイトと型の組に `impl` が二つあると、名前の順で最初のものを使います（重なりは検査しません）。
 - メソッドは自分のジェネリック引数を持てません。トレイトの型引数で書きます。
 
-`std` の `Eq` と `Show` は演算子と組み込み関数に結びついています。`Eq` の実装がある型では `==` と `!=` がその実装の `eq` を、`Show` の実装がある型では `to_str` と `print` がその実装の `show` を使います。実装が無い型では、組み込みの比較と文字列化のままです。`int` `str` `bool` は、細分化型の検査が `==` を直接扱うので、いつも組み込みです。
+`std` の `Eq` と `Show` は演算子と組み込み関数に結びついています。`Eq` の実装がある型では `==` と `!=` がその実装の `eq` を、`Show` の実装がある型では `to_str` と `put` がその実装の `show` を使います。実装が無い型では、組み込みの比較と文字列化のままです。`int` `str` `bool` は、細分化型の検査が `==` を直接扱うので、いつも組み込みです。
 
 ### 3.8 テスト
 
@@ -257,8 +257,8 @@ fn str::twice(s: str) -> str { s + s }         // 組み込みの型にも書け
 
 fn main() {
     let id = Param { value: 'u7' }
-    print(Param::get(id))       // u7
-    print(id.get().twice())     // u7u7。x.f(a) は、x の型 T の T::f(x, a) を呼ぶ
+    put(Param::get(id))       // u7
+    put(id.get().twice())     // u7u7。x.f(a) は、x の型 T の T::f(x, a) を呼ぶ
 }
 ```
 
@@ -272,7 +272,7 @@ fn main() {
 |---|---|
 | リテラル | `1` `'s'` `` `n={n}` `` `true` `[1, 2, 3]` |
 | 変数 | `let x = 1`、`let mut i: int = 0`、`i = i + 1` |
-| 演算 | `+ - * / %`（`+` は文字列の連結にも使う）、`< <= > >= == !=`、`&& \|\| !` |
+| 演算 | `+ - * / % **`（`+` は文字列の連結にも使う。`**` はべき乗）、`< <= > >= == !=`、`&& \|\| !` |
 | 呼び出し | `f(x)`、`f<int>(x)`、`adder(10)(5)` |
 | 条件 | `if c { a } else { b }`（`else` が無ければ値は捨てる。片方の分岐だけで型が決まらない `None` や `[]` は、もう片方の型になる） |
 | 繰り返し | `while c { }`、`for x in v { }`（`v` は `Vec`）、`for i in a..b { }` |
@@ -283,6 +283,7 @@ fn main() {
 | ブロック | `{ let a = 1; a + 1 }`（最後の式が値） |
 
 - `match` は網羅していなければエラーです。
+- `**` は単項の `-` `!` より強く結合し、右から結合します（`-x ** 2` は `-(x ** 2)`、`2 ** 3 ** 2` は `2 ** (3 ** 2)`）。負の指数は実行時エラー（負の指数）、結果が `int` の範囲を超えると実行時エラー（オーバーフロー）です。
 - 無名関数は作った時の変数の値を写し取ります。後から代入しても関数の中には届きません。
 
 ## 5. 型
@@ -355,7 +356,7 @@ macro pow ('pow' '(' x:Expr ',' n:Int ')') {
 - `quote { ... }` はコード片を作ります。中では `$x`（変数の値）、`$x.f`（フィールド）、`${式}`（式の値）、`$( ... ) 区切り? *`（配列を繰り返す）が使えます。差し込める値は `syn`・`int`・`str`・`bool` です。
 - パターンで束縛した式は、括弧で囲んで差し込みます（`-sum(1 + 2)` は `-(1 + 2)`）。`quote` で作った断片は囲みません。
 - 束縛の型は、パターンから決まる `syn<種類>` です（`p:Pair` は `syn<Pair>`、`ps:(Pair % ',')` は `syn<[Pair]>`、`x:Expr` は `syn<Expr>`）。存在しないフィールドの参照や、配列でない値への `at` は、マクロ定義の時点で型エラーになります。
-- 組み込み関数: `len(x)`、`at(xs, i)`、`is_null(x)`、`int_of(x)`、`str_of(x)`、`ident(s)`（文字列から識別子を作る）、`error(msg)`（コンパイルエラーにする）。文字列の関数（9 節）も使えます。マクロ本体の `print` は標準エラーに出ます。
+- 組み込み関数: `len(x)`、`at(xs, i)`、`is_null(x)`、`int_of(x)`、`str_of(x)`、`ident(s)`（文字列から識別子を作る）、`error(msg)`（コンパイルエラーにする）。文字列の関数（9 節）も使えます。マクロ本体の `put` は標準エラーに出ます。
 - 本体から普通の `fn` は呼べません。マクロは関数の構文解析より前に実行するためです。
 
 ### 8.3 衛生性
@@ -395,7 +396,7 @@ enum Shape { Circle(r: int), Rect(w: int, h: int), Dot }
 
 | 関数 | 型 |
 |---|---|
-| `print(x)` | 任意の値を表示する |
+| `put(x)` | 任意の値を表示する |
 | `len(v)` | `Vec<T>` か `str` の長さ。`mut` の変数は、初期値と `push`・`set_at` の代入から長さを追う（ループと分岐の後は分からなくなる） |
 | `to_str(x)` | 任意の値を文字列にする |
 | `split(s, sep)` | `(str, str) -> Vec<str>` |
@@ -432,7 +433,7 @@ enum Shape { Circle(r: int), Rect(w: int, h: int), Dot }
 |---|---|
 | `Option<A>` = `None` \| `Some(value)`、`unwrap_or(o, d)` | 値が無いかもしれないこと |
 | `Result<A, E>` = `Ok(value)` \| `Err(error)` | 成功か失敗 |
-| `Eq<A>`（`eq`）、`Ord<A>: Eq<A>`（`lt`）、`Show<A>`（`show`） | トレイト（3.7 節）。`int` `str` `bool` の `Eq` と `Show`、`int` の `Ord`、`Vec<A>` の `Eq` と `Show` の実装がある（`print` と `to_str` での `Vec` の表示は組み込みのまま） |
+| `Eq<A>`（`eq`）、`Ord<A>: Eq<A>`（`lt`）、`Show<A>`（`show`） | トレイト（3.7 節）。`int` `str` `bool` の `Eq` と `Show`、`int` の `Ord`、`Vec<A>` の `Eq` と `Show` の実装がある（`put` と `to_str` での `Vec` の表示は組み込みのまま） |
 | `max(a, b)` `min(a, b)` `contains(xs, x)` | `Ord` と `Eq` を使う関数 |
 | `assert(ok)` `assert_eq(got, want)` | テスト（3.8 節）。偽か等しくなければ実行時エラー |
 | `derive(Eq, Show) struct ...`（`enum` も） | 型の `Eq`・`Show` の `impl` を作る宣言のマクロ（8.4 節） |
@@ -475,7 +476,7 @@ fn main() {
         GET '/user/{id}' { web.ok('user ' + id) }
     }
     let res = app(web.request('GET', '/user/42'))
-    print(res.body)    // user 42
+    put(res.body)    // user 42
 }
 ```
 
@@ -597,7 +598,7 @@ npm ツールは各記録の `npm_lock` に npm の package-lock JSON（lockfile
 | `hibana test [ファイル...]` | `test` をインタプリタで実行し、成功した数を表示する。失敗があれば終了コード 1。ファイルを省くと、`hibana.toml` のあるディレクトリの `src` と `tests` の `.hb` すべて | テスト（3.8 節） |
 | `hibana lsp` | Language Server を標準入出力で動かす | エディタ（エラーの表示・整形・hover・定義へのジャンプ・補完・色付け）。VS Code と Zed の拡張機能は `editors/`（`editors/README.md`） |
 
-WASM 出力は関数を名前で公開します。整数は符号付き 64 ビットで、JavaScript からは `BigInt` で渡します。`print` がある場合、取り込み `hibana.write(fd, 位置, 長さ)` で memory 上の 1 行（改行を含む UTF-8）を書きます。`now_ms` は取り込み `hibana.now_ms()` を呼びます。JavaScript の接続コードはこの 2 つを用意し、`print` の 1 行を `imports.hibana.print`（無ければ `console.log`）に渡します。整数の範囲外・0 による除算・`panic` などの実行時エラーでは、メッセージの文字列の位置を memory の 24 番地に書いて WASM の実行を停止します。IR が扱えない構文はコンパイル時にエラーになります。
+WASM 出力は関数を名前で公開します。整数は符号付き 64 ビットで、JavaScript からは `BigInt` で渡します。`put` がある場合、取り込み `hibana.write(fd, 位置, 長さ)` で memory 上の 1 行（改行を含む UTF-8）を書きます。`now_ms` は取り込み `hibana.now_ms()` を呼びます。JavaScript の接続コードはこの 2 つを用意し、`put` の 1 行を `imports.hibana.print`（無ければ `console.log`）に渡します。整数の範囲外・0 による除算・`panic` などの実行時エラーでは、メッセージの文字列の位置を memory の 24 番地に書いて WASM の実行を停止します。IR が扱えない構文はコンパイル時にエラーになります。
 
 ライブラリは `hibana::to_wasm_library(source, &exports)` に公開する関数名を渡して生成します。`main` は必要ありません。型検査はライブラリ全体に行い、WASM には公開関数と、そこから呼ぶ関数だけを含めます。未使用の関数や型が IR に未対応でも、型検査を通れば含めません。
 

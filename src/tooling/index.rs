@@ -210,7 +210,7 @@ mod tests {
 
     #[test]
     fn symbols() {
-        let src = "use std -> *\nuse web\n// 2 倍にする\nfn double(x: int) -> int { x * 2 }\nstruct P { x: int, y: int }\nfn main() { print(double(1)) }\n";
+        let src = "use std -> *\nuse web\n// 2 倍にする\nfn double(x: int) -> int { x * 2 }\nstruct P { x: int, y: int }\nfn main() { put(double(1)) }\n";
         let combined = crate::parser::with_uses(src).unwrap();
         let prog = crate::parser::parse(&combined).unwrap();
         let ix = build(src, &combined, &prog);

@@ -31,12 +31,12 @@ impl<A: Describe> Describe<Vec<A>> {
 fn twice<A: Describe>(x: A) -> str { describe(x) + ' ' + describe(x) }
 
 fn main() {
-    print(describe(1))
-    print(shout(2))
-    print(describe(Point { x: 1, y: 2 }))
-    print(shout(Point { x: 1, y: 2 }))
-    print(describe([1, 2]))
-    print(twice([Point { x: 3, y: 4 }]))
+    put(describe(1))
+    put(shout(2))
+    put(describe(Point { x: 1, y: 2 }))
+    put(shout(Point { x: 1, y: 2 }))
+    put(describe([1, 2]))
+    put(twice([Point { x: 3, y: 4 }]))
     report()
 }
 
@@ -60,10 +60,10 @@ fn same_or_max<A: Ord>(a: A, b: A) -> A {
 fn report() {
     let p = Point { x: 1, y: 2 }
     let q = Point { x: 5, y: 0 }
-    print(p == Point { x: 1, y: 2 })
-    print(p != q)
-    print(max(p, q))
-    print(same_or_max(3, 7))
-    print('to_str: ' + to_str(min(p, q)))
-    print(contains([p, q], Point { x: 5, y: 0 }))
+    put(p == Point { x: 1, y: 2 })
+    put(p != q)
+    put(max(p, q))
+    put(same_or_max(3, 7))
+    put('to_str: ' + to_str(min(p, q)))
+    put(contains([p, q], Point { x: 5, y: 0 }))
 }

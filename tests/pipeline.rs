@@ -4,7 +4,7 @@ use std::process::Command;
 
 #[test]
 fn builds_and_links_as_independent_steps() {
-    let src = "fn add(a: int, b: int) -> int { a + b }\nfn twice(n: int) -> int { add(n, n) }\nfn log(n: int) { print(n) }\nfn unused(n: int) -> int { n + 999 }";
+    let src = "fn add(a: int, b: int) -> int { a + b }\nfn twice(n: int) -> int { add(n, n) }\nfn log(n: int) { put(n) }\nfn unused(n: int) -> int { n + 999 }";
     let expanded = pipeline::load(src, Path::new(".")).unwrap();
     let parsed = pipeline::parse(&expanded).unwrap();
     let checked = pipeline::check(parsed, Kind::Library).unwrap();

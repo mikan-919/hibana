@@ -50,6 +50,26 @@ fn __div_zero() {
     __die('0 で除算した')
 }
 
+// 指数が 64 を超えると、-1・0・1 以外は範囲外になる。-1・0・1 は偶奇だけで決まる
+fn __pow(a: int, b: int) -> int {
+    if b < 0 {
+        __die('負の指数')
+    }
+    let mut n = b
+    if n > 64 {
+        if a > 1 || a < 0 - 1 {
+            __overflow()
+        }
+        n = 64 + n % 2
+    }
+    let mut r = 1
+    while n > 0 {
+        r = r * a
+        n = n - 1
+    }
+    r
+}
+
 fn __copy(dst: int, src: int, n: int) {
     let mut i = 0
     while i + 8 <= n {
@@ -324,7 +344,7 @@ fn __write_str(fd: int, s: str) {
 }
 
 // 1 回の書き込みで 1 行を出す（JavaScript の接続コードは 1 回ごとに 1 行として渡す）
-fn __print(v: int) {
+fn __put(v: int) {
     __write_str(1, __cat(__to_str(v), '\n'))
 }
 

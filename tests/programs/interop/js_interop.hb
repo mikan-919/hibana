@@ -25,18 +25,18 @@ fn job(name: str, n: int) -> str ! Async {
 }
 
 fn main() ! Async {
-    print(util.add(2, 3) * 10)
-    print(util.shout('hibana'))
-    print(util.applyTwice(fn(x) { x * 3 }, 2))
+    put(util.add(2, 3) * 10)
+    put(util.shout('hibana'))
+    put(util.applyTwice(fn(x) { x * 3 }, 2))
     let p = util.point(1, 2)
-    print(p.x + p.y)
-    print(len(util.words('a b c')))
-    print(greet.hello('world'))
-    print(greet.size(greet.Size { w: 3, h: 4 }).w)
-    print(twice_later(5))
+    put(p.x + p.y)
+    put(len(util.words('a b c')))
+    put(greet.hello('world'))
+    put(greet.size(greet.Size { w: 3, h: 4 }).w)
+    put(twice_later(5))
     // Async の関数型の値も渡せる。JavaScript からは Promise を返す関数に見える
-    print(util.mapLater([1, 2], fn(x) { util.later(x) + 1 }))
-    print(all([fn() { job('a', 1) }, fn() { job('b', 2) }]))
+    put(util.mapLater([1, 2], fn(x) { util.later(x) + 1 }))
+    put(all([fn() { job('a', 1) }, fn() { job('b', 2) }]))
     // 効果の多相な関数にも Async を渡せる（JavaScript では map の async 版を呼んで待つ）
-    print(map([1, 2], fn(x) { util.later(x) * 10 }))
+    put(map([1, 2], fn(x) { util.later(x) * 10 }))
 }

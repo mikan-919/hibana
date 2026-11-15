@@ -17,7 +17,7 @@ fn sum(v: NumVec<Pos>) -> int {
 
 fn main() {
     let v: NumVec<int[x -> x > 0]> = [3, 1, 4]
-    print(v)
-    print(sum(v))
+    put(v)
+    put(sum(v))
     // let w: NumVec<Pos> = [1, 0] は 0 > 0 を証明できないので型エラー
 }

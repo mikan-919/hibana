@@ -265,8 +265,8 @@ mod tests {
 
     #[test]
     fn layout() {
-        let src = "fn add(a:int,b :int)->int{   a+b }  // 足す\n\n\n\nfn main(){\nlet x=add( 1,2 )\n      if x==3 {print( 'ok' )}else{\n  print('ng')\n}\n    /* c */\n  let ok = x == 3 ||\n  x == 4\n  print(<p>a   b {x}</p>)\n  print(web.json(f([\n    1\n    ])))\n\n}\n";
-        let want = "fn add(a:int, b:int) -> int { a+b } // 足す\n\nfn main() {\n    let x = add(1, 2)\n    if x == 3 { print('ok') } else {\n        print('ng')\n    }\n    /* c */\n    let ok = x == 3 ||\n        x == 4\n    print(<p>a   b {x}</p>)\n    print(web.json(f([\n        1\n    ])))\n}\n";
+        let src = "fn add(a:int,b :int)->int{   a+b }  // 足す\n\n\n\nfn main(){\nlet x=add( 1,2 )\n      if x==3 {put( 'ok' )}else{\n  put('ng')\n}\n    /* c */\n  let ok = x == 3 ||\n  x == 4\n  put(<p>a   b {x}</p>)\n  put(web.json(f([\n    1\n    ])))\n\n}\n";
+        let want = "fn add(a:int, b:int) -> int { a+b } // 足す\n\nfn main() {\n    let x = add(1, 2)\n    if x == 3 { put('ok') } else {\n        put('ng')\n    }\n    /* c */\n    let ok = x == 3 ||\n        x == 4\n    put(<p>a   b {x}</p>)\n    put(web.json(f([\n        1\n    ])))\n}\n";
         assert_eq!(format(src).unwrap(), want);
     }
 

@@ -36,10 +36,10 @@ if (api.echo('日本語🌸') !== '日本語🌸' || api.answer(41) !== 42n) thr
 fn removed_codegen_commands_are_rejected() {
     let dir = std::env::temp_dir().join(format!("hibana-removed-cli-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("input.hb"), "fn main() { print(42) }").unwrap();
+    std::fs::write(dir.join("input.hb"), "fn main() { put(42) }").unwrap();
     for command in ["ir", "wasm", "glue", "web", "js", "c", "run"] {
         // A same-named file must not revive the removed command through implicit eval.
-        std::fs::write(dir.join(command), "fn main() { print(42) }").unwrap();
+        std::fs::write(dir.join(command), "fn main() { put(42) }").unwrap();
         for args in [
             vec![command],
             vec![command, "input.hb"],

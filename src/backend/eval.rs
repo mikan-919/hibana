@@ -121,7 +121,7 @@ pub fn run_fn_args(
     }
 }
 
-// マクロ本体を実行する。print はコンパイル時の出力として標準エラーに書く
+// マクロ本体を実行する。put はコンパイル時の出力として標準エラーに書く
 pub fn run_macro(b: &Block, vars: Vec<(String, Value)>, prog: &Program) -> Result<Value, String> {
     let mut err = std::io::stderr();
     let mut it = Interp {
@@ -209,6 +209,9 @@ fn arith(op: &str, a: i64, b: i64) -> Option<i64> {
         "-" => a.checked_sub(b),
         "*" => a.checked_mul(b),
         "/" => a.checked_div(b),
+        // 指数が 64 を超えると、-1・0・1 以外は範囲外になる。-1・0・1 は偶奇だけで決まる
+        "**" if b > 64 && !(-1..=1).contains(&a) => None,
+        "**" => a.checked_pow(if b > 64 { 64 + b % 2 } else { b } as u32),
         _ => a.checked_rem(b),
     }
 }
@@ -565,6 +568,9 @@ impl Interp<'_> {
                         if b == 0 && matches!(*op, "/" | "%") {
                             return Err(Flow::Error("0 で除算した".into()));
                         }
+                        if b < 0 && *op == "**" {
+                            return Err(Flow::Error("負の指数".into()));
+                        }
                         Value::Int(arith(op, a, b).ok_or(Flow::Error("オーバーフロー".into()))?)
                     }
                 }
@@ -626,7 +632,7 @@ impl Interp<'_> {
                 } else if self.ctors.contains_key(name.as_str()) {
                     Value::Data(Rc::new((name.clone(), vs)))
                 } else if !self.fns.contains_key(name.as_str())
-                    && name != "print"
+                    && name != "put"
                     && name.starts_with(|c: char| c.is_ascii_uppercase())
                 {
                     // 型を作る呼び出し（Option(int) など）。実行時には名前だけを持つ
@@ -693,7 +699,7 @@ impl Interp<'_> {
                     }
                 } else if let Some(v) = self.syn_fn(name, &mut vs)? {
                     v
-                } else if name == "print" {
+                } else if name == "put" {
                     let s = match &vs[0] {
                         Value::Int(n) => n.to_string(),
                         Value::Bool(b) => b.to_string(),

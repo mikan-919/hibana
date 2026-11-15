@@ -113,7 +113,7 @@ fn error(output: &Output) -> String {
 #[test]
 fn hibana_dlx_accepts_prefix_bare_url_args_and_offline_reuse() {
     let f = Fixture::new();
-    let source = f.package("app", Some("fn main() { print(args()) }\n"));
+    let source = f.package("app", Some("fn main() { put(args()) }\n"));
     let url = format!("file://{}", source.display());
     let spec = format!("hibana:{url}");
     assert_eq!(
@@ -131,7 +131,7 @@ fn hibana_dlx_resolves_dependencies_without_mutating_store() {
     let dep = f.package("greet", None);
     std::fs::write(dep.join("src/lib.hb"), "fn message() -> str { 'from dependency' }\n").unwrap();
     commit(&dep);
-    let source = f.package("app", Some("use greet\nfn main() { print(greet.message()) }\n"));
+    let source = f.package("app", Some("use greet\nfn main() { put(greet.message()) }\n"));
     std::fs::write(
         source.join("hibana.toml"),
         format!(
@@ -152,9 +152,9 @@ fn hibana_dlx_resolves_dependencies_without_mutating_store() {
 #[test]
 fn hibana_dlx_revision_selection_is_isolated() {
     let f = Fixture::new();
-    let source = f.package("app", Some("fn main() { print('first') }\n"));
+    let source = f.package("app", Some("fn main() { put('first') }\n"));
     let first = git(&source, &["rev-parse", "HEAD"]);
-    std::fs::write(source.join("src/main.hb"), "fn main() { print('second') }\n").unwrap();
+    std::fs::write(source.join("src/main.hb"), "fn main() { put('second') }\n").unwrap();
     let second = commit(&source);
     let spec = format!("hibana:file://{}", source.display());
     assert_eq!(stdout(&f.run(&["dlx", "--rev", &first, &spec])), "first\n");
@@ -171,7 +171,7 @@ fn hibana_dlx_reports_missing_entry_manifest_revision_and_bin() {
     assert!(error(&f.run(&["dlx", &spec])).contains("main.hb"));
     error(&f.run(&["dlx", "--bin", "library", &spec]));
     error(&f.run(&["dlx", "--rev", "missing-revision", &spec]));
-    let missing = f.package("no-manifest", Some("fn main() { print('wrong') }\n"));
+    let missing = f.package("no-manifest", Some("fn main() { put('wrong') }\n"));
     std::fs::remove_file(missing.join("hibana.toml")).unwrap();
     commit(&missing);
     let spec = format!("hibana:file://{}", missing.display());

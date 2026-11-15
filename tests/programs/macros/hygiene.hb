@@ -47,10 +47,10 @@ macro make_pt ('make_pt' '(' v:Expr ')') -> Expr {
 fn main() {
     let total = 10
     let len = 20
-    print(plus_one(total))
-    print(plus_len(len))
-    print(add_circle(Circle(1), total))
-    print(add_fn(total))
+    put(plus_one(total))
+    put(plus_len(len))
+    put(add_circle(Circle(1), total))
+    put(add_fn(total))
     let x = 7
     let p = make_pt(x)
     if p.x != 7 {

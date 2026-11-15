@@ -70,6 +70,6 @@ fn main() ! Async {
         }
     }
     // 試しに1回呼ぶ（サーバーを立てずに確かめられる）
-    print(app(web.request('GET', '/users/alice')).body)
+    put(app(web.request('GET', '/users/alice')).body)
     web.serve(8080, app)
 }

@@ -17,7 +17,7 @@ trait Ord<A>: Eq<A> {
     fn lt(a: A, b: A) -> bool
 }
 
-// 文字列にする。実装がある型では to_str と print がこれを使う
+// 文字列にする。実装がある型では to_str と put がこれを使う
 trait Show<A> {
     fn show(x: A) -> str
 }

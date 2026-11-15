@@ -496,7 +496,7 @@ fn parse_toks(src: &str, toks: Vec<Token>, round: usize) -> R<Program> {
     // 組み込みと利用者のファイルの名前・モジュール名・パターンのリテラル。マクロの衛生性で名前を付け替えない
     let mut globals: HashSet<String> = [
         "js",
-        "print",
+        "put",
         "len",
         "at",
         "is_null",
@@ -1838,7 +1838,16 @@ impl Parser<'_> {
                 return Ok(Expr::Unary(op, Box::new(self.unary()?)));
             }
         }
-        self.primary()
+        // ** は単項演算子より強く、右から結合する（-x ** 2 は -(x ** 2)、2 ** 3 ** 2 は 2 ** (3 ** 2)）
+        let start = self.pos;
+        let base = self.primary()?;
+        if self.peek() == &Tok::Punct("**") && !self.at_newline() {
+            self.pos += 1;
+            let base = self.wrap(start, base);
+            let exp = self.unary()?;
+            return Ok(Expr::Binary("**", Box::new(base), Box::new(exp)));
+        }
+        Ok(base)
     }
 
     // "(" は読み終えた状態で呼ぶ

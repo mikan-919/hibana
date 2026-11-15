@@ -46,8 +46,8 @@ fn greet(name: str) -> str {
 fn main() {
     let mut total = 0
     for i in 1..4 { total = total + i }
-    print(greet('hibana'))
-    print(total)
+    put(greet('hibana'))
+    put(total)
 }
 ```
 
@@ -81,11 +81,11 @@ fn area(s: Shape) -> int {
 
 fn main() {
     let p = Point { x: 1, y: 2 }
-    print(p.x + p.y)
-    print(area(Rect(3, 4)))
+    put(p.x + p.y)
+    put(area(Rect(3, 4)))
     let xs = map([1, 2, 3], fn(x) { x * 10 })
-    print(xs)
-    print(unwrap_or(find(xs, fn(x) { x > 15 }), 0))
+    put(xs)
+    put(unwrap_or(find(xs, fn(x) { x > 15 }), 0))
 }
 ```
 
@@ -107,8 +107,8 @@ fn first(xs: Vec<int>) -> int {
 fn half(n: int[x -> x > 0]) -> int { n / 2 }
 
 fn main() {
-    print(first([7, 8]))
-    print(half(10))
+    put(first([7, 8]))
+    put(half(10))
 }
 ```
 
@@ -148,18 +148,18 @@ fn work() ! Log {
 }
 
 fn main() {
-    print(twice(3))
-    print(P { x: 1, y: 2 } == P { x: 1, y: 2 })
-    print(P { x: 1, y: 2 })
+    put(twice(3))
+    put(P { x: 1, y: 2 } == P { x: 1, y: 2 })
+    put(P { x: 1, y: 2 })
     handle work() {
-        log(msg) => { print('log: ' + msg); resume() }
+        log(msg) => { put('log: ' + msg); resume() }
     }
 }
 ```
 
 出力は `int 3, int 3`、`true`、`P { x: 1, y: 2 }`、`log: start`、`log: end` です。
 
-- `derive(Eq, Show)` は宣言のマクロで、型の `Eq`（`==`）と `Show`（`to_str` と `print`）の実装を作ります。
+- `derive(Eq, Show)` は宣言のマクロで、型の `Eq`（`==`）と `Show`（`to_str` と `put`）の実装を作ります。
 - `==` は `Eq` の実装があればそれを使い、無ければ構造の比較をします。
 
 ## 5. テスト

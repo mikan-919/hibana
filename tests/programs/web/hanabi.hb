@@ -39,7 +39,7 @@ fn make() -> (web.Request) -> web.Response {
 fn show(app: (web.Request) -> web.Response, path: str, query: str) {
     let r = web.request('GET', path)
     let res = app(web.Request { method: r.method, path: r.path, query: query, headers: r.headers, body: r.body })
-    print(`{res.status} {res.content_type} {res.body}`)
+    put(`{res.status} {res.content_type} {res.body}`)
 }
 
 fn main() {

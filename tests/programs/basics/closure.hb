@@ -22,11 +22,11 @@ fn add(a: int, b: int) -> int { a + b }
 
 fn main() {
     let inc = fn(x: int) -> int { x + 1 }
-    print(twice(inc)(3))
-    print(adder(10)(5))
+    put(twice(inc)(3))
+    put(adder(10)(5))
     let l = Cons(1, Cons(2, Cons(3, Nil)))
-    print(sum(map(adder(100), l)))
-    print(sum(map<int, int>(inc, l)))
+    put(sum(map(adder(100), l)))
+    put(sum(map<int, int>(inc, l)))
     let f: (int, int) -> int = add
-    print(f(2, 3))
+    put(f(2, 3))
 }
