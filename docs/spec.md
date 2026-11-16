@@ -443,6 +443,7 @@ macro unless('unless' expr:Expr block:Block) {
 | `stringify(j)` `quote_str(s)` | JSON の文字列にする |
 | `parse_json(s)`、`field(j, key)` `str_or(o, d)` `int_or(o, d)` | JSON を読む（`Option<Json>`、読めなければ `None`）。フィールドと値を取り出す |
 
+- `式?` は式を一度評価し、`Ok` の値を取り出します。`Err` の場合はそのエラーを包んで関数から返します。`Ok` と `Err` は名前を取り込む必要があり、関数の戻り値の型はエラーを受け取れる `Result` にします。
 - `empty()` の型引数は引数から決まらないので、`let e: Map<int> = empty()` のように期待する型を書きます。
 - JSON の数は整数だけを読み、`\uXXXX` のエスケープは読めません。
 

@@ -412,6 +412,13 @@ mod tests {
         Ok(String::from_utf8(buf).unwrap())
     }
 
+    #[test]
+    fn result_propagation() {
+        let src = "use std -> *\nfn get_result(ok: bool) -> Result<int, String> { if ok { Ok(7) } else { Err('bad') } }\nfn twice(ok: bool) -> Result<int, String> { let n = get_result(ok)?\n Ok(n * 2) }\nfn main() { put(twice(true))\n put(twice(false)) }";
+        assert_eq!(out(src).unwrap(), "std.Ok(14)\nstd.Err(\"bad\")\n");
+        assert!(out("use std -> *\nfn f() -> int { Ok(1)? }\nfn main() {}\n").is_err());
+    }
+
     // すべての例について、JavaScript に変換して Node.js で実行した結果がインタプリタと同じか
     #[test]
     fn js_backend_matches_interpreter() {

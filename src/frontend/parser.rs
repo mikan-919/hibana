@@ -2272,7 +2272,15 @@ impl Parser<'_> {
             }
         };
         while !self.at_newline() {
-            if self.eat(".") {
+            if self.eat("?") {
+                let ok = self.qualify("Ok");
+                let err = self.qualify("Err");
+                let value = format!("try#{}", self.pos);
+                e = Expr::Match(Box::new(e), vec![
+                    Arm { span: None, ctor: ok, binds: vec![value.clone()], body: Expr::Var(value.clone()) },
+                    Arm { span: None, ctor: err.clone(), binds: vec![value.clone()], body: Expr::Return(Some(Box::new(Expr::Call(err, vec![Expr::Var(value)])))) },
+                ]);
+            } else if self.eat(".") {
                 // struct Name(型, ...) のフィールドは x.0
                 let name = match self.peek().clone() {
                     Tok::Int(k) => {
