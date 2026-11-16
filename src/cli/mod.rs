@@ -787,6 +787,8 @@ fn main() {
             ("fn main() { 1 + ; }", "式が必要"),
             ("fn main() { let x = 1 put(x) }", "文の区切り"),
             ("fn main() { let x = quote { 1 } }", "マクロ本体の中でだけ"),
+            ("macro m('m' a:Ident) { quote { put('${a') } }\nfn main() {}", "対応する }"),
+            ("macro m('m' a:Ident) { quote { put('${}') } }\nfn main() {}", "式が無い"),
         ] {
             let e = out(src).unwrap_err();
             assert!(e.contains(msg), "{src} => {e}");

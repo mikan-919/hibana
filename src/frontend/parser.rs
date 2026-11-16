@@ -373,6 +373,26 @@ struct Declarations {
     declarations: Vec<(usize, usize, usize, Node)>,
 }
 
+// ${ の後ろ s から、対応する } の位置（バイト数）を返す。{ } のネストと、中の文字列リテラルは飛ばす
+// ponytail: s はエスケープを解いた後の文字列なので、式の中の文字列に \ や \' を書くと区切りを誤る。字句の段階で ${ } を読めば直る（Template と同じ方法）
+fn interp_end(s: &str) -> Option<usize> {
+    let (mut depth, mut quote) = (0, None);
+    for (i, c) in s.char_indices() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None => match c {
+                '\'' | '"' | '`' => quote = Some(c),
+                '{' => depth += 1,
+                '}' if depth == 0 => return Some(i),
+                '}' => depth -= 1,
+                _ => {}
+            },
+        }
+    }
+    None
+}
+
 fn parse_modules_tokens(
     loaded: &ModuleSet,
     tokens: Vec<Vec<Token>>,
@@ -2388,6 +2408,24 @@ impl Parser<'_> {
         Ok(e)
     }
 
+    // quote の文字列リテラル s の ${式} を読む。断片と、式を文字列にした値を + でつないだ式にする
+    fn quote_text(&self, s: &str) -> R<Expr> {
+        let plus = |a: Expr, b: Expr| Expr::Binary("+", Box::new(a), Box::new(b));
+        let mut acc = Expr::Str(String::new());
+        let mut rest = s;
+        while let Some(at) = rest.find("${") {
+            let after = &rest[at + 2..];
+            let Some(end) = interp_end(after) else {
+                return self.err("quote の文字列の ${ に対応する } が無い");
+            };
+            let value = self.sub_expr(lex(&after[..end])?)?;
+            acc = plus(acc, Expr::Str(rest[..at].into()));
+            acc = plus(acc, Expr::Call("to_str".into(), vec![value]));
+            rest = &after[end + 1..];
+        }
+        Ok(plus(acc, Expr::Str(rest.into())))
+    }
+
     // 閉じ括弧 close までのトークンを読む。開き括弧は読み終えた状態で呼ぶ
     fn quote_body(&mut self, close: &str) -> R<Vec<Q>> {
         let open = if close == "}" { "{" } else { "(" };
@@ -2412,12 +2450,12 @@ impl Parser<'_> {
                 }
                 _ => {}
             }
-            // ponytail: 文字列全体が ${式} の時だけ展開する。文字列の途中にも埋め込むなら、断片と式の連結へ分解する
+            // 文字列リテラルの中の ${式} は、断片と式の文字列化をつないだ式として差し込む（全体でも途中でも書ける）
             if let Tok::Str(s) = &t.tok
-                && let Some(inner) = s.strip_prefix("${").and_then(|s| s.strip_suffix('}'))
+                && s.contains("${")
             {
-                let value = self.sub_expr(lex(inner)?)?;
-                out.push(Q::Splice(t, Expr::Call("str_of".into(), vec![value])));
+                let value = self.quote_text(s)?;
+                out.push(Q::Splice(t, value));
                 self.pos += 1;
                 continue;
             }
