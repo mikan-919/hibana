@@ -1233,24 +1233,12 @@ impl Parser<'_> {
             known: self.known.clone(),
             traits: self.traits.clone(),
         };
-        if m.stmt {
-            // 文の並びとして読み、ブロックにする
-            p.toks.extend([
-                Token {
-                    tok: Tok::Punct("}"),
-                    nl_before: true,
-                    ..end
-                },
-                eof,
-            ]);
-            let e = p.block().map(Expr::Block).ctx(wrap)?;
-            return if m.template { ret_tail(e).ctx(wrap) } else { Ok(e) };
-        }
-        p.toks.push(eof);
-        let e = p.expr().ctx(wrap)?;
-        if p.peek() != &Tok::Eof {
-            return p.err("1個の式でない").ctx(wrap);
-        }
+        // 一度だけ読み、式が1つならその式、文の並びならブロックにする。
+        p.toks.extend([Token { tok: Tok::Punct("}"), nl_before: true, ..end }, eof]);
+        let e = match p.block().ctx(wrap)? {
+            Block { stmts, tail: Some(e) } if !m.stmt && stmts.is_empty() => *e,
+            block => Expr::Block(block),
+        };
         if m.template { ret_tail(e).ctx(wrap) } else { Ok(e) }
     }
 

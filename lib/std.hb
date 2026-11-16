@@ -5,6 +5,19 @@
 enum Option<A> { None, Some(value: A) }
 enum Result<A, E> { Ok(value: A), Err(error: E) }
 
+// 符号 - と10進数字を読み、文字列全体が整数かを検査する
+fn parse_int(s: String) -> Result<int, String> {
+    let parsed = parse_json_int(s, 0)
+    if parsed.ok && parsed.pos == len(s) {
+        match parsed.value {
+            JInt(n) -> Ok(n)
+            _ -> Err('整数として読めない')
+        }
+    } else {
+        Err('整数として読めない')
+    }
+}
+
 // ---- トレイト ----
 
 // 等しさ。実装がある型では == と != がこれを使う
@@ -416,7 +429,7 @@ fn starts_at(s: String, i: int, w: String) -> bool {
 }
 
 // ponytail: 整数だけを読む（小数・指数は読めない）
-fn parse_int(s: String, i: int) -> Parsed {
+fn parse_json_int(s: String, i: int) -> Parsed {
     let mut j = i
     let neg = char_at(s, j) == '-'
     if neg { j = j + 1 }
@@ -541,7 +554,7 @@ fn parse_value(s: String, i0: int) -> Parsed {
     } else if c == '{' {
         parse_object(s, i + 1)
     } else {
-        parse_int(s, i)
+        parse_json_int(s, i)
     }
 }
 

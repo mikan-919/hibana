@@ -51,3 +51,12 @@ test 'json int boundaries' {
     assert(match parse_json('9223372036854775808') { None -> true _ -> false })
     assert(match parse_json('-9223372036854775809') { None -> true _ -> false })
 }
+
+test 'parse int' {
+    for n in [0, 7, -12, 9223372036854775807, -9223372036854775807 - 1] {
+        assert(match parse_int(n.to_string()) { Ok(parsed) -> parsed == n Err(_) -> false })
+    }
+    for s in ['', '-', '+1', ' 1', '1 ', '1.5', '1x', '１２', '9223372036854775808', '-9223372036854775809'] {
+        assert(match parse_int(s) { Ok(_) -> false Err(_) -> true })
+    }
+}

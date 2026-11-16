@@ -461,6 +461,7 @@ mod tests {
         let src = "use std -> *\nfn get_result(ok: bool) -> Result<int, String> { if ok { Ok(7) } else { Err('bad') } }\nfn twice(ok: bool) -> Result<int, String> { let n = get_result(ok)?\n Ok(n * 2) }\nfn main() { put(twice(true))\n put(twice(false)) }";
         assert_eq!(out(src).unwrap(), "std.Ok(14)\nstd.Err(\"bad\")\n");
         assert!(out("use std -> *\nfn f() -> int { Ok(1)? }\nfn main() {}\n").is_err());
+        assert!(out("type Digit = int[x -> 0 <= x && x < 10]\nfn f() -> Result<Digit, String> { Ok(12) }\nfn main() {}\n").is_err());
     }
 
     // すべての例について、JavaScript に変換して Node.js で実行した結果がインタプリタと同じか
@@ -470,6 +471,8 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         let names = program_files();
         for p in names {
+            // 標準入力を使う正本は tests/first.rs で入力と出力を比較する。
+            if p.ends_with("examples/first.hb") { continue; }
             let src = std::fs::read_to_string(&p).unwrap();
             // extern を使う例はインタプリタでは動かないので、js_extern で確かめる
             // main の無いファイル（ライブラリとテスト）は実行しない
@@ -481,12 +484,7 @@ mod tests {
                 continue;
             }
             crate::parser::set_base_dir(p.parent().unwrap());
-            let want = match out(&src) {
-                Ok(w) => w,
-                // ponytail: 再編の途中で、正本（examples/first.hb）は未実装の書き方を含む。動くようになったらこの分岐を消す
-                Err(_) if p.components().any(|c| c.as_os_str() == "examples") => continue,
-                Err(e) => panic!("{}: {e}", p.display()),
-            };
+            let want = out(&src).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
             let js = tmp.join(p.file_stem().unwrap()).with_extension("js");
             std::fs::write(&js, super::to_js(&src).unwrap()).unwrap();
             let r = std::process::Command::new("node")
@@ -514,6 +512,12 @@ mod tests {
         let (mut total, mut native, mut wasm, mut reasons): (usize, Vec<String>, Vec<String>, Vec<String>) = (0, Vec::new(), Vec::new(), Vec::new());
         for p in program_files() {
             let src = std::fs::read_to_string(&p).unwrap();
+            // ponytail: first.hb は num を使う。IR に num を追加したら、この拒否の検査を出力比較に含める
+            if p.ends_with("examples/first.hb") {
+                assert!(crate::to_native(&src).unwrap_err().msg.contains("#num"));
+                assert!(crate::to_wasm(&src).unwrap_err().msg.contains("#num"));
+                continue;
+            }
             if src.contains(".ts'") || src.contains(".js'") || src.contains("\nextern") {
                 continue;
             }

@@ -38,6 +38,7 @@ Nix の flake で開発環境（Rust、Z3、Node.js、tree-sitter）を作りま
 
 ```sh
 nix develop -c cargo build
+nix develop -c cargo run -q -- examples/first.hb       # 機能を組み合わせた例。色と1桁の整数を入力する
 nix develop -c cargo run -q -- tests/programs/types/refine.hb      # インタプリタで実行
 nix develop -c cargo run -q -- test                    # Hibana のテストを実行
 nix develop -c cargo test

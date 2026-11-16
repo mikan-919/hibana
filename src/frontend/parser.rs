@@ -247,6 +247,8 @@ const LIBS: &[(&str, &str)] = &[
     ("std__math", include_str!("../../lib/math.hb")),
 ];
 
+const PRELUDE_NAMES: &[&str] = &["Result", "Ok", "Err", "parse_int"];
+
 // use した名前の取り込み方
 #[derive(Debug, Clone)]
 pub enum UseNames {
@@ -424,6 +426,12 @@ pub fn with_uses(src: &str) -> R<String> {
     let mut todo = vec![(src.to_string(), base_dir())];
     while let Some((s, dir)) = todo.pop() {
         let toks = lex(&s)?;
+        // 標準で使える名前が現れた時に std を読む。元のソースの位置は変えない。
+        if !done.iter().any(|n| n == "std")
+            && toks.iter().any(|t| matches!(&t.tok, Tok::Ident(n) if PRELUDE_NAMES.contains(&n.as_str())))
+        {
+            todo.push(("use std".into(), dir.clone()));
+        }
         for w in toks.windows(2) {
             let (name, is_str) = match (&w[0].tok, &w[1].tok) {
                 (Tok::Punct("use"), Tok::Ident(n) | Tok::Str(n)) => {
@@ -705,10 +713,19 @@ fn parse_toks(src: &str, toks: Vec<Token>) -> R<Program> {
     p.types = Rc::new(types.clone());
     p.generic_fns = Rc::new(generic_fns);
     globals.extend(p.g.literals());
+    globals.extend(PRELUDE_NAMES.iter().map(|n| n.to_string()));
     globals.extend(modules.iter().cloned());
     p.globals = Rc::new(globals);
     p.mod_names = Rc::new(mod_names);
     p.known = Rc::new(known);
+    for (_, module) in &module_at {
+        if module != "std" {
+            uses.entry(module.clone()).or_default().push(Use {
+                module: "std".into(),
+                names: UseNames::List(PRELUDE_NAMES.iter().map(|n| n.to_string()).collect()),
+            });
+        }
+    }
     p.uses = Rc::new(uses);
     p.modules = Rc::new(modules);
     p.module_at = Rc::new(module_at);
@@ -2394,6 +2411,15 @@ impl Parser<'_> {
                     continue;
                 }
                 _ => {}
+            }
+            // ponytail: 文字列全体が ${式} の時だけ展開する。文字列の途中にも埋め込むなら、断片と式の連結へ分解する
+            if let Tok::Str(s) = &t.tok
+                && let Some(inner) = s.strip_prefix("${").and_then(|s| s.strip_suffix('}'))
+            {
+                let value = self.sub_expr(lex(inner)?)?;
+                out.push(Q::Splice(t, Expr::Call("str_of".into(), vec![value])));
+                self.pos += 1;
+                continue;
             }
             // 構造体リテラル・宣言の フィールド名 Name { x: 式 } の x。直前が { か , で、直後が :
             // ponytail: $( ... ) の中は外の括弧が見えないので、その中の Name { x: ... } の x は改名される。外から見える括弧の並びを渡すようにすれば直る

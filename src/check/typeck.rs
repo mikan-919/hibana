@@ -2758,7 +2758,7 @@ impl Ck {
                 && let Term::Var(id, _) = &**n
                 && metas.contains(id)
             {
-                sol.insert(*id, base(y));
+                sol.insert(*id, y.clone());
                 return Ok(true);
             }
         }
