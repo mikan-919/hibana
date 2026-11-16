@@ -1,4 +1,4 @@
-use crate::{error, eval, fmt, lexer, lsp, parser, typeck};
+use crate::{error, eval, fmt, lexer, parser, typeck};
 #[cfg(test)]
 use crate::{run, to_js, to_web};
 
@@ -31,10 +31,6 @@ const STACK: usize = 256 << 20;
 
 fn run_cli() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args == ["lsp"] {
-        lsp::serve();
-        return;
-    }
     if let ["test", files @ ..] = args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         match test_cmd(files) {
             Ok(true) => {},
@@ -49,12 +45,10 @@ fn run_cli() {
     }
     let (cmd, path) = match args.as_slice() {
         [p] => ("eval", p.clone()),
-        [p, sep, _rest @ ..] if sep == "--" => ("eval", p.clone()),
         [cmd, p] if cmd == "fmt" => (cmd.as_str(), p.clone()),
-        [p, ..] if p.ends_with(".hb") => ("eval", p.clone()),
         _ => {
             eprintln!(
-                "使い方: hibana <ファイル> [-- 引数...]（実行） | hibana fmt <ファイル>（整形） | hibana lsp（言語サーバー） | hibana test <ファイル...>（テスト）"
+                "使い方: hibana <ファイル>（実行） | hibana fmt <ファイル>（整形） | hibana test <ファイル...>（テスト）"
             );
             std::process::exit(2);
         }
@@ -78,10 +72,7 @@ fn run_cli() {
                 });
             }
         }),
-        _ => {
-            let rest = match args.as_slice() { [_, sep, rest @ ..] if sep == "--" => rest, [_, rest @ ..] => rest, _ => &[] };
-            crate::run_with_args(&src, &mut std::io::stdout(), rest).map(|_| ())
-        },
+        _ => crate::run(&src, &mut std::io::stdout()).map(|_| ()),
     };
     if let Err(e) = r {
         eprintln!("{:?}", report(&path, &src, e));

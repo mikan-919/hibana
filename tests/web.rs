@@ -3,7 +3,7 @@ use std::process::Command;
 
 #[test]
 fn reserved_wasm_exports_are_rejected() {
-    for name in ["memory", "__hibana_alloc", "__hibana_reset", "dispose"] {
+    for name in ["memory", "__hibana_alloc", "__hibana_reset"] {
         let source = format!("fn {name}(n: int) -> int {{ n }}");
         let exports = [name.to_string()];
         assert!(hibana::to_web(&source, &exports).is_err());
@@ -14,12 +14,25 @@ fn reserved_wasm_exports_are_rejected() {
 }
 
 #[test]
+fn references_cannot_cross_the_wasm_boundary() {
+    for source in [
+        "fn expose(r: Ref<int>) -> int { read(r) }",
+        "fn expose() -> Ref<int> { new_ref(1) }",
+        "extern 'host' { fn consume(r: Ref<int>) -> int } fn expose() -> int { consume(new_ref(1)) }",
+        "extern 'host' { fn produce() -> Ref<int> } fn expose() -> int { read(produce()) }",
+    ] {
+        assert!(hibana::to_web(source, &["expose".into()]).is_err());
+    }
+}
+
+#[test]
 fn web_strings_and_host_functions() {
     let source = r#"
 extern 'browser' {
     fn decorate(s: String) -> String
     fn show(s: String)
     fn increment(n: int) -> int
+    fn invert(value: bool) -> bool
     fn unused_host(n: int) -> int
     fn __EXPORTS__(s: String) -> String
 }
@@ -32,11 +45,13 @@ fn run(s: String) -> String {
 }
 fn add(n: int) -> int { increment(n) }
 fn notify(s: String) { show(s) }
+fn negate(value: bool) -> bool { invert(value) }
+fn dispose() -> int { 7 }
 fn unused(s: String) -> String { s }
 "#;
     let checked = pipeline::check(pipeline::parse(source).unwrap(), Kind::Library).unwrap();
     let all = pipeline::lower(&checked, None).unwrap();
-    let exports = ["echo", "literal", "run", "add", "notify"].map(String::from);
+    let exports = ["echo", "literal", "run", "add", "notify", "negate", "dispose"].map(String::from);
     let linked = pipeline::link(&all, &exports).unwrap();
     assert!(!linked.functions().iter().any(|f| f.name() == "unused"));
     let wasm = pipeline::emit_wasm(&linked, Some(&exports)).unwrap();
@@ -67,9 +82,14 @@ api = await instantiate(bytes, { hibana_host: {
   },
   show: s => { messages.push(s); },
   increment: n => n + 1n,
+  invert: value => { assert.equal(typeof value, 'boolean'); return !value; },
   __EXPORTS__: s => s,
 }});
-assert.deepEqual(Object.keys(api), ['echo', 'literal', 'run', 'add', 'notify']);
+assert.deepEqual(Object.keys(api), ['echo', 'literal', 'run', 'add', 'notify', 'negate', 'dispose']);
+assert.equal(api.dispose(), 7n);
+assert.equal(api.negate(true), false);
+assert.equal(api.negate(false), true);
+assert.throws(() => api.negate(1), TypeError);
 for (const text of ['', '日本語🌸', 'a\0b', 'x'.repeat(200000)]) {
   assert.equal(api.echo(text), text);
   assert.equal(api.run(text), '[' + text + ']');
@@ -95,80 +115,6 @@ for (let i = 0; i < 100; i++) assert.equal(api.echo('reuse'), 'reuse');
         .args(["--input-type=module", "-e", script])
         .arg(&wasm_path)
         .arg(&glue_path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn wasm_opaque_references_preserve_state_and_check_owner_and_type() {
-    let source = r#"
-        type Positive = int[n -> n > 0]
-        fn cell() -> Ref<int> { new_ref(0) }
-        fn positive() -> Ref<Positive> { new_ref(1) }
-        fn text() -> Ref<String> { new_ref('value') }
-        fn increment(cell: Ref<int>, n: int) -> int { write(cell, read(cell) + n); read(cell) }
-        fn read_positive(cell: Ref<Positive>) -> Positive { read(cell) }
-        fn get(cell: Ref<String>) -> String { read(cell) }
-        fn invert(value: bool) -> bool { !value }
-    "#;
-    let exports = [
-        "cell",
-        "positive",
-        "text",
-        "increment",
-        "read_positive",
-        "get",
-        "invert",
-    ]
-    .map(String::from);
-    let checked = pipeline::check(pipeline::parse(source).unwrap(), Kind::Library).unwrap();
-    let ir = pipeline::lower(&checked, Some(&exports)).unwrap();
-    let dir = std::env::temp_dir().join(format!("hibana-references-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("app.wasm"),
-        pipeline::emit_wasm(&ir, Some(&exports)).unwrap(),
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("app.mjs"),
-        pipeline::emit_js_glue(&ir, &exports).unwrap(),
-    )
-    .unwrap();
-    let script = r#"
-        import assert from 'node:assert/strict';
-        import fs from 'node:fs';
-        import { pathToFileURL } from 'node:url';
-        const { instantiate } = await import(pathToFileURL(process.argv[2]));
-        const bytes = fs.readFileSync(process.argv[1]);
-        const api = await instantiate(bytes), other = await instantiate(bytes);
-        const cell = api.cell(), text = api.text(), positive = api.positive();
-        for (let i = 1; i <= 100; i++) {
-          assert.equal(api.increment(cell, 1), BigInt(i));
-          assert.equal(api.get(text), 'value');
-        }
-        assert.equal(api.read_positive(positive), 1n);
-        assert.throws(() => api.read_positive(cell), TypeError);
-        assert.throws(() => api.get(cell), TypeError);
-        assert.throws(() => other.increment(cell, 1), TypeError);
-        assert.throws(() => api.increment(1n, 1), TypeError);
-        assert.equal(api.invert(false), true);
-        assert.equal(api.invert(true), false);
-        assert.throws(() => api.invert(0), TypeError);
-        api.dispose();
-        assert.throws(() => api.increment(cell, 1), TypeError);
-        assert.equal(api.increment(api.cell(), 2), 2n);
-    "#;
-    let output = Command::new("node")
-        .args(["--input-type=module", "-e", script])
-        .arg(dir.join("app.wasm"))
-        .arg(dir.join("app.mjs"))
         .output()
         .unwrap();
     assert!(

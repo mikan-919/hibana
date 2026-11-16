@@ -146,34 +146,9 @@ test 'join' {
 ## 6. 道具
 
 - `hibana fmt <ファイル>` はファイルを整形して書き戻します。設定はありません。
-- `hibana lsp` は Language Server を動かし、エディタにエラー表示・整形・hover・定義へのジャンプ・補完・色付けを渡します。VS Code と Zed の拡張機能は `editors/` にあります。
 - JavaScript と TypeScript のモジュールは `use './util.ts'` で読めます。型は TypeScript の宣言から読みます。詳細は仕様の 3.4 節です。
 
-## 7. ビルドだけで成果物を作る
-
-次の `build.hb` はソースから JavaScript を生成します。`hibana build.hb` で実行します。
-
-```
-fn main() {
-    write_bytes('dist/app.mjs', compile_file('src/main.hb', 'js', []))
-}
-```
-
-`compile_file` は対象ファイルを基準に `use` を解決します。`write_bytes` は親ディレクトリを作成します。引数は `hibana build.hb -- a b` と渡し、`args()` で読めます。これらの関数はインタプリタとマクロで使い、生成したプログラムからは呼べません。
-
-WASM と JavaScript 接続コードもスクリプトで作れます。
-
-```
-fn main() {
-    let exports = ['echo']
-    write_bytes('dist/app.wasm', compile_file('src/lib.hb', 'wasm', exports))
-    write_text('dist/app.mjs', js_glue(inspect_file_exports('src/lib.hb', exports)))
-}
-```
-
-公開する関数は `src/lib.hb` に書きます。接続コードの使い方は [WebAssembly](wasm.md) を参照してください。
-
-## 8. 次に読むもの
+## 7. 次に読むもの
 
 - 言語の規則と既知の制約: `docs/spec.md`
 - [カテゴリ別の例](../tests/programs/README.md)（効果は `tests/programs/effects/effects.hb`、トレイトは `tests/programs/types/trait.hb`、マクロは `tests/programs/macros/macros.hb`）

@@ -539,12 +539,6 @@ impl Body<'_, '_> {
                 self.b.ins().iadd(ms, sub)
             }
             Read => self.sys(0, &[x(0), x(1), x(2)]),
-            Syscall => {
-                let f = self.func(self.syscall, 6, 1);
-                let values: Vec<_> = vs.iter().map(|v| v.1).collect();
-                let call = self.b.ins().call(f, &values);
-                self.b.inst_results(call)[0]
-            }
             FFromInt => {
                 let f = self.b.ins().fcvt_from_sint(F64, x(0));
                 self.b.ins().bitcast(I64, MemFlagsData::new(), f)

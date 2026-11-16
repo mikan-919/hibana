@@ -1,4 +1,2 @@
-//! フォーマッタ、シンボル索引、Language Server。
+//! フォーマッタ。
 pub mod fmt;
-pub mod index;
-pub mod lsp;

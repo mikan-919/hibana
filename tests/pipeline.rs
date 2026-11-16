@@ -70,7 +70,7 @@ try { x.twice(); throw Error('accepted missing argument'); } catch (e) { if (!(e
 }
 
 #[test]
-fn inspection_and_glue_preserve_boundary_signatures_and_order() {
+fn glue_preserves_boundary_signatures_and_order() {
     let source = r#"
 extern 'host' {
     fn show(message: String)
@@ -85,23 +85,6 @@ fn unused() -> int { unused_host() }
 "#;
     // 宣言順とは違う順序で公開し、外部関数は宣言順のままであることを確かめる。
     let exports = vec!["answer".into(), "log".into(), "greet".into()];
-    let inspected: serde_json::Value =
-        serde_json::from_str(&pipeline::inspect_exports(source, &exports).unwrap()).unwrap();
-    assert_eq!(
-        inspected,
-        serde_json::json!({
-            "exports": [
-                ["answer", [], "int"],
-                ["log", ["String"], "unit"],
-                ["greet", ["String", "int"], "String"]
-            ],
-            "imports": [
-                ["show", ["String"], "unit"],
-                ["decorate", ["String", "int"], "String"],
-                ["count", [], "int"]
-            ]
-        })
-    );
     let checked = pipeline::check(pipeline::parse(source).unwrap(), Kind::Library).unwrap();
     let ir = pipeline::link(
         &pipeline::lower(&checked, Some(&exports)).unwrap(),

@@ -11,7 +11,7 @@ pub mod tooling;
 pub use backend::{eval, ir, js, native, wasm};
 pub use check::{smt, typeck};
 pub use frontend::{lexer, meta, parser};
-pub use tooling::{fmt, index, lsp};
+pub use tooling::fmt;
 
 pub(crate) use frontend::{resolve, ts};
 
@@ -23,12 +23,8 @@ fn checked(src: &str, kind: pipeline::Kind) -> error::R<pipeline::Checked> {
 }
 
 pub fn run(src: &str, out: &mut dyn Write) -> error::R<eval::Value> {
-    run_with_args(src, out, &[])
-}
-
-pub fn run_with_args(src: &str, out: &mut dyn Write, args: &[String]) -> error::R<eval::Value> {
     let checked = checked(src, pipeline::Kind::Executable)?;
-    eval::run_fn_args(&checked.program, "main", usize::MAX, out, args)
+    eval::run_fn(&checked.program, "main", usize::MAX, out)
 }
 
 pub fn to_js(src: &str) -> error::R<String> {

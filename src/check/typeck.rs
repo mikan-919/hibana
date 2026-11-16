@@ -6,19 +6,6 @@ use super::prove::{bin, len, replace_len, un, Env, Eval, Halt, Term};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-thread_local! {
-    // LSP の hover のため、式の位置 (先頭, 終わり) ごとの型を記録する。None なら記録しない
-    pub static TYPES: std::cell::RefCell<Option<Vec<(usize, usize, String)>>> = const { std::cell::RefCell::new(None) };
-}
-
-fn record(sp: &crate::lexer::Span, t: &V) {
-    TYPES.with(|ts| {
-        if let Some(ts) = ts.borrow_mut().as_mut() {
-            ts.push((sp.start.offset, sp.end.offset, show(t)));
-        }
-    });
-}
-
 use crate::error::{Ctx, Error, R};
 use crate::lexer::Span;
 
@@ -74,9 +61,6 @@ pub(super) const SYN_FNS: &[(&str, &[&str], &str)] = &[
     // 文字列から識別子のコード片を作る。呼び出し側から見える名前を導入する時に使う
     ("ident", &["String"], "syn"),
 ];
-
-// マクロ専用。Vec<String> の引数は個別に検査する
-pub(crate) const BUILD_FNS: &[&str] = &["compile", "inspect_exports", "utf8", "args", "read_text", "read_bytes", "write_text", "write_bytes", "compile_file", "inspect_file_exports", "js_glue"];
 
 // どこでも使える組み込み関数
 const BUILTINS: &[&str] = &[
@@ -633,23 +617,6 @@ pub(crate) fn callees(f: &Fn) -> Vec<String> {
     out
 }
 
-pub(crate) fn reject_script_calls(prog: &Program, roots: &[String]) -> R<()> {
-    let mut pending = roots.to_vec();
-    let mut seen = std::collections::HashSet::new();
-    while let Some(name) = pending.pop() {
-        if !seen.insert(name.clone()) { continue; }
-        if let Some(f) = prog.fns.iter().find(|f| f.name == name) {
-            let mut forbidden = None;
-            walk(&Expr::Block(f.body.clone()), &mut |e| {
-                if let Expr::Call(n, _) = e && BUILD_FNS.contains(&n.as_str()) { forbidden = Some(n.clone()); }
-            });
-            if let Some(n) = forbidden { return Err(format!("{n} はスクリプト実行（hibana <ファイル>）でだけ使えます").into()); }
-            pending.extend(callees(f).into_iter().filter(|n| prog.fns.iter().any(|f| f.name == *n)));
-        }
-    }
-    Ok(())
-}
-
 // 型検査の結果のうち、出力に使うもの
 pub struct Info {
     // JavaScript で待つ呼び出しの式と、async にする無名関数の本体（アドレス）
@@ -726,8 +693,7 @@ fn check_prog(prog: &mut Program, require_main: bool) -> R<Info> {
     {
         let reserved = BUILTINS.contains(&n.as_str())
             || PRIMS.contains(&n.as_str())
-            || SYN_FNS.iter().any(|s| s.0 == n)
-            || BUILD_FNS.contains(&n.as_str());
+            || SYN_FNS.iter().any(|s| s.0 == n);
         if reserved || names.contains(&n.as_str()) {
             return Err(at_opt(format!("名前 {n} が重複している").into(), sp));
         }
@@ -1204,11 +1170,7 @@ impl Ck {
     // 期待する型に対して検査する。if は条件の値で期待する型を絞り込む
     fn check(&mut self, e: &mut Expr, expected: &V) -> R<()> {
         if let Expr::At(sp, inner) = e {
-            let r = self.check(inner, expected).map_err(|err| err.at(*sp));
-            if r.is_ok() {
-                record(sp, expected);
-            }
-            return r;
+            return self.check(inner, expected).map_err(|err| err.at(*sp));
         }
         let addr = e as *const Expr as usize;
         match e {
@@ -1311,11 +1273,7 @@ impl Ck {
 
     fn expr(&mut self, e: &mut Expr) -> R<V> {
         if let Expr::At(sp, inner) = e {
-            let r = self.expr(inner).map_err(|err| err.at(*sp));
-            if let Ok(t) = &r {
-                record(sp, t);
-            }
-            return r;
+            return self.expr(inner).map_err(|err| err.at(*sp));
         }
         if matches!(e, Expr::Call(n, _) if n == "refine") { return self.refine_value(e); }
         // 長い a + b + ... は左に深く再帰するので、大きな expr_inner のフレームを通らずに検査する
@@ -1879,31 +1837,6 @@ impl Ck {
                     V::Syn(k) => return Err(format!("at は配列に使う（実際は syn<{k}>）").into()),
                     _ => prim("syn"),
                 }
-            }
-            Expr::Call(name, args) if BUILD_FNS.contains(&name.as_str()) => {
-                let str_t = prim("String");
-                let bytes = V::VecT(Rc::new(prim("int")));
-                let names = V::VecT(Rc::new(str_t.clone()));
-                let (ps, ret) = match name.as_str() {
-                    "compile" => (vec![str_t.clone(), str_t.clone(), names], bytes),
-                    "inspect_exports" => (vec![str_t.clone(), names], str_t.clone()),
-                    "args" => (vec![], names),
-                    "read_text" | "js_glue" => (vec![str_t.clone()], str_t.clone()),
-                    "read_bytes" => (vec![str_t.clone()], bytes),
-                    "write_text" => (vec![str_t.clone(), str_t.clone()], prim("unit")),
-                    "write_bytes" => (vec![str_t.clone(), bytes], prim("unit")),
-                    "compile_file" => (vec![str_t.clone(), str_t.clone(), names], bytes),
-                    "inspect_file_exports" => (vec![str_t.clone(), names], str_t.clone()),
-                    "utf8" => (vec![str_t.clone()], bytes),
-                    _ => unreachable!(),
-                };
-                if args.len() != ps.len() {
-                    return Err(format!("{name} の引数は{}個", ps.len()).into());
-                }
-                for (a, p) in args.iter_mut().zip(&ps) {
-                    self.check(a, p)?;
-                }
-                ret
             }
             Expr::Call(name, args) if self.in_macro && SYN_FNS.iter().any(|s| s.0 == name) => {
                 let (_, params, ret) = SYN_FNS.iter().find(|s| s.0 == name).unwrap();

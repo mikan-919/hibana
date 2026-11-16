@@ -27,19 +27,11 @@
             toolchain
             pkgs.z3
             pkgs.nodejs
-            # editors/tree-sitter-hibana の parser.c を作る（tree-sitter generate）
-            pkgs.tree-sitter
           ];
           RUST_SRC_PATH = "${toolchain}/lib/rustlib/src/rust/library";
           # build.rs が実行ファイルの rpath に入れる（Z3 のライブラリを FFI で使う）
           Z3_LIB_DIR = "${pkgs.z3.lib}/lib";
-          # Playwright の Chromium を Nix の共有ライブラリで実行する。
-          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (with pkgs; [ z3 ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
-            glib nss nspr dbus atk at-spi2-atk at-spi2-core
-            libx11 libxcomposite libxdamage libxext
-            libxfixes libxrandr libxcb
-            libgbm expat libxkbcommon systemd alsa-lib
-          ]);
+          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [ pkgs.z3 ];
         };
       }
     );

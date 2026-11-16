@@ -293,7 +293,7 @@ mod tests {
                 let e = e.unwrap();
                 let p = e.path();
                 let kind = e.file_type().unwrap();
-                if kind.is_dir() && !matches!(e.file_name().to_str(), Some("node_modules" | "test-results" | ".vlmkit" | "playwright-report")) {
+                if kind.is_dir() {
                     check_dir(&p);
                 } else if kind.is_file() && p.extension().is_some_and(|x| x == "hb") {
                     let src = std::fs::read_to_string(&p).unwrap();
@@ -302,7 +302,7 @@ mod tests {
             }
         }
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        for dir in ["tests/programs", "examples", "lib", "hanabi"] {
+        for dir in ["tests/programs", "examples", "lib"] {
             check_dir(&root.join(dir));
         }
     }

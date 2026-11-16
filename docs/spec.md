@@ -74,7 +74,7 @@ use std -> {map, Option}  // 挙げた名前だけ修飾なしで使う
 use 'util.hb'        // ファイル（今のディレクトリからの経路）。モジュール名は拡張子を除いた名前（util）
 use './lib' -> *     // ./ か ../ で始まる経路は .hb を省ける。-> * はすべての名前を修飾なしで使う
 use './lib'
-    -> { hanabi }    // -> { 名前 } は挙げた名前だけ修飾なしで使う。改行して続けて書ける
+    -> { render }    // -> { 名前 } は挙げた名前だけ修飾なしで使う。改行して続けて書ける
     -> { Response }  // 型の名前を挙げると、その型に属する関数（Response::text など）も修飾なしで使える
 ```
 
@@ -339,7 +339,7 @@ macro routes ('routes' '{' rs:Route* '}') -> Expr { ...本体... }
 | `( P )` | グループ |
 
 - マクロは、式の位置（`-> Expr`、省略時）か文の位置（`-> Stmt`）で、組み込みの構文より先に試します。一致しなければ組み込みの構文として読みます。複数のマクロが一致すると「Ambiguous macro match」エラーです。
-- `-> Decl` は宣言の位置で展開します。展開した型・関数・実装を含めて名前を集め直し、型検査します。展開の入れ子は64段未満です。`hanabi/json.hb` の `record`・`scalar`・`union` と `hanabi/endpoint.hb` の `api` が利用例です。
+- `-> Decl` は宣言の位置で展開します。展開した型・関数・実装を含めて名前を集め直し、型検査します。展開の入れ子は64段未満です。
 - 左再帰（`syntax E = E '+' Int`）と、`Expr` / `Stmt` で始まるマクロは禁止です。
 - `syntax` 宣言の末尾の `;` は省けます。
 
@@ -407,18 +407,6 @@ macro unless('unless' expr:Expr block:Block) {
 | `all(fs)` | `(Vec<() -> T ! Async>) -> Vec<T> ! Async`（3.5 節） |
 | `resume(x)` | `handle` の腕の中で、続きを再開する（3.5 節） |
 
-次の関数はインタプリタとマクロで使います。生成するプログラムから到達するとエラーになります。ファイルの経路は作業ディレクトリからの相対経路です。
-
-| 関数 | 型と動作 |
-|---|---|
-| `args()` | `() -> Vec<String>`。`--` の後の引数 |
-| `read_text(path)` / `read_bytes(path)` | `String -> String` / `String -> Vec<int>`。UTF-8 とバイト列の読み込み |
-| `write_text(path, text)` / `write_bytes(path, bytes)` | `(String, String) -> unit` / `(String, Vec<int>) -> unit`。親ディレクトリを作って書き込む。バイトは 0〜255 |
-| `compile_file(path, target, exports)` | `(String, String, Vec<String>) -> Vec<int>`。ファイルのディレクトリを基準に `use` を解決してコンパイル |
-| `inspect_file_exports(path, exports)` | `(String, Vec<String>) -> String`。ファイルの公開関数の型情報を返す |
-| `compile(source, target, exports)` / `inspect_exports(source, exports)` | ソース文字列をコンパイルし、または型情報を返す |
-| `utf8(text)` / `js_glue(metadata)` | 文字列をバイト列に変換 / 型情報から JavaScript 接続コードを生成 |
-
 ## 10. ライブラリ
 
 ### std::math
@@ -454,20 +442,15 @@ macro unless('unless' expr:Expr block:Block) {
 
 目標は Web とネイティブの両方です。型検査を通ったプログラムから型を消し、出力先ごとのバックエンドでコードを作ります。型と証明は実行に影響しないので、どのバックエンドも普通の値と関数だけを扱います。
 
-### 11.1 ビルドファイル
-
-`hibana build.hb` のように、ビルド処理を書くファイルを実行します。`compile_file` で対象のソースをコンパイルし、`write_bytes` で成果物を保存します（9 節）。
-
-### 11.2 コマンドとコード生成 API
+### 11.1 コマンドとコード生成 API
 
 ファイルを指定した実行は `hibana <ファイル>` で行います。コード生成は Rust API から利用します。
 
 | コマンド | 出力 | 用途 |
 |---|---|---|
-| `hibana <ファイル> [-- 引数...]` | 構文木を直接評価して実行 | 開発中の確認。マクロもこの評価器で行う |
+| `hibana <ファイル>` | 構文木を直接評価して実行 | 開発中の確認。マクロもこの評価器で行う |
 | `hibana fmt <ファイル>` | ファイルを整形して書き戻す | 整形。トークンの並びと改行の位置は変えず、字下げ（空白4つ）・行内の空白（`,` の後、`=` `==` `&&` `->` などの前後、`{ }` の内側。`->` の前に揃えるための空白が2つ以上あれば残す）・空行（続く空行は1行、括弧の直後と閉じ括弧の前は無し）・コメントの位置を整える。設定は無い。JSX の要素と `$( )` `${ }` の中は元のまま（JSX の本文は空白も文字列になるため）。`+ - * /` の前後は元の空白のまま。行の長さで改行の位置は変えない |
 | `hibana test <ファイル...>` | `test` をインタプリタで実行し、成功した数を表示する。失敗があれば終了コード 1。ファイルを引数で指定する | テスト（3.8 節） |
-| `hibana lsp` | Language Server を標準入出力で動かす | エディタ（エラーの表示・整形・hover・定義へのジャンプ・補完・色付け）。VS Code と Zed の拡張機能は `editors/`（`editors/README.md`） |
 
 WASM 出力は関数を名前で公開します。整数は符号付き64ビットで、JavaScript からは `BigInt` で渡します。`num` は `f64` と JavaScript の `Number` で渡し、有限性を検査します。`put` は取り込み `hibana.write(fd, 位置, 長さ)`、`input` は `hibana.read(fd, 位置, 長さ) -> 読み取ったバイト数`、`now_ms` は `hibana.now_ms()` を呼びます。JavaScript の接続コードは、出力を `imports.hibana.print`（無ければ `console.log`）に渡します。読み取りは `imports.hibana.read(fd, Uint8Array) -> バイト数` を使い、指定が無ければ Node.js の標準入力を読みます。入力終了は0、失敗は負の値です。実行時エラーでは、メッセージの文字列の位置を memory の24番地に書いて WASM の実行を停止します。
 
@@ -497,9 +480,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-IR は WASM とネイティブの共通の中間表現です。制御フローは WASM と同じ入れ子の形（`if`・`while`・`return`）で持ちます。値は型の番号と中身の2つの64ビット整数で表し、`num` の中身には浮動小数点数のビット列を置きます。文字列の連結・比較・表示や組み込み関数は、hibana の構文で書いたランタイム（`src/backend/runtime.hb`）にあり、同じ変換で IR にします。ランタイムは型検査を通さず、`__load` などの組み込みを IR の命令に直接変換します。効果の `handle` は、中断の印を呼び出しの後で調べ、1段ずつ戻って抜けます。`resume` は腕の末尾でだけ使えます。`lower(&checked, Some(&exports))` に公開関数を渡すと、使う関数だけを変換できます。WASM の境界は `int`・`num`・`String`・`bool`・`Ref<T>`・`unit` に対応します。配列の受け渡しと WASM モジュール同士のリンクは未対応です。
+IR は WASM とネイティブの共通の中間表現です。制御フローは WASM と同じ入れ子の形（`if`・`while`・`return`）で持ちます。値は型の番号と中身の2つの64ビット整数で表し、`num` の中身には浮動小数点数のビット列を置きます。文字列の連結・比較・表示や組み込み関数は、hibana の構文で書いたランタイム（`src/backend/runtime.hb`）にあり、同じ変換で IR にします。ランタイムは型検査を通さず、`__load` などの組み込みを IR の命令に直接変換します。効果の `handle` は、中断の印を呼び出しの後で調べ、1段ずつ戻って抜けます。`resume` は腕の末尾でだけ使えます。`lower(&checked, Some(&exports))` に公開関数を渡すと、使う関数だけを変換できます。WASM の境界は `int`・`num`・`String`・`bool`・`unit` に対応します。配列の受け渡しと WASM モジュール同士のリンクは未対応です。
 
-ネイティブの出力（`hibana::to_native`）は、IR を Cranelift（Rust で書かれたコード生成器）で機械語にし、libc を使わない静的な ELF の実行ファイルを返します。リンカーは使わず、入力・出力・終了・メモリの確保（mmap）・時刻は Linux の syscall を直接呼びます。現在は x86-64 の Linux に対応します。`extern 'hibana:native'` は通信・ファイル操作などの実行環境の関数へ接続します。型別名と細分化条件を除いた境界の型を照合し、それ以外の外部関数は使えません。実行時エラーでは、標準エラーにメッセージを書いて終了コード1で終わります。
+ネイティブの出力（`hibana::to_native`）は、IR を Cranelift（Rust で書かれたコード生成器）で機械語にし、libc を使わない静的な ELF の実行ファイルを返します。リンカーは使わず、入力・出力・終了・メモリの確保（mmap）・時刻は Linux の syscall を直接呼びます。現在は x86-64 の Linux に対応します。外部関数には対応しません。実行時エラーでは、標準エラーにメッセージを書いて終了コード1で終わります。
 
 `hibana::to_wasm` は `main` を持つ実行用 WASM を返します。実行するには WebAssembly の実行環境が必要です。
 

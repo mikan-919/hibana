@@ -29,11 +29,11 @@ fn main() {
 - 型: ジェネリクス、細分化型、代数的効果、トレイト
 - マクロ: `syntax` と `macro` の宣言で文法を拡張する。展開の中で束縛した名前は付け替え、呼び出し側の変数を捕まえない
 - 実行: インタプリタ、JavaScript、共通の IR を経由した WebAssembly とネイティブ出力
-- 道具: フォーマッタ、テストランナー、Language Server、VS Code と Zed の拡張機能、tree-sitter の文法
+- 道具: フォーマッタ、テストランナー
 
 ## 動かす
 
-Nix の flake で開発環境（Rust、Z3、Node.js、tree-sitter）を作ります。
+Nix の flake で開発環境（Rust、Z3、Node.js）を作ります。
 
 ```sh
 nix develop -c cargo build
@@ -50,15 +50,14 @@ Rust の実装は `src/` 内で役割ごとに分けています。
 - `frontend/`: 字句・構文解析、名前解決、マクロ展開、TypeScript の宣言の読み込み
 - `check/`: 型検査と Z3 による証明
 - `backend/`: インタプリタ、JavaScript、共通の IR、WebAssembly、ネイティブ出力
-- `tooling/`: フォーマッタ、Language Server、シンボルの索引
+- `tooling/`: フォーマッタ
 - `cli/`: CLI のコマンド処理と統合的なテスト
 
-`src/lib.rs` と `src/main.rs` が入口で、`pipeline.rs` はコンパイルの各段階、`error.rs` は共通のエラー表現を扱います。標準ライブラリは `lib/`、エディター連携は `editors/` にあります。
+`src/lib.rs` と `src/main.rs` が入口で、`pipeline.rs` はコンパイルの各段階、`error.rs` は共通のエラー表現を扱います。標準ライブラリは `lib/` にあります。
 
 ## 文書
 
 - [入門](docs/tutorial.md)
 - [言語仕様](docs/spec.md)
 - [WebAssembly](docs/wasm.md)
-- [hanabi: hibana で書く Web アプリ](hanabi/README.md)
 - [カテゴリ別の例](tests/programs/README.md)

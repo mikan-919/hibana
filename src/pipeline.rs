@@ -34,56 +34,6 @@ pub fn parse(source: &str) -> R<parser::Program> {
     parser::parse(source)
 }
 
-/// 明示したソースをコンパイルする。
-pub fn compile(source: &str, target: &str, exports: &[String]) -> R<Vec<u8>> {
-    match target {
-        "wasm" => {
-            let program = compiler_input(source, Kind::Library)?;
-            let ir = exported_ir(&program, exports)?;
-            emit_wasm(&ir, Some(exports))
-        }
-        "js" => {
-            if !exports.is_empty() {
-                return Err("js の compile は公開関数の指定に未対応。main と空の公開関数一覧を使ってください".into());
-            }
-            let program = compiler_input(source, Kind::Executable)?;
-            let text = emit_js(&program)?;
-            Ok(text.into_bytes())
-        }
-        "native" => {
-            if !exports.is_empty() { return Err("native の公開関数一覧は空にしてください".into()); }
-            let program = compiler_input(source, Kind::Executable)?;
-            let roots = ["main".to_string()];
-            crate::native::emit(&lower(&program, Some(&roots))?)
-        }
-        _ => Err(format!("未対応のコンパイル先: {target}").into()),
-    }
-}
-
-/// WASM 境界で扱える公開関数と外部関数の型を JSON で返す。
-/// 現在の境界型は int/num/str/unit。プログラム全体の型リフレクションではない。
-pub fn inspect_exports(source: &str, exports: &[String]) -> R<String> {
-    let program = compiler_input(source, Kind::Library)?;
-    let ir = exported_ir(&program, exports)?;
-    let signatures = boundary_signatures(&ir, exports)?;
-    Ok(
-        serde_json::json!({"exports": signatures.exports, "imports": signatures.imports})
-            .to_string(),
-    )
-}
-
-fn compiler_input(source: &str, kind: Kind) -> R<Checked> {
-    let source = parser::with_uses(source)?;
-    check(parse(&source)?, kind)
-}
-
-fn exported_ir(checked: &Checked, exports: &[String]) -> R<ir::Program> {
-    if exports.is_empty() {
-        return Err("WASM の公開関数が必要".into());
-    }
-    link(&lower(checked, Some(exports))?, exports)
-}
-
 /// 構文木を型検査し、必要な引数を補う。
 pub fn check(mut program: parser::Program, kind: Kind) -> R<Checked> {
     let info = match kind {
@@ -108,7 +58,7 @@ pub fn link(program: &ir::Program, exports: &[String]) -> R<ir::Program> {
     let selected = select_exports(program, exports)?;
     let mut pending: Vec<&str> = selected.iter().map(|f| f.name.as_str()).collect();
     let has_str = |ts: &[ir::ValueType], r: ir::ValueType| {
-        ts.iter().chain([&r]).any(|t| matches!(t, ir::ValueType::Str | ir::ValueType::Ref(_)))
+        ts.iter().chain([&r]).any(|t| matches!(t, ir::ValueType::Str))
     };
     let mut visited = HashSet::new();
     let mut strings = selected
@@ -155,11 +105,6 @@ pub fn link(program: &ir::Program, exports: &[String]) -> R<ir::Program> {
 
 /// IR を WASM に変換し、指定した関数を公開する。None はすべての関数を公開する。
 pub fn emit_wasm(program: &ir::Program, exports: Option<&[String]>) -> R<Vec<u8>> {
-    let mut native_io = false;
-    for f in program.functions() {
-        f.each(&mut |n| { if matches!(n, ir::Node::Expr(ir::Expr::Prim(ir::Prim::Syscall, _))) { native_io = true; } });
-    }
-    if native_io { return Err("WASM はネイティブの通信・ファイル操作に未対応".into()); }
     if let Some(names) = exports {
         select_exports(program, names)?;
     }
@@ -170,29 +115,15 @@ pub fn emit_wasm(program: &ir::Program, exports: Option<&[String]>) -> R<Vec<u8>
 /// int は BigInt、num は Number、str は文字列、unit は undefined として渡す。
 pub fn emit_js_glue(program: &ir::Program, exports: &[String]) -> R<String> {
     let signatures = boundary_signatures(program, exports)?;
-    let metadata = serde_json::json!({"exports": signatures.exports, "imports": signatures.imports}).to_string();
-    js_glue(&metadata)
-}
-
-/// 境界の型情報から JavaScript 接続コードを作る。
-pub fn js_glue(metadata: &str) -> R<String> {
-    let metadata: serde_json::Value = serde_json::from_str(metadata).map_err(|e| format!("接続コードの型情報: {e}"))?;
-    let hosts = serde_json::to_string(metadata.get("imports").ok_or("imports が必要")?).unwrap();
-    let names = serde_json::to_string(metadata.get("exports").ok_or("exports が必要")?).unwrap();
+    let hosts = serde_json::to_string(&signatures.imports).unwrap();
+    let names = serde_json::to_string(&signatures.exports).unwrap();
     let template = r#"// hibana が生成した JavaScript 接続コード
 export async function instantiate(bytes, imports = {}) {
   let instance;
   let active = false;
-  let handles = new WeakMap();
-  let persistent = false;
   const encoder = new TextEncoder();
   const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
   function encode(value, type) {
-    if (type.startsWith('ref:')) {
-      const handle = value && handles.get(value);
-      if (!handle || handle.type !== type) throw new TypeError('このインスタンスの同じ型の参照が必要');
-      return handle.value;
-    }
     if (type === 'bool') {
       if (typeof value !== 'boolean') throw new TypeError('真偽値が必要');
       return value ? 1n : 0n;
@@ -219,11 +150,6 @@ export async function instantiate(bytes, imports = {}) {
     return n;
   }
   function decode(value, type) {
-    if (type.startsWith('ref:')) {
-      const token = Object.freeze(Object.create(null));
-      handles.set(token, { type, value });
-      return token;
-    }
     if (type === 'bool') return value !== 0n;
     if (type === "unit") return undefined;
     if (type === "int") return value;
@@ -259,27 +185,21 @@ export async function instantiate(bytes, imports = {}) {
   instance = instantiated instanceof WebAssembly.Instance ? instantiated : instantiated.instance;
   const functions = Object.create(null);
   const exportSignatures = __EXPORTS__;
-  persistent = [...exportSignatures, ...hostSignatures].some(([, ps, r]) => [...ps, r].some(t => t.startsWith('ref:')));
   for (const [name, params, result] of exportSignatures) {
     functions[name] = (...args) => {
       if (active) throw new Error("同じ WASM インスタンスへ再入できない");
       if (args.length !== params.length) throw new TypeError("引数の数が違う");
       active = true;
       try {
-        if (!persistent) instance.exports.__hibana_reset?.();
+        instance.exports.__hibana_reset?.();
         const value = instance.exports[name](...args.map((value, i) => encode(value, params[i])));
         return decode(value, result);
       } finally {
-        if (!persistent) instance.exports.__hibana_reset?.();
+        instance.exports.__hibana_reset?.();
         active = false;
       }
     };
   }
-  if (persistent) functions.dispose = () => {
-    if (active) throw new Error('実行中は破棄できない');
-    handles = new WeakMap();
-    instance.exports.__hibana_reset?.();
-  };
   return functions;
 }
 "#;
@@ -289,7 +209,7 @@ export async function instantiate(bytes, imports = {}) {
     Ok(format!("{before}{hosts}{middle}{names}{after}"))
 }
 
-// JSON と JS 接続コードで、境界の型名とシグネチャの並びを共有する。
+// JS 接続コードに渡す境界の型名とシグネチャ。
 type BoundarySignature<'a> = (&'a str, Vec<String>, String);
 
 struct BoundarySignatures<'a> {
@@ -328,7 +248,7 @@ fn select_exports<'a>(program: &'a ir::Program, names: &[String]) -> R<Vec<&'a i
     for name in names {
         if matches!(
             name.as_str(),
-            "memory" | "__hibana_alloc" | "__hibana_reset" | "dispose"
+            "memory" | "__hibana_alloc" | "__hibana_reset"
         ) {
             return Err(format!("公開する関数名 {name} は WASM の内部用に予約されている").into());
         }
@@ -348,6 +268,5 @@ fn select_exports<'a>(program: &'a ir::Program, names: &[String]) -> R<Vec<&'a i
 
 /// 型検査済みプログラムから JavaScript を作る。
 pub fn emit_js(checked: &Checked) -> R<String> {
-    typeck::reject_script_calls(&checked.program, &["main".into()])?;
     Ok(js::emit(&checked.program, &checked.info))
 }
