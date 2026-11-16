@@ -71,6 +71,19 @@ function $op(op, args) {
 }
 function $str(v) { return typeof v === "string" ? v : $show(v); }
 function $print(v) { console.log($str(v)); }
+function $input() {
+  if (typeof process === "undefined" || !process.getBuiltinModule) throw new Error("input には Node.js の標準入力が必要です");
+  const fs = process.getBuiltinModule("node:fs"), byte = new Uint8Array(1), bytes = [];
+  // ponytail: 1 バイトずつ読む。行の読み込みが律速になったら、呼び出し間で共有するバッファを使う
+  while (fs.readSync(0, byte, 0, 1, null) !== 0) {
+    if (byte[0] === 10) {
+      if (bytes.at(-1) === 13) bytes.pop();
+      break;
+    }
+    bytes.push(byte[0]);
+  }
+  return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(new Uint8Array(bytes));
+}
 function $len(v) { return BigInt(typeof v === "string" ? [...v].length : v.length); }
 function $split(s, sep) { return sep === "" ? ["", ...s, ""] : s.split(sep); }
 function $starts_with(s, p) { return s.startsWith(p); }
@@ -580,6 +593,7 @@ impl Gen<'_> {
                     "set_at" => format!("$set({}, {}, {})", vs[0], vs[1], vs[2]),
                     "all" => wait(true, format!("$all({})", vs[0])),
                     "put" => format!("$print({})", vs[0]),
+                    "input" => "$input()".into(),
                     "to_str" => format!("$str({})", vs[0]),
                     "len" | "split" | "starts_with" | "slice" | "chars" | "code" | "char_from_codepoint" | "panic" | "now_ms" => {
                         format!("${name}({})", vs.join(", "))

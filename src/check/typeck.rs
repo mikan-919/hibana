@@ -80,6 +80,7 @@ pub(crate) const BUILD_FNS: &[&str] = &["compile", "inspect_exports", "utf8", "a
 // どこでも使える組み込み関数
 const BUILTINS: &[&str] = &[
     "put",
+    "input",
     "len",
     "Vec",
     "Type",
@@ -105,6 +106,7 @@ const BUILTINS: &[&str] = &[
 
 // 文字列の組み込み関数 (名前, 引数, 戻り値)。split の戻り値は Vec<String>
 const STR_FNS: &[(&str, &[&str], &str)] = &[
+    ("input", &[], "String"),
     ("split", &["String", "String"], "Vec<String>"),
     ("starts_with", &["String", "String"], "bool"),
     ("slice", &["String", "int", "int"], "String"),

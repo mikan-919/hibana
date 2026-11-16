@@ -399,6 +399,7 @@ macro unless('unless' expr:Expr block:Block) {
 | 関数 | 型 |
 |---|---|
 | `put(x)` | 任意の値を表示する |
+| `input()` | 標準入力から1行読み、行末の改行を除いた `String` を返す。入力終了時は空文字列。インタプリタと Node.js 向け JavaScript で使える |
 | `len(v)` | `Vec<T>` か `String` の長さ。`mut` の変数は、初期値と `push`・`set_at` の代入から長さを追う（ループと分岐の後は分からなくなる） |
 | `x.to_string()` | 任意の値を文字列にする（3.7 節） |
 | `split(s, sep)` | `(String, String) -> Vec<String>` |

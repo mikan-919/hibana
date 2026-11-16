@@ -492,6 +492,7 @@ fn parse_toks(src: &str, toks: Vec<Token>) -> R<Program> {
     let mut globals: HashSet<String> = [
         "js",
         "put",
+        "input",
         "len",
         "at",
         "is_null",

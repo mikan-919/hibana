@@ -697,6 +697,15 @@ impl Interp<'_> {
                             if file { crate::parser::with_base_dir(std::path::Path::new(&input).parent().unwrap_or(std::path::Path::new(".")), compile)? } else { compile()? }
                         }
                     }
+                } else if name == "input" {
+                    self.out.flush().map_err(|e| Flow::Error(e.to_string()))?;
+                    let mut line = String::new();
+                    std::io::stdin().read_line(&mut line).map_err(|e| Flow::Error(format!("標準入力を読めません: {e}")))?;
+                    if line.ends_with('\n') {
+                        line.pop();
+                        if line.ends_with('\r') { line.pop(); }
+                    }
+                    Value::Str(line.into())
                 } else if let Some(v) = self.syn_fn(name, &mut vs)? {
                     v
                 } else if name == "put" {
