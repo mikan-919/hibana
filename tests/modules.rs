@@ -7,6 +7,7 @@ impl Files {
     fn new(name: &str, files: &[(&str, &str)]) -> Self {
         let directory =
             std::env::temp_dir().join(format!("hibana-modules-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
         for (path, text) in files {
             let path = directory.join(path);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -169,4 +170,55 @@ fn declaration_macros_keep_generated_names_in_imported_modules() {
     let mut output = Vec::new();
     hibana::eval::run(&program, &mut output).unwrap();
     assert_eq!(output, b"42\n");
+}
+
+#[test]
+fn module_names_qualify_only_under_a_plain_use() {
+    let files = Files::new("qualification", &[]);
+    // -> { } と -> * は名前を取り込むだけで、モジュール名では修飾できない
+    let mut program = files
+        .parse("use std::math -> { floor }\nfn main() { put(floor(2.5)) }")
+        .unwrap();
+    hibana::typeck::check(&mut program).unwrap();
+    for source in [
+        "use std::math -> { floor }\nfn main() { put(math::sqrt(9)) }",
+        "use std::math -> { floor }\nfn main() { put(math.sqrt(9)) }",
+        "use std -> *\nfn main() { put(std.map([1], fn(x) { x })) }",
+    ] {
+        let mut program = files.parse(source).unwrap();
+        let error = hibana::typeck::check(&mut program).err().unwrap();
+        assert!(error.msg.contains("未定義"), "{source}: {}", error.msg);
+    }
+    // use 名前と use 名前 -> { } を両方書けば、どちらの形も使える
+    let mut program = files
+        .parse("use std::math\nuse std::math -> { floor }\nfn main() { put(math::sqrt(9))\n put(floor(2.5)) }")
+        .unwrap();
+    hibana::typeck::check(&mut program).unwrap();
+    let mut output = Vec::new();
+    hibana::eval::run(&program, &mut output).unwrap();
+    assert_eq!(output, b"3\n2\n");
+}
+
+#[test]
+fn module_names_stay_in_the_file_that_uses_them() {
+    let files = Files::new(
+        "file-scope",
+        &[
+            ("a.hb", "use './b.hb'\nfn answer() -> int { b.base() }"),
+            ("b.hb", "fn base() -> int { 42 }"),
+        ],
+    );
+    // a.hb は b を修飾して使えるが、b を use していない main からは使えない
+    let mut program = files
+        .parse("use './a.hb'\nfn main() { put(a.answer()) }")
+        .unwrap();
+    hibana::typeck::check(&mut program).unwrap();
+    let mut output = Vec::new();
+    hibana::eval::run(&program, &mut output).unwrap();
+    assert_eq!(output, b"42\n");
+    let mut program = files
+        .parse("use './a.hb'\nfn main() { put(b.base()) }")
+        .unwrap();
+    let error = hibana::typeck::check(&mut program).err().unwrap();
+    assert!(error.msg.contains("未定義"), "{}", error.msg);
 }

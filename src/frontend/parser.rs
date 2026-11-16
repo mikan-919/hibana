@@ -187,8 +187,8 @@ pub struct Parser<'s> {
     pub mod_names: Rc<HashMap<String, HashSet<Name>>>,
     // モジュールごとの use
     pub uses: Rc<HashMap<String, Vec<Use>>>,
-    // use されたモジュールの名前。web.ok の web
-    pub modules: Rc<HashSet<String>>,
+    // モジュールごとに、修飾して使えるモジュールの名前（-> を付けない use で取り込んだもの）。web.ok の web
+    pub modules: Rc<HashMap<String, HashSet<String>>>,
     // 修飾した形の大域の名前（関数・型・構築子）
     pub known: Rc<HashSet<Name>>,
     // トレイトの名前（修飾した形）から、その構造体のフィールドの並び
@@ -510,7 +510,7 @@ fn parse_modules_tokens(
     let mut mod_names: HashMap<String, HashSet<Name>> = HashMap::new();
     let mut known: HashSet<Name> = HashSet::new();
     let mut uses: HashMap<String, Vec<Use>> = HashMap::new();
-    let mut modules: HashSet<String> = HashSet::new();
+    let mut modules: HashMap<String, HashSet<String>> = HashMap::new();
     // 名前を宣言する。同じモジュールで既に宣言していれば false
     let mut declare = |m: &str, n: &Name, globals: &mut HashSet<Name>| {
         mod_names
@@ -545,7 +545,10 @@ fn parse_modules_tokens(
                 Tok::Eof => break,
                 Tok::Punct("use") => {
                     let u = p.use_decl()?;
-                    modules.insert(u.module.clone());
+                    // 修飾して使えるのは、-> を付けない use だけ。-> * と -> { } は名前を取り込むだけ
+                    if matches!(u.names, UseNames::Qualified) {
+                        modules.entry(cur.clone()).or_default().insert(u.module.clone());
+                    }
                     uses.entry(cur).or_default().push(u);
                 }
                 Tok::Punct("syntax" | "macro") => p.pos = decl_end[&p.pos],
@@ -663,7 +666,8 @@ fn parse_modules_tokens(
     }
     globals.extend(grammar.literals().into_iter().map(Name::from));
     globals.extend(PRELUDE_NAMES.iter().map(|name| Name::from(*name)));
-    globals.extend(modules.iter().map(|name| Name::from(name.as_str())));
+    // 利用者のファイルで修飾して使うモジュールの名前は、マクロの衛生性で付け替えない
+    globals.extend(modules.get("").into_iter().flatten().map(|name| Name::from(name.as_str())));
     for module in &loaded.modules {
         if module.name != "std" {
             uses.entry(module.name.clone()).or_default().push(Use {
@@ -969,6 +973,11 @@ impl Parser<'_> {
             _ => self.err("識別子が必要"),
         }
     }
+    // m が、今のモジュールから修飾して使えるモジュールの名前か
+    fn uses_module(&self, m: &str) -> bool {
+        self.modules.get(&self.module).is_some_and(|ms| ms.contains(m))
+    }
+
     // 今のトークンが名前なら、修飾した名前に書き換える。web.ok は1個の名前にし、型名は今のモジュールから見た名前にする
     // （構造体の値と <> の判定に使う。それ以外の名前は resolve で局所変数と区別してから解決する）
     fn qualify_here(&mut self) {
@@ -976,13 +985,13 @@ impl Parser<'_> {
             return;
         };
         if let NameKind::Associated(module, member) = &n.kind
-            && self.modules.contains(module.as_str())
+            && self.uses_module(module.as_str())
         {
             self.toks[self.pos].tok = Tok::Ident(Name::qualified(module, *member.clone()));
             return;
         }
         let at = |k: usize| self.toks.get(self.pos + k).map(|t| t.tok.clone());
-        if self.modules.contains(n.as_str())
+        if self.uses_module(n.as_str())
             && at(1) == Some(Tok::Punct("."))
             && !self.toks[self.pos + 1].gap_before
         {
