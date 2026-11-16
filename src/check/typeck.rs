@@ -1077,7 +1077,7 @@ impl Ck {
                 *e = shown;
             }
             // 構文片（syn）は、ソースの綴りを文字列にする（str_of と同じ）
-            None if matches!(t, V::Syn(_) | V::Prim("syn")) => *e = Expr::Call("str_of".into(), args),
+            None if self.in_macro && same(&prim("syn"), &t) => *e = Expr::Call("str_of".into(), args),
             None => *e = Expr::Call("to_str".into(), args),
         }
         Ok(prim("String"))
