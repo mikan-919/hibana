@@ -1994,6 +1994,17 @@ impl Ck {
     fn call_fn(&mut self, name: &str, args: &mut Vec<Expr>, expected: Option<&V>, addr: usize) -> R<V> {
         let f = self.norm.fns[name].clone();
         let explicit = f.params.len() - f.implicit - f.insts;
+        // with の要求は、内側のスコープで選ばれた値を引数にして渡す。
+        let caps: Vec<_> = f.params[f.implicit..f.params.len() - f.insts]
+            .iter().filter(|(n, _)| n.starts_with("cap#")).map(|(n, _)| n.clone()).collect();
+        if !caps.is_empty() && args.len() == explicit - caps.len() {
+            for cap in caps {
+                if self.lookup(&cap).is_none() {
+                    return Err(format!("関数 {name} には with {} が必要", cap.trim_start_matches("cap#")).into());
+                }
+                args.push(Expr::Var(cap));
+            }
+        }
         let n = args.len();
         let infer = f.implicit > 0 && (n == explicit || n == explicit + f.insts);
         // 制約の実装を省いた呼び出し。実装は型引数が決まってから探す

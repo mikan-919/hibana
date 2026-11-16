@@ -1105,10 +1105,10 @@ impl Parser<'_> {
             vec![]
         };
         // 制約 <A: Show> の実装は引数の末尾に置く
-        let insts: Vec<_> = params
+        let mut insts: Vec<_> = params
             .extract_if(.., |p| p.0.starts_with("inst#"))
             .collect();
-        let implicit = params.len();
+        let mut implicit = params.len();
         self.expect("(")?;
         params.extend(self.params()?);
         let ret = if self.eat("->") {
@@ -1122,15 +1122,44 @@ impl Parser<'_> {
             None
         };
         let effects = self.effects()?;
+        let mut capabilities = Vec::new();
+        if matches!(self.peek(), Tok::Ident(n) if n == "with") {
+            self.pos += 1;
+            loop {
+                let trait_name = self.ident()?;
+                let Some(tr) = self.trait_name(&trait_name) else {
+                    return self.err_at(format!("{trait_name} はトレイトでない"));
+                };
+                self.expect("(")?;
+                let local = self.ident()?;
+                self.expect(")")?;
+                let cap = format!("cap#{tr}");
+                if capabilities.iter().any(|(_, n)| n == &cap) {
+                    return self.err("同じトレイトの with 要求は一度だけ書ける");
+                }
+                let ty = format!("captype#{tr}");
+                // ponytail: with の対象型は推論で決める。型引数の明示との併用は、利用者の型引数と内部の型引数を分けて対応する
+                params.insert(implicit, (ty.clone(), Expr::Var("Type".into())));
+                implicit += 1;
+                params.push((cap.clone(), Expr::Var(ty.clone())));
+                insts.push((format!("inst#{cap}"), Expr::Call(tr, vec![Expr::Var(ty)])));
+                capabilities.push((local, cap));
+                if !self.eat(",") { break; }
+            }
+        }
         self.expect("{")?;
         let n_insts = insts.len();
         params.extend(insts);
+        let mut body = self.block()?;
+        for (local, cap) in capabilities.into_iter().rev() {
+            body.stmts.insert(0, Stmt::Let { name: local, mutable: false, ty: None, init: Expr::Var(cap) });
+        }
         Ok(Fn {
             span: Some(span),
             name,
             params,
             ret,
-            body: self.block()?,
+            body,
             alias: false,
             module,
 
@@ -1979,6 +2008,20 @@ impl Parser<'_> {
             }
             Tok::Punct("true") => Expr::Bool(true),
             Tok::Punct("false") => Expr::Bool(false),
+            // with Trait(値) { ... } は、要求を満たす値をスコープに束縛する
+            Tok::Ident(name) if name == "with" && matches!(self.peek(), Tok::Ident(_)) => {
+                let trait_name = self.ident()?;
+                let Some(tr) = self.trait_name(&trait_name) else {
+                    return self.err_at(format!("{trait_name} はトレイトでない"));
+                };
+                self.expect("(")?;
+                let value = self.expr()?;
+                self.expect(")")?;
+                self.expect("{")?;
+                let mut body = self.block()?;
+                body.stmts.insert(0, Stmt::Let { name: format!("cap#{tr}"), mutable: false, ty: None, init: value });
+                Expr::Block(body)
+            }
             // struct Name(型, ...) の値 Name(式, ...)。構築子 Name{} の呼び出しにする
             Tok::Ident(name)
                 if self

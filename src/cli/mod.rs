@@ -413,6 +413,20 @@ mod tests {
     }
 
     #[test]
+    fn capability_scopes() {
+        let src = include_str!("../../tests/programs/types/capabilities.hb");
+        assert_eq!(out(src).unwrap(), "created\nplain\n[DEBUG] inner\nrestored\n[OTHER] other\n");
+        let missing = src.replace("with Logger(make_logger())", "");
+        assert!(out(&missing).unwrap_err().to_string().contains("with Logger が必要"));
+        let invalid = src.replace("with Logger(make_logger())", "with Logger(0)");
+        assert!(out(&invalid).is_err());
+        let escaped = src.replace("fn main() {", "fn main() { emit('outside')\n");
+        assert!(out(&escaped).unwrap_err().to_string().contains("with Logger が必要"));
+        let multiple = "trait First { fn first(self) -> int }\ntrait Second { fn second(self) -> int }\nimpl First for int { fn first(self) -> int { self } }\nimpl Second for int { fn second(self) -> int { self } }\nfn sum() -> int with First(a), Second(b) { a.first() + b.second() }\nfn main() { with First(2) { with Second(3) { put(sum()) } } }";
+        assert_eq!(out(multiple).unwrap(), "5\n");
+    }
+
+    #[test]
     fn result_propagation() {
         let src = "use std -> *\nfn get_result(ok: bool) -> Result<int, String> { if ok { Ok(7) } else { Err('bad') } }\nfn twice(ok: bool) -> Result<int, String> { let n = get_result(ok)?\n Ok(n * 2) }\nfn main() { put(twice(true))\n put(twice(false)) }";
         assert_eq!(out(src).unwrap(), "std.Ok(14)\nstd.Err(\"bad\")\n");
