@@ -155,6 +155,11 @@ pub fn link(program: &ir::Program, exports: &[String]) -> R<ir::Program> {
 
 /// IR を WASM に変換し、指定した関数を公開する。None はすべての関数を公開する。
 pub fn emit_wasm(program: &ir::Program, exports: Option<&[String]>) -> R<Vec<u8>> {
+    let mut native_io = false;
+    for f in program.functions() {
+        f.each(&mut |n| { if matches!(n, ir::Node::Expr(ir::Expr::Prim(ir::Prim::Syscall, _))) { native_io = true; } });
+    }
+    if native_io { return Err("WASM はネイティブの通信・ファイル操作に未対応".into()); }
     if let Some(names) = exports {
         select_exports(program, names)?;
     }

@@ -635,7 +635,15 @@ fn __input() -> String {
             }
         }
     }
-    // UTF-8 の過長表現・代理符号・範囲外・途中で終わる文字を拒否する
+    __utf8_validate(buffer, size)
+    __bytes(buffer, size)
+}
+
+// UTF-8 の過長表現・代理符号・範囲外・途中で終わる文字を拒否する
+fn __utf8_validate(buffer: int, size: int) {
+    if !__utf8_valid(buffer, size) { __die('標準入力の文字コードが UTF-8 でない') }
+}
+fn __utf8_valid(buffer: int, size: int) -> bool {
     let mut i = 0
     while i < size {
         let b = __load8(buffer + i)
@@ -646,20 +654,20 @@ fn __input() -> String {
             if b >= 194 && b <= 223 { n = 2; minimum = 128; codepoint = b - 192 }
             else if b >= 224 && b <= 239 { n = 3; minimum = 2048; codepoint = b - 224 }
             else if b >= 240 && b <= 244 { n = 4; minimum = 65536; codepoint = b - 240 }
-            else { __die('標準入力の文字コードが UTF-8 でない') }
-            if i + n > size { __die('標準入力の文字コードが UTF-8 でない') }
+            else { return false }
+            if i + n > size { return false }
             let mut j = 1
             while j < n {
                 let c = __load8(buffer + i + j)
-                if c < 128 || c > 191 { __die('標準入力の文字コードが UTF-8 でない') }
+                if c < 128 || c > 191 { return false }
                 codepoint = codepoint * 64 + c - 128
                 j = j + 1
             }
-            if codepoint < minimum || codepoint > 1114111 || (codepoint >= 55296 && codepoint <= 57343) { __die('標準入力の文字コードが UTF-8 でない') }
+            if codepoint < minimum || codepoint > 1114111 || (codepoint >= 55296 && codepoint <= 57343) { return false }
         }
         i = i + n
     }
-    __bytes(buffer, size)
+    true
 }
 
 // 1 回の書き込みで 1 行を出す（JavaScript の接続コードは 1 回ごとに 1 行として渡す）

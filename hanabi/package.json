@@ -1,0 +1,12 @@
+{
+  "name": "hanabi-workspace",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:browser": "playwright test"
+  },
+  "devDependencies": {
+    "@mizchi/vlmkit": "^0.23.0",
+    "@playwright/test": "^1.65.1"
+  }
+}

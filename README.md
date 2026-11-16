@@ -62,4 +62,5 @@ Rust の実装は `src/` 内で役割ごとに分けています。
 - [入門](docs/tutorial.md)
 - [言語仕様](docs/spec.md)
 - [WebAssembly](docs/wasm.md)
+- [hanabi: hibana で書く Web アプリ](hanabi/README.md)
 - [カテゴリ別の例](tests/programs/README.md)

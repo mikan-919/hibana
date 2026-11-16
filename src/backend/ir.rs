@@ -19,7 +19,7 @@ pub const FN: i64 = 6;
 pub const TY: i64 = 7;
 pub const NUM: i64 = 9;
 
-const RUNTIME: &str = include_str!("runtime.hb");
+const RUNTIME: &str = concat!(include_str!("runtime.hb"), "\n", include_str!("runtime_native.hb"));
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
@@ -101,6 +101,7 @@ pub enum Prim {
     Read,
     FFromInt, FToInt, FAdd, FSub, FMul, FDiv, FNeg, FFloor, FSqrt,
     FEq, FLt, FLe,
+    Syscall,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -359,6 +360,34 @@ pub fn lower(p: &parser::Program) -> R<Program> {
 
 /// exports から辿れる関数だけを変換する。None はすべての関数を変換する。
 pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>) -> R<Program> {
+    let mut native_program = p.clone();
+    for f in &mut native_program.fns {
+        if f.js.as_deref() == Some("hibana:native") {
+            let name = f.name.rsplit('.').next().unwrap();
+            let (params, ret): (&[&str], &str) = match name {
+                "listen" => (&["int"], "int"), "accept" => (&["int"], "int"),
+                "close" | "wait" => (&["int"], "unit"), "exit" => (&["int"], "never"), "fork" => (&[], "int"),
+                "read" => (&["int", "int"], "Vec<int>"), "write" => (&["int", "Vec<int>"], "unit"),
+                "slice" => (&["Vec<int>", "int", "int"], "Vec<int>"), "join" => (&["Vec<int>", "Vec<int>"], "Vec<int>"),
+                "read_file" => (&["String"], "Vec<int>"), "write_file" => (&["String", "Vec<int>"], "unit"),
+                "mkdir" => (&["String"], "unit"), "utf8" => (&["String"], "Vec<int>"), "decode" => (&["Vec<int>"], "String"),
+                "valid_utf8" => (&["Vec<int>"], "bool"),
+                _ => return Err(format!("hibana:native の関数 {name} は未対応").into()),
+            };
+            let ty = |e: &Ast| match e.peel() {
+                Ast::Var(n) => n.clone(),
+                Ast::Call(n, a) if n == "Vec" && a.len() == 1 && matches!(a[0].peel(), Ast::Var(n) if n == "int") => "Vec<int>".into(),
+                _ => "?".into(),
+            };
+            if f.params.len() != params.len() || f.params.iter().zip(params).any(|((_, t), expected)| ty(t) != *expected)
+                || f.ret.as_ref().map_or("unit".into(), ty) != ret {
+                return Err(format!("hibana:native の関数 {name} の型が契約と異なる").into());
+            }
+            f.body = parser::Block { stmts: vec![], tail: Some(Box::new(Ast::Call(format!("__native_{name}"), f.params.iter().map(|(n, _)| Ast::Var(n.clone())).collect()))) };
+            f.js = None;
+        }
+    }
+    let p = &native_program;
     let roots = exports.map(|v| v.to_vec()).unwrap_or_else(|| p.fns.iter().map(|f| f.name.clone()).collect());
     crate::typeck::reject_script_calls(p, &roots)?;
     let runtime = parser::parse(RUNTIME)?;
@@ -1130,6 +1159,7 @@ fn intrinsic(n: &str) -> Option<Option<Prim>> {
         "__fail" => Prim::Fail,
         "__now" => Prim::Now,
         "__sys_read" => Prim::Read,
+        "__syscall" => Prim::Syscall,
         "__f_from_int" => Prim::FFromInt,
         "__f_to_int" => Prim::FToInt,
         "__f_add" => Prim::FAdd,

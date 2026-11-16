@@ -638,6 +638,7 @@ impl Emit<'_, '_> {
             Static => self.out.push(I::I64Const(STATIC)),
             Now => self.out.push(I::Call(self.cx.now.unwrap())),
             Read => self.out.extend([get(0), get(1), get(2), I::Call(self.cx.read.unwrap())]),
+            Syscall => { self.out.push(I::Unreachable); }
             FFromInt => self.out.extend([get(0), I::F64ConvertI64S, I::I64ReinterpretF64]),
             FToInt | FAdd | FSub | FMul | FDiv | FNeg | FFloor | FSqrt | FEq | FLt | FLe => {
                 self.out.extend([get(0), I::F64ReinterpretI64]);
