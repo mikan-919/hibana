@@ -260,7 +260,7 @@ fn ret_stmt(e: Expr, rest: Block) -> R<Expr> {
         Expr::If(c, t, f) if !has_ret(&c) => {
             let t = ret_block(join(t, rest.clone()))?;
             let f = match f {
-                Some(f) => join(Block { stmts: vec![Stmt::Expr(*f)], tail: None }, rest),
+                Some(f) => join(Block { id: Default::default(), stmts: vec![Stmt::Expr(*f)], tail: None }, rest),
                 None => rest,
             };
             Expr::If(c, t, Some(Box::new(Expr::Block(ret_block(f)?))))
@@ -278,11 +278,11 @@ fn ret_block(b: Block) -> R<Block> {
     while let Some(s) = it.next() {
         match s {
             Stmt::Expr(e) if has_ret(&e) => {
-                let rest = Block {
+                let rest = Block { id: Default::default(),
                     stmts: it.collect(),
                     tail: b.tail,
                 };
-                return Ok(Block {
+                return Ok(Block { id: Default::default(),
                     stmts,
                     tail: Some(Box::new(ret_stmt(e, rest)?)),
                 });
@@ -292,7 +292,7 @@ fn ret_block(b: Block) -> R<Block> {
         }
     }
     let tail = b.tail.map(|t| ret_tail(*t).map(Box::new)).transpose()?;
-    Ok(Block { stmts, tail })
+    Ok(Block { id: Default::default(), stmts, tail })
 }
 
 // a の後に b を続けたブロック。a の最後の式の値は捨てる
@@ -300,7 +300,7 @@ fn join(a: Block, b: Block) -> Block {
     let mut stmts = a.stmts;
     stmts.extend(a.tail.map(|t| Stmt::Expr(*t)));
     stmts.extend(b.stmts);
-    Block {
+    Block { id: Default::default(),
         stmts,
         tail: b.tail,
     }
@@ -1247,7 +1247,7 @@ impl Parser<'_> {
         // 一度だけ読み、式が1つならその式、文の並びならブロックにする。
         p.toks.extend([Token { tok: Tok::Punct("}"), nl_before: true, ..end }, eof]);
         let e = match p.block().ctx(wrap)? {
-            Block { stmts, tail: Some(e) } if !m.stmt && stmts.is_empty() => *e,
+            Block { stmts, tail: Some(e), .. } if !m.stmt && stmts.is_empty() => *e,
             block => Expr::Block(block),
         };
         if m.template { ret_tail(e).ctx(wrap) } else { Ok(e) }

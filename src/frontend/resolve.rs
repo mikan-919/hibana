@@ -169,7 +169,7 @@ impl Resolver<'_> {
                 self.name(n);
                 self.exprs(args);
             }
-            Expr::At(_, x)
+            Expr::At(_, x) | Expr::Id(_, x)
             | Expr::Unary(_, x)
             | Expr::Field(x, _)
             | Expr::Assign(_, x)

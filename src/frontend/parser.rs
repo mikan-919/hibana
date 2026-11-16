@@ -3,6 +3,18 @@ use crate::meta::{Grammar, Node, Q};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+/// 構文木の節点の識別子。移動と複製では保持し、新しい節点には別の値を割り当てる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NodeId(u64);
+
+impl Default for NodeId {
+    fn default() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Field と Method の中身は型検査が対応するまで読まれない
 pub enum Expr {
@@ -48,6 +60,8 @@ pub enum Expr {
     For(String, Box<Expr>, Option<Box<Expr>>, Block),
     // ソース上の位置。エラー表示に使う
     At(Span, Box<Expr>),
+    // 型検査後も式と一緒に移動する識別子。
+    Id(NodeId, Box<Expr>),
 }
 
 impl Expr {
@@ -80,7 +94,7 @@ impl Expr {
 
     pub fn peel(&self) -> &Expr {
         match self {
-            Expr::At(_, e) => e.peel(),
+            Expr::At(_, e) | Expr::Id(_, e) => e.peel(),
             e => e,
         }
     }
@@ -88,9 +102,18 @@ impl Expr {
     // 位置の包みを外す（可変）
     pub fn peel_mut(&mut self) -> &mut Expr {
         match self {
-            Expr::At(_, e) => e.peel_mut(),
+            Expr::At(_, e) | Expr::Id(_, e) => e.peel_mut(),
             e => e,
         }
+    }
+
+    pub(crate) fn identified(&mut self) -> (NodeId, &mut Expr) {
+        if !matches!(self, Expr::Id(..)) {
+            let expression = std::mem::replace(self, Expr::Int(0));
+            *self = Expr::Id(NodeId::default(), Box::new(expression));
+        }
+        let Expr::Id(id, expression) = self else { unreachable!() };
+        (*id, expression)
     }
 }
 
@@ -107,6 +130,7 @@ pub enum Stmt {
 
 #[derive(Debug, Clone)]
 pub struct Block {
+    pub id: NodeId,
     pub stmts: Vec<Stmt>,
     pub tail: Option<Box<Expr>>,
 }
@@ -821,7 +845,7 @@ fn parse_toks_depth(src: &str, toks: Vec<Token>, expansion: usize) -> R<Program>
         let module = p.cur_module();
         let setup = p.test_cases(&label, Vec::new(), &module, &mut cases)?;
         if cases.len() == before {
-            cases.push((label, s, module, Block { stmts: setup, tail: None }));
+            cases.push((label, s, module, Block { id: Default::default(), stmts: setup, tail: None }));
         }
     }
     for (k, (label, s, module, body)) in cases.into_iter().enumerate() {
@@ -1272,7 +1296,7 @@ impl Parser<'_> {
                 name: op,
                 params: ps,
                 ret,
-                body: Block {
+                body: Block { id: Default::default(),
                     stmts: vec![],
                     tail: None,
                 },
@@ -1384,7 +1408,7 @@ impl Parser<'_> {
             };
             fns.push(mk(
                 qual(&module, &m),
-                Block {
+                Block { id: Default::default(),
                     stmts: vec![],
                     tail: Some(Box::new(Expr::Apply(Box::new(field), vars))),
                 },
@@ -1404,7 +1428,7 @@ impl Parser<'_> {
             name: format!("{name}#get"),
             params: with_inst(&[]),
             ret: Some(me.clone()),
-            body: Block {
+            body: Block { id: Default::default(),
                 stmts: vec![],
                 tail: Some(Box::new(Expr::Var("inst#0".into()))),
             },
@@ -1506,7 +1530,7 @@ impl Parser<'_> {
                 None => return self.err_at(format!("{q} のメソッド {m} の実装が無い")),
             };
             let call = Expr::Call(target, ps.iter().map(|p| Expr::Var(p.clone())).collect());
-            let body = Block {
+            let body = Block { id: Default::default(),
                 stmts: vec![],
                 tail: Some(Box::new(call)),
             };
@@ -1524,7 +1548,7 @@ impl Parser<'_> {
             name: base,
             params,
             ret: Some(head),
-            body: Block {
+            body: Block { id: Default::default(),
                 stmts: vec![],
                 tail: Some(Box::new(Expr::Call(format!("{q}{{}}"), args))),
             },
@@ -1566,7 +1590,7 @@ impl Parser<'_> {
                 None
             };
             let effects = self.effects()?;
-            let body = Block {
+            let body = Block { id: Default::default(),
                 stmts: vec![],
                 tail: None,
             };
@@ -1774,7 +1798,7 @@ impl Parser<'_> {
             if matches!(e.peel(), Expr::If(..)) {
                 return self.err("型別名には型を指定する");
             }
-            let body = Block {
+            let body = Block { id: Default::default(),
                 stmts: vec![],
                 tail: Some(Box::new(e)),
             };
@@ -1902,7 +1926,7 @@ impl Parser<'_> {
                     let body = self.block()?;
                     let mut stmts = setup.clone();
                     stmts.extend(body.stmts);
-                    cases.push((label, at, module.to_string(), Block { stmts, tail: body.tail }));
+                    cases.push((label, at, module.to_string(), Block { id: Default::default(), stmts, tail: body.tail }));
                 } else {
                     self.test_cases(&label, setup.clone(), module, cases)?;
                     if cases.len() == before {
@@ -1941,7 +1965,7 @@ impl Parser<'_> {
         let mut stmts = Vec::new();
         loop {
             if self.eat("}") {
-                return Ok(Block { stmts, tail: None });
+                return Ok(Block { id: Default::default(), stmts, tail: None });
             }
             if let Some(e) = self.try_macros(true)? {
                 self.end_stmt()?;
@@ -1956,7 +1980,7 @@ impl Parser<'_> {
             if self.eat(";") {
                 stmts.push(Stmt::Expr(e));
             } else if self.eat("}") {
-                return Ok(Block {
+                return Ok(Block { id: Default::default(),
                     stmts,
                     tail: Some(Box::new(e)),
                 });
@@ -2291,13 +2315,13 @@ impl Parser<'_> {
                         return self.err_at("文字列・整数のパターンと構築子のパターンは混ぜられない".into());
                     }
                     let name = format!("match#{}", self.pos);
-                    let leaf = |e: Expr| Block { stmts: vec![], tail: Some(Box::new(e)) };
+                    let leaf = |e: Expr| Block { id: Default::default(), stmts: vec![], tail: Some(Box::new(e)) };
                     let mut acc = Expr::Block(leaf(body.clone()));
                     for (v, body) in lits.into_iter().rev() {
                         let cond = Expr::Binary("==", Box::new(Expr::Var(name.clone())), Box::new(v));
                         acc = Expr::If(Box::new(cond), leaf(body), Some(Box::new(acc)));
                     }
-                    Expr::Block(Block {
+                    Expr::Block(Block { id: Default::default(),
                         stmts: vec![Stmt::Let { name, mutable: false, ty: None, init: s }],
                         tail: Some(Box::new(acc)),
                     })
@@ -2346,7 +2370,7 @@ impl Parser<'_> {
             // .do() を使うマクロの本体に書いた return（meta.rs の template_body）。展開後に式の値へ直す
             Tok::Punct("macro_return") => {
                 let v = if self.at_newline() || matches!(self.peek(), Tok::Punct(";" | "}")) {
-                    Expr::Block(Block { stmts: vec![], tail: None })
+                    Expr::Block(Block { id: Default::default(), stmts: vec![], tail: None })
                 } else {
                     self.expr()?
                 };

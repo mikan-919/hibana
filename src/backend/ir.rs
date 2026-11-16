@@ -1089,7 +1089,7 @@ impl Lower<'_, '_> {
         let mut fns = Vec::new();
         for a in arms {
             ops.push(Expr::Str(a.ctor.clone()));
-            let b = parser::Block {
+            let b = parser::Block { id: Default::default(),
                 stmts: vec![],
                 tail: Some(Box::new(a.body.clone())),
             };

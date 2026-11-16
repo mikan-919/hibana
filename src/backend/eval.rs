@@ -470,7 +470,10 @@ impl Interp<'_> {
     }
 
     fn expr(&mut self, e: &Expr, env: &mut Vec<HashMap<String, Value>>) -> R<Value> {
+        let mut e = e;
+        while let Expr::Id(_, inner) = e { e = inner; }
         Ok(match e {
+            Expr::Id(..) => unreachable!(),
             Expr::At(sp, x) => {
                 let r = self.expr(x, env);
                 let lib = |s: &Span| s.start.offset >= self.user_end;
@@ -734,7 +737,7 @@ impl Interp<'_> {
                 let arms = arms
                     .iter()
                     .map(|a| {
-                        let body = Block {
+                        let body = Block { id: Default::default(),
                             stmts: vec![],
                             tail: Some(Box::new(a.body.clone())),
                         };

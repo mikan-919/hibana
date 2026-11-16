@@ -330,12 +330,12 @@ struct Gen<'a> {
     next: usize,
     // async 関数にする関数。呼び出しを await する
     async_fns: std::collections::HashSet<&'a str>,
-    // 型検査が記録した、待つ呼び出しと async にする無名関数の本体（アドレス）
-    awaits: &'a std::collections::HashSet<usize>,
+    // 型検査が記録した、待つ呼び出しと async にする無名関数の本体（節点の識別子）
+    awaits: &'a std::collections::HashSet<crate::parser::NodeId>,
     // 効果の変数を通して効果を起こす呼び出しと本体。async 版の中でだけ待つ
-    var_awaits: &'a std::collections::HashSet<usize>,
+    var_awaits: &'a std::collections::HashSet<crate::parser::NodeId>,
     // 多相な関数の async 版を呼ぶ呼び出し
-    async_inst: &'a std::collections::HashSet<usize>,
+    async_inst: &'a std::collections::HashSet<crate::parser::NodeId>,
     // 多相な関数の async 版を出力している
     variant: bool,
 }
@@ -347,17 +347,17 @@ impl Gen<'_> {
     }
 
     // 型検査が待つと記録した呼び出しなら待つ
-    fn await_(&self, e: &Expr, call: String) -> String {
-        wait(self.waits(e as *const Expr as usize), call)
+    fn await_(&self, id: Option<crate::parser::NodeId>, call: String) -> String {
+        wait(id.is_some_and(|id| self.waits(id)), call)
     }
 
-    fn waits(&self, addr: usize) -> bool {
+    fn waits(&self, addr: crate::parser::NodeId) -> bool {
         self.awaits.contains(&addr) || (self.variant && self.var_awaits.contains(&addr))
     }
 
     // 失敗しうる式か（算術・slice・操作・JavaScript の関数の呼び出し）。実行時エラーの位置を記録する所
     fn risky(&self, e: &Expr) -> bool {
-        match e {
+        match e.peel() {
             Expr::Binary(op, ..) => matches!(*op, "+" | "-" | "*" | "**" | "/" | "%"),
             Expr::Unary(op, _) => *op == "-",
             Expr::Call(n, _) => {
@@ -521,17 +521,22 @@ impl Gen<'_> {
 
     // 位置の包みと算術・比較は、深く入れ子になるので大きな expr_inner のフレームを通らずに生成する
     fn expr(&mut self, e: &Expr) -> String {
+        self.expr_with_id(e, None)
+    }
+
+    fn expr_with_id(&mut self, e: &Expr, id: Option<crate::parser::NodeId>) -> String {
         match e {
             Expr::At(sp, x) => {
                 if self.risky(x) {
                     let p = sp.start;
                     self.push(format!("$at = \"{} 行 {} 列\";", p.line, p.column));
                 }
-                self.expr(x)
+                self.expr_with_id(x, id)
             }
             // && と || は右辺を条件付きで生成するので expr_inner で扱う
             Expr::Binary(op, l, r) if !matches!(*op, "&&" | "||") => self.binary(op, l, r),
-            _ => self.expr_inner(e),
+            Expr::Id(id, inner) => self.expr_with_id(inner, Some(*id)),
+            _ => self.expr_inner(e, id),
         }
     }
 
@@ -553,9 +558,9 @@ impl Gen<'_> {
     }
 
     #[inline(never)]
-    fn expr_inner(&mut self, e: &Expr) -> String {
+    fn expr_inner(&mut self, e: &Expr, id: Option<crate::parser::NodeId>) -> String {
         match e {
-            Expr::At(..) => unreachable!("expr で外している"),
+            Expr::At(..) | Expr::Id(..) => unreachable!("expr で外している"),
             Expr::Int(n) => format!("{n}n"),
             Expr::Num(n) => format!("{n:?}"),
             Expr::Bool(b) => b.to_string(),
@@ -593,7 +598,7 @@ impl Gen<'_> {
             Expr::Call(name, args) => {
                 if let Some((js, _)) = self.lookup(name).cloned() {
                     let vs = self.args(args);
-                    let v = self.await_(e, format!("{js}({})", vs.join(", ")));
+                    let v = self.await_(id, format!("{js}({})", vs.join(", ")));
                     return self.let_(v);
                 }
                 let mut vs = if name == "len" { vec![self.look(&args[0])] } else { self.args(args) };
@@ -631,9 +636,8 @@ impl Gen<'_> {
                                 full.append(&mut vs);
                                 vs = full;
                             }
-                            let addr = e as *const Expr as usize;
-                            if self.async_inst.contains(&addr)
-                                || (self.variant && is_poly(f) && self.var_awaits.contains(&addr))
+                            if id.is_some_and(|id| self.async_inst.contains(&id)
+                                || (self.variant && is_poly(f) && self.var_awaits.contains(&id)))
                             {
                                 wait(true, format!("{}$a({})", ident("f_", n), vs.join(", ")))
                             } else {
@@ -652,7 +656,7 @@ impl Gen<'_> {
             Expr::Apply(f, args) => {
                 let f = self.expr(f);
                 let vs = self.args(args);
-                let v = self.await_(e, format!("{f}({})", vs.join(", ")));
+                let v = self.await_(id, format!("{f}({})", vs.join(", ")));
                 self.let_(v)
             }
             Expr::Field(x, f) => {
@@ -750,7 +754,7 @@ impl Gen<'_> {
                     .map(|(js, _)| js.clone())
                     .collect();
                 let params: Vec<String> = params.iter().map(|p| p.0.clone()).collect();
-                let a = self.waits(body as *const Block as usize);
+                let a = self.waits(body.id);
                 let f = self.function(&params, body, a);
                 let shared: Vec<String> = muts.iter().map(|m| format!("$sh({m})")).collect();
                 self.let_(format!("(({}) => {f})({})", muts.join(", "), shared.join(", ")))
@@ -761,7 +765,7 @@ impl Gen<'_> {
                     .iter()
                     .map(|a| {
                         let params = a.binds.iter().map(|b| (b.clone(), None)).collect();
-                        let body = Block {
+                        let body = Block { id: Default::default(),
                             stmts: vec![],
                             tail: Some(Box::new(a.body.clone())),
                         };
