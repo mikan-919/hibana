@@ -460,7 +460,7 @@ JavaScript の接続コードは `hibana::to_js_glue(source, &exports)`、WASM �
 
 JavaScript、IR、実行用 WASM、ネイティブの実行ファイルは、それぞれ `hibana::to_js`、`hibana::to_ir`、`hibana::to_wasm`、`hibana::to_native` で生成します。API は文字列やバイト列を返し、ファイルへの保存は呼び出し側で行います。`to_wasm` と `to_native` は `main` から辿れる関数だけを含めます。
 
-Rust のライブラリからは、`hibana::pipeline` の各関数を組み合わせられます。`load` は `use` のファイルを読み、`parse` は構文木を作り、`check` は型検査します。`lower` は IR を作り、`link` は IR から公開関数とその呼び出し先を選びます。`emit_wasm` と `emit_js_glue` はそれぞれバイト列と文字列を返すため、書き込みや外部ツールの起動は呼び出し側で決められます。
+Rust のライブラリからは、`hibana::pipeline` の各関数を組み合わせられます。`load` は `use` のファイルを読み、ファイルごとの本文と識別子を持つ `ModuleSet` を返します。`parse` はファイルごとに構文解析し、宣言とマクロの情報を共有した構文木とモジュール表を作ります。エラーの位置はファイル内の位置です。同じモジュール名が異なるファイルを指す場合はエラーです。`check` は型検査し、`lower` は IR を作り、`link` は IR から公開関数とその呼び出し先を選びます。`emit_wasm` と `emit_js_glue` はそれぞれバイト列と文字列を返すため、書き込みや外部ツールの起動は呼び出し側で決められます。
 
 ```rust
 use hibana::pipeline::{self, Kind};
@@ -469,7 +469,7 @@ use std::path::Path;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let source = "fn twice(n: int) -> int { n + n }";
     let loaded = pipeline::load(source, Path::new("."))?;
-    let parsed = pipeline::parse(&loaded)?;
+    let parsed = pipeline::parse(loaded)?;
     let checked = pipeline::check(parsed, Kind::Library)?;
     let ir = pipeline::lower(&checked, None)?;
     let exports = vec!["twice".to_string()];

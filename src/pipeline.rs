@@ -25,13 +25,13 @@ impl Checked {
 
 /// use したファイルを `base_dir` から読み、構文解析に渡すソースを作る。
 /// 組み込みのライブラリと、指定ディレクトリからのファイルを読み込む。
-pub fn load(source: &str, base_dir: &Path) -> R<String> {
-    parser::with_base_dir(base_dir, || parser::with_uses(source))
+pub fn load(source: &str, base_dir: &Path) -> R<parser::ModuleSet> {
+    parser::load_modules(source, base_dir)
 }
 
 /// 読み込み済みソースを構文解析し、マクロを展開して名前を解決する。
-pub fn parse(source: &str) -> R<parser::Program> {
-    parser::parse(source)
+pub fn parse(source: impl Into<parser::ModuleSet>) -> R<parser::Program> {
+    parser::parse_modules(source.into())
 }
 
 /// 構文木を型検査し、必要な引数を補う。

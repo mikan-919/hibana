@@ -22,7 +22,7 @@ fn tests_require_explicit_files_and_named_imports_require_builtins() {
         .unwrap();
     assert_eq!(result.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&result.stderr).contains("ファイル"));
-    let error = hibana::parser::with_uses("use missing_library\nfn main() {}").unwrap_err();
+    let error = hibana::pipeline::load("use missing_library\nfn main() {}", std::path::Path::new(".")).unwrap_err();
     assert!(error
         .to_string()
         .contains("ライブラリ missing_library が無い"));

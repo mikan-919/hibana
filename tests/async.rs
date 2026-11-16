@@ -18,9 +18,16 @@ fn main() ! Async {
     drop(program);
     let javascript = hibana::js::emit(&moved, &info);
     let output = Command::new("node")
-        .args(["-e", &format!("globalThis.delay = async n => n;\n{javascript}")])
+        .args([
+            "-e",
+            &format!("globalThis.delay = async n => n;\n{javascript}"),
+        ])
         .output()
         .unwrap();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(output.stdout, b"7\n[2, 3]\n");
 }

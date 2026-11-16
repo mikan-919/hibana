@@ -1,3 +1,5 @@
+pub use super::modules::{Module, ModuleSet, load_modules};
+use super::modules::source_tokens;
 use crate::lexer::{Span, TPart, Tok, Token, lex};
 use crate::meta::{Grammar, Node, Q};
 use std::collections::{HashMap, HashSet};
@@ -179,7 +181,7 @@ pub struct Parser<'s> {
     // 戻り値の型を読んでいる間は、続く { を構造体の値と読まない
     pub no_struct: bool,
     // トークンの位置から、そこを含むモジュール（利用者のファイルは ""）
-    pub module_at: Rc<Vec<(usize, String)>>,
+    pub module: String,
     // モジュールごとの名前（修飾しない形）
     pub mod_names: Rc<HashMap<String, HashSet<String>>>,
     // モジュールごとの use
@@ -259,6 +261,7 @@ enum TypeDecl {
 
 #[derive(Debug, Default, Clone)]
 pub struct Program {
+    pub modules: Vec<Module>,
     pub fns: Vec<Fn>,
     pub datas: Vec<Data>,
     // test "名前" { 本体 } の (名前, 本体の関数名)。hibana test で実行する
@@ -266,12 +269,12 @@ pub struct Program {
 }
 
 // 組み込みのライブラリ。実行ファイルに埋め込むので、どこからでも use できる
-const LIBS: &[(&str, &str)] = &[
+pub(super) const LIBS: &[(&str, &str)] = &[
     ("std", include_str!("../../lib/std.hb")),
     ("std__math", include_str!("../../lib/math.hb")),
 ];
 
-const PRELUDE_NAMES: &[&str] = &["Result", "Ok", "Err", "parse_int", "refine"];
+pub(super) const PRELUDE_NAMES: &[&str] = &["Result", "Ok", "Err", "parse_int", "refine"];
 
 // use した名前の取り込み方
 #[derive(Debug, Clone)]
@@ -339,177 +342,102 @@ pub fn set_base_dir(p: &std::path::Path) {
     BASE.with(|b| *b.borrow_mut() = p.to_path_buf());
 }
 
-pub(crate) fn with_base_dir<T>(p: &std::path::Path, f: impl FnOnce() -> T) -> T {
-    struct Restore(std::path::PathBuf);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            BASE.with(|b| *b.borrow_mut() = std::mem::take(&mut self.0));
-        }
-    }
-    let old = BASE.with(|b| b.replace(p.to_path_buf()));
-    let _restore = Restore(old);
-    f()
-}
-
-fn base_dir() -> std::path::PathBuf {
+pub(crate) fn base_dir() -> std::path::PathBuf {
     BASE.with(|b| b.borrow().clone())
 }
 
-// JavaScript のパッケージ（npm・node:）の型宣言 .d.ts を node_modules から探す
-fn find_dts(spec: &str) -> Option<String> {
-    let nm = base_dir().join("node_modules");
-    let mut cands = Vec::new();
-    if let Some(m) = spec.strip_prefix("node:") {
-        cands.push(nm.join("@types/node").join(format!("{m}.d.ts")));
-    } else {
-        let pkg = nm.join(spec);
-        if let Ok(j) = std::fs::read_to_string(pkg.join("package.json")) {
-            // package.json の "types" か "typings"
-            for key in ["\"types\"", "\"typings\""] {
-                if let Some(rest) = j.split(key).nth(1)
-                    && let Some(v) = rest.split('"').nth(1)
-                {
-                    cands.push(pkg.join(v));
-                }
-            }
-        }
-        cands.push(pkg.join("index.d.ts"));
-        cands.push(nm.join("@types").join(spec).join("index.d.ts"));
-    }
-    cands
-        .into_iter()
-        .find_map(|p| std::fs::read_to_string(p).ok())
-}
-
-// use の対象のモジュール名と本文。組み込みのライブラリ、.hb のファイル、JavaScript / TypeScript のモジュール
-// use を読み込んだ結果 (モジュール名, ソース, そのソースの use "x.hb" の起点)
-fn load(
-    name: &str,
-    is_str: bool,
-    dir: &std::path::Path,
-    span: crate::lexer::Span,
-) -> R<(String, String, std::path::PathBuf)> {
-    // 名前で書いたら組み込みのライブラリ、文字列で書いたらファイルか npm の型宣言
-    if !is_str {
-        if let Some((_, t)) = LIBS.iter().find(|l| l.0 == name) {
-            return Ok((name.rsplit("__").next().unwrap().to_string(), t.to_string(), dir.to_path_buf()));
-        }
-        return Err(Error::from(format!("ライブラリ {name} が無い")).at(span)
-            .help("組み込み以外は use './ファイル.hb' と書く".into()));
-    }
-    let read = |p: &str| {
-        std::fs::read_to_string(dir.join(p)).map_err(|e| Error::from(format!("{p}: {e}")).at(span))
-    };
-    // use './lib' は lib.hb を読む
-    let hb = format!("{name}.hb");
-    let name = if name.starts_with('.') && !name.ends_with(".hb") && dir.join(&hb).is_file() {
-        hb.as_str()
-    } else {
-        name
-    };
-    if name.ends_with(".hb") {
-        let sub = dir.join(name).parent().unwrap().to_path_buf();
-        return Ok((module_name(name), read(name)?, sub));
-    }
-    // JavaScript / TypeScript は型宣言から extern の宣言を作る（JS ターゲットでだけ使える）
-    let dts = if name.ends_with(".ts") {
-        read(name)?
-    } else if let Some(base) = name.strip_suffix(".js").or(name.strip_suffix(".mjs")) {
-        read(&format!("{base}.d.ts"))
-            .map_err(|_| Error::from(format!("{name} の型宣言 {base}.d.ts が無い")).at(span))?
-    } else if name.starts_with("node:") || !name.contains('/') || name.starts_with('@') {
-        find_dts(name).ok_or_else(|| {
-            Error::from(format!("{name} の型宣言（.d.ts）が node_modules に無い（node: の組み込みには @types/node が要る）"))
-                .at(span)
-        })?
-    } else {
-        return Err(Error::from(format!("ライブラリ {name} が無い")).at(span));
-    };
-    let text = crate::ts::module_text(&dts, name).map_err(|e| e.at(span))?;
-    Ok((module_name(name), text, dir.to_path_buf()))
-}
-
-// use したモジュールの本文を、`module 名前` を前に付けてソースの後ろに足す。同じものは1回だけ読む
-pub fn with_uses(src: &str) -> R<String> {
-    let mut out = src.to_string();
-    let mut done: Vec<String> = Vec::new();
-    let mut todo = vec![(src.to_string(), base_dir())];
-    while let Some((s, dir)) = todo.pop() {
-        let toks = lex(&s)?;
-        // 標準で使える名前が現れた時に std を読む。元のソースの位置は変えない。
-        if !done.iter().any(|n| n == "std")
-            && toks.iter().any(|t| matches!(&t.tok, Tok::Ident(n) if PRELUDE_NAMES.contains(&n.as_str())))
-        {
-            todo.push(("use std".into(), dir.clone()));
-        }
-        for w in toks.windows(2) {
-            let (name, is_str) = match (&w[0].tok, &w[1].tok) {
-                (Tok::Punct("use"), Tok::Ident(n) | Tok::Str(n)) => {
-                    (n.clone(), matches!(w[1].tok, Tok::Str(_)))
-                }
-                (Tok::Punct("use"), _) => {
-                    return Err(
-                        Error::from("use の後にはライブラリ名かファイル名が必要").at(w[1].span)
-                    );
-                }
-                _ => continue,
-            };
-            if done.contains(&name) {
-                continue;
-            }
-            // ponytail: 別のパッケージにある同じ名前の "x.hb" は一つ目だけ読む。名前の衝突はパッケージごとのモジュールにするときに直す
-            let (module, text, sub) = load(&name, is_str, &dir, w[1].span)?;
-            // 別の経路で書いた同じファイル（'./lib' と '../web/lib'）も1回だけ読む
-            let seen = done.contains(&module);
-            done.push(name);
-            if seen {
-                continue;
-            }
-            done.push(module.clone());
-            out += &format!("\nmodule {module}\n");
-            out += &text;
-            todo.push((text, sub));
-        }
-    }
-    Ok(out)
-}
-
 pub fn parse(src: &str) -> R<Program> {
-    parse_toks(src, lex(src)?)
+    parse_modules(ModuleSet::from(src))
 }
 
-fn parse_toks(src: &str, toks: Vec<Token>) -> R<Program> {
-    parse_toks_depth(src, toks, 0)
+pub fn parse_modules(loaded: ModuleSet) -> R<Program> {
+    let tokens = loaded
+        .modules
+        .iter()
+        .map(|module| source_tokens(&module.source))
+        .collect::<R<_>>()?;
+    parse_modules_tokens(&loaded, tokens, 0)
+        .map_err(|error| error.with_sources(loaded.modules.iter().map(|module| &module.source)))
 }
-fn parse_toks_depth(src: &str, toks: Vec<Token>, expansion: usize) -> R<Program> {
-    if expansion >= 64 { return Err("宣言マクロの展開が深すぎる".into()); }
-    let mut p = Parser {
-        helpers: Rc::default(),
-        toks,
-        pos: 0,
-        src,
-        g: Rc::default(),
-        depth: 0,
-        types: Rc::default(),
-        generic_fns: Rc::default(),
-        globals: Rc::default(),
-        structs: Rc::default(),
-        no_struct: false,
-        module_at: Rc::default(),
-        mod_names: Rc::default(),
-        uses: Rc::default(),
-        modules: Rc::default(),
-        known: Rc::default(),
-        traits: Rc::default(),
-    };
+
+#[derive(Default)]
+struct Declarations {
+    fn_starts: Vec<usize>,
+    data_starts: Vec<usize>,
+    extern_starts: Vec<usize>,
+    effect_starts: Vec<usize>,
+    trait_starts: Vec<usize>,
+    test_starts: Vec<usize>,
+    impl_starts: Vec<usize>,
+    declarations: Vec<(usize, usize, usize, Node)>,
+}
+
+fn parse_modules_tokens(
+    loaded: &ModuleSet,
+    tokens: Vec<Vec<Token>>,
+    expansion: usize,
+) -> R<Program> {
+    if expansion >= 64 {
+        return Err("宣言マクロの展開が深すぎる".into());
+    }
+    let mut parsers: Vec<_> = loaded
+        .modules
+        .iter()
+        .zip(tokens)
+        .map(|(module, toks)| Parser {
+            helpers: Rc::default(),
+            toks,
+            pos: 0,
+            src: &module.source.text,
+            g: Rc::default(),
+            depth: 0,
+            types: Rc::default(),
+            generic_fns: Rc::default(),
+            globals: Rc::default(),
+            structs: Rc::default(),
+            no_struct: false,
+            module: module.name.clone(),
+            mod_names: Rc::default(),
+            uses: Rc::default(),
+            modules: Rc::default(),
+            known: Rc::default(),
+            traits: Rc::default(),
+        })
+        .collect();
     let mut g = Grammar::default();
-    let mut fn_starts = Vec::new();
-    let mut data_starts = Vec::new();
-    let mut extern_starts = Vec::new();
-    let mut effect_starts = Vec::new();
-    let mut trait_starts = Vec::new();
-    let mut test_starts = Vec::new();
-    let mut impl_starts = Vec::new();
+    let mut ends = Vec::new();
+    for p in &mut parsers {
+        // 先に syntax と macro だけを読む（宣言より前の関数や宣言の位置でも、後で宣言したマクロを使えるようにする）
+        let mut decl_end: HashMap<usize, usize> = HashMap::new();
+        {
+            let (mut depth, mut i) = (0, 0);
+            while i < p.toks.len() {
+                match &p.toks[i].tok {
+                    Tok::Punct("(" | "[" | "{") => depth += 1,
+                    Tok::Punct(")" | "]" | "}") => depth -= 1,
+                    Tok::Punct(k @ ("syntax" | "macro")) if depth == 0 => {
+                        let k = *k;
+                        p.pos = i;
+                        if k == "syntax" {
+                            p.syntax_decl(&mut g)?;
+                        } else {
+                            p.macro_decl(&mut g)?;
+                        }
+                        decl_end.insert(i, p.pos);
+                        i = p.pos;
+                        continue;
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+            p.pos = 0;
+        }
+
+        ends.push(decl_end);
+    }
+    g.validate()?;
+    let grammar = Rc::new(g);
     let mut types: HashSet<String> = ["Vec", "Ref", "Type"].map(String::from).into();
     let mut generic_fns: HashSet<String> = ["refine".to_string()].into();
     // 組み込みと利用者のファイルの名前・モジュール名・パターンのリテラル。マクロの衛生性で名前を付け替えない
@@ -539,8 +467,8 @@ fn parse_toks_depth(src: &str, toks: Vec<Token>, expansion: usize) -> R<Program>
         "slice",
         "chars",
         "code",
-    "char_from_codepoint",
-    "now_ms",
+        "char_from_codepoint",
+        "now_ms",
         "panic",
         "resume",
         "all",
@@ -561,7 +489,6 @@ fn parse_toks_depth(src: &str, toks: Vec<Token>, expansion: usize) -> R<Program>
     let mut known: HashSet<String> = HashSet::new();
     let mut uses: HashMap<String, Vec<Use>> = HashMap::new();
     let mut modules: HashSet<String> = HashSet::new();
-    let mut module_at: Vec<(usize, String)> = vec![(0, String::new())];
     // 名前を宣言する。同じモジュールで既に宣言していれば false
     let mut declare = |m: &str, n: &str, globals: &mut HashSet<String>| {
         mod_names
@@ -576,212 +503,214 @@ fn parse_toks_depth(src: &str, toks: Vec<Token>, expansion: usize) -> R<Program>
     let dup = |p: &Parser, i: usize, n: &str| {
         Err(Error::from(format!("名前 {n} が重複している")).at(p.toks[i].span))
     };
-    // 先に syntax と macro だけを読む（宣言より前の関数や宣言の位置でも、後で宣言したマクロを使えるようにする）
-    let mut decl_end: HashMap<usize, usize> = HashMap::new();
-    {
-        let (mut depth, mut i) = (0, 0);
-        let mut mods = vec![(0, String::new())];
-        while i < p.toks.len() {
-            match &p.toks[i].tok {
-                Tok::Punct("(" | "[" | "{") => depth += 1,
-                Tok::Punct(")" | "]" | "}") => depth -= 1,
-                Tok::Punct("module") if depth == 0 => {
-                    if let Some(Tok::Ident(m)) = p.toks.get(i + 1).map(|t| &t.tok) {
-                        mods.push((i + 2, m.clone()));
-                        p.module_at = Rc::new(mods.clone());
+
+    let mut plans = Vec::new();
+    for (p, decl_end) in parsers.iter_mut().zip(ends) {
+        p.g = grammar.clone();
+        let mut fn_starts = Vec::new();
+        let mut data_starts = Vec::new();
+        let mut extern_starts = Vec::new();
+        let mut effect_starts = Vec::new();
+        let mut trait_starts = Vec::new();
+        let mut test_starts = Vec::new();
+        let mut impl_starts = Vec::new();
+        let mut declarations = Vec::new();
+        // 宣言の位置で照合した宣言のマクロ (始まり, 終わり, マクロの番号, 照合結果)
+        // 1周目は宣言の名前を集める
+        loop {
+            let cur = p.module.clone();
+            match p.peek() {
+                Tok::Eof => break,
+                Tok::Punct("use") => {
+                    let u = p.use_decl()?;
+                    modules.insert(u.module.clone());
+                    uses.entry(cur).or_default().push(u);
+                }
+                Tok::Punct("syntax" | "macro") => p.pos = decl_end[&p.pos],
+                // extern "モジュール" { fn 名前(引数) -> 型 ... }
+                Tok::Punct("extern") => {
+                    extern_starts.push(p.pos);
+                    let start = p.pos;
+                    p.skip_fn()?;
+                    for w in p.toks[start..p.pos].windows(2) {
+                        if let (Tok::Punct("fn"), Tok::Ident(n)) = (&w[0].tok, &w[1].tok) {
+                            let n = n.clone();
+                            declare(&cur, &n, &mut globals);
+                        }
                     }
                 }
-                Tok::Punct(k @ ("syntax" | "macro")) if depth == 0 => {
-                    let k = *k;
-                    p.pos = i;
-                    if k == "syntax" {
-                        p.syntax_decl(&mut g)?;
+                Tok::Punct("effect") => {
+                    if let Some(Tok::Ident(n)) = p.toks.get(p.pos + 1).map(|t| t.tok.clone()) {
+                        types.insert(qual(&cur, &n));
+                        if !declare(&cur, &n, &mut globals) {
+                            return dup(&p, p.pos + 1, &n);
+                        }
+                    }
+                    effect_starts.push(p.pos);
+                    let start = p.pos;
+                    p.skip_fn()?;
+                    for w in p.toks[start..p.pos].windows(2) {
+                        if let (Tok::Punct("fn"), Tok::Ident(n)) = (&w[0].tok, &w[1].tok) {
+                            let n = n.clone();
+                            declare(&cur, &n, &mut globals);
+                        }
+                    }
+                }
+                Tok::Punct("fn") => {
+                    let k = 1;
+                    if let Some(Tok::Ident(n)) = p.toks.get(p.pos + k).map(|t| t.tok.clone()) {
+                        if p.toks.get(p.pos + k + 1).map(|t| &t.tok) == Some(&Tok::Punct("<")) {
+                            generic_fns.insert(qual(&cur, &n));
+                        }
+                        if !declare(&cur, &n, &mut globals) {
+                            return dup(&p, p.pos + k, &n);
+                        }
+                    }
+                    fn_starts.push(p.pos);
+                    p.skip_fn()?;
+                }
+                Tok::Punct(kw @ ("type" | "struct" | "enum")) => {
+                    let kw = *kw;
+                    if let Some(Tok::Ident(n)) = p.toks.get(p.pos + 1).map(|t| t.tok.clone()) {
+                        types.insert(qual(&cur, &n));
+                        if !declare(&cur, &n, &mut globals) {
+                            return dup(&p, p.pos + 1, &n);
+                        }
+                    }
+                    data_starts.push(p.pos);
+                    let start = p.pos;
+                    p.skip_decl();
+                    if kw == "enum" {
+                        for n in enum_ctors(&p.toks[start..p.pos]) {
+                            declare(&cur, &n, &mut globals);
+                        }
+                    }
+                }
+                Tok::Punct("trait") => {
+                    if let Some(Tok::Ident(n)) = p.toks.get(p.pos + 1).map(|t| t.tok.clone()) {
+                        types.insert(qual(&cur, &n));
+                        if !declare(&cur, &n, &mut globals) {
+                            return dup(&p, p.pos + 1, &n);
+                        }
+                    }
+                    trait_starts.push(p.pos);
+                    let start = p.pos;
+                    p.skip_fn()?;
+                    for w in p.toks[start..p.pos].windows(2) {
+                        if let (Tok::Punct("fn"), Tok::Ident(n)) = (&w[0].tok, &w[1].tok) {
+                            let n = n.clone();
+                            generic_fns.insert(qual(&cur, &n));
+                            declare(&cur, &n, &mut globals);
+                        }
+                    }
+                }
+                Tok::Punct("impl") => {
+                    impl_starts.push(p.pos);
+                    p.skip_fn()?;
+                }
+                // test は宣言の先頭でだけ特別な名前（変数名にも使える）
+                Tok::Ident(t)
+                    if t == "test"
+                        && matches!(p.toks.get(p.pos + 1).map(|t| &t.tok), Some(Tok::Str(_))) =>
+                {
+                    test_starts.push(p.pos);
+                    p.skip_fn()?;
+                }
+                _ => {
+                    p.types = Rc::new(types.clone());
+                    let start = p.pos;
+                    if let Some((k, node)) = p.declaration_macro()? {
+                        declarations.push((start, p.pos, k, node));
                     } else {
-                        p.macro_decl(&mut g)?;
-                    }
-                    decl_end.insert(i, p.pos);
-                    i = p.pos;
-                    continue;
-                }
-                _ => {}
-            }
-            i += 1;
-        }
-        p.pos = 0;
-    }
-    g.validate()?;
-    p.g = Rc::new(g);
-    let mut declarations = Vec::new();
-    // 宣言の位置で照合した宣言のマクロ (始まり, 終わり, マクロの番号, 照合結果)
-    // 1周目は宣言の名前を集める
-    loop {
-        let cur = module_at.last().unwrap().1.clone();
-        match p.peek() {
-            Tok::Eof => break,
-            // with_uses が足したモジュールの始まり
-            Tok::Punct("module") => {
-                p.pos += 1;
-                let m = p.ident()?;
-                module_at.push((p.pos, m));
-                p.module_at = Rc::new(module_at.clone());
-            }
-            Tok::Punct("use") => {
-                let u = p.use_decl()?;
-                modules.insert(u.module.clone());
-                uses.entry(cur).or_default().push(u);
-            }
-            Tok::Punct("syntax" | "macro") => p.pos = decl_end[&p.pos],
-            // extern "モジュール" { fn 名前(引数) -> 型 ... }
-            Tok::Punct("extern") => {
-                extern_starts.push(p.pos);
-                let start = p.pos;
-                p.skip_fn()?;
-                for w in p.toks[start..p.pos].windows(2) {
-                    if let (Tok::Punct("fn"), Tok::Ident(n)) = (&w[0].tok, &w[1].tok) {
-                        let n = n.clone();
-                        declare(&cur, &n, &mut globals);
+                        return p.err("fn・type・effect・trait・impl・extern・syntax・macro・use・宣言マクロのいずれかが必要");
                     }
                 }
-            }
-            Tok::Punct("effect") => {
-                if let Some(Tok::Ident(n)) = p.toks.get(p.pos + 1).map(|t| t.tok.clone()) {
-                    types.insert(qual(&cur, &n));
-                    if !declare(&cur, &n, &mut globals) {
-                        return dup(&p, p.pos + 1, &n);
-                    }
-                }
-                effect_starts.push(p.pos);
-                let start = p.pos;
-                p.skip_fn()?;
-                for w in p.toks[start..p.pos].windows(2) {
-                    if let (Tok::Punct("fn"), Tok::Ident(n)) = (&w[0].tok, &w[1].tok) {
-                        let n = n.clone();
-                        declare(&cur, &n, &mut globals);
-                    }
-                }
-            }
-            Tok::Punct("fn") => {
-                let k = 1;
-                if let Some(Tok::Ident(n)) = p.toks.get(p.pos + k).map(|t| t.tok.clone()) {
-                    if p.toks.get(p.pos + k + 1).map(|t| &t.tok) == Some(&Tok::Punct("<")) {
-                        generic_fns.insert(qual(&cur, &n));
-                    }
-                    if !declare(&cur, &n, &mut globals) {
-                        return dup(&p, p.pos + k, &n);
-                    }
-                }
-                fn_starts.push(p.pos);
-                p.skip_fn()?;
-            }
-            Tok::Punct(kw @ ("type" | "struct" | "enum")) => {
-                let kw = *kw;
-                if let Some(Tok::Ident(n)) = p.toks.get(p.pos + 1).map(|t| t.tok.clone()) {
-                    types.insert(qual(&cur, &n));
-                    if !declare(&cur, &n, &mut globals) {
-                        return dup(&p, p.pos + 1, &n);
-                    }
-                }
-                data_starts.push(p.pos);
-                let start = p.pos;
-                p.skip_decl();
-                if kw == "enum" {
-                    for n in enum_ctors(&p.toks[start..p.pos]) {
-                        declare(&cur, &n, &mut globals);
-                    }
-                }
-            }
-            Tok::Punct("trait") => {
-                if let Some(Tok::Ident(n)) = p.toks.get(p.pos + 1).map(|t| t.tok.clone()) {
-                    types.insert(qual(&cur, &n));
-                    if !declare(&cur, &n, &mut globals) {
-                        return dup(&p, p.pos + 1, &n);
-                    }
-                }
-                trait_starts.push(p.pos);
-                let start = p.pos;
-                p.skip_fn()?;
-                for w in p.toks[start..p.pos].windows(2) {
-                    if let (Tok::Punct("fn"), Tok::Ident(n)) = (&w[0].tok, &w[1].tok) {
-                        let n = n.clone();
-                        generic_fns.insert(qual(&cur, &n));
-                        declare(&cur, &n, &mut globals);
-                    }
-                }
-            }
-            Tok::Punct("impl") => {
-                impl_starts.push(p.pos);
-                p.skip_fn()?;
-            }
-            // test は宣言の先頭でだけ特別な名前（変数名にも使える）
-            Tok::Ident(t)
-                if t == "test"
-                    && matches!(p.toks.get(p.pos + 1).map(|t| &t.tok), Some(Tok::Str(_))) =>
-            {
-                test_starts.push(p.pos);
-                p.skip_fn()?;
-            }
-            _ => {
-                p.types = Rc::new(types.clone());
-                let start = p.pos;
-                if let Some((k, node)) = p.declaration_macro()? {
-                    declarations.push((start, p.pos, k, node));
-                } else { return p.err("fn・type・effect・trait・impl・extern・syntax・macro・use・宣言マクロのいずれかが必要"); }
             }
         }
+
+        plans.push(Declarations {
+            fn_starts,
+            data_starts,
+            extern_starts,
+            effect_starts,
+            trait_starts,
+            test_starts,
+            impl_starts,
+            declarations,
+        });
     }
-    p.types = Rc::new(types.clone());
-    p.generic_fns = Rc::new(generic_fns);
-    globals.extend(p.g.literals());
-    globals.extend(PRELUDE_NAMES.iter().map(|n| n.to_string()));
+    globals.extend(grammar.literals());
+    globals.extend(PRELUDE_NAMES.iter().map(|name| name.to_string()));
     globals.extend(modules.iter().cloned());
-    p.globals = Rc::new(globals);
-    p.mod_names = Rc::new(mod_names);
-    p.known = Rc::new(known);
-    for (_, module) in &module_at {
-        if module != "std" {
-            uses.entry(module.clone()).or_default().push(Use {
+    for module in &loaded.modules {
+        if module.name != "std" {
+            uses.entry(module.name.clone()).or_default().push(Use {
                 module: "std".into(),
-                names: UseNames::List(PRELUDE_NAMES.iter().map(|n| n.to_string()).collect()),
+                names: UseNames::List(PRELUDE_NAMES.iter().map(|name| name.to_string()).collect()),
             });
         }
     }
-    p.uses = Rc::new(uses);
-    p.modules = Rc::new(modules);
-    p.module_at = Rc::new(module_at);
-    if !declarations.is_empty() {
-        let mut tokens = p.toks.clone();
-        for (start, end, k, node) in declarations.into_iter().rev() {
-            p.pos = end;
-            let generated = p.expand_declaration(k, node, p.toks[start].span)?;
-            tokens.splice(start..end, generated);
+    let (types, generic_fns, globals, mod_names, known, uses, modules) = (
+        Rc::new(types),
+        Rc::new(generic_fns),
+        Rc::new(globals),
+        Rc::new(mod_names),
+        Rc::new(known),
+        Rc::new(uses),
+        Rc::new(modules),
+    );
+    for p in &mut parsers {
+        p.types = types.clone();
+        p.generic_fns = generic_fns.clone();
+        p.globals = globals.clone();
+        p.mod_names = mod_names.clone();
+        p.known = known.clone();
+        p.uses = uses.clone();
+        p.modules = modules.clone();
+    }
+    if plans.iter().any(|plan| !plan.declarations.is_empty()) {
+        let mut tokens = Vec::new();
+        for (p, plan) in parsers.iter_mut().zip(&plans) {
+            let mut expanded = p.toks.clone();
+            for (start, end, k, node) in plan.declarations.iter().rev() {
+                p.pos = *end;
+                let generated = p.expand_declaration(*k, node.clone(), p.toks[*start].span)?;
+                expanded.splice(*start..*end, generated);
+            }
+            tokens.push(expanded);
         }
-        return parse_toks_depth(src, tokens, expansion + 1);
+        return parse_modules_tokens(loaded, tokens, expansion + 1);
     }
     let mut prog = Program::default();
-    for s in effect_starts {
-        p.pos = s;
-        let (d, ops) = p.effect_decl()?;
-        prog.datas.push(d);
-        prog.fns.extend(ops);
+    for (p, plan) in parsers.iter_mut().zip(&plans) {
+        for &s in &plan.effect_starts {
+            p.pos = s;
+            let (d, ops) = p.effect_decl()?;
+            prog.datas.push(d);
+            prog.fns.extend(ops);
+        }
     }
-    for s in data_starts {
-        p.pos = s;
-        match p.type_decl()? {
-            TypeDecl::Data(d) => prog.datas.push(d),
-            TypeDecl::Alias(f) => prog.fns.push(f),
+    for (p, plan) in parsers.iter_mut().zip(&plans) {
+        for &s in &plan.data_starts {
+            p.pos = s;
+            match p.type_decl()? {
+                TypeDecl::Data(d) => prog.datas.push(d),
+                TypeDecl::Alias(f) => prog.fns.push(f),
+            }
         }
     }
     let mut traits = HashMap::new();
-    for s in trait_starts {
-        p.pos = s;
-        let (d, fs, t) = p.trait_decl()?;
-        traits.insert(d.name.clone(), t);
-        p.traits = Rc::new(traits.clone());
-        prog.datas.push(d);
-        prog.fns.extend(fs);
+    for (p, plan) in parsers.iter_mut().zip(&plans) {
+        for &s in &plan.trait_starts {
+            p.pos = s;
+            let (d, fs, t) = p.trait_decl()?;
+            traits.insert(d.name.clone(), t);
+            p.traits = Rc::new(traits.clone());
+            prog.datas.push(d);
+            prog.fns.extend(fs);
+        }
     }
-    // 構造体の値 Name { ... } をフィールドの順に並べるため、フィールド名を覚えておく
-    p.structs = Rc::new(
+    let structs: Rc<HashMap<String, Vec<String>>> = Rc::new(
         prog.datas
             .iter()
             .filter(|d| d.ctors.len() == 1 && d.ctors[0].name.ends_with("{}"))
@@ -793,66 +722,94 @@ fn parse_toks_depth(src: &str, toks: Vec<Token>, expansion: usize) -> R<Program>
             })
             .collect(),
     );
-    // 宣言マクロが型を追加する場合、既存関数の本体をまだ読めないことがある。
-    // また式マクロが後方の補助関数を呼ぶ場合も、補助関数がそろってから読み直す。
     let mut deferred = Vec::new();
-    for s in fn_starts {
-        p.pos = s;
-        match p.func() {
-            Ok(f) => prog.fns.push(f),
-            Err(e) => deferred.push((s, e)),
+    let mut implementation = 0;
+    for (unit, (p, plan)) in parsers.iter_mut().zip(&plans).enumerate() {
+        p.structs = structs.clone();
+        p.traits = Rc::new(traits.clone());
+        for &start in &plan.fn_starts {
+            p.pos = start;
+            match p.func() {
+                Ok(function) => prog.fns.push(function),
+                Err(error) => deferred.push((unit, start, error)),
+            }
+        }
+        for &start in &plan.extern_starts {
+            p.pos = start;
+            prog.fns.extend(p.extern_block()?);
+        }
+        for &start in &plan.impl_starts {
+            p.pos = start;
+            prog.fns.extend(p.impl_decl(implementation)?);
+            implementation += 1;
         }
     }
-    for s in extern_starts {
-        p.pos = s;
-        prog.fns.extend(p.extern_block()?);
-    }
-    for (k, s) in impl_starts.into_iter().enumerate() {
-        p.pos = s;
-        prog.fns.extend(p.impl_decl(k)?);
-    }
-    let mut helpers = prog.clone();
-    crate::resolve::resolve(&mut helpers, &p.uses, &p.known);
-    p.helpers = Rc::new(helpers);
-    while !deferred.is_empty() {
+    loop {
+        let mut helpers = prog.clone();
+        crate::resolve::resolve(&mut helpers, &uses, &known);
+        let helpers = Rc::new(helpers);
+        for p in &mut parsers {
+            p.helpers = helpers.clone();
+        }
+        if deferred.is_empty() {
+            break;
+        }
         let before = deferred.len();
         let mut failed = Vec::new();
-        for (s, _) in deferred {
-            p.pos = s;
+        for (unit, start, _) in deferred {
+            let p = &mut parsers[unit];
+            p.pos = start;
             match p.func() {
-                Ok(f) => prog.fns.push(f),
-                Err(e) => failed.push((s, e)),
+                Ok(function) => prog.fns.push(function),
+                Err(error) => failed.push((unit, start, error)),
             }
         }
         if failed.len() == before {
-            return Err(failed.remove(0).1);
+            return Err(failed.remove(0).2);
         }
         deferred = failed;
-        let mut helpers = prog.clone();
-        crate::resolve::resolve(&mut helpers, &p.uses, &p.known);
-        p.helpers = Rc::new(helpers);
     }
-    p.check_macros()?;
-    // test "名前" { 本体 } は引数の無い関数 test#k にする。中に it があれば it ごとに 1 つ
     let mut cases = Vec::new();
-    for s in test_starts {
-        p.pos = s + 1;
-        let Tok::Str(label) = p.next() else {
-            unreachable!()
-        };
-        p.expect("{")?;
-        let before = cases.len();
-        let module = p.cur_module();
-        let setup = p.test_cases(&label, Vec::new(), &module, &mut cases)?;
-        if cases.len() == before {
-            cases.push((label, s, module, Block { id: Default::default(), stmts: setup, tail: None }));
+    for (p, plan) in parsers.iter_mut().zip(&plans) {
+        p.check_macros()?;
+        let mut unit_cases = Vec::new();
+        for &s in &plan.test_starts {
+            p.pos = s + 1;
+            let Tok::Str(label) = p.next() else {
+                unreachable!()
+            };
+            p.expect("{")?;
+            let before = unit_cases.len();
+            let module = p.cur_module();
+            let setup = p.test_cases(&label, Vec::new(), &module, &mut unit_cases)?;
+            if unit_cases.len() == before {
+                unit_cases.push((
+                    label,
+                    s,
+                    module,
+                    Block {
+                        id: Default::default(),
+                        stmts: setup,
+                        tail: None,
+                    },
+                ));
+            }
         }
+
+        cases.extend(unit_cases.into_iter().map(|(label, start, module, body)| {
+            (
+                label,
+                p.toks[start].site.unwrap_or(p.toks[start].span),
+                module,
+                body,
+            )
+        }));
     }
-    for (k, (label, s, module, body)) in cases.into_iter().enumerate() {
+    for (k, (label, span, module, body)) in cases.into_iter().enumerate() {
         let name = qual(&module, &format!("test#{k}"));
         prog.tests.push((label, name.clone()));
         prog.fns.push(Fn {
-            span: Some(p.toks[s].site.unwrap_or(p.toks[s].span)),
+            span: Some(span),
             name,
             params: vec![],
             ret: None,
@@ -867,7 +824,16 @@ fn parse_toks_depth(src: &str, toks: Vec<Token>, expansion: usize) -> R<Program>
             insts: 0,
         });
     }
-    crate::resolve::resolve(&mut prog, &p.uses, &p.known);
+    crate::resolve::resolve(&mut prog, &uses, &known);
+    prog.modules = loaded
+        .modules
+        .iter()
+        .cloned()
+        .map(|mut module| {
+            module.uses = uses.get(&module.name).cloned().unwrap_or_default();
+            module
+        })
+        .collect();
     Ok(prog)
 }
 
@@ -1052,7 +1018,7 @@ impl Parser<'_> {
             globals: self.globals.clone(),
             structs: self.structs.clone(),
             no_struct: false,
-            module_at: Rc::new(vec![(0, self.cur_module())]),
+            module: self.cur_module(),
             mod_names: self.mod_names.clone(),
             uses: self.uses.clone(),
             modules: self.modules.clone(),
@@ -1071,12 +1037,7 @@ impl Parser<'_> {
 
     // 今のトークンを含むモジュール
     pub fn cur_module(&self) -> String {
-        self.module_at
-            .iter()
-            .rev()
-            .find(|(i, _)| *i <= self.pos)
-            .map(|m| m.1.clone())
-            .unwrap_or_default()
+        self.module.clone()
     }
 
     // 修飾していない名前 n を、今のモジュールから見た大域の名前にする。自分のモジュール、利用者のファイル、

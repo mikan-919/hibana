@@ -6,7 +6,7 @@ use std::process::Command;
 fn builds_and_links_as_independent_steps() {
     let src = "fn add(a: int, b: int) -> int { a + b }\nfn twice(n: int) -> int { add(n, n) }\nfn log(n: int) { put(n) }\nfn unused(n: int) -> int { n + 999 }";
     let expanded = pipeline::load(src, Path::new(".")).unwrap();
-    let parsed = pipeline::parse(&expanded).unwrap();
+    let parsed = pipeline::parse(expanded).unwrap();
     let checked = pipeline::check(parsed, Kind::Library).unwrap();
     assert_eq!(checked.program().fns.len(), 4);
     let all = pipeline::lower(&checked, None).unwrap();
@@ -143,7 +143,9 @@ fn load_uses_explicit_base_directory_without_changing_caller() {
     std::fs::write(b.join("util.hb"), "fn value() -> int { 2 }").unwrap();
     let source = "use 'util.hb'\n";
     hibana::parser::set_base_dir(&a);
-    assert!(pipeline::load(source, &b).unwrap().contains("{ 2 }"));
-    assert!(hibana::parser::with_uses(source).unwrap().contains("{ 1 }"));
+    let loaded = pipeline::load(source, &b).unwrap();
+    assert!(loaded.modules.iter().any(|module| module.source.text.contains("{ 2 }")));
+    let loaded = hibana::parser::load_modules(source, &a).unwrap();
+    assert!(loaded.modules.iter().any(|module| module.source.text.contains("{ 1 }")));
     std::fs::remove_dir_all(dir).unwrap();
 }

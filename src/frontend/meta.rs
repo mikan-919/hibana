@@ -1180,7 +1180,7 @@ impl Parser<'_> {
             globals: self.globals.clone(),
             structs: self.structs.clone(),
             no_struct: false,
-            module_at: Rc::new(vec![(0, m.module.clone())]),
+            module: m.module.clone(),
             mod_names: self.mod_names.clone(),
             uses: self.uses.clone(),
             modules: self.modules.clone(),
@@ -1237,7 +1237,7 @@ impl Parser<'_> {
             globals: self.globals.clone(),
             structs: self.structs.clone(),
             no_struct: false,
-            module_at: Rc::new(vec![(0, self.cur_module())]),
+            module: self.cur_module(),
             mod_names: self.mod_names.clone(),
             uses: self.uses.clone(),
             modules: self.modules.clone(),
@@ -1332,7 +1332,7 @@ impl Parser<'_> {
         } else {
             s
         };
-        Span { start: s, end }
+        Span { source: self.toks[start].span.source, start: s, end }
     }
 
     // start から今までの位置。マクロの展開で作ったトークンが端にあれば、その呼び出し位置を使う

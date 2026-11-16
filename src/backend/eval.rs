@@ -66,20 +66,17 @@ struct Interp<'a> {
     next_h: usize,
     // 実行時エラーが起きた一番内側の式の位置
     err_at: Option<Span>,
-    // ソースのこの位置より後（読み込んだライブラリ）で起きたエラーは、ここより前の、呼び出した側の位置にする
-    user_end: usize,
 }
 
 // 型検査を通ったプログラムを前提とする
 pub fn run(prog: &Program, out: &mut dyn Write) -> Result<Value, Error> {
-    run_fn(prog, "main", usize::MAX, out)
+    run_fn(prog, "main", out)
 }
 
 // 引数の無い関数 entry を実行する（main と hibana test のテスト）
 pub fn run_fn(
     prog: &Program,
     entry: &str,
-    user_end: usize,
     out: &mut dyn Write,
 ) -> Result<Value, Error> {
     let mut it = Interp {
@@ -99,7 +96,6 @@ pub fn run_fn(
         handlers: Vec::new(),
         next_h: 0,
         err_at: None,
-        user_end,
     };
     match it.call(entry, vec![]) {
         Ok(v) | Err(Flow::Return(v)) => Ok(v),
@@ -108,7 +104,7 @@ pub fn run_fn(
             Err(match it.err_at {
                 Some(s) => e.at(s),
                 None => e,
-            })
+            }.with_sources(prog.modules.iter().map(|module| &module.source)))
         }
         Err(Flow::Abort(..)) => unreachable!("handle の外には出ない"),
     }
@@ -134,7 +130,6 @@ pub fn run_macro(b: &Block, vars: Vec<(String, Value)>, prog: &Program) -> Resul
         handlers: Vec::new(),
         next_h: 0,
         err_at: None,
-        user_end: usize::MAX,
     };
     match it.block(b, &mut vec![vars.into_iter().collect()]) {
         Ok(v) | Err(Flow::Return(v)) => Ok(v),
@@ -476,10 +471,7 @@ impl Interp<'_> {
             Expr::Id(..) => unreachable!(),
             Expr::At(sp, x) => {
                 let r = self.expr(x, env);
-                let lib = |s: &Span| s.start.offset >= self.user_end;
-                if matches!(r, Err(Flow::Error(_)))
-                    && (self.err_at.is_none() || self.err_at.as_ref().is_some_and(lib) && !lib(sp))
-                {
+                if matches!(r, Err(Flow::Error(_))) && self.err_at.is_none() {
                     self.err_at = Some(*sp);
                 }
                 r?

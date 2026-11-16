@@ -472,12 +472,12 @@ pub struct Info {
 
 // 型検査し、メソッド呼び出しと制約の実装をその場で書き込む
 pub fn check(prog: &mut Program) -> R<Info> {
-    check_prog(prog, true).map_err(Error::with_line)
+    check_prog(prog, true).map_err(|error| error.with_sources(prog.modules.iter().map(|module| &module.source)).with_line())
 }
 
 // main を求めない検査（ライブラリ出力）
 pub fn check_library(prog: &mut Program) -> R<Info> {
-    check_prog(prog, false).map_err(Error::with_line)
+    check_prog(prog, false).map_err(|error| error.with_sources(prog.modules.iter().map(|module| &module.source)).with_line())
 }
 
 // 位置が分かっている宣言・腕の誤りには、その位置を付ける（内側で付いた位置は残す）
@@ -1720,7 +1720,10 @@ impl Ck {
                 let origin = op_site(&self.norm.fns, &f, &k);
                 self.use_effect(v).map_err(|mut er| {
                     if er.origin.is_none() {
-                        er.origin = origin;
+                        if let Some(span) = origin {
+                            er.origin = Some((span.start.offset, span.end.offset - span.start.offset));
+                            er.origin_source = Some(span.source);
+                        }
                     }
                     er.help(format!("関数 {name} の型が ! {s} を持つ"))
                 })?;

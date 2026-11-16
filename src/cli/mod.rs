@@ -17,6 +17,17 @@ struct Report {
     help: Option<String>,
     #[label("ここで起こしている")]
     origin: Option<miette::SourceSpan>,
+    #[related]
+    related: Vec<RelatedSite>,
+}
+
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
+#[error("効果の操作を呼んでいる位置")]
+struct RelatedSite {
+    #[source_code]
+    src: miette::NamedSource<String>,
+    #[label("ここで起こしている")]
+    span: miette::SourceSpan,
 }
 
 // 型検査と変換は構文木を再帰でたどるので、深く入れ子になったコードのために大きなスタックで動かす
@@ -89,13 +100,24 @@ fn report(path: &str, src: &str, e: error::Error) -> miette::Report {
             .iter()
             .any(|s| e.msg.contains(s))
             .then(|| "値.to_string() で文字列にする".to_string());
+        let related = match (e.origin, &e.origin_file) {
+            (Some(span), Some(source)) if source.id != e.source_id => vec![RelatedSite {
+                src: miette::NamedSource::new(source.name.clone(), source.text.clone()),
+                span: span.into(),
+            }],
+            _ => Vec::new(),
+        };
         let report = Report {
             help: e.help.clone().or(to_str),
-            origin: e.origin.map(Into::into),
+            origin: e.origin.filter(|_| e.origin_source.is_none_or(|source| source == e.source_id)).map(Into::into),
+            related,
             label,
             msg: e.msg,
             // 読み込んだライブラリの中のエラーも指せるよう、ライブラリを足したソースを渡す
-            src: miette::NamedSource::new(path, parser::with_uses(src).unwrap_or(src.to_string())),
+            src: match e.source {
+                Some(source) => miette::NamedSource::new(if source.id.0 == 0 { path.to_string() } else { source.name }, source.text),
+                None => miette::NamedSource::new(path, src.to_string()),
+            },
             span: e.span.map(Into::into),
         };
         miette::Report::new(report)
@@ -116,7 +138,7 @@ fn test_cmd(files: &[&str]) -> Result<bool, String> {
             ts.windows(2).any(|w| w[0].tok == lexer::Tok::Punct("fn") && w[1].tok == lexer::Tok::Ident("main".into()))
         });
         let full = if has_main { src.clone() } else { format!("{src}\nfn main() {{}}\n") };
-        let prog = parser::with_uses(&full).and_then(|s| parser::parse(&s)).and_then(|mut prog| {
+        let prog = parser::load_modules(&full, &parser::base_dir()).and_then(parser::parse_modules).and_then(|mut prog| {
             typeck::check(&mut prog)?;
             Ok(prog)
         });
@@ -130,7 +152,7 @@ fn test_cmd(files: &[&str]) -> Result<bool, String> {
         };
         for (label, f) in prog.tests.iter().filter(|t| !t.1.contains('.')) {
             total += 1;
-            match eval::run_fn(&prog, f, full.len(), &mut std::io::stdout()) {
+            match eval::run_fn(&prog, f, &mut std::io::stdout()) {
                 Ok(_) => {
                     pass += 1;
                     println!("ok   {label}");

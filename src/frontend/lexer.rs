@@ -34,6 +34,7 @@ pub struct Pos {
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Span {
+    pub source: super::source::SourceId,
     pub start: Pos,
     pub end: Pos,
 }
@@ -116,7 +117,7 @@ impl Lx<'_> {
     }
     fn err<T>(&self, msg: &str) -> R<T> {
         let p = self.pos();
-        Err(Error::from(msg).at(Span {
+        Err(Error::from(msg).at(Span { source: Default::default(),
             start: p,
             end: Pos {
                 offset: p.offset + 1,
@@ -141,7 +142,7 @@ impl Lx<'_> {
                 self.bump();
                 while !self.rest().starts_with("*/") {
                     if self.bump().is_none() {
-                        return Err(Error::from("ブロックコメントが閉じていない").at(Span {
+                        return Err(Error::from("ブロックコメントが閉じていない").at(Span { source: Default::default(),
                             start,
                             end: Pos {
                                 offset: start.offset + 2,
@@ -230,7 +231,7 @@ fn lex_from(lx: &mut Lx, nested: bool) -> R<Vec<Token>> {
             lx.bump();
             out.push(Token {
                 tok: Tok::Eof,
-                span: Span { start, end: start },
+                span: Span { source: Default::default(), start, end: start },
                 gap_before: gap,
                 nl_before: nl,
                 site: None,
@@ -243,7 +244,7 @@ fn lex_from(lx: &mut Lx, nested: bool) -> R<Vec<Token>> {
             }
             out.push(Token {
                 tok: Tok::Eof,
-                span: Span { start, end: start },
+                span: Span { source: Default::default(), start, end: start },
                 gap_before: gap,
                 nl_before: nl,
                 site: None,
@@ -311,7 +312,7 @@ fn lex_from(lx: &mut Lx, nested: bool) -> R<Vec<Token>> {
         };
         out.push(Token {
             tok,
-            span: Span {
+            span: Span { source: Default::default(),
                 start,
                 end: lx.pos(),
             },

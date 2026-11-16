@@ -18,13 +18,13 @@ pub(crate) use frontend::{resolve, ts};
 use std::io::Write;
 
 fn checked(src: &str, kind: pipeline::Kind) -> error::R<pipeline::Checked> {
-    let expanded = parser::with_uses(src)?;
-    pipeline::check(pipeline::parse(&expanded)?, kind)
+    let modules = pipeline::load(src, &parser::base_dir())?;
+    pipeline::check(pipeline::parse(modules)?, kind)
 }
 
 pub fn run(src: &str, out: &mut dyn Write) -> error::R<eval::Value> {
     let checked = checked(src, pipeline::Kind::Executable)?;
-    eval::run_fn(&checked.program, "main", usize::MAX, out)
+    eval::run_fn(&checked.program, "main", out)
 }
 
 pub fn to_js(src: &str) -> error::R<String> {

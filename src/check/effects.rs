@@ -22,7 +22,7 @@ pub(super) fn flat(effs: &[V]) -> Vec<V> {
         .collect()
 }
 
-pub(super) fn op_site(fns: &HashMap<String, Fn>, f: &Fn, eff: &str) -> Option<(usize, usize)> {
+pub(super) fn op_site(fns: &HashMap<String, Fn>, f: &Fn, eff: &str) -> Option<Span> {
     let mut found = None;
     walk(&Expr::Block(f.body.clone()), &mut |x| {
         if let Expr::At(sp, inner) = x
@@ -32,7 +32,7 @@ pub(super) fn op_site(fns: &HashMap<String, Fn>, f: &Fn, eff: &str) -> Option<(u
                 .get(n.as_str())
                 .is_some_and(|g| g.op.as_deref() == Some(eff))
         {
-            found = Some((sp.start.offset, sp.end.offset - sp.start.offset));
+            found = Some(*sp);
         }
     });
     found

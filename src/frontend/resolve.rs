@@ -60,7 +60,12 @@ pub fn resolve(prog: &mut Program, uses: &HashMap<String, Vec<Use>>, known: &Has
 mod tests {
     #[test]
     fn local_values_shadow_module_names() {
-        let mut program = crate::parser::parse("use tools\nstruct Data { x: int }\nfn main() { put(tools.x())\n let tools = Data { x: 3 }\n put(tools.x) }\nmodule tools\nfn x() -> int { 7 }").unwrap();
+        let mut modules = crate::parser::ModuleSet::from("use tools\nstruct Data { x: int }\nfn main() { put(tools.x())\n let tools = Data { x: 3 }\n put(tools.x) }");
+        let mut tools = crate::parser::ModuleSet::from("fn x() -> int { 7 }").modules.remove(0);
+        tools.name = "tools".into();
+        tools.source.id = crate::frontend::source::SourceId(1);
+        modules.modules.push(tools);
+        let mut program = crate::parser::parse_modules(modules).unwrap();
         crate::typeck::check(&mut program).unwrap();
         let mut output = Vec::new();
         crate::eval::run(&program, &mut output).unwrap();
