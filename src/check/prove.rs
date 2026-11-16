@@ -150,7 +150,18 @@ pub(super) fn prove<'a>(
 ) -> bool {
     // ponytail: num の証明は定数評価と事実の一致だけ。浮動小数点用の証明器を導入するまで整数用の規則と Z3 の Int に渡さない
     if has_num(goal) || facts.clone().any(has_num) {
-        return *goal == V::Bool(true) || facts.clone().any(|f| f == goal);
+        fn known<'a>(goal: &V, facts: impl Iterator<Item = &'a V> + Clone) -> bool {
+            if *goal == V::Bool(true) || facts.clone().any(|f| f == goal) { return true; }
+            if let V::Neu(n) = goal {
+                match &**n {
+                    Term::Bin("&&", a, b) => return known(a, facts.clone()) && known(b, facts),
+                    Term::Bin("||", a, b) => return known(a, facts.clone()) || known(b, facts),
+                    _ => {}
+                }
+            }
+            false
+        }
+        return known(goal, facts);
     }
     if prove_facts(goal, facts.clone()) {
         return true;

@@ -247,7 +247,7 @@ const LIBS: &[(&str, &str)] = &[
     ("std__math", include_str!("../../lib/math.hb")),
 ];
 
-const PRELUDE_NAMES: &[&str] = &["Result", "Ok", "Err", "parse_int"];
+const PRELUDE_NAMES: &[&str] = &["Result", "Ok", "Err", "parse_int", "refine"];
 
 // use した名前の取り込み方
 #[derive(Debug, Clone)]
@@ -497,12 +497,13 @@ fn parse_toks(src: &str, toks: Vec<Token>) -> R<Program> {
     let mut test_starts = Vec::new();
     let mut impl_starts = Vec::new();
     let mut types: HashSet<String> = ["Vec", "Ref", "Type"].map(String::from).into();
-    let mut generic_fns: HashSet<String> = HashSet::new();
+    let mut generic_fns: HashSet<String> = ["refine".to_string()].into();
     // 組み込みと利用者のファイルの名前・モジュール名・パターンのリテラル。マクロの衛生性で名前を付け替えない
     let mut globals: HashSet<String> = [
         "js",
         "put",
         "input",
+        "refine",
         "len",
         "at",
         "is_null",

@@ -56,6 +56,18 @@ pub fn resolve(prog: &mut Program, uses: &HashMap<String, Vec<Use>>, known: &Has
     }
 }
 
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn local_values_shadow_module_names() {
+        let mut program = crate::parser::parse("use tools\nstruct Data { x: int }\nfn main() { put(tools.x())\n let tools = Data { x: 3 }\n put(tools.x) }\nmodule tools\nfn x() -> int { 7 }").unwrap();
+        crate::typeck::check(&mut program).unwrap();
+        let mut output = Vec::new();
+        crate::eval::run(&program, &mut output).unwrap();
+        assert_eq!(output, b"7\n3\n");
+    }
+}
+
 pub(crate) fn resolve_macro(
     block: &mut Block,
     module: &str,
@@ -138,6 +150,19 @@ impl Resolver<'_> {
     }
 
     fn expr(&mut self, e: &mut Expr) {
+        let local_member = match &*e {
+            Expr::Var(n) | Expr::Call(n, _) => n.split_once('.').filter(|(base, _)| self.locals.iter().any(|s| s.iter().any(|n| n == base))).map(|(base, field)| (base.to_string(), field.to_string())),
+            _ => None,
+        };
+        if let Some((base, field)) = local_member {
+            let old = std::mem::replace(e, Expr::Int(0));
+            *e = match old {
+                Expr::Call(_, args) => Expr::Method(Box::new(Expr::Var(base)), field, args),
+                _ => Expr::Field(Box::new(Expr::Var(base)), field),
+            };
+            self.expr(e);
+            return;
+        }
         match e {
             Expr::Var(n) => self.name(n),
             Expr::Call(n, args) => {

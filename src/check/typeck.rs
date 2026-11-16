@@ -82,6 +82,7 @@ pub(crate) const BUILD_FNS: &[&str] = &["compile", "inspect_exports", "utf8", "a
 const BUILTINS: &[&str] = &[
     "put",
     "input",
+    "refine",
     "num_floor",
     "num_sqrt",
     "len",
@@ -1316,11 +1317,50 @@ impl Ck {
             }
             return r;
         }
+        if matches!(e, Expr::Call(n, _) if n == "refine") { return self.refine_value(e); }
         // 長い a + b + ... は左に深く再帰するので、大きな expr_inner のフレームを通らずに検査する
         if matches!(e, Expr::Binary(..)) {
             return self.binary(e);
         }
         self.expr_inner(e)
+    }
+
+    // 実行時の検査を通常の if と構築子へ展開し、成功する枝で細分化条件を証明する。
+    // ponytail: 基本型の条件式だけを扱う。データ型は条件式の再構築と証明の対応を足してから対応する。
+    fn refine_value(&mut self, e: &mut Expr) -> R<V> {
+        fn predicate(v: &V, name: &str) -> R<Expr> {
+            Ok(match v {
+                V::Int(n) => Expr::Int(*n), V::Num(n) => Expr::Num(*n), V::Bool(b) => Expr::Bool(*b), V::Str(s) => Expr::Str(s.to_string()),
+                V::Neu(n) => match &**n {
+                    Term::Var(0, _) => Expr::Var(name.into()),
+                    Term::Num(v) => predicate(v, name)?,
+                    Term::Un(op, v) => Expr::Unary(op, Box::new(predicate(v, name)?)),
+                    Term::Bin(op, a, b) => Expr::Binary(op, Box::new(predicate(a, name)?), Box::new(predicate(b, name)?)),
+                    Term::Call(f, args) => Expr::Call(f.clone(), args.iter().map(|v| predicate(v, name)).collect::<R<_>>()?),
+                    Term::Proj(v, field) => Expr::Field(Box::new(predicate(v, name)?), field.clone()),
+                    _ => return Err("refine の条件を実行時の式に変換できない".into()),
+                },
+                _ => return Err("refine の条件を実行時の式に変換できない".into()),
+            })
+        }
+        let Expr::Call(_, args) = e else { unreachable!() };
+        if args.len() != 2 { return Err("refine<型>(値) と書く".into()); }
+        let target = self.eval_type(&args[0])?;
+        let (base, conditions) = split(&target);
+        let V::Prim(kind @ ("int" | "num" | "String" | "bool")) = base else { return Err("refine は int・num・String・bool の細分化型に使う".into()) };
+        let name = format!("refine#{}", self.norm.fresh());
+        let mut condition = Expr::Bool(true);
+        for p in conditions { condition = Expr::Binary("&&", Box::new(condition), Box::new(predicate(&p, &name)?)); }
+        let value = args.pop().unwrap();
+        let expected = V::DataT(Rc::new(("std.Result".into(), vec![target, prim("String")])));
+        let leaf = |value| Block { stmts: vec![], tail: Some(Box::new(value)) };
+        let mut expanded = Expr::Block(Block {
+            stmts: vec![Stmt::Let { name: name.clone(), mutable: false, ty: Some(Expr::Var(kind.into())), init: value }],
+            tail: Some(Box::new(Expr::If(Box::new(condition), leaf(Expr::Call("std.Ok".into(), vec![Expr::Var(name)])), Some(Box::new(Expr::Block(leaf(Expr::Call("std.Err".into(), vec![Expr::Str("細分化型の条件を満たさない".into())])))))))),
+        });
+        self.check(&mut expanded, &expected)?;
+        *e = expanded;
+        Ok(expected)
     }
 
     #[inline(never)]
@@ -1942,7 +1982,8 @@ impl Ck {
                     }
                     Err(e) => return Err(e),
                 };
-                if tt == et {
+                if tt == prim("never") { et }
+                else if et == prim("never") || tt == et {
                     tt
                 } else {
                     let (tb, eb) = (base(&tt), base(&et));
@@ -2056,7 +2097,18 @@ impl Ck {
             }
         }
         let n = args.len();
-        let infer = f.implicit > 0 && (n == explicit || n == explicit + f.insts);
+        // 明示した型引数と、補完済みの辞書引数は個数が一致する場合がある。
+        let type_argument = args.first().is_some_and(|e| match e.peel() {
+            Expr::Var(n) => self.lookup(n).is_some_and(|e| e.ty == V::Type)
+                || PRIMS.contains(&n.as_str()) || self.norm.datas.contains_key(n.as_str())
+                || self.norm.fns.get(n.as_str()).is_some_and(|f| f.alias),
+            Expr::Call(n, _) => n == "Vec" || n == "Ref" || self.norm.datas.contains_key(n.as_str())
+                || self.norm.fns.get(n.as_str()).is_some_and(|f| f.alias),
+            Expr::Refine(..) | Expr::Pi(..) => true,
+            _ => false,
+        });
+        let explicit_types = f.implicit > 0 && n == f.params.len() - f.insts && type_argument;
+        let infer = f.implicit > 0 && !explicit_types && (n == explicit || n == explicit + f.insts);
         // 制約の実装を省いた呼び出し。実装は型引数が決まってから探す
         let omit = f.insts > 0 && (n == explicit || n == f.params.len() - f.insts);
         if !infer && !omit && n != f.params.len() {
@@ -2916,6 +2968,7 @@ impl Ck {
             result = Some(match result {
                 None => t,
                 Some(prev) if prev == prim("never") => t,
+                Some(prev) if t == prim("never") || prev == t => prev,
                 Some(prev) => {
                     want(&base(&prev), &t, &r("場合ごとの型")).map_err(at)?;
                     base(&prev)

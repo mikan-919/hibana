@@ -413,6 +413,12 @@ mod tests {
     }
 
     #[test]
+    fn runtime_refinements() {
+        assert_eq!(out(include_str!("../../tests/programs/types/runtime_refine.hb")).unwrap(), "ok:ok\nbad\nbad\nok\n1\ntrue\n1.5\n3\n");
+        assert!(out("type Title = String[s -> len(s) > 0]\nfn main() { let t: Title = '' }").is_err());
+    }
+
+    #[test]
     fn numeric_values() {
         let src = include_str!("../../tests/programs/types/num.hb");
         assert_eq!(out(src).unwrap(), "2.5\n1.5\n1.5\n-0.5\n0.25\n1\n1.5\n2\ntrue\ntrue\ntrue\n[0.5, 2.5]\n-0\n0.00000001\n1000000000000000000000\n");
