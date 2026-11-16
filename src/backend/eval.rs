@@ -1,3 +1,4 @@
+use crate::parser::Name;
 use crate::error::Error;
 use crate::lexer::{Span, Tok, Token};
 use crate::meta::{self, Node, Syn};
@@ -19,7 +20,7 @@ pub enum Value {
     Ty(Rc<str>),
     Arr(Rc<Vec<Value>>),
     // data の値 (構築子, フィールド)
-    Data(Rc<(String, Vec<Value>)>),
+    Data(Rc<(Name, Vec<Value>)>),
     Fn(Rc<Callable>),
     // 書き換えられる参照。写し取った関数どうしでも同じものを指す
     Ref(Rc<std::cell::RefCell<Value>>),
@@ -30,12 +31,12 @@ pub enum Value {
 pub enum Callable {
     // ponytail: 作った時の変数を値で写し取る。後から代入しても関数の中には届かない
     Lam {
-        params: Vec<String>,
+        params: Vec<Name>,
         body: Block,
-        env: HashMap<String, Value>,
+        env: HashMap<Name, Value>,
     },
     // トップレベルの関数
-    Named(String),
+    Named(Name),
 }
 
 // 関数の値は同じものの時だけ等しい（型検査で比較を禁止していないので、ここで決める）
@@ -59,10 +60,10 @@ type R<T> = Result<T, Flow>;
 struct Interp<'a> {
     fns: HashMap<&'a str, &'a Fn>,
     // 構築子の名前からフィールド名の並び
-    ctors: HashMap<&'a str, Vec<&'a str>>,
+    ctors: HashMap<&'a str, (&'a Name, Vec<&'a str>)>,
     out: &'a mut dyn Write,
     // 処理中の handle (番号, 操作の名前から腕の関数)。内側ほど後ろ
-    handlers: Vec<(usize, HashMap<String, Value>)>,
+    handlers: Vec<(usize, HashMap<Name, Value>)>,
     next_h: usize,
     // 実行時エラーが起きた一番内側の式の位置
     err_at: Option<Span>,
@@ -88,7 +89,7 @@ pub fn run_fn(
             .map(|c| {
                 (
                     c.name.as_str(),
-                    c.fields.iter().map(|f| f.0.as_str()).collect(),
+                    (&c.name, c.fields.iter().map(|f| f.0.as_str()).collect()),
                 )
             })
             .collect(),
@@ -111,7 +112,7 @@ pub fn run_fn(
 }
 
 // マクロ本体を実行する。put はコンパイル時の出力として標準エラーに書く
-pub fn run_macro(b: &Block, vars: Vec<(String, Value)>, prog: &Program) -> Result<Value, String> {
+pub fn run_macro(b: &Block, vars: Vec<(Name, Value)>, prog: &Program) -> Result<Value, String> {
     let mut err = std::io::stderr();
     let mut it = Interp {
         fns: prog.fns.iter().map(|f| (f.name.as_str(), f)).collect(),
@@ -122,7 +123,7 @@ pub fn run_macro(b: &Block, vars: Vec<(String, Value)>, prog: &Program) -> Resul
             .map(|c| {
                 (
                     c.name.as_str(),
-                    c.fields.iter().map(|f| f.0.as_str()).collect(),
+                    (&c.name, c.fields.iter().map(|f| f.0.as_str()).collect()),
                 )
             })
             .collect(),
@@ -150,7 +151,7 @@ fn show(v: &Value) -> String {
         Value::Syn(s) => format!("{:?}", s.node.strip()),
         Value::Fn(_) => "<fn>".into(),
         Value::Ref(_) => "<ref>".into(),
-        Value::Data(d) if d.1.is_empty() => d.0.clone(),
+        Value::Data(d) if d.1.is_empty() => d.0.to_string(),
         Value::Data(d) => format!(
             "{}({})",
             d.0,
@@ -292,7 +293,7 @@ impl Interp<'_> {
             }
             ("ident", Value::Str(s)) => {
                 let tok = Token {
-                    tok: Tok::Ident(s.to_string()),
+                    tok: Tok::Ident(s.to_string().into()),
                     span: Span::default(),
                     site: None,
                     gap_before: true,
@@ -329,7 +330,7 @@ impl Interp<'_> {
                     if t.gap_before && !text.is_empty() { text.push(' '); }
                     use crate::lexer::Tok;
                     text.push_str(&match &t.tok {
-                        Tok::Ident(n) => n.clone(), Tok::Punct(n) => n.to_string(),
+                        Tok::Ident(n) => n.to_string(), Tok::Punct(n) => n.to_string(),
                         Tok::Str(n) => format!("{n:?}"), Tok::Int(n) => n.to_string(), Tok::Float(n) => n.to_string(),
                         Tok::Raw(c) => c.to_string(), Tok::Template(n, _) => format!("`{n}`"), Tok::Eof => String::new(),
                     });
@@ -350,11 +351,11 @@ impl Interp<'_> {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            Value::Data(d) if d.0.ends_with("{}") => {
-                let fs = &self.ctors[d.0.as_str()];
-                let name = &d.0[..d.0.len() - 2];
+            Value::Data(d) if d.0.structure_owner().is_some() => {
+                let fs = &self.ctors[d.0.as_str()].1;
+                let name = d.0.structure_owner().unwrap();
                 // struct Name(型, ...) は Name(1, 2)
-                if fs.first() == Some(&"0") {
+                if d.0.structure_style() == Some(crate::frontend::name::StructureStyle::Tuple) {
                     let body: Vec<String> = d.1.iter().map(|x| self.show(x)).collect();
                     return format!("{name}({})", body.join(", "));
                 }
@@ -439,14 +440,14 @@ impl Interp<'_> {
         }
     }
 
-    fn block(&mut self, b: &Block, env: &mut Vec<HashMap<String, Value>>) -> R<Value> {
+    fn block(&mut self, b: &Block, env: &mut Vec<HashMap<Name, Value>>) -> R<Value> {
         env.push(HashMap::new());
         let r = self.block_inner(b, env);
         env.pop();
         r
     }
 
-    fn block_inner(&mut self, b: &Block, env: &mut Vec<HashMap<String, Value>>) -> R<Value> {
+    fn block_inner(&mut self, b: &Block, env: &mut Vec<HashMap<Name, Value>>) -> R<Value> {
         for s in &b.stmts {
             match s {
                 Stmt::Let { name, init, .. } => {
@@ -464,7 +465,7 @@ impl Interp<'_> {
         }
     }
 
-    fn expr(&mut self, e: &Expr, env: &mut Vec<HashMap<String, Value>>) -> R<Value> {
+    fn expr(&mut self, e: &Expr, env: &mut Vec<HashMap<Name, Value>>) -> R<Value> {
         let mut e = e;
         while let Expr::Id(_, inner) = e { e = inner; }
         Ok(match e {
@@ -501,7 +502,7 @@ impl Interp<'_> {
             Expr::Field(x, name) => {
                 let v = self.expr(x, env)?;
                 if let Value::Data(d) = &v {
-                    let i = self.ctors[d.0.as_str()]
+                    let i = self.ctors[d.0.as_str()].1
                         .iter()
                         .position(|f| f == name)
                         .expect("型検査済み");
@@ -514,12 +515,12 @@ impl Interp<'_> {
                 }
             }
             Expr::Quote(q) => {
-                let mut flat: Vec<(String, Value)> = env
+                let mut flat: Vec<(Name, Value)> = env
                     .iter()
                     .flat_map(|s| s.iter().map(|(k, v)| (k.clone(), v.clone())))
                     .collect();
                 let mut out = Vec::new();
-                let mut ev = |e: &Expr, vars: &[(String, Value)]| {
+                let mut ev = |e: &Expr, vars: &[(Name, Value)]| {
                     env.push(vars.iter().cloned().collect());
                     let r = self.expr(e, env);
                     env.pop();
@@ -549,7 +550,7 @@ impl Interp<'_> {
                     Value::Fn(Rc::new(Callable::Named(n.clone())))
                 }
                 None if self.ctors.contains_key(n.as_str()) => {
-                    Value::Data(Rc::new((n.clone(), vec![])))
+                    Value::Data(Rc::new((self.ctors[n.as_str()].0.clone(), vec![])))
                 }
                 // 型検査を通っているので、残りは int などの型名
                 None => Value::Ty(n.as_str().into()),
@@ -673,7 +674,7 @@ impl Interp<'_> {
                         vec![vs.pop().unwrap_or(Value::Unit)],
                     )))
                 } else if self.ctors.contains_key(name.as_str()) {
-                    Value::Data(Rc::new((name.clone(), vs)))
+                    Value::Data(Rc::new((self.ctors[name.as_str()].0.clone(), vs)))
                 } else if !self.fns.contains_key(name.as_str())
                     && name != "put"
                     && name.starts_with(|c: char| c.is_ascii_uppercase())
@@ -722,7 +723,7 @@ impl Interp<'_> {
             Expr::Handle(body, arms) => {
                 self.next_h += 1;
                 let id = self.next_h;
-                let captured: HashMap<String, Value> = env
+                let captured: HashMap<Name, Value> = env
                     .iter()
                     .flat_map(|s| s.iter().map(|(k, v)| (k.clone(), v.clone())))
                     .collect();

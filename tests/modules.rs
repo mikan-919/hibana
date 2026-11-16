@@ -119,3 +119,36 @@ fn distinct_files_with_the_same_module_name_are_rejected() {
     assert!(error.msg.contains("モジュール名 item"));
     assert_eq!(error.source_id.0, 0);
 }
+
+#[test]
+fn same_named_constructors_resolve_through_their_type_and_module() {
+    let files = Files::new(
+        "constructors",
+        &[
+            ("one.hb", "enum Shape { Node(value: int) }"),
+            ("two.hb", "enum Shape { Node(left: int, right: int) }"),
+        ],
+    );
+    let mut program = files.parse("use './one.hb'\nuse './two.hb'\nfn main() { put(one.Shape::Node(3))\n put(two.Shape::Node(4, 5)) }").unwrap();
+    hibana::typeck::check(&mut program).unwrap();
+    let mut output = Vec::new();
+    hibana::eval::run(&program, &mut output).unwrap();
+    assert_eq!(output, b"one.Node(3)\ntwo.Node(4, 5)\n");
+}
+
+#[test]
+fn effect_diagnostics_keep_the_call_and_operation_in_their_own_files() {
+    let dependency = "effect Log { fn log(message: String) }\nfn trigger() ! Log { log('entry') }";
+    let files = Files::new("effect-origin", &[("dep.hb", dependency)]);
+    let mut program = files
+        .parse("use './dep.hb'\nfn main() { dep.trigger() }")
+        .unwrap();
+    let error = hibana::typeck::check(&mut program).err().unwrap();
+    assert_eq!(error.source_id.0, 0);
+    assert_ne!(error.origin_source.unwrap(), error.source_id);
+    assert!(error.origin_file.unwrap().name.ends_with("dep.hb"));
+    assert_eq!(
+        error.origin.unwrap().0,
+        dependency.find("log('entry')").unwrap()
+    );
+}

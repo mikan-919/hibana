@@ -1,3 +1,4 @@
+use crate::parser::Name;
 // syntax / macro 宣言の解析、パターン照合、マクロ展開
 use crate::error::{Ctx, Error};
 use crate::eval::{self, Value};
@@ -420,7 +421,7 @@ fn record(rule: Option<&str>, span: Span, fields: &[(String, bool)], binds: Bind
 }
 
 // 展開中のマクロの (番号, 大域の名前, マクロのモジュール, そのモジュールから見える名前と修飾した名前)。quote の中の名前の付け替えに使う
-type Hygiene = (usize, Rc<HashSet<String>>, String, HashMap<String, String>);
+type Hygiene = (usize, Rc<HashSet<Name>>, String, HashMap<Name, Name>);
 thread_local! {
     static HYGIENE: RefCell<Option<Hygiene>> = const { RefCell::new(None) };
 }
@@ -429,7 +430,7 @@ static NEXT_EXPANSION: AtomicUsize = AtomicUsize::new(1);
 // quote の中で束縛される名前。let と for の変数、fn の引数、match と handle の腕の束縛。
 // 大域の名前と同じでも、束縛された名前は改名する（呼び出し側の同じ名前を隠さないため）
 // ponytail: 同じ quote で、束縛した名前と同じ名前の大域の関数や構築子を呼ぶと、その呼び出しも改名される。呼び出しの位置で大域かどうかを見分けるなら、束縛の範囲を追う必要がある
-fn bound_names(q: &[Q]) -> HashSet<String> {
+fn bound_names(q: &[Q]) -> HashSet<Name> {
     // $ の差し込みは None にして、並びを切る
     fn flat(q: &[Q], out: &mut Vec<Option<Tok>>) {
         for x in q {
@@ -490,7 +491,7 @@ fn bound_names(q: &[Q]) -> HashSet<String> {
 // quote に直接書いた名前を、展開ごとに固有の名前 名前#番号 にする（利用者は # を書けないので衝突しない）。
 // 大域の名前と、. の後のフィールド名はそのまま。ただし束縛された名前（bound_names）は大域の名前でも改名する。
 // $x で差し込んだ呼び出し側のトークンはここを通らない
-fn hygienic(t: &Token, prev: Option<&Token>, bound: &HashSet<String>) -> Token {
+fn hygienic(t: &Token, prev: Option<&Token>, bound: &HashSet<Name>) -> Token {
     HYGIENE.with(|h| match (&*h.borrow(), &t.tok) {
         _ if matches!(prev.map(|p| &p.tok), Some(Tok::Punct(".")))
             || t.tok == Tok::Ident("_".into()) =>
@@ -502,13 +503,13 @@ fn hygienic(t: &Token, prev: Option<&Token>, bound: &HashSet<String>) -> Token {
             if !m.is_empty() && names.contains_key(n) && !bound.contains(n) =>
         {
             Token {
-                tok: Tok::Ident(names[n].clone()),
+                tok: Tok::Ident(names[n].clone().into()),
                 ..t.clone()
             }
         }
         (Some((id, globals, _, _)), Tok::Ident(n)) if !globals.contains(n) || bound.contains(n) => {
             Token {
-                tok: Tok::Ident(format!("{n}#{id}")),
+                tok: Tok::Ident(Name::hygienic(n, *id)),
                 ..t.clone()
             }
         }
@@ -582,7 +583,7 @@ impl PartialEq for Syn {
 }
 
 // path を env の最長一致から辿り、(値, 辿った段数) を返す。stop_at_list なら配列で止まる
-fn walk(env: &[(String, Value)], path: &[String], stop_at_list: bool) -> R<(Value, usize)> {
+fn walk(env: &[(Name, Value)], path: &[String], stop_at_list: bool) -> R<(Value, usize)> {
     let mut best: Option<(&Value, usize)> = None;
     for (k, v) in env {
         let ks: Vec<&str> = k.split('.').collect();
@@ -616,12 +617,12 @@ fn q_paths<'a>(q: &'a [Q], out: &mut Vec<&'a [String]>) {
     }
 }
 
-type Eval<'a> = dyn FnMut(&Expr, &[(String, Value)]) -> R<Value> + 'a;
+type Eval<'a> = dyn FnMut(&Expr, &[(Name, Value)]) -> R<Value> + 'a;
 
 // quote の中身を、env の値を差し込みながらトークン列にする。${ } は ev で評価する
 pub fn splice(
     q: &[Q],
-    env: &mut Vec<(String, Value)>,
+    env: &mut Vec<(Name, Value)>,
     out: &mut Vec<Token>,
     ev: &mut Eval,
 ) -> R<()> {
@@ -631,10 +632,10 @@ pub fn splice(
 
 fn splice_in(
     q: &[Q],
-    env: &mut Vec<(String, Value)>,
+    env: &mut Vec<(Name, Value)>,
     out: &mut Vec<Token>,
     ev: &mut Eval,
-    bound: &HashSet<String>,
+    bound: &HashSet<Name>,
 ) -> R<()> {
     for x in q {
         match x {
@@ -688,7 +689,7 @@ fn splice_in(
                         let Node::List(v) = s.node.strip() else {
                             unreachable!()
                         };
-                        env.push((key.clone(), Value::Syn(Rc::new(s.child(v[k].clone())))));
+                        env.push((Name::from(key.as_str()), Value::Syn(Rc::new(s.child(v[k].clone())))));
                     }
                     let r = splice_in(inner, env, out, ev, bound);
                     env.truncate(base);
@@ -727,7 +728,7 @@ fn emit(v: &Value, dollar: &Token, out: &mut Vec<Token>) -> R<()> {
         Value::Num(n) => Tok::Float(*n),
         Value::Bool(b) => Tok::Punct(if *b { "true" } else { "false" }),
         Value::Str(s) => Tok::Str(s.to_string()),
-        Value::Ty(t) => Tok::Ident(t.to_string()),
+        Value::Ty(t) => Tok::Ident(t.to_string().into()),
         Value::Arr(_) | Value::Data(_) | Value::Fn(_) => {
             return Err("配列・data・関数の値は差し込めない".into());
         }
@@ -944,7 +945,7 @@ type Binds = Vec<(String, Node)>;
 impl Parser<'_> {
     pub fn syntax_decl(&mut self, g: &mut Grammar) -> R<()> {
         self.expect("syntax")?;
-        let name = self.ident()?;
+        let name = self.ident()?.to_string();
         if builtin(&name).is_some() || name == "Text" || g.rules.contains_key(&name) {
             return self.err_at(format!("規則 {name} が重複している"));
         }
@@ -959,7 +960,7 @@ impl Parser<'_> {
 
     pub fn macro_decl(&mut self, g: &mut Grammar) -> R<()> {
         self.expect("macro")?;
-        let name = self.ident()?;
+        let name = self.ident()?.to_string();
         if g.macros.iter().any(|m| m.name == name) {
             return self.err_at(format!("マクロ {name} が重複している"));
         }
@@ -1044,7 +1045,7 @@ impl Parser<'_> {
             )
         {
             self.pos += 2;
-            name = Some(n);
+            name = Some(n.to_string());
         }
         let atom = self.atom()?;
         let op = if self.eat("*") {
@@ -1070,14 +1071,14 @@ impl Parser<'_> {
         let a = match self.peek().clone() {
             Tok::Str(s) => {
                 let ts = lex(&s)?;
-                // Response::json は1つの名前 Response__json として照合する
+                // 修飾名のリテラルは、区切りを含む綴りで照合する。
                 match (ts.len(), ts[0].tok.text()) {
                     (2, Some(t)) if !t.is_empty() => Atom::Lit(t.to_string()),
                     _ => return self.err_at(format!("リテラル {s:?} は1個のトークンでない")),
                 }
             }
             Tok::Ident(n) if n == "Text" => Atom::Text(vec![]),
-            Tok::Ident(n) => builtin(&n).map(Atom::Builtin).unwrap_or(Atom::Rule(n)),
+            Tok::Ident(n) => builtin(&n).map(Atom::Builtin).unwrap_or(Atom::Rule(n.to_string())),
             Tok::Punct("(") => {
                 self.pos += 1;
                 let p = self.pattern()?;
@@ -1192,7 +1193,7 @@ impl Parser<'_> {
         crate::resolve::resolve_macro(
             &mut b,
             &m.module,
-            field_kinds(&m.pat).into_iter().map(|(n, _)| n).collect(),
+            field_kinds(&m.pat).into_iter().map(|(n, _)| Name::from(n)).collect(),
             &self.uses,
             &self.known,
         );
@@ -1267,7 +1268,7 @@ impl Parser<'_> {
             .into_iter()
             .map(|(n, node)| {
                 (
-                    n,
+                    Name::from(n),
                     Value::Syn(Rc::new(Syn {
                         node,
                         toks: src_toks.clone(),
@@ -1279,16 +1280,16 @@ impl Parser<'_> {
         // 展開ごとに番号を振り、quote に書いた名前をその番号で付け替える
         let id = NEXT_EXPANSION.fetch_add(1, Ordering::Relaxed);
         // 自分のモジュールの名前と、そのモジュールが use で修飾なしに取り込んだ名前（use './lib' -> * など）
-        let mut names: HashMap<String, String> = HashMap::new();
+        let mut names: HashMap<Name, Name> = HashMap::new();
         for u in self.uses.get(&m.module).into_iter().flatten() {
             for n in self.mod_names.get(&u.module).into_iter().flatten() {
                 if u.names.takes(n) {
-                    names.insert(n.clone(), format!("{}.{n}", u.module));
+                    names.insert(n.clone(), Name::qualified(&u.module, n.clone()));
                 }
             }
         }
         for n in self.mod_names.get(&m.module).into_iter().flatten() {
-            names.insert(n.clone(), format!("{}.{n}", m.module));
+            names.insert(n.clone(), Name::qualified(&m.module, n.clone()));
         }
         let prev =
             HYGIENE.with(|h| h.replace(Some((id, self.globals.clone(), m.module.clone(), names))));
@@ -1519,7 +1520,7 @@ impl Parser<'_> {
         let t = self.toks[self.pos].clone();
         let fail = |_| Miss::Fail;
         let n = match (k, t.tok) {
-            (Builtin::Ident, Tok::Ident(s)) => Node::Ident(s, t.span),
+            (Builtin::Ident, Tok::Ident(s)) => Node::Ident(s.to_string(), t.span),
             (Builtin::Int, Tok::Int(n)) => Node::Int(n),
             (Builtin::Float, Tok::Float(n)) => Node::Float(n),
             (Builtin::Str, Tok::Str(s)) => Node::Str(s),

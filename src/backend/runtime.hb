@@ -565,13 +565,11 @@ fn __show_data(p: int) -> String {
     let ctor = __load(p)
     let n = __load(p + 8)
     let name = __ctor_name(ctor)
-    let np = __payload(name)
-    let len = __load(np)
-    let braces = len >= 2 && __load8(np + 8 + len - 2) == 123 && __load8(np + 8 + len - 1) == 125
-    if braces {
-        let base = __bytes(np + 8, len - 2)
+    let kind = __ctor_kind(ctor)
+    if kind != 0 {
+        let base = name
         // struct Name(型, ...) は Name(1, 2)
-        if n > 0 && __str_eq(__payload(__ctor_field(ctor, 0)), __payload('0')) {
+        if kind == 2 {
             return __cat(__cat(__cat(base, '('), __join_shown(p + 16, n)), ')')
         }
         let mut out = __cat(base, ' { ')

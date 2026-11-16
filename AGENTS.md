@@ -19,7 +19,7 @@ nix develop -c cargo run -q -- <ファイル>   # 実行（fmt / test は第 1 �
 
 | 場所 | 内容 |
 |---|---|
-| `src/frontend/` | 字句解析（`lexer.rs`）、ファイル読み込みとモジュール表（`modules.rs`）、ファイルの識別子とソース（`source.rs`）、構文解析（`parser.rs`）、名前解決（`resolve.rs`）、マクロ展開（`meta.rs`）、TypeScript の宣言の読み込み（`ts.rs`） |
+| `src/frontend/` | 名前の構造と生成名の種類（`name.rs`）、字句解析（`lexer.rs`）、ファイル読み込みとモジュール表（`modules.rs`）、ファイルの識別子とソース（`source.rs`）、構文解析（`parser.rs`）、名前解決（`resolve.rs`）、マクロ展開（`meta.rs`）、TypeScript の宣言の読み込み（`ts.rs`） |
 | `src/check/` | 型検査（`typeck.rs`）。トレイト解決（`traits.rs`）、効果検査（`effects.rs`）、証明との接続（`proof.rs`）は型検査の子モジュール。`prove.rs` は型の評価と細分化型の証明、`smt.rs` は Z3 の FFI |
 | `src/backend/` | インタプリタ（`eval.rs`）、JavaScript（`js.rs`）、WASM とネイティブの共通の構造化 IR（`ir.rs`）、WebAssembly（`wasm.rs`）、Cranelift によるネイティブ（`native.rs`。libc なしの静的 ELF） |
 | `src/tooling/` | フォーマッタ（`fmt.rs`） |
@@ -33,6 +33,7 @@ nix develop -c cargo run -q -- <ファイル>   # 実行（fmt / test は第 1 �
 ## 規約
 
 - インタプリタ・JavaScript・WASM・ネイティブの出力をテストで比較します。バックエンドに手を入れたら対応するテストを実行します。
+- 生成名の種類は `NameKind` で判定します。綴りの記号から種類を推測しません。非同期処理の情報は構文木の `NodeId` に結び付け、式のメモリアドレスは使いません。
 - 組み込み関数を足す時は `src/check/typeck.rs` の `BUILTINS`、`src/frontend/parser.rs` の `globals`、各バックエンド、`docs/spec.md` の 9 章を更新します。`std` に足した名前が組み込み（`all`、`resume` など）と衝突しないか確認します。
 - `lib/std.hb` に関数を足したら `tests/programs/stdlib/stdlib.hb` にテストを足します。
 - 簡略化して上限がある所には `ponytail:` で始まるコメントに、上限と改善の方向を書きます。

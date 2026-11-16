@@ -150,7 +150,7 @@ fn test_cmd(files: &[&str]) -> Result<bool, String> {
                 continue;
             }
         };
-        for (label, f) in prog.tests.iter().filter(|t| !t.1.contains('.')) {
+        for (label, f) in prog.tests.iter().filter(|test| !matches!(test.1.kind, parser::NameKind::Qualified(..))) {
             total += 1;
             match eval::run_fn(&prog, f, &mut std::io::stdout()) {
                 Ok(_) => {

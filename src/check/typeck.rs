@@ -9,7 +9,7 @@ use traits::is_impl;
 
 // 型検査。型別名と細分化型の条件を評価して比べる
 use crate::meta::{Kinds, Q};
-use crate::parser::{Arm, Block, Data, Expr, Fn, Program, Stmt, NodeId};
+use crate::parser::{Arm, Block, Data, Expr, Fn, Name, NodeId, Program, Stmt};
 use crate::smt::Smt;
 use super::prove::{bin, len, replace_len, un, Env, Eval, Halt, Term};
 use std::collections::HashMap;
@@ -30,9 +30,9 @@ pub(crate) enum V {
     // 型を表す印
     Type,
     // data の値 (構築子, フィールド)
-    Data(Rc<(String, Vec<V>)>),
+    Data(Rc<(Name, Vec<V>)>),
     // data の型 (型名, 引数)
-    DataT(Rc<(String, Vec<V>)>),
+    DataT(Rc<(Name, Vec<V>)>),
     // int・bool・String・syn・unit・never。never は return の型で、どの型とも一致する
     Prim(&'static str),
     // Vec<要素の型>
@@ -172,7 +172,7 @@ fn show(v: &V) -> String {
             d.0,
             d.1.iter().map(show).collect::<Vec<_>>().join(", ")
         ),
-        V::Data(d) | V::DataT(d) if d.1.is_empty() => d.0.clone(),
+        V::Data(d) | V::DataT(d) if d.1.is_empty() => d.0.to_string(),
         V::Data(d) | V::DataT(d) => format!(
             "{}({})",
             d.0,
@@ -198,7 +198,7 @@ fn show(v: &V) -> String {
         ),
         V::Syn(k) => format!("syn<{k}>"),
         V::Neu(n) => match &**n {
-            Term::Var(_, name) => name.clone(),
+            Term::Var(_, name) => name.to_string(),
             Term::Un(op, x) => format!("{op}{}", show(x)),
             Term::Bin(op, a, b) => format!("({} {op} {})", show(a), show(b)),
             Term::Call(f, args) if f == "[]" => format!("{}[{}]", show(&args[0]), show(&args[1])),
@@ -273,7 +273,7 @@ struct Entry {
 // 変数と、そこで成り立つと分かっている事実（bool の値）
 #[derive(Default)]
 struct Scope {
-    vars: HashMap<String, Entry>,
+    vars: HashMap<Name, Entry>,
     facts: Vec<V>,
 }
 
@@ -288,7 +288,7 @@ struct Ck {
     // マクロ本体の検査で使う、syntax 規則ごとのフィールドの種類
     rules: HashMap<String, Kinds>,
     // 今起こしてよい効果 (効果の名前, 型)。handle の本体の効果の型は、本体で初めて起こした時に決まる
-    avail: Vec<(String, Option<V>)>,
+    avail: Vec<(Name, Option<V>)>,
     // 検査中の handle の腕で、resume に渡す値の型
     resume: Vec<V>,
     // 検査中の handle の腕の入れ子の深さ
@@ -304,7 +304,7 @@ struct Ck {
     // impl から作った、実装の値を作る関数（名前の順）
     impls: Vec<Fn>,
     // 効果の名前（Async と effect 宣言）
-    effect_names: std::collections::HashSet<String>,
+    effect_names: std::collections::HashSet<Name>,
 }
 
 // never はどの型とも一致する。細分化された値は元の型として使える
@@ -419,7 +419,7 @@ pub(crate) fn walk(e: &Expr, f: &mut dyn FnMut(&Expr)) {
 }
 
 // resume が handle の腕の末尾（腕の値になる位置）にだけあるか確かめる
-fn assigned(e: &Expr, out: &mut Vec<String>) {
+fn assigned(e: &Expr, out: &mut Vec<Name>) {
     walk(e, &mut |x| {
         if let Expr::Assign(n, _) = x {
             out.push(n.clone());
@@ -428,7 +428,7 @@ fn assigned(e: &Expr, out: &mut Vec<String>) {
 }
 
 // ブロックの中で代入される変数名を集める
-fn assigned_block(b: &Block, out: &mut Vec<String>) {
+fn assigned_block(b: &Block, out: &mut Vec<Name>) {
     for s in &b.stmts {
         match s {
             Stmt::Let { init, .. } => assigned(init, out),
@@ -441,10 +441,10 @@ fn assigned_block(b: &Block, out: &mut Vec<String>) {
 }
 
 // quote の中の $x.y の先頭の名前を集める
-fn q_names(q: &[Q], out: &mut Vec<String>) {
+fn q_names(q: &[Q], out: &mut Vec<Name>) {
     for x in q {
         match x {
-            Q::Var { path, .. } => out.push(path[0].clone()),
+            Q::Var { path, .. } => out.push(path[0].clone().into()),
             Q::Rep(inner, _) => q_names(inner, out),
             _ => {}
         }
@@ -452,7 +452,7 @@ fn q_names(q: &[Q], out: &mut Vec<String>) {
 }
 
 // 関数の本体から呼ぶ関数名を集める
-pub(crate) fn callees(f: &Fn) -> Vec<String> {
+pub(crate) fn callees(f: &Fn) -> Vec<Name> {
     let mut out = Vec::new();
     walk(&Expr::Block(f.body.clone()), &mut |x| {
         if let Expr::Call(n, _) | Expr::Var(n) = x {
@@ -508,7 +508,7 @@ fn check_prog(prog: &mut Program, require_main: bool) -> R<Info> {
             v.sort_by(|a, b| a.name.cmp(&b.name));
             v
         },
-        effect_names: std::iter::once("Async".to_string())
+        effect_names: std::iter::once(Name::from("Async"))
             .chain(prog.fns.iter().filter_map(|f| f.op.clone()))
             .chain(
                 prog.datas
@@ -697,7 +697,7 @@ fn check_macro_body(
     ck.ret = prim("syn");
     for (p, k) in params {
         let v = ck.norm.opaque();
-        ck.bind(p, syn_of(k), v, false)?;
+        ck.bind(&Name::from(p.as_str()), syn_of(k), v, false)?;
     }
     let t = ck.block(b)?;
     want(&prim("syn"), &t, "マクロ本体の値")
@@ -980,7 +980,7 @@ impl Ck {
         // 呼び出しの結果に対するメソッドは、結果を一時変数に置いてから呼ぶ。
         // 検査済みの呼び出しをもう一度検査すると、制約の実装の引数を二重に足すため
         if matches!(x.peel(), Expr::Call(..) | Expr::Apply(..)) {
-            let tmp = format!("recv#{}", self.norm.fresh());
+            let tmp = Name::temporary("recv", self.norm.fresh());
             let v = self.norm.opaque();
             self.bind(&tmp, t, v, false)?;
             *e = Expr::Method(Box::new(Expr::Var(tmp.clone())), f, xs);
@@ -995,30 +995,29 @@ impl Ck {
         }
         let ty = match base(&t) {
             V::DataT(d) => Some(d.0.clone()),
-            V::Prim(p) => Some(p.to_string()),
-            V::VecT(_) => Some("Vec".into()),
+            V::Prim(p) => Some(Name::from(p)),
+            V::VecT(_) => Some(Name::from("Vec")),
             _ => None,
         };
-        let mut name = ty.as_ref().map(|ty| format!("{ty}__{f}")).unwrap_or_default();
+        let mut name = ty.as_ref().map(|ty| Name::associated(ty.clone(), f.clone())).unwrap_or_else(|| Name::from(""));
         // 組み込みの型（String など）のメソッドは、どのモジュールで宣言してもよい
         // ponytail: 同じ名前を複数のモジュールが宣言すれば最初の1つ。重なりの検査はトレイトに寄せる時に足す
         if let Some(ty) = &ty
             && !self.norm.fns.contains_key(name.as_str())
             && !ty.contains('.')
         {
-            let tail = format!(".{name}");
-            if let Some(k) = self.norm.fns.keys().filter(|k| k.ends_with(&tail)).min() {
-                name = k.to_string();
+            if let Some(k) = self.norm.fns.keys().filter(|candidate| candidate.local() == &name).min() {
+                name = k.clone();
             }
         }
         // T::f が無ければ、f をメソッドに持つトレイトのうち、x の型に実装があるもの
         if !self.norm.fns.contains_key(name.as_str()) {
-            let mut traits: Vec<(String, String)> = self
+            let mut traits: Vec<(Name, Name)> = self
                 .norm
                 .datas
                 .values()
                 .filter(|d| {
-                    matches!(d.ctors.as_slice(), [c] if c.name == format!("{}{{}}", d.name)
+                    matches!(d.ctors.as_slice(), [c] if c.name.structure_owner() == Some(&d.name)
                         && c.fields.iter().any(|(n, _)| *n == f))
                 })
                 .map(|d| (d.name.clone(), crate::parser::qual(&d.module, &f)))
@@ -1241,7 +1240,7 @@ impl Ck {
                             };
                             self.awaits.insert(body.id);
                             self.push();
-                            let avail = vec![("Async".to_string(), Some(async_eff.clone()))];
+                            let avail = vec![(Name::from("Async"), Some(async_eff.clone()))];
                             let c = self.fn_body(body, rt, avail);
                             self.pop();
                             let c = base(&c?);
@@ -1559,11 +1558,11 @@ impl Ck {
         let explicit = f.params.len() - f.implicit - f.insts;
         // with の要求は、内側のスコープで選ばれた値を引数にして渡す。
         let caps: Vec<_> = f.params[f.implicit..f.params.len() - f.insts]
-            .iter().filter(|(n, _)| n.starts_with("cap#")).map(|(n, _)| n.clone()).collect();
+            .iter().filter(|(name, _)| name.capability_trait().is_some()).map(|(name, _)| name.clone()).collect();
         if !caps.is_empty() && args.len() == explicit - caps.len() {
             for cap in caps {
                 if self.lookup(&cap).is_none() {
-                    return Err(format!("関数 {name} には with {} が必要", cap.trim_start_matches("cap#")).into());
+                    return Err(format!("関数 {name} には with {} が必要", cap.capability_trait().unwrap()).into());
                 }
                 args.push(Expr::Var(cap));
             }
@@ -1598,7 +1597,7 @@ impl Ck {
             for (p, _) in &f.params[..f.implicit] {
                 let id = self.norm.fresh();
                 metas.push((id, p.clone()));
-                fenv[0].insert(p.clone(), neu(Term::Var(id, format!("?{p}"))));
+                fenv[0].insert(p.clone(), neu(Term::Var(id, format!("?{p}").into())));
             }
             &f.params[f.implicit..]
         } else {
@@ -1713,7 +1712,7 @@ impl Ck {
                     self.async_inst.insert(addr);
                     self.awaits.insert(addr);
                 }
-                if k.contains('#') {
+                if k.is_effect_parameter() {
                     self.var_awaits.insert(addr);
                 }
                 let s = show(&v);
@@ -1794,7 +1793,7 @@ impl Ck {
                 if eff_key(&eff) == "Async" {
                     self.awaits.insert(addr);
                 }
-                if eff_key(&eff).contains('#') {
+                if eff_key(&eff).is_effect_parameter() {
                     self.var_awaits.insert(addr);
                 }
                 let s = show(&eff);
@@ -1807,7 +1806,7 @@ impl Ck {
 
     // 関数の本体を、戻り値の型 rt で検査する
     // avail は本体で起こしてよい効果
-    fn fn_body(&mut self, body: &mut Block, rt: Option<V>, avail: Vec<(String, Option<V>)>) -> R<V> {
+    fn fn_body(&mut self, body: &mut Block, rt: Option<V>, avail: Vec<(Name, Option<V>)>) -> R<V> {
         if let Some(V::Type) = rt.as_ref().map(base) {
             return Err("関数は型を返せない。型を計算するなら type で定義する".into());
         }
@@ -1843,7 +1842,7 @@ impl Ck {
     // hint は引数の型だけが分かっている関数型。true なら効果も本体から集める
     fn lam_infer(
         &mut self,
-        params: &[(String, Option<Expr>)],
+        params: &[(Name, Option<Expr>)],
         ret: &Option<Box<Expr>>,
         effs: &[Expr],
         body: &mut Block,
@@ -1907,7 +1906,7 @@ impl Ck {
                 }
             }
             if collect {
-                avail.push(("*".to_string(), None));
+                avail.push((Name::from("*"), None));
             }
             let saved = std::mem::replace(&mut self.collected, collect.then(Vec::new));
             let cod = self.fn_body(body, rt, avail);
@@ -1926,7 +1925,7 @@ impl Ck {
     // 無名関数を、期待する関数型 p で検査する。引数の型は省いてよい
     fn lam_check(
         &mut self,
-        params: &[(String, Option<Expr>)],
+        params: &[(Name, Option<Expr>)],
         ret: &Option<Box<Expr>>,
         body: &mut Block,
         p: &PiV,
@@ -1963,7 +1962,7 @@ impl Ck {
     }
 
     // 関数型 (x: A, ...) -> B の型を検査する
-    fn pi_type(&mut self, binders: &[(String, Expr)], ret: &Expr, effs: &[Expr]) -> R<V> {
+    fn pi_type(&mut self, binders: &[(Name, Expr)], ret: &Expr, effs: &[Expr]) -> R<V> {
         self.push();
         let r = (|| {
             for (n, t) in binders {
@@ -2043,7 +2042,7 @@ impl Ck {
         for (p, _) in &d.params {
             let id = self.norm.fresh();
             metas.push((id, p.clone()));
-            env[0].insert(p.clone(), neu(Term::Var(id, format!("?{p}"))));
+            env[0].insert(p.clone(), neu(Term::Var(id, format!("?{p}").into())));
         }
         let mut sol = HashMap::new();
         if let Some(exp) = expected {
@@ -2158,14 +2157,14 @@ impl Ck {
     }
 
     // 構造体の値 x のフィールド f の型。フィールドの型の細分化の条件は前のフィールドの値を参照できる
-    fn struct_field(&mut self, d: &(String, Vec<V>), x: &Expr, f: &str) -> R<V> {
+    fn struct_field(&mut self, d: &(Name, Vec<V>), x: &Expr, f: &str) -> R<V> {
         let Some(data) = self.norm.datas.get(d.0.as_str()).cloned() else {
             return Err(format!("型 {} は構造体でないのでフィールドは無い", d.0).into());
         };
         let [c] = data.ctors.as_slice() else {
             return Err(format!("型 {} は構造体でないのでフィールドは無い", d.0).into());
         };
-        if !c.name.ends_with("{}") {
+        if c.name.structure_owner().is_none() {
             return Err(format!("型 {} は構造体でないのでフィールドは無い", d.0).into());
         }
         let xv = self.eval_value(x)?;

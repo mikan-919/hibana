@@ -1,3 +1,4 @@
+use super::name::Name;
 use crate::error::{Error, R};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -7,7 +8,7 @@ pub enum Tok {
     Str(String),
     // `...{式}...`。ソースのままの中身と、文字列と式の並び
     Template(String, Vec<TPart>),
-    Ident(String),
+    Ident(Name),
     Raw(char),
     // 記号とキーワードを共に表す
     Punct(&'static str),
@@ -263,7 +264,7 @@ fn lex_from(lx: &mut Lx, nested: bool) -> R<Vec<Token>> {
             let w = &src[start.offset..lx.i];
             match KEYWORDS.iter().find(|k| **k == w) {
                 Some(k) => Tok::Punct(k),
-                None => Tok::Ident(w.to_string()),
+                None => Tok::Ident(w.to_string().into()),
             }
         } else if c == '\'' || c == '"' {
             lx.bump();
@@ -323,15 +324,14 @@ fn lex_from(lx: &mut Lx, nested: bool) -> R<Vec<Token>> {
     }
 }
 
-// 型の名前::名前 は1つの名前 型の名前__名前 にする（Response::text、fn Param::get の宣言、x.get() の呼び先）
-// ponytail: 名前を __ でつなぐだけなので、エラーには Response__text と出る。名前の表を持つ時に専用の名前にする
+// :: の両側の名前を構造として保持する。下線を含む利用者の識別子とは区別する。
 fn paths(toks: Vec<Token>) -> Vec<Token> {
     let mut out: Vec<Token> = Vec::with_capacity(toks.len());
     let mut it = toks.into_iter().peekable();
     while let Some(t) = it.next() {
         if let (Some(Token { tok: Tok::Ident(a), .. }), Tok::Punct("::")) = (out.last(), &t.tok) {
             if let Some(Token { tok: Tok::Ident(b), span, .. }) = it.peek() {
-                let (name, end) = (format!("{a}__{b}"), span.end);
+                let (name, end) = (Name::associated(a.clone(), b.clone()), span.end);
                 let last = out.last_mut().unwrap();
                 last.tok = Tok::Ident(name);
                 last.span.end = end;

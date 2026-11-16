@@ -1,14 +1,14 @@
 //! 効果の検査、ハンドラーと継続の制約。
 use super::*;
 
-pub(super) fn eff_key(v: &V) -> String {
+pub(super) fn eff_key(v: &V) -> Name {
     match v {
         V::DataT(d) => d.0.clone(),
         V::Neu(n) => match &**n {
-            Term::Var(id, name) => format!("{name}#{id}"),
-            _ => show(v),
+            Term::Var(id, name) => Name::effect_parameter(name.clone(), *id),
+            _ => show(v).into(),
         },
-        _ => show(v),
+        _ => show(v).into(),
     }
 }
 
@@ -22,7 +22,7 @@ pub(super) fn flat(effs: &[V]) -> Vec<V> {
         .collect()
 }
 
-pub(super) fn op_site(fns: &HashMap<String, Fn>, f: &Fn, eff: &str) -> Option<Span> {
+pub(super) fn op_site(fns: &HashMap<Name, Fn>, f: &Fn, eff: &str) -> Option<Span> {
     let mut found = None;
     walk(&Expr::Block(f.body.clone()), &mut |x| {
         if let Expr::At(sp, inner) = x
@@ -156,7 +156,7 @@ impl Ck {
                 ));
             }
         }
-        let mut effs: Vec<String> = Vec::new();
+        let mut effs: Vec<Name> = Vec::new();
         for a in &mut *arms {
             let Some(f) = self.norm.fns.get(a.ctor.as_str()).cloned() else {
                 return Err(at_opt(format!("未定義の操作 {}", a.ctor).into(), a.span));
@@ -198,7 +198,7 @@ impl Ck {
     }
 
     // handle の腕を、handle の値の型 t で検査する。resume には操作の戻り値の型の値を渡す
-    pub(super) fn arm(&mut self, a: &mut Arm, insts: &[(String, Option<V>)], t: &V) -> R<()> {
+    pub(super) fn arm(&mut self, a: &mut Arm, insts: &[(Name, Option<V>)], t: &V) -> R<()> {
         let f = self.norm.fns[a.ctor.as_str()].clone();
         let eff = f.op.as_ref().unwrap();
         let Some((_, Some(V::DataT(d)))) = insts.iter().find(|(n, _)| n == eff) else {
@@ -239,7 +239,7 @@ impl Ck {
         if k == "Async" {
             self.awaits.insert(body.id);
         }
-        if k.contains('#') {
+        if k.is_effect_parameter() {
             self.var_awaits.insert(body.id);
         }
     }

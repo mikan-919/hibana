@@ -2,12 +2,7 @@
 use super::*;
 
 // impl から作った、実装の値を作る関数（Show#impl0。メソッドの Show#impl0#show は除く）
-pub(super) fn is_impl(name: &str) -> bool {
-    let last = name.rsplit('.').next().unwrap_or(name);
-    let mut parts = last.split('#');
-    parts.next();
-    parts.next().is_some_and(|p| p.starts_with("impl")) && parts.next().is_none()
-}
+pub(super) fn is_impl(name: &Name) -> bool { name.is_implementation() }
 
 
 impl Ck {
@@ -37,7 +32,7 @@ impl Ck {
             .scopes
             .iter()
             .flat_map(|s| s.vars.keys())
-            .filter(|k| k.starts_with("inst#"))
+            .filter(|k| k.is_instance())
             .map(|k| Expr::Var(k.clone()))
             .collect();
         let mut i = 0;
@@ -51,7 +46,7 @@ impl Ck {
                 && let Some(data) = self.norm.datas.get(d.0.as_str())
             {
                 for (fname, _) in data.ctors.iter().flat_map(|c| &c.fields) {
-                    if fname.starts_with("super#") {
+                    if fname.is_supertrait() {
                         cands.push(Expr::Field(Box::new(c.clone()), fname.clone()));
                     }
                 }
@@ -64,7 +59,7 @@ impl Ck {
             for (p, _) in &f.params[..f.implicit] {
                 let id = self.norm.fresh();
                 ids.push(id);
-                fenv[0].insert(p.clone(), neu(Term::Var(id, format!("?{p}"))));
+                fenv[0].insert(p.clone(), neu(Term::Var(id, format!("?{p}").into())));
             }
             let rt = self
                 .norm

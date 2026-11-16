@@ -1,3 +1,4 @@
+use crate::parser::Name;
 // 型検査後の構文木から、WASM とネイティブの両方へ出す構造化した中間表現を作る。
 // 制御フローは WASM と同じ入れ子の形（if・while・return）で持ち、goto を持たない。
 // 値はすべて V（型の番号 tag と中身 payload の 2 つの 64 ビット整数）で表す。番号は runtime.hb の先頭を参照。
@@ -346,7 +347,7 @@ struct Ctx<'a> {
     sources: HashMap<&'a str, Source<'a>>,
     // 構築子の名前から (番号, フィールド名)
     ctors: HashMap<&'a str, (i64, Vec<&'a str>)>,
-    ctor_list: Vec<(&'a str, Vec<&'a str>)>,
+    ctor_list: Vec<(&'a Name, Vec<&'a str>)>,
     types: HashSet<&'a str>,
     // 変換の途中で作った関数（無名関数）
     made: Vec<Function>,
@@ -367,13 +368,13 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>) -> R<Prog
     for f in &p.fns {
         sources.insert(f.name.as_str(), Source { f, runtime: false });
     }
-    let ctor_list: Vec<(&str, Vec<&str>)> = p
+    let ctor_list: Vec<(&Name, Vec<&str>)> = p
         .datas
         .iter()
         .flat_map(|d| &d.ctors)
         .map(|c| {
             (
-                c.name.as_str(),
+                &c.name,
                 c.fields.iter().map(|f| f.0.as_str()).collect(),
             )
         })
@@ -382,7 +383,7 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>) -> R<Prog
         ctors: ctor_list
             .iter()
             .enumerate()
-            .map(|(i, (n, fs))| (*n, (i as i64, fs.clone())))
+            .map(|(i, (n, fs))| (n.as_str(), (i as i64, fs.clone())))
             .collect(),
         ctor_list,
         types: p.datas.iter().map(|d| d.name.as_str()).collect(),
@@ -412,7 +413,7 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>) -> R<Prog
             }
             names.to_vec()
         }
-        None => p.fns.iter().map(|f| f.name.clone()).collect(),
+        None => p.fns.iter().map(|f| f.name.to_string()).collect(),
     };
     let exported = |name: &str| exports.is_some_and(|names| names.iter().any(|n| n == name));
     let mut visited = HashSet::new();
@@ -449,7 +450,7 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>) -> R<Prog
                     pending.extend(["__str_in".to_string(), "__str_out".to_string()]);
                 }
                 imports.push(Import {
-                    name: f.name.clone(),
+                    name: f.name.to_string(),
                     param_types,
                     result_type,
                 });
@@ -519,7 +520,7 @@ impl<'a> Ctx<'a> {
         let mut body = b.stmts;
         body.push(Stmt::Return(b.value));
         Ok(Function {
-            name: f.name.clone(),
+            name: f.name.to_string(),
             params: f.params.len() as u32,
             param_types: f.params.iter().map(|(_, t)| value_type(t)).collect(),
             result_type: ret_type(f),
@@ -540,13 +541,18 @@ impl<'a> Ctx<'a> {
         };
         let eq = |a: Expr, n: i64| prim(Prim::Eq, vec![a, int(n)]);
         // 構築子の番号から名前、(番号, 位置) からフィールド名
-        if name == "__ctor_name" || name == "__ctor_field" {
-            let mut f = other(if name == "__ctor_name" { 1 } else { 2 });
+        if matches!(name, "__ctor_name" | "__ctor_field" | "__ctor_kind") {
+            let mut f = other(if name == "__ctor_field" { 2 } else { 1 });
             for (i, (cn, fields)) in self.ctor_list.iter().enumerate() {
+                if name == "__ctor_kind" {
+                    let kind = match cn.structure_style() { Some(crate::frontend::name::StructureStyle::Record) => 1, Some(crate::frontend::name::StructureStyle::Tuple) => 2, None => 0 };
+                    f.body.push(if_return(eq(Expr::Local(0), i as i64), int(kind)));
+                    continue;
+                }
                 if name == "__ctor_name" {
                     f.body.push(if_return(
                         eq(Expr::Local(0), i as i64),
-                        Expr::Str(cn.to_string()),
+                        Expr::Str(cn.structure_owner().unwrap_or(cn).to_string()),
                     ));
                     continue;
                 }
@@ -559,7 +565,7 @@ impl<'a> Ctx<'a> {
                     f.body.push(if_return(cond, Expr::Str(field.to_string())));
                 }
             }
-            f.body.push(Stmt::Return(Expr::Str(String::new())));
+            f.body.push(Stmt::Return(if name == "__ctor_kind" { int(0) } else { Expr::Str(String::new()) }));
             return Ok(f);
         }
         // 名前でフィールドを読む。構築子ごとに位置が違うので番号で振り分ける
@@ -612,7 +618,7 @@ fn if_return(cond: Expr, v: Expr) -> Stmt {
 
 struct Lower<'c, 'a> {
     cx: &'c mut Ctx<'a>,
-    vars: HashMap<String, u32>,
+    vars: HashMap<Name, u32>,
     locals: u32,
     // ランタイムの関数。演算子は中身の演算になる
     raw: bool,
@@ -800,7 +806,7 @@ impl Lower<'_, '_> {
                         call("__fn_new", vec![Expr::Func(format!("__w_{n}")), int(0)]),
                     ),
                     // 型は名前だけ
-                    None => mkv(TY, Expr::Str(n.clone())),
+                    None => mkv(TY, Expr::Str(n.to_string())),
                 }
             }
             Ast::Unary("-", a) if matches!(a.peel(), Ast::Num(_)) => {
@@ -941,7 +947,7 @@ impl Lower<'_, '_> {
                 block(stmts, rest)
             }
             Ast::Lam(params, _, _, body) => {
-                let params: Vec<String> = params.iter().map(|(p, _)| p.clone()).collect();
+                let params: Vec<Name> = params.iter().map(|(p, _)| p.clone()).collect();
                 self.lambda(&params, &[], body)?
             }
             Ast::Pi(..) => mkv(TY, Expr::Str("fn".into())),
@@ -1030,8 +1036,8 @@ impl Lower<'_, '_> {
 
     // 無名関数。見えている局所変数をすべて写し取り、別の関数にする
     // unpack は handle の腕の束縛。腕は引数の Vec を 1 つ受け取り、そこから取り出す
-    fn lambda(&mut self, params: &[String], unpack: &[String], body: &parser::Block) -> R<Expr> {
-        let mut caps: Vec<(String, u32)> = self.vars.iter().map(|(n, i)| (n.clone(), *i)).collect();
+    fn lambda(&mut self, params: &[Name], unpack: &[Name], body: &parser::Block) -> R<Expr> {
+        let mut caps: Vec<(Name, u32)> = self.vars.iter().map(|(n, i)| (n.clone(), *i)).collect();
         caps.sort();
         self.cx.lambdas += 1;
         let name = format!("__lam{}", self.cx.lambdas);
@@ -1088,12 +1094,12 @@ impl Lower<'_, '_> {
         let mut ops = Vec::new();
         let mut fns = Vec::new();
         for a in arms {
-            ops.push(Expr::Str(a.ctor.clone()));
+            ops.push(Expr::Str(a.ctor.to_string()));
             let b = parser::Block { id: Default::default(),
                 stmts: vec![],
                 tail: Some(Box::new(a.body.clone())),
             };
-            fns.push(self.lambda(&["#args".to_string()], &a.binds, &b)?);
+            fns.push(self.lambda(&[Name::from("#args")], &a.binds, &b)?);
         }
         let n = int(ops.len() as i64);
         let ops = self.object(ARR, call("__arr_new", vec![n.clone()]), 8, ops);

@@ -1,4 +1,5 @@
 //! 細分化型の項・評価器・事実の照合。
+use crate::parser::Name;
 use super::typeck::{bound, neu, prim, ref_t, PiV, V, PRIMS, SYN_FNS};
 use crate::error::{Error, R};
 use crate::parser::{Ctor, Data, Expr, Fn};
@@ -8,13 +9,13 @@ use std::rc::Rc;
 #[derive(Debug, PartialEq)]
 pub(crate) enum Term {
     // 引数など、値の分からない変数。番号で区別する。0 は細分化型の条件の変数
-    Var(usize, String),
+    Var(usize, Name),
     Un(&'static str, V),
     Bin(&'static str, V, V),
     // 長さなどの記号的な呼び出し
-    Call(String, Vec<V>),
+    Call(Name, Vec<V>),
     // 値の分からない構造体のフィールド
-    Proj(V, String),
+    Proj(V, Name),
     // 型の計算で扱えない式（while・代入・put など）。どの値とも等しくない
     Opaque(usize),
     // num の値。整数用の証明規則を適用しないための印
@@ -289,17 +290,17 @@ pub(super) type H<T> = Result<T, Halt>;
 // 型の計算と、細分化型の条件の評価をする評価器
 // ponytail: 展開は燃料と深さに上限があり、超えると記号として残す
 pub(super) struct Eval {
-    pub(super) fns: HashMap<String, Fn>,
-    pub(super) datas: HashMap<String, Data>,
+    pub(super) fns: HashMap<Name, Fn>,
+    pub(super) datas: HashMap<Name, Data>,
     // 構築子名から (型, 構築子)
-    pub(super) ctors: HashMap<String, (Data, Ctor)>,
+    pub(super) ctors: HashMap<Name, (Data, Ctor)>,
     pub(super) fuel: usize,
     // 展開の入れ子の深さ。スタックあふれを防ぐ
     pub(super) depth: usize,
     pub(super) next_id: usize,
 }
 
-pub(super) type Env = Vec<HashMap<String, V>>;
+pub(super) type Env = Vec<HashMap<Name, V>>;
 
 impl Eval {
     pub(super) fn new() -> Self {
@@ -340,13 +341,13 @@ impl Eval {
         {
             return d.1[i].clone();
         }
-        neu(Term::Proj(x, f.to_string()))
+        neu(Term::Proj(x, f.to_string().into()))
     }
 
     // 関数型の式を評価する。型は引数の値に依存しない
     pub(super) fn eval_pi(
         &mut self,
-        binders: &[(String, Expr)],
+        binders: &[(Name, Expr)],
         ret: &Expr,
         effs: &[Expr],
         env: &mut Env,

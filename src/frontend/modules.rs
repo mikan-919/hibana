@@ -42,7 +42,7 @@ fn load(
     if !is_str {
         if let Some((_, t)) = LIBS.iter().find(|l| l.0 == name) {
             return Ok((
-                name.rsplit("__").next().unwrap().to_string(),
+                name.rsplit("::").next().unwrap().to_string(),
                 t.to_string(),
                 dir.to_path_buf(),
             ));
@@ -158,8 +158,8 @@ pub fn load_modules(source: &str, directory: &std::path::Path) -> R<ModuleSet> {
                 continue;
             }
             match &pair[1].tok {
-                Tok::Ident(name) => requests.push((name.clone(), false, pair[1].span)),
-                Tok::Str(name) => requests.push((name.clone(), true, pair[1].span)),
+                Tok::Ident(name) => requests.push((name.to_string(), false, pair[1].span)),
+                Tok::Str(name) => requests.push((name.clone().into(), true, pair[1].span)),
                 _ => {
                     return Err(Error::from("use の後にはライブラリ名かファイル名が必要")
                         .at(pair[1].span)

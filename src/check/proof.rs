@@ -21,7 +21,7 @@ impl Ck {
         let [c] = data.ctors.as_slice() else {
             return Ok(());
         };
-        if !c.name.ends_with("{}") {
+        if c.name.structure_owner().is_none() {
             return Ok(());
         }
         let mut env: Env = vec![
@@ -44,7 +44,7 @@ impl Ck {
     }
 
     // 変数を束縛し、型の細分化の条件をその変数についての事実として加える
-    pub(super) fn bind(&mut self, name: &str, ty: V, val: V, mutable: bool) -> R<()> {
+    pub(super) fn bind(&mut self, name: &Name, ty: V, val: V, mutable: bool) -> R<()> {
         let val = if base(&ty) == prim("num") { crate::check::prove::num(val) } else { val };
         for p in split(&ty).1 {
             let f = self.norm.subst(&p, 0, &val)?;
@@ -55,7 +55,7 @@ impl Ck {
             .last_mut()
             .unwrap()
             .vars
-            .insert(name.into(), Entry { ty, val, mutable });
+            .insert(name.clone(), Entry { ty, val, mutable });
         Ok(())
     }
 
@@ -234,15 +234,15 @@ impl Ck {
         let target = self.eval_type(&args[0])?;
         let (base, conditions) = split(&target);
         let V::Prim(kind @ ("int" | "num" | "String" | "bool")) = base else { return Err("refine は int・num・String・bool の細分化型に使う".into()) };
-        let name = format!("refine#{}", self.norm.fresh());
+        let name = Name::temporary("refine", self.norm.fresh());
         let mut condition = Expr::Bool(true);
         for p in conditions { condition = Expr::Binary("&&", Box::new(condition), Box::new(predicate(&p, &name)?)); }
         let value = args.pop().unwrap();
         let expected = V::DataT(Rc::new(("std.Result".into(), vec![target, prim("String")])));
         let leaf = |value| Block { id: Default::default(), stmts: vec![], tail: Some(Box::new(value)) };
         let mut expanded = Expr::Block(Block { id: Default::default(),
-            stmts: vec![Stmt::Let { name: name.clone(), mutable: false, ty: Some(Expr::Var(kind.into())), init: value }],
-            tail: Some(Box::new(Expr::If(Box::new(condition), leaf(Expr::Call("std.Ok".into(), vec![Expr::Var(name)])), Some(Box::new(Expr::Block(leaf(Expr::Call("std.Err".into(), vec![Expr::Str("細分化型の条件を満たさない".into())])))))))),
+            stmts: vec![Stmt::Let { name: name.clone().into(), mutable: false, ty: Some(Expr::Var(kind.into())), init: value }],
+            tail: Some(Box::new(Expr::If(Box::new(condition), leaf(Expr::Call("std.Ok".into(), vec![Expr::Var(name.into())])), Some(Box::new(Expr::Block(leaf(Expr::Call("std.Err".into(), vec![Expr::Str("細分化型の条件を満たさない".into())])))))))),
         });
         self.check(&mut expanded, &expected)?;
         *e = expanded;

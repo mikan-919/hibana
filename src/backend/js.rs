@@ -58,9 +58,10 @@ function $show(v) {
   if (typeof v === "function") return "<fn>";
   if (v instanceof $Ref) return "<ref>";
   if (Array.isArray(v)) return "[" + v.map($show).join(", ") + "]";
-  if (v.$c.endsWith("{}") && $fields[v.$c][0] === "0") return v.$c.slice(0, -2) + "(" + v.$f.map($show).join(", ") + ")";
-  if (v.$c.endsWith("{}")) return v.$c.slice(0, -2) + " { " + $fields[v.$c].map((f, i) => f + ": " + $show(v.$f[i])).join(", ") + " }";
-  return v.$f.length === 0 ? v.$c : v.$c + "(" + v.$f.map($show).join(", ") + ")";
+  const [name, style] = $constructors[v.$c] ?? [v.$c, 0];
+  if (style === 2) return name + "(" + v.$f.map($show).join(", ") + ")";
+  if (style === 1) return name + " { " + $fields[v.$c].map((f, i) => f + ": " + $show(v.$f[i])).join(", ") + " }";
+  return v.$f.length === 0 ? name : name + "(" + v.$f.map($show).join(", ") + ")";
 }
 // 処理中の handle。内側ほど後ろ。腕の中の操作は、その handle より外で処理する
 // 並べ替えずに作り直す（並行に動く処理と共有するため）。await の後は $k で、待つ前の並びに戻す
@@ -199,6 +200,15 @@ pub fn emit(prog: &Program, info: &crate::typeck::Info) -> String {
         })
         .collect();
     out += &format!("const $fields = {{ {} }};\n", fields.join(", "));
+    let constructors: Vec<_> = prog.datas.iter().flat_map(|data| &data.ctors).map(|ctor| {
+        let kind = match ctor.name.structure_style() {
+            Some(crate::frontend::name::StructureStyle::Record) => 1,
+            Some(crate::frontend::name::StructureStyle::Tuple) => 2,
+            None => 0,
+        };
+        format!("{}: [{}, {kind}]", lit(&ctor.name), lit(ctor.name.structure_owner().unwrap_or(&ctor.name)))
+    }).collect();
+    out += &format!("const $constructors = {{ {} }};\n", constructors.join(", "));
     // 構築子ごとの、フィールドの名前から位置への表
     out += "const $fi = Object.fromEntries(Object.entries($fields).map(([c, fs]) => [c, Object.fromEntries(fs.map((f, i) => [f, i]))]));\n";
     let mut imports = String::new();
@@ -214,7 +224,7 @@ pub fn emit(prog: &Program, info: &crate::typeck::Info) -> String {
     }
     // import は ES モジュールの先頭に置く
     let mut out = imports + &out;
-    out += "(async () => { try { await f_main(); } catch (e) { console.error(\"実行時エラー: \" + e.message + ($at ? \"（\" + $at + \"）\" : \"\")); if (globalThis.process) process.exitCode = 1; } })();\n";
+    out += &format!("(async () => {{ try {{ await {}(); }} catch (e) {{ console.error(\"実行時エラー: \" + e.message + ($at ? \"（\" + $at + \"）\" : \"\")); if (globalThis.process) process.exitCode = 1; }} }})();\n", ident("f_", "main"));
     out
 }
 
@@ -243,7 +253,7 @@ fn desc(prog: &Program, t: &Expr, depth: usize) -> String {
             if let Some(d) = prog
                 .datas
                 .iter()
-                .find(|d| &d.name == n && d.ctors.len() == 1 && d.ctors[0].name.ends_with("{}"))
+                .find(|d| &d.name == n && d.ctors.len() == 1 && d.ctors[0].name.structure_owner().is_some())
             {
                 let c = &d.ctors[0];
                 let fs: Vec<String> = c
@@ -313,9 +323,12 @@ fn lit(s: &str) -> String {
     o + "\""
 }
 
-// 衛生性で付けた # などを JavaScript の名前に使える形にする
+// 出力先の識別子へ変換する。異なる綴りが同じ名前にならないよう全バイトを符号化する。
 fn ident(prefix: &str, n: &str) -> String {
-    format!("{prefix}{}", n.replace('#', "$").replace('.', "$_"))
+    use std::fmt::Write;
+    let mut result = prefix.to_string();
+    for byte in n.bytes() { write!(&mut result, "{byte:02x}").unwrap(); }
+    result
 }
 
 struct Gen<'a> {
@@ -446,7 +459,7 @@ impl Gen<'_> {
     }
 
     fn func(&mut self, f: &Fn) -> String {
-        let params: Vec<String> = f.params.iter().map(|p| p.0.clone()).collect();
+        let params: Vec<String> = f.params.iter().map(|p| p.0.to_string()).collect();
         let mut s = format!(
             "const {} = {};\n",
             ident("f_", &f.name),
@@ -753,7 +766,7 @@ impl Gen<'_> {
                     .filter(|(_, m)| *m)
                     .map(|(js, _)| js.clone())
                     .collect();
-                let params: Vec<String> = params.iter().map(|p| p.0.clone()).collect();
+                let params: Vec<String> = params.iter().map(|p| p.0.to_string()).collect();
                 let a = self.waits(body.id);
                 let f = self.function(&params, body, a);
                 let shared: Vec<String> = muts.iter().map(|m| format!("$sh({m})")).collect();

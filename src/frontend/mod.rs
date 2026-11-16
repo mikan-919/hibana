@@ -2,6 +2,7 @@
 pub mod lexer;
 pub mod meta;
 pub mod modules;
+pub mod name;
 pub mod parser;
 pub mod source;
 pub(crate) mod resolve;

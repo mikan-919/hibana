@@ -1,17 +1,13 @@
+use crate::parser::Name;
 // 名前の解決。修飾していない大域の名前を、そのモジュールから見た修飾した名前（web.ok など）に書き換える。
 // 局所変数（引数・let・無名関数の引数・match の束縛・for の変数）は書き換えない
 use crate::parser::{Block, Expr, Program, Stmt, Use, qual};
 use std::collections::{HashMap, HashSet};
 
-pub fn resolve(prog: &mut Program, uses: &HashMap<String, Vec<Use>>, known: &HashSet<String>) {
-    // 型の名前::構築子（Shape::Circle は字句解析で Shape__Circle になっている）から構築子の名前
-    // ponytail: 型の名前は修飾を外して引く。別のモジュールに同じ名前の型と構築子があれば後の方になる
-    let last = |n: &str| n.rsplit('.').next().unwrap_or(n).to_string();
-    let ctors: HashMap<String, String> = prog
-        .datas
-        .iter()
-        .flat_map(|d| d.ctors.iter().map(move |c| (format!("{}__{}", last(&d.name), last(&c.name)), last(&c.name))))
-        .collect();
+pub fn resolve(prog: &mut Program, uses: &HashMap<String, Vec<Use>>, known: &HashSet<Name>) {
+    let ctors: HashMap<Name, Name> = prog.datas.iter().flat_map(|data| {
+        data.ctors.iter().map(move |ctor| (Name::associated(data.name.clone(), ctor.name.local().clone()), ctor.name.clone()))
+    }).collect();
     let ctors = &ctors;
     for f in &mut prog.fns {
         let mut r = Resolver {
@@ -76,9 +72,9 @@ mod tests {
 pub(crate) fn resolve_macro(
     block: &mut Block,
     module: &str,
-    params: Vec<String>,
+    params: Vec<Name>,
     uses: &HashMap<String, Vec<Use>>,
-    known: &HashSet<String>,
+    known: &HashSet<Name>,
 ) {
     let mut r = Resolver {
         module: module.into(),
@@ -93,35 +89,27 @@ pub(crate) fn resolve_macro(
 struct Resolver<'a> {
     module: String,
     uses: &'a HashMap<String, Vec<Use>>,
-    known: &'a HashSet<String>,
-    ctors: &'a HashMap<String, String>,
-    locals: Vec<Vec<String>>,
+    known: &'a HashSet<Name>,
+    ctors: &'a HashMap<Name, Name>,
+    locals: Vec<Vec<Name>>,
 }
 
 impl Resolver<'_> {
     // 自分のモジュール、use で取り込んだ名前の順に探す。利用者のファイル（module が ""）では、自分の名前は修飾しない形のまま
-    fn name(&self, n: &mut String) {
-        if let Some(c) = self.ctors.get(n.as_str())
-            && !self.locals.iter().any(|s| s.contains(n))
-        {
-            *n = c.clone();
+    fn name(&self, name: &mut Name) {
+        if self.locals.iter().any(|scope| scope.contains(name)) { return; }
+        let mut candidates = vec![qual(&self.module, &*name)];
+        for import in self.uses.get(&self.module).into_iter().flatten() {
+            if import.names.takes(name) { candidates.push(qual(&import.module, &*name)); }
         }
-        if n.contains('.') || self.locals.iter().any(|s| s.contains(n)) {
-            return;
-        }
-        let mut cands = vec![qual(&self.module, n)];
-        for u in self.uses.get(&self.module).into_iter().flatten() {
-            let take = u.names.takes(n);
-            if take {
-                cands.push(qual(&u.module, n));
-            }
-        }
-        if let Some(c) = cands.into_iter().find(|c| self.known.contains(c)) {
-            *n = c;
+        candidates.push(name.clone());
+        for candidate in candidates {
+            let resolved = self.ctors.get(&candidate).unwrap_or(&candidate);
+            if self.known.contains(resolved) { *name = resolved.clone(); return; }
         }
     }
 
-    fn with<T>(&mut self, names: &[String], f: impl FnOnce(&mut Self) -> T) -> T {
+    fn with<T>(&mut self, names: &[Name], f: impl FnOnce(&mut Self) -> T) -> T {
         self.locals.push(names.to_vec());
         let r = f(self);
         self.locals.pop();
@@ -156,7 +144,10 @@ impl Resolver<'_> {
 
     fn expr(&mut self, e: &mut Expr) {
         let local_member = match &*e {
-            Expr::Var(n) | Expr::Call(n, _) => n.split_once('.').filter(|(base, _)| self.locals.iter().any(|s| s.iter().any(|n| n == base))).map(|(base, field)| (base.to_string(), field.to_string())),
+            Expr::Var(n) | Expr::Call(n, _) => match &n.kind {
+                crate::parser::NameKind::Qualified(base, field) if self.locals.iter().any(|scope| scope.iter().any(|name| name == base)) => Some((Name::from(base), *field.clone())),
+                _ => None,
+            },
             _ => None,
         };
         if let Some((base, field)) = local_member {
