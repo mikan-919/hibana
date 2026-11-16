@@ -7,8 +7,8 @@ use crate::error::R;
 use crate::ir::{self, Block, Expr, Node, Prim, Program, Stmt};
 use cranelift_codegen::binemit::Reloc;
 use cranelift_codegen::control::ControlPlane;
-use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::types::I64;
+use cranelift_codegen::ir::condcodes::{IntCC, FloatCC};
+use cranelift_codegen::ir::types::{I64, F64};
 use cranelift_codegen::ir::{
     AbiParam, ExtFuncData, ExternalName, FuncRef, Function, GlobalValueData, InstBuilder,
     MemFlagsData, Signature, StackSlotData, StackSlotKind, TrapCode, UserExternalName,
@@ -537,6 +537,28 @@ impl Body<'_, '_> {
                 let million = self.int(1_000_000);
                 let sub = self.b.ins().sdiv(nsec, million);
                 self.b.ins().iadd(ms, sub)
+            }
+            Read => self.sys(0, &[x(0), x(1), x(2)]),
+            FFromInt => {
+                let f = self.b.ins().fcvt_from_sint(F64, x(0));
+                self.b.ins().bitcast(I64, MemFlagsData::new(), f)
+            }
+            FToInt | FAdd | FSub | FMul | FDiv | FNeg | FFloor | FSqrt | FEq | FLt | FLe => {
+                let a = self.b.ins().bitcast(F64, MemFlagsData::new(), x(0));
+                if p == FToInt { self.b.ins().fcvt_to_sint_sat(I64, a) } else {
+                    let b = if vs.len() > 1 { self.b.ins().bitcast(F64, MemFlagsData::new(), x(1)) } else { a };
+                    if matches!(p, FEq | FLt | FLe) {
+                        let cc = match p { FEq => FloatCC::Equal, FLt => FloatCC::LessThan, _ => FloatCC::LessThanOrEqual };
+                        let r = self.b.ins().fcmp(cc, a, b);
+                        let r = self.b.ins().uextend(I64, r);
+                        return (self.int(ir::BOOL), r);
+                    }
+                    let r = match p {
+                        FAdd => self.b.ins().fadd(a,b), FSub => self.b.ins().fsub(a,b), FMul => self.b.ins().fmul(a,b), FDiv => self.b.ins().fdiv(a,b),
+                        FNeg => self.b.ins().fneg(a), FFloor => self.b.ins().floor(a), FSqrt => self.b.ins().sqrt(a), _ => unreachable!(),
+                    };
+                    self.b.ins().bitcast(I64, MemFlagsData::new(), r)
+                }
             }
         };
         (self.int(ir::INT), payload)

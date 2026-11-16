@@ -2,7 +2,7 @@
 // 型検査は通さず、構文解析だけして IR に変換する。演算子はすべて値の中身（64 ビット整数）の演算になる。
 // __load などの __ で始まる組み込みは、IR の命令に直接変換する（src/backend/ir.rs の prim）。
 //
-// 値の型の番号: 0 unit, 1 int, 2 bool, 3 String, 4 Vec, 5 type の値・構造体, 6 関数, 7 型, 8 Ref
+// 値の型の番号: 0 unit, 1 int, 2 bool, 3 String, 4 Vec, 5 type の値・構造体, 6 関数, 7 型, 8 Ref, 9 num（中身は f64 のビット列）
 // ヒープ上の形（各欄は 8 バイト、値は型の番号と中身の 16 バイト）:
 //   String: [長さ][UTF-8 のバイト列]
 //   Vec: [要素数][値...]
@@ -115,7 +115,107 @@ fn __cat(a: String, b: String) -> String {
 
 // + の整数以外。文字列の連結
 fn __add(a: String, b: String) -> String {
+    if __tag(a) == 9 { return __num_checked(__f_add(a, b)) }
     __cat(a, b)
+}
+
+fn __num_checked(bits: int) -> num {
+    if __and(__shr(__payload(bits), 52), 2047) == 2047 { __die('num の演算結果が有限でない') }
+    __mkv(9, __payload(bits))
+}
+
+fn __num(v: int) -> num {
+    if __tag(v) == 9 { return __num_checked(v) }
+    __num_checked(__f_from_int(v))
+}
+
+fn __neg(v: int) -> int {
+    if __tag(v) == 9 { return __num_checked(__f_neg(v)) }
+    0 - v
+}
+fn __sub(a: int, b: int) -> int {
+    if __tag(a) == 9 { return __num_checked(__f_sub(a, b)) }
+    a - b
+}
+fn __mul(a: int, b: int) -> int {
+    if __tag(a) == 9 { return __num_checked(__f_mul(a, b)) }
+    a * b
+}
+fn __div(a: int, b: int) -> int {
+    if __tag(a) == 9 {
+        if __f_eq(b, 0.0) { __div_zero() }
+        return __num_checked(__f_div(a, b))
+    }
+    a / b
+}
+fn __lt(a: int, b: int) -> bool {
+    if __tag(a) == 9 { return __f_lt(a, b) }
+    a < b
+}
+fn __le(a: int, b: int) -> bool {
+    if __tag(a) == 9 { return __f_le(a, b) }
+    a <= b
+}
+fn __gt(a: int, b: int) -> bool { __lt(b, a) }
+fn __ge(a: int, b: int) -> bool { __le(b, a) }
+
+fn __num_floor(v: num) -> int {
+    let n = __f_floor(v)
+    if __f_lt(n, -9223372036854775808.0) || !__f_lt(n, 9223372036854775808.0) { __die('floor の結果が int の範囲外') }
+    __f_to_int(n)
+}
+fn __num_sqrt(v: num) -> num {
+    if __f_lt(v, 0.0) { __die('sqrt の引数が負') }
+    __num_checked(__f_sqrt(v))
+}
+
+// ponytail: num の指数は int の範囲の整数のみ。小数の指数には対数・指数関数の実装が必要
+fn __value_pow(a: int, b: int) -> int {
+    if __tag(a) != 9 { return __pow(a, b) }
+    let mut n = __num_floor(b)
+    if !__f_eq(__f_from_int(n), b) { __die('num の小数の指数は未対応') }
+    let mut factor = a
+    if n < 0 {
+        if __f_eq(a, 0.0) { __die('num の演算結果が有限でない') }
+        factor = __num_checked(__f_div(1.0, a))
+    }
+    let mut result = 1.0
+    while n != 0 {
+        if n % 2 != 0 { result = __num_checked(__f_mul(result, factor)) }
+        n = n / 2
+        if n != 0 { factor = __num_checked(__f_mul(factor, factor)) }
+    }
+    result
+}
+
+// 仮数の整数除算で余りを求め、除算の結果が桁あふれする場合も扱う
+fn __rem(a: int, b: int) -> int {
+    if __tag(a) != 9 { return a % b }
+    let sign = __shl(__shr(__payload(a), 63), 63)
+    let mut x = __and(__payload(a), 9223372036854775807)
+    let y = __and(__payload(b), 9223372036854775807)
+    if y == 0 { __div_zero() }
+    if x < y { return a }
+    if x == y { return __mkv(9, sign) }
+    let mut ex = __shr(x, 52)
+    let mut ey = __shr(y, 52)
+    let mut my = __and(y, 4503599627370495)
+    x = __and(x, 4503599627370495)
+    if ex == 0 { ex = 1 } else { x = x + 4503599627370496 }
+    if ey == 0 { ey = 1 } else { my = my + 4503599627370496 }
+    while x < 4503599627370496 { x = x * 2; ex = ex - 1 }
+    while my < 4503599627370496 { my = my * 2; ey = ey - 1 }
+    while ex > ey {
+        if x >= my { x = x - my }
+        if x == 0 { return __mkv(9, sign) }
+        x = x * 2
+        ex = ex - 1
+    }
+    if x >= my { x = x - my }
+    if x == 0 { return __mkv(9, sign) }
+    while x < 4503599627370496 { x = x * 2; ex = ex - 1 }
+    if ex > 0 { x = x - 4503599627370496 + __shl(ex, 52) } else { x = __shr(x, 1 - ex) }
+    __mkv(9, __or(x, sign))
 }
 
 fn __str_eq(pa: int, pb: int) -> bool {
@@ -144,6 +244,168 @@ fn __utf8_len(p: int) -> int {
         i = i + 1
     }
     c
+}
+
+// f64 の境界を10進の整数比で保持する。40桁の基数10億で全 f64 と丸めの余白を収める
+fn __big(n: int) -> int {
+    let p = __alloc(328)
+    let mut value = n
+    let mut len = 0
+    while len == 0 || value != 0 {
+        __store(p + 8 + len * 8, value % 1000000000)
+        value = value / 1000000000
+        len = len + 1
+    }
+    __store(p, len)
+    p
+}
+fn __big_copy(p: int) -> int {
+    let q = __alloc(328)
+    __copy(q, p, 8 + __load(p) * 8)
+    q
+}
+fn __big_mul(p: int, factor: int) {
+    let mut carry = 0
+    let mut i = 0
+    let n = __load(p)
+    while i < n {
+        let d = __load(p + 8 + i * 8) * factor + carry
+        __store(p + 8 + i * 8, d % 1000000000)
+        carry = d / 1000000000
+        i = i + 1
+    }
+    if carry != 0 {
+        if n >= 40 { __die('num の表示用整数が範囲外') }
+        __store(p + 8 + n * 8, carry)
+        __store(p, n + 1)
+    }
+}
+fn __big_cmp(a: int, b: int) -> int {
+    let na = __load(a)
+    let nb = __load(b)
+    if na < nb { return 0 - 1 }
+    if na > nb { return 1 }
+    let mut i = na
+    while i > 0 {
+        i = i - 1
+        let x = __load(a + 8 + i * 8)
+        let y = __load(b + 8 + i * 8)
+        if x < y { return 0 - 1 }
+        if x > y { return 1 }
+    }
+    0
+}
+fn __big_sub(a: int, b: int) {
+    let n = __load(a)
+    let mut borrow = 0
+    let mut i = 0
+    while i < n {
+        let mut d = __load(a + 8 + i * 8) - borrow
+        if i < __load(b) { d = d - __load(b + 8 + i * 8) }
+        borrow = 0
+        if d < 0 { d = d + 1000000000; borrow = 1 }
+        __store(a + 8 + i * 8, d)
+        i = i + 1
+    }
+    let mut len = n
+    while len > 1 && __load(a + len * 8) == 0 { len = len - 1 }
+    __store(a, len)
+}
+
+// 隣り合う f64 の中点を境界にして、元の値へ丸め戻せる最短の10進表記を選ぶ
+fn __num_str(bits: int) -> String {
+    let negative = __shr(bits, 63) != 0
+    let absolute = __and(bits, 9223372036854775807)
+    if absolute == 0 {
+        if negative { return '-0' }
+        return '0'
+    }
+    let exponent = __shr(absolute, 52)
+    let fraction = __and(absolute, 4503599627370495)
+    let mut mantissa = fraction
+    let mut shift = 0 - 1076
+    if exponent != 0 {
+        mantissa = mantissa + 4503599627370496
+        shift = exponent - 1077
+    }
+    let r = __big(mantissa * 4)
+    let s = __big(1)
+    let mut lower = 2
+    if exponent > 1 && fraction == 0 { lower = 1 }
+    let lo = __big(lower)
+    let hi = __big(2)
+    while shift > 0 {
+        __big_mul(r, 2); __big_mul(lo, 2); __big_mul(hi, 2)
+        shift = shift - 1
+    }
+    while shift < 0 { __big_mul(s, 2); shift = shift + 1 }
+    let mut decimal = 0
+    let ten_s = __big_copy(s)
+    __big_mul(ten_s, 10)
+    while __big_cmp(r, ten_s) >= 0 {
+        __big_mul(s, 10); __big_mul(ten_s, 10)
+        decimal = decimal + 1
+    }
+    while __big_cmp(r, s) < 0 {
+        __big_mul(r, 10); __big_mul(lo, 10); __big_mul(hi, 10)
+        decimal = decimal - 1
+    }
+    let digits = __alloc(24)
+    let mut count = 0
+    let mut done = false
+    let inclusive = __and(mantissa, 1) == 0
+    while !done {
+        let mut digit = 0
+        while __big_cmp(r, s) >= 0 { __big_sub(r, s); digit = digit + 1 }
+        __store8(digits + count, digit)
+        count = count + 1
+        let low_cmp = __big_cmp(r, lo)
+        let gap = __big_copy(s)
+        __big_sub(gap, r)
+        let high_cmp = __big_cmp(gap, hi)
+        let low = low_cmp < 0 || (inclusive && low_cmp == 0)
+        let high = high_cmp < 0 || (inclusive && high_cmp == 0)
+        if low || high {
+            let twice = __big_copy(r)
+            __big_mul(twice, 2)
+            let middle = __big_cmp(twice, s)
+            let up = high && (!low || middle > 0 || (middle == 0 && digit % 2 != 0))
+            if up {
+                let mut pos = count - 1
+                while pos > 0 && __load8(digits + pos) == 9 {
+                    __store8(digits + pos, 0)
+                    pos = pos - 1
+                }
+                if __load8(digits + pos) == 9 {
+                    __store8(digits, 1)
+                    decimal = decimal + 1
+                } else { __store8(digits + pos, __load8(digits + pos) + 1) }
+            }
+            done = true
+        } else {
+            if count >= 17 { __die('num の表示を丸められない') }
+            __big_mul(r, 10); __big_mul(lo, 10); __big_mul(hi, 10)
+        }
+    }
+    while count > 1 && __load8(digits + count - 1) == 0 { count = count - 1 }
+    let mut i = 0
+    while i < count { __store8(digits + i, __load8(digits + i) + 48); i = i + 1 }
+    let mut text = ''
+    let point = decimal + 1
+    if point <= 0 {
+        text = '0.'
+        let mut zeros = 0 - point
+        while zeros > 0 { text = __cat(text, '0'); zeros = zeros - 1 }
+        text = __cat(text, __bytes(digits, count))
+    } else if point >= count {
+        text = __bytes(digits, count)
+        let mut zeros = point - count
+        while zeros > 0 { text = __cat(text, '0'); zeros = zeros - 1 }
+    } else {
+        text = __cat(__cat(__bytes(digits, point), '.'), __bytes(digits + point, count - point))
+    }
+    if negative { text = __cat('-', text) }
+    text
 }
 
 fn __int_str(n: int) -> String {
@@ -175,6 +437,7 @@ fn __eq(a: int, b: int) -> bool {
     if t != __tag(b) {
         return false
     }
+    if t == 9 { return __f_eq(a, b) }
     let pa = __payload(a)
     let pb = __payload(b)
     if pa == pb {
@@ -273,6 +536,7 @@ fn __show(v: int) -> String {
     if t == 1 {
         return __int_str(p)
     }
+    if t == 9 { return __num_str(p) }
     if t == 2 {
         if p != 0 {
             return 'true'
@@ -341,6 +605,61 @@ fn __to_str(v: int) -> String {
 fn __write_str(fd: int, s: String) {
     let p = __payload(s)
     __sys_write(fd, p + 8, __load(p))
+}
+
+fn __input() -> String {
+    let mut capacity = 64
+    let mut buffer = __alloc(capacity)
+    let byte = __alloc(1)
+    let mut size = 0
+    let mut done = false
+    while !done {
+        // ponytail: 1バイトずつ読む。読み込みが律速になる場合は、呼び出し間で残りを保持するバッファを足す
+        let read = __sys_read(0, byte, 1)
+        if read == 0 { done = true }
+        else if read != 0 - 4 {
+            if read != 1 { __die('標準入力を読めません') }
+            let b = __load8(byte)
+            if b == 10 {
+                if size > 0 && __load8(buffer + size - 1) == 13 { size = size - 1 }
+                done = true
+            } else {
+                if size == capacity {
+                    capacity = capacity * 2
+                    let next = __alloc(capacity)
+                    __copy(next, buffer, size)
+                    buffer = next
+                }
+                __store8(buffer + size, b)
+                size = size + 1
+            }
+        }
+    }
+    // UTF-8 の過長表現・代理符号・範囲外・途中で終わる文字を拒否する
+    let mut i = 0
+    while i < size {
+        let b = __load8(buffer + i)
+        let mut n = 1
+        let mut minimum = 0
+        let mut codepoint = b
+        if b >= 128 {
+            if b >= 194 && b <= 223 { n = 2; minimum = 128; codepoint = b - 192 }
+            else if b >= 224 && b <= 239 { n = 3; minimum = 2048; codepoint = b - 224 }
+            else if b >= 240 && b <= 244 { n = 4; minimum = 65536; codepoint = b - 240 }
+            else { __die('標準入力の文字コードが UTF-8 でない') }
+            if i + n > size { __die('標準入力の文字コードが UTF-8 でない') }
+            let mut j = 1
+            while j < n {
+                let c = __load8(buffer + i + j)
+                if c < 128 || c > 191 { __die('標準入力の文字コードが UTF-8 でない') }
+                codepoint = codepoint * 64 + c - 128
+                j = j + 1
+            }
+            if codepoint < minimum || codepoint > 1114111 || (codepoint >= 55296 && codepoint <= 57343) { __die('標準入力の文字コードが UTF-8 でない') }
+        }
+        i = i + n
+    }
+    __bytes(buffer, size)
 }
 
 // 1 回の書き込みで 1 行を出す（JavaScript の接続コードは 1 回ごとに 1 行として渡す）

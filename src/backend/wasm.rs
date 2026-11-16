@@ -1,6 +1,6 @@
 // 構造化 IR を WebAssembly に変換する。
 // IR の値（型の番号と中身）は 2 つの i64 で表し、関数は 2 つの i64 を返す。
-// 公開関数と外部関数の境界では、int は i64、str は (長さ << 32) | 位置 の i64 に変換する。
+// 公開関数と外部関数の境界では、int は i64、num は f64、str は (長さ << 32) | 位置 の i64 に変換する。
 // メモリ: [0, 8) は使わない、[8, 72) はランタイムの状態（runtime.hb の __static）、その後に文字列のリテラル、ヒープ。
 use crate::ir::{self, Block, Expr, Node, Prim, Program, Stmt, ValueType};
 use std::collections::HashMap;
@@ -30,24 +30,24 @@ fn mem(offset: u64, align: u32) -> MemArg {
 #[derive(Default)]
 struct Types {
     section: TypeSection,
-    seen: HashMap<(u32, u32), u32>,
+    seen: HashMap<(Vec<ValType>, Vec<ValType>), u32>,
 }
 
 impl Types {
     fn get(&mut self, params: u32, results: u32) -> u32 {
+        self.signature(vec![ValType::I64; params as usize], vec![ValType::I64; results as usize])
+    }
+    fn signature(&mut self, params: Vec<ValType>, results: Vec<ValType>) -> u32 {
         let n = self.seen.len() as u32;
-        *self.seen.entry((params, results)).or_insert_with(|| {
-            self.section.ty().function(
-                vec![ValType::I64; params as usize],
-                vec![ValType::I64; results as usize],
-            );
+        *self.seen.entry((params.clone(), results.clone())).or_insert_with(|| {
+            self.section.ty().function(params, results);
             n
         })
     }
-}
-
-fn raw_results(t: ValueType) -> u32 {
-    u32::from(t != ValueType::Unit)
+    fn boundary(&mut self, params: &[ValueType], result: ValueType) -> u32 {
+        let ty = |t: ValueType| if t == ValueType::Num { ValType::F64 } else { ValType::I64 };
+        self.signature(params.iter().copied().map(ty).collect(), if result == ValueType::Unit { vec![] } else { vec![ty(result)] })
+    }
 }
 
 // 公開する関数は selected、None なら境界で渡せる利用者の関数すべて
@@ -57,6 +57,7 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
     let mut data = Vec::new();
     let mut writes = false;
     let mut now = false;
+    let mut reads = false;
     let mut table: Vec<&str> = Vec::new();
     for f in &program.functions {
         f.each(&mut |n| match n {
@@ -70,6 +71,7 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
             }
             Node::Expr(Expr::Prim(Prim::Write, _)) => writes = true,
             Node::Expr(Expr::Prim(Prim::Now, _)) => now = true,
+            Node::Expr(Expr::Prim(Prim::Read, _)) => reads = true,
             Node::Expr(Expr::Func(name)) if !table.contains(&name.as_str()) => table.push(name),
             _ => {}
         });
@@ -117,19 +119,13 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
     };
     let write = writes.then(|| import(&mut types, "hibana", "write", 3, 0));
     let now = now.then(|| import(&mut types, "hibana", "now_ms", 0, 1));
-    let hosts: Vec<u32> = program
-        .imports
-        .iter()
-        .map(|f| {
-            import(
-                &mut types,
-                "hibana_host",
-                &f.name,
-                f.param_types.len() as u32,
-                raw_results(f.result_type),
-            )
-        })
-        .collect();
+    let read = reads.then(|| import(&mut types, "hibana", "read", 3, 1));
+    let mut hosts = Vec::new();
+    for f in &program.imports {
+        imports.import("hibana_host", &f.name, EntityType::Function(types.boundary(&f.param_types, f.result_type)));
+        hosts.push(count);
+        count += 1;
+    }
     let imported = count;
     // 定義する関数の番号: IR の関数、外部関数の受け口、公開関数の入口、確保と初期化
     let mut indices: HashMap<&str, u32> = HashMap::new();
@@ -154,6 +150,7 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
         table: &table,
         write,
         now,
+        read,
         block_type,
     };
     for f in &program.functions {
@@ -187,6 +184,7 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
                     I::Drop,
                     I::LocalGet(t),
                 ]),
+                ValueType::Num => out.extend([I::LocalGet(i + 1), I::F64ReinterpretI64]),
                 _ => out.push(I::LocalGet(i + 1)),
             }
         }
@@ -199,11 +197,13 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
     let mut exports = ExportSection::new();
     for (k, f) in exported.iter().enumerate() {
         let n = f.param_types.len() as u32;
-        functions.function(types.get(n, raw_results(f.result_type)));
+        functions.function(types.boundary(&f.param_types, f.result_type));
         exports.export(&f.name, ExportKind::Func, wrappers + k as u32);
         let mut out = Vec::new();
         for (i, p) in f.param_types.iter().enumerate() {
-            out.extend(from_raw(*p, i as u32, &indices).into_iter().skip(1));
+            if *p == ValueType::Num {
+                out.extend([I::I64Const(ir::NUM), I::LocalGet(i as u32), I::I64ReinterpretF64, I::Call(indices["__num_checked"])]);
+            } else { out.extend(from_raw(*p, i as u32, &indices).into_iter().skip(1)); }
         }
         out.push(I::Call(indices[f.name.as_str()]));
         match f.result_type {
@@ -214,6 +214,7 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
                 I::Drop,
                 I::LocalGet(n),
             ]),
+            ValueType::Num => out.extend([I::LocalSet(n), I::Drop, I::LocalGet(n), I::F64ReinterpretI64]),
             _ => out.extend([I::LocalSet(n), I::Drop, I::LocalGet(n)]),
         }
         out.push(I::End);
@@ -253,7 +254,7 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
         exports.export("__hibana_alloc", ExportKind::Func, alloc);
         exports.export("__hibana_reset", ExportKind::Func, alloc + 1);
     }
-    if strings || writes || selected.is_none() {
+    if strings || writes || reads || selected.is_none() {
         exports.export("memory", ExportKind::Memory, 0);
     }
     let mut memory = MemorySection::new();
@@ -309,11 +310,7 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
 }
 
 fn types_i32(types: &mut Types) -> u32 {
-    // (i32) -> i32 は境界の確保だけで使う。i64 の型と番号が重ならないよう最後に足す
-    let n = types.seen.len() as u32;
-    types.section.ty().function([ValType::I32], [ValType::I32]);
-    types.seen.insert((u32::MAX, u32::MAX), n);
-    n
+    types.signature(vec![ValType::I32], vec![ValType::I32])
 }
 
 // 境界の形の値（局所変数 at）を IR の値にする。先頭は捨ててよい LocalGet ではなく型の番号
@@ -326,6 +323,7 @@ fn from_raw(t: ValueType, at: u32, indices: &HashMap<&str, u32>) -> Vec<I<'stati
             I::LocalGet(at),
             I::Call(indices["__str_in"]),
         ],
+        ValueType::Num => vec![I::I64ReinterpretF64, I::LocalSet(at), I::I64Const(ir::NUM), I::LocalGet(at), I::Call(indices["__num_checked"])],
         _ => vec![I::LocalSet(at), I::I64Const(ir::INT), I::LocalGet(at)],
     }
 }
@@ -343,6 +341,7 @@ struct Cx<'a> {
     literals: &'a HashMap<String, i64>,
     table: &'a [&'a str],
     write: Option<u32>,
+    read: Option<u32>,
     now: Option<u32>,
     block_type: u32,
 }
@@ -549,7 +548,7 @@ impl Emit<'_, '_> {
                 return;
             }
             Store | Store8 | Write => ir::UNIT,
-            Eq | Ne | Lt | Le | Gt | Ge | Not => ir::BOOL,
+            Eq | Ne | Lt | Le | Gt | Ge | Not | FEq | FLt | FLe => ir::BOOL,
             _ => ir::INT,
         };
         match p {
@@ -638,6 +637,18 @@ impl Emit<'_, '_> {
             }
             Static => self.out.push(I::I64Const(STATIC)),
             Now => self.out.push(I::Call(self.cx.now.unwrap())),
+            Read => self.out.extend([get(0), get(1), get(2), I::Call(self.cx.read.unwrap())]),
+            FFromInt => self.out.extend([get(0), I::F64ConvertI64S, I::I64ReinterpretF64]),
+            FToInt | FAdd | FSub | FMul | FDiv | FNeg | FFloor | FSqrt | FEq | FLt | FLe => {
+                self.out.extend([get(0), I::F64ReinterpretI64]);
+                if matches!(p, FAdd | FSub | FMul | FDiv | FEq | FLt | FLe) { self.out.extend([get(1), I::F64ReinterpretI64]); }
+                self.out.push(match p {
+                    FToInt => I::I64TruncSatF64S, FAdd => I::F64Add, FSub => I::F64Sub, FMul => I::F64Mul, FDiv => I::F64Div,
+                    FNeg => I::F64Neg, FFloor => I::F64Floor, FSqrt => I::F64Sqrt, FEq => I::F64Eq, FLt => I::F64Lt, FLe => I::F64Le, _ => unreachable!(),
+                });
+                if matches!(p, FEq | FLt | FLe) { self.out.push(I::I64ExtendI32U); }
+                else if p != FToInt { self.out.push(I::I64ReinterpretF64); }
+            }
             _ => unreachable!(),
         }
     }

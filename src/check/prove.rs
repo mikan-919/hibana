@@ -211,7 +211,7 @@ pub(super) fn bin(op: &'static str, a: V, b: V) -> V {
     let r = match (op, &a, &b) {
         (op, Num(x), Num(y)) => match op {
             "+" => Some(Num(x + y)), "-" => Some(Num(x - y)), "*" => Some(Num(x * y)),
-            "/" if *y != 0.0 => Some(Num(x / y)), "%" if *y != 0.0 => Some(Num(x % y)), "**" => Some(Num(x.powf(*y))),
+            "/" if *y != 0.0 => Some(Num(x / y)), "%" if *y != 0.0 => Some(Num(x % y)), "**" => Some(Num(crate::eval::num_pow(*x, *y))),
             "<" => Some(Bool(x < y)), "<=" => Some(Bool(x <= y)), ">" => Some(Bool(x > y)), ">=" => Some(Bool(x >= y)),
             "==" => Some(Bool(x == y)), "!=" => Some(Bool(x != y)), _ => None,
         },

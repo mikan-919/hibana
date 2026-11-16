@@ -414,7 +414,7 @@ mod tests {
 
     #[test]
     fn numeric_values() {
-        let src = include_str!("../../tests/fixtures/num.hb");
+        let src = include_str!("../../tests/programs/types/num.hb");
         assert_eq!(out(src).unwrap(), "2.5\n1.5\n1.5\n-0.5\n0.25\n1\n1.5\n2\ntrue\ntrue\ntrue\n[0.5, 2.5]\n-0\n0.00000001\n1000000000000000000000\n");
         for src in [
             "fn main() { let x: int = 0.5 }",
@@ -425,7 +425,7 @@ mod tests {
             "fn f(x: num) -> num[y -> y >= 1] { if x > 0 { x } else { 1 } }\nfn main() {}",
             "fn f(x: num) -> num[y -> y > x] { x + 1.0 }\nfn main() {}",
         ] { assert!(out(src).is_err(), "{src}"); }
-        let math = include_str!("../../tests/fixtures/math.hb");
+        let math = include_str!("../../tests/programs/stdlib/math.hb");
         assert_eq!(out(math).unwrap(), "3\n1.5\n2\n-3\n5\n");
         for (name, source) in [("num", src), ("math", math)] {
             let path = std::env::temp_dir().join(format!("hibana-{name}-{}.cjs", std::process::id()));
@@ -434,8 +434,6 @@ mod tests {
             assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
             assert_eq!(String::from_utf8(result.stdout).unwrap(), out(source).unwrap());
             std::fs::remove_file(path).unwrap();
-            assert!(crate::to_wasm(source).is_err());
-            assert!(crate::to_native(source).is_err());
         }
         for src in ["use std::math -> *\nfn main() { put(sqrt(-1)) }", "use std::math -> *\nfn main() { put(floor(1000000000000000000000.0)) }", "fn main() { put(1.0 / 0.0) }"] {
             assert!(out(src).is_err(), "{src}");
@@ -512,10 +510,8 @@ mod tests {
         let (mut total, mut native, mut wasm, mut reasons): (usize, Vec<String>, Vec<String>, Vec<String>) = (0, Vec::new(), Vec::new(), Vec::new());
         for p in program_files() {
             let src = std::fs::read_to_string(&p).unwrap();
-            // ponytail: first.hb は num を使う。IR に num を追加したら、この拒否の検査を出力比較に含める
+            // 標準入力を使う正本は tests/first.rs で両出力先も比較する。
             if p.ends_with("examples/first.hb") {
-                assert!(crate::to_native(&src).unwrap_err().msg.contains("#num"));
-                assert!(crate::to_wasm(&src).unwrap_err().msg.contains("#num"));
                 continue;
             }
             if src.contains(".ts'") || src.contains(".js'") || src.contains("\nextern") {
@@ -574,6 +570,12 @@ mod tests {
             ("fn f(a: int, b: int) -> int { a % b }\nfn main() { put(1)\n put(f(-9223372036854775807 - 1, -1)) }", "オーバーフロー"),
             ("fn f(a: int, b: int) -> int { a ** b }\nfn main() { put(1)\n put(f(2, -1)) }", "負の指数"),
             ("fn f(a: int, b: int) -> int { a ** b }\nfn main() { put(1)\n put(f(3, 100)) }", "オーバーフロー"),
+            ("fn main() { put(1)\n put(1.0 / 0.0) }", "0 で除算した"),
+            ("fn main() { put(1)\n put(1.0 % 0.0) }", "0 で除算した"),
+            ("fn main() { put(1)\n put(2.0 ** 1024.0) }", "num の演算結果が有限でない"),
+            ("use std::math\nfn main() { put(1)\n put(math::sqrt(-1)) }", "sqrt の引数が負"),
+            ("use std::math\nfn main() { put(1)\n put(math::floor(9223372036854775808.0)) }", "floor の結果が int の範囲外"),
+            ("fn main() { put(1)\n put(2.0 ** 0.5) }", "num の小数の指数は未対応"),
         ];
         for (i, (src, msg)) in cases.iter().enumerate() {
             let exe = tmp.join(format!("e{i}"));

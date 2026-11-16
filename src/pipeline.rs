@@ -61,7 +61,7 @@ pub fn compile(source: &str, target: &str, exports: &[String]) -> R<Vec<u8>> {
 }
 
 /// WASM 境界で扱える公開関数と外部関数の型を JSON で返す。
-/// 現在の境界型は int/str/unit。プログラム全体の型リフレクションではない。
+/// 現在の境界型は int/num/str/unit。プログラム全体の型リフレクションではない。
 pub fn inspect_exports(source: &str, exports: &[String]) -> R<String> {
     let program = compiler_input(source, Kind::Library)?;
     let ir = exported_ir(&program, exports)?;
@@ -125,6 +125,7 @@ pub fn link(program: &ir::Program, exports: &[String]) -> R<ir::Program> {
             }
             if let Some(f) = program.imports.iter().find(|f| f.name() == name) {
                 strings |= has_str(f.param_types(), f.result_type());
+                if f.param_types().contains(&ir::ValueType::Num) || f.result_type() == ir::ValueType::Num { pending.push("__num_checked"); }
                 continue;
             }
             let function = functions
@@ -161,7 +162,7 @@ pub fn emit_wasm(program: &ir::Program, exports: Option<&[String]>) -> R<Vec<u8>
 }
 
 /// 公開関数を JavaScript から呼ぶための ES モジュールを作る。
-/// int は BigInt、str は文字列、unit は undefined として渡す。
+/// int は BigInt、num は Number、str は文字列、unit は undefined として渡す。
 pub fn emit_js_glue(program: &ir::Program, exports: &[String]) -> R<String> {
     let signatures = boundary_signatures(program, exports)?;
     let metadata = serde_json::json!({"exports": signatures.exports, "imports": signatures.imports}).to_string();
@@ -178,7 +179,7 @@ export async function instantiate(bytes, imports = {}) {
   let instance;
   let active = false;
   const encoder = new TextEncoder();
-  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
   function encode(value, type) {
     if (type === "unit") {
       if (value !== undefined) throw new TypeError("unit の戻り値は undefined が必要");
@@ -191,6 +192,10 @@ export async function instantiate(bytes, imports = {}) {
       new Uint8Array(instance.exports.memory.buffer, ptr, data.length).set(data);
       return BigInt.asIntN(64, (BigInt(data.length) << 32n) | BigInt(ptr));
     }
+    if (type === "num") {
+      if (typeof value !== "number" || !Number.isFinite(value)) throw new TypeError("有限な num が必要");
+      return value;
+    }
     if (typeof value !== "number" && typeof value !== "bigint") throw new TypeError("整数が必要");
     if (typeof value === "number" && !Number.isSafeInteger(value)) throw new RangeError("安全な整数が必要");
     const n = BigInt(value);
@@ -200,6 +205,10 @@ export async function instantiate(bytes, imports = {}) {
   function decode(value, type) {
     if (type === "unit") return undefined;
     if (type === "int") return value;
+    if (type === "num") {
+      if (!Number.isFinite(value)) throw new RangeError("num の演算結果が有限でない");
+      return value;
+    }
     const packed = BigInt.asUintN(64, value);
     const ptr = Number(packed & 0xffffffffn);
     const len = Number(packed >> 32n);
@@ -216,6 +225,12 @@ export async function instantiate(bytes, imports = {}) {
   const hibana = {
     write: (fd, ptr, len) => print(decoder.decode(new Uint8Array(instance.exports.memory.buffer, Number(ptr), Number(len))).replace(/\n$/, "")),
     now_ms: () => BigInt(Date.now()),
+    read: (fd, ptr, len) => {
+      const target = new Uint8Array(instance.exports.memory.buffer, Number(ptr), Number(len));
+      if (imports.hibana?.read) return BigInt(imports.hibana.read(Number(fd), target));
+      if (typeof process !== "undefined" && process.getBuiltinModule) return BigInt(process.getBuiltinModule("node:fs").readSync(Number(fd), target, 0, target.length, null));
+      throw new Error("標準入力には imports.hibana.read が必要です");
+    },
   };
   const instantiated = await WebAssembly.instantiate(bytes, { ...imports, hibana_host: host, hibana });
   instance = instantiated instanceof WebAssembly.Instance ? instantiated : instantiated.instance;
@@ -260,6 +275,7 @@ fn boundary_signature<'a>(
     fn ty(t: &ir::ValueType) -> &'static str {
         match t {
             ir::ValueType::Int => "int",
+            ir::ValueType::Num => "num",
             ir::ValueType::Str => "String",
             ir::ValueType::Unit => "unit",
             ir::ValueType::Bool => "bool",

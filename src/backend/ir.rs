@@ -17,6 +17,7 @@ pub const ARR: i64 = 4;
 pub const DATA: i64 = 5;
 pub const FN: i64 = 6;
 pub const TY: i64 = 7;
+pub const NUM: i64 = 9;
 
 const RUNTIME: &str = include_str!("runtime.hb");
 
@@ -30,6 +31,7 @@ pub struct Program {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueType {
     Int,
+    Num,
     Bool,
     Str,
     Unit,
@@ -96,6 +98,9 @@ pub enum Prim {
     Fail,
     // 1970 年からのミリ秒
     Now,
+    Read,
+    FFromInt, FToInt, FAdd, FSub, FMul, FDiv, FNeg, FFloor, FSqrt,
+    FEq, FLt, FLe,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -136,6 +141,7 @@ impl fmt::Display for ValueType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Int => "int",
+            Self::Num => "num",
             Self::Bool => "bool",
             Self::Str => "String",
             Self::Unit => "unit",
@@ -166,7 +172,12 @@ impl Import {
 }
 
 fn boundary(t: ValueType) -> bool {
-    matches!(t, ValueType::Int | ValueType::Str | ValueType::Unit)
+    matches!(t, ValueType::Int | ValueType::Num | ValueType::Str | ValueType::Unit)
+}
+
+// 型検査は num の演算の引数を #num で包む。リテラルはそのまま残る。
+fn numeric(e: &Ast) -> bool {
+    matches!(e.peel(), Ast::Num(_)) || matches!(e.peel(), Ast::Call(n, _) if n == "#num")
 }
 
 impl Function {
@@ -199,6 +210,7 @@ impl Function {
     /// 呼ぶ関数の名前。算術の範囲外などで呼ぶランタイムの関数も含む
     pub fn calls(&self) -> Vec<&str> {
         let mut names = Vec::new();
+        if self.result_type == ValueType::Num || self.param_types.contains(&ValueType::Num) { names.push("__num_checked"); }
         self.each(&mut |n| match n {
             Node::Expr(Expr::Call(n, _) | Expr::Func(n)) => names.push(n.as_str()),
             Node::Expr(Expr::Prim(Prim::Add | Prim::Sub | Prim::Mul, _)) => {
@@ -260,6 +272,7 @@ fn each_block<'a>(b: &'a Block, f: &mut impl FnMut(Node<'a>)) {
 fn value_type(e: &Ast) -> ValueType {
     match e.peel() {
         Ast::Var(n) if n == "int" => ValueType::Int,
+        Ast::Var(n) if n == "num" => ValueType::Num,
         Ast::Var(n) if n == "bool" => ValueType::Bool,
         Ast::Var(n) if n == "String" => ValueType::Str,
         Ast::Var(n) if n == "unit" => ValueType::Unit,
@@ -420,10 +433,13 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>) -> R<Prog
             Some(f) => {
                 let param_types: Vec<_> = f.params.iter().map(|(_, t)| value_type(t)).collect();
                 let result_type = ret_type(f);
+                if param_types.contains(&ValueType::Num) || result_type == ValueType::Num {
+                    pending.push("__num_checked".into());
+                }
                 if exported(&name) {
                     return Err("外部関数を直接公開できない".into());
                 }
-                // ponytail: WASM の境界（公開関数と外部関数）は int・str・unit だけ。ほかの型は接続コードに変換を足す
+                // ponytail: WASM の境界は int・num・str・unit。ほかの型は接続コードに変換を足す
                 if !param_types
                     .iter()
                     .chain([&result_type])
@@ -770,6 +786,7 @@ impl Lower<'_, '_> {
     fn expr(&mut self, e: &Ast) -> R<Expr> {
         Ok(match e.peel() {
             Ast::Int(n) => int(*n),
+            Ast::Num(n) => Expr::Const(NUM, n.to_bits() as i64),
             Ast::Bool(b) => Expr::Const(BOOL, *b as i64),
             Ast::Str(s) => Expr::Str(s.clone()),
             Ast::Var(n) => {
@@ -789,6 +806,11 @@ impl Lower<'_, '_> {
                     None => mkv(TY, Expr::Str(n.clone())),
                 }
             }
+            Ast::Unary("-", a) if matches!(a.peel(), Ast::Num(_)) => {
+                let Ast::Num(n) = a.peel() else { unreachable!() };
+                Expr::Const(NUM, (-n).to_bits() as i64)
+            }
+            Ast::Unary("-", a) if !self.raw && numeric(a) => call("__neg", vec![self.expr(a)?]),
             Ast::Unary("-", a) => prim(Prim::Sub, vec![int(0), self.expr(a)?]),
             Ast::Unary(_, a) => prim(Prim::Not, vec![self.expr(a)?]),
             Ast::Binary(op @ ("&&" | "||"), a, b) => {
@@ -801,9 +823,14 @@ impl Lower<'_, '_> {
                 Expr::If(Box::new(a), t, f)
             }
             Ast::Binary(op, a, b) => {
+                let number = !self.raw && numeric(a);
                 let (a, b) = (self.expr(a)?, self.expr(b)?);
                 if *op == "**" {
-                    return Ok(call("__pow", vec![a, b]));
+                    return Ok(call(if number { "__value_pow" } else { "__pow" }, vec![a, b]));
+                }
+                if number && matches!(*op, "-" | "*" | "/" | "%" | "<" | "<=" | ">" | ">=") {
+                    let name = match *op { "-" => "__sub", "*" => "__mul", "/" => "__div", "%" => "__rem", "<" => "__lt", "<=" => "__le", ">" => "__gt", _ => "__ge" };
+                    return Ok(call(name, vec![a, b]));
                 }
                 let p = match *op {
                     "+" => Prim::Add,
@@ -939,6 +966,7 @@ impl Lower<'_, '_> {
             return Ok(self.checked(Expr::CallIndirect(Box::new(Expr::Local(i)), args)));
         }
         let mut args = self.args(args)?;
+        if n == "#num" { return Ok(call("__num", args)); }
         if let Some(p) = intrinsic(n) {
             return Ok(match n {
                 "__getv" => {
@@ -1101,6 +1129,19 @@ fn intrinsic(n: &str) -> Option<Option<Prim>> {
         "__sys_write" => Prim::Write,
         "__fail" => Prim::Fail,
         "__now" => Prim::Now,
+        "__sys_read" => Prim::Read,
+        "__f_from_int" => Prim::FFromInt,
+        "__f_to_int" => Prim::FToInt,
+        "__f_add" => Prim::FAdd,
+        "__f_sub" => Prim::FSub,
+        "__f_mul" => Prim::FMul,
+        "__f_div" => Prim::FDiv,
+        "__f_neg" => Prim::FNeg,
+        "__f_floor" => Prim::FFloor,
+        "__f_sqrt" => Prim::FSqrt,
+        "__f_eq" => Prim::FEq,
+        "__f_lt" => Prim::FLt,
+        "__f_le" => Prim::FLe,
         "__and" => Prim::And,
         "__or" => Prim::Or,
         "__shl" => Prim::Shl,

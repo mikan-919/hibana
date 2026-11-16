@@ -14,7 +14,15 @@ function $sub(a, b) { return $chk(a - b); }
 function $mul(a, b) { return $chk(a * b); }
 function $div(a, b) { if (b === 0n || b === 0) throw new Error("0 で除算した"); return $chk(a / b); }
 function $rem(a, b) { if (b === 0n || b === 0) throw new Error("0 で除算した"); if (a === $MIN && b === -1n) throw new Error("オーバーフロー"); return $chk(a % b); }
-function $pow(a, b) { if (typeof a === "number") return $chk(a ** b); if (b < 0n) throw new Error("負の指数"); if (b > 64n) { if (a > 1n || a < -1n) throw new Error("オーバーフロー"); b = 64n + b % 2n; } return $chk(a ** b); }
+function $pow(a, b) {
+  if (typeof a === "number") {
+    if (!Number.isInteger(b) || b < -(2 ** 63) || b >= 2 ** 63) return $chk(a ** b);
+    let n = BigInt(b), factor = n < 0n ? $chk(1 / a) : a, result = 1;
+    while (n !== 0n) { if (n % 2n !== 0n) result = $chk(result * factor); n /= 2n; if (n !== 0n) factor = $chk(factor * factor); }
+    return result;
+  }
+  if (b < 0n) throw new Error("負の指数"); if (b > 64n) { if (a > 1n || a < -1n) throw new Error("オーバーフロー"); b = 64n + b % 2n; } return $chk(a ** b);
+}
 function $neg(a) { return $chk(-a); }
 function $num_floor(n) { const x = Math.floor(n); if (!(x >= -(2 ** 63) && x < 2 ** 63)) throw new Error("floor の結果が int の範囲外"); return BigInt(x); }
 function $num_sqrt(n) { if (n < 0) throw new Error("sqrt の引数が負"); return Math.sqrt(n); }

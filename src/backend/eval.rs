@@ -218,6 +218,20 @@ fn arith(op: &str, a: i64, b: i64) -> Option<i64> {
     }
 }
 
+// 整数の指数は各出力先で乗算の順序もそろえる。
+pub(crate) fn num_pow(a: f64, b: f64) -> f64 {
+    if b.fract() != 0.0 || !(-9223372036854775808.0..9223372036854775808.0).contains(&b) { return a.powf(b); }
+    let mut n = b as i64;
+    let mut factor = if n < 0 { 1.0 / a } else { a };
+    let mut result = 1.0;
+    while n != 0 {
+        if n % 2 != 0 { result *= factor; }
+        n /= 2;
+        if n != 0 { factor *= factor; }
+    }
+    result
+}
+
 impl Interp<'_> {
     // マクロ本体用の組み込み関数。該当しなければ None
     fn syn_fn(&mut self, name: &str, vs: &mut Vec<Value>) -> R<Option<Value>> {
@@ -564,7 +578,7 @@ impl Interp<'_> {
                         "<" => Ok(Value::Bool(x < y)), "<=" => Ok(Value::Bool(x <= y)), ">" => Ok(Value::Bool(x > y)), ">=" => Ok(Value::Bool(x >= y)),
                         "/" | "%" if *y == 0.0 => error("0 で除算した".into()),
                         op => {
-                            let n = match op { "+" => x + y, "-" => x - y, "*" => x * y, "/" => x / y, "%" => x % y, "**" => x.powf(*y), _ => unreachable!("型検査済み") };
+                            let n = match op { "+" => x + y, "-" => x - y, "*" => x * y, "/" => x / y, "%" => x % y, "**" => num_pow(*x, *y), _ => unreachable!("型検査済み") };
                             if !n.is_finite() { return error("num の演算結果が有限でない".into()); }
                             Ok(Value::Num(n))
                         }

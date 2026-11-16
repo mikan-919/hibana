@@ -14,7 +14,7 @@ fn interact(command: &mut Command, bytes: &[u8]) -> Output {
 }
 
 #[test]
-fn input_lines_match_between_interpreter_and_javascript() {
+fn input_lines_match_all_backends() {
     let dir = std::env::temp_dir().join(format!("hibana-input-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let source = "fn main() { put('prompt')\n put('[' + input() + ']')\n put('[' + input() + ']')\n put('[' + input() + ']')\n put('[' + input() + ']')\n put('[' + input() + ']')\n put('[' + input() + ']') }";
@@ -35,16 +35,64 @@ fn input_lines_match_between_interpreter_and_javascript() {
         command.arg(path);
         commands.push(command);
     }
+    let web = hibana::to_web(source, &["main".into()]).unwrap();
+    std::fs::write(dir.join("input.wasm"), web.wasm).unwrap();
+    std::fs::write(dir.join("input-glue.mjs"), web.javascript).unwrap();
+    let runner = dir.join("input-wasm.mjs");
+    std::fs::write(&runner, "import {readFileSync} from 'node:fs'; import {instantiate} from './input-glue.mjs'; const api = await instantiate(readFileSync(new URL('./input.wasm', import.meta.url))); api.main();").unwrap();
+    let mut command = Command::new("node");
+    command.arg(runner);
+    commands.push(command);
+    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("input-native");
+        std::fs::write(&path, hibana::to_native(source).unwrap()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        commands.push(Command::new(path));
+    }
     for command in &mut commands {
         let output = interact(command, input.as_bytes());
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
-        let invalid = interact(command, &[0xff, b'\n']);
-        assert!(!invalid.status.success());
+        let long = "x".repeat(8192);
+        let output = interact(command, format!("{long}\n").as_bytes());
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), format!("prompt\n[{long}]\n[]\n[]\n[]\n[]\n[]\n"));
+        for invalid_bytes in [&[0xff, b'\n'][..], &[0xc0, 0xaf, b'\n'], &[0xed, 0xa0, 0x80, b'\n'], &[0xf4, 0x90, 0x80, 0x80, b'\n'], &[0xe3, b'\n']] {
+            let invalid = interact(command, invalid_bytes);
+            assert!(!invalid.status.success());
+        }
     }
     assert!(hibana::run("fn main() { input(1) }", &mut Vec::new()).is_err());
-    // 標準入力の取り込みを持たない出力先では、生成時に失敗させる。
-    assert!(hibana::to_wasm(source).is_err());
-    assert!(hibana::to_native(source).is_err());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn wasm_input_uses_host_callback() {
+    let dir = std::env::temp_dir().join(format!("hibana-input-host-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let web = hibana::to_web("fn next_line() -> String { input() }", &["next_line".into()]).unwrap();
+    std::fs::write(dir.join("input.wasm"), web.wasm).unwrap();
+    std::fs::write(dir.join("glue.mjs"), web.javascript).unwrap();
+    let script = dir.join("check.mjs");
+    std::fs::write(&script, r#"
+import {readFileSync} from 'node:fs';
+import {instantiate} from './glue.mjs';
+const bytes = new TextEncoder().encode('\ufeff日本🌸\r\n\nlast');
+let pos = 0, fail = false;
+const api = await instantiate(readFileSync(new URL('./input.wasm', import.meta.url)), {hibana: {read(fd, target) {
+  if (fd !== 0) throw Error('標準入力でない');
+  if (fail) return -1;
+  const n = Math.min(target.length, bytes.length - pos);
+  target.set(bytes.subarray(pos, pos + n)); pos += n; return n;
+}}});
+for (const expected of ['\ufeff日本🌸', '', 'last', '']) if (api.next_line() !== expected) throw Error('入力の結果が違う');
+fail = true;
+let rejected = false; try { api.next_line(); } catch { rejected = true; }
+if (!rejected) throw Error('読み取りの失敗を無視した');
+"#).unwrap();
+    let output = Command::new("node").arg(script).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     std::fs::remove_dir_all(dir).unwrap();
 }

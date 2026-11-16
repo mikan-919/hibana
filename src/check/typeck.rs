@@ -1375,6 +1375,10 @@ impl Ck {
                     *e = Expr::Binary(op, l, r);
                     return Ok(boolean);
                 }
+                if lt == prim("num") {
+                    self.check(&mut l, &lt)?;
+                    self.check(&mut r, &lt)?;
+                }
                 want(&lt, &base(&rt), &op)?;
                 if lt == prim("syn") {
                     return Err("syn は比較できない".into());
@@ -1635,6 +1639,7 @@ impl Ck {
                 let xt = self.expr(x)?;
                 let t = if *op == "-" && base(&xt) == prim("num") { prim("num") } else if *op == "-" { int } else { boolean };
                 want(&t, &xt, op)?;
+                if *op == "-" && t == prim("num") { self.check(x, &t)?; }
                 t
             }
             Expr::Call(name, args) if name == "#num" => {
