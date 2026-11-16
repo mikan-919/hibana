@@ -336,6 +336,20 @@ impl Interp<'_> {
             ("str_of", Node::Str(x) | Node::Ident(x, _) | Node::Text(x, _) | Node::Token(x, _)) => {
                 Value::Str(x.as_str().into())
             }
+            ("str_of", Node::Record { .. } | Node::Type(_)) => {
+                let Node::At(range, _) = &s.node else { return error("構文の元のトークン列が無い".into()); };
+                let mut text = String::new();
+                for t in &s.toks[range.clone()] {
+                    if t.gap_before && !text.is_empty() { text.push(' '); }
+                    use crate::lexer::Tok;
+                    text.push_str(&match &t.tok {
+                        Tok::Ident(n) => n.clone(), Tok::Punct(n) => n.to_string(),
+                        Tok::Str(n) => format!("{n:?}"), Tok::Int(n) => n.to_string(), Tok::Float(n) => n.to_string(),
+                        Tok::Raw(c) => c.to_string(), Tok::Template(n, _) => format!("`{n}`"), Tok::Eof => String::new(),
+                    });
+                }
+                Value::Str(text.into())
+            }
             _ => return error(format!("{name} を {n:?} に使えない")),
         }))
     }

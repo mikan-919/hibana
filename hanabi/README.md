@@ -1,99 +1,119 @@
 # hanabi
 
-hanabi は、hibana でサーバーと画面を書く Web フルスタックフレームワークです。サーバーは Linux x86-64 のネイティブ実行ファイル、画面は WebAssembly（WASM。ブラウザーで実行する形式）にコンパイルします。JavaScript は DOM（画面の要素）と通信を WASM に接続します。
+hibana でサーバーと画面を書くフレームワークです。サーバーは Linux x86-64 のネイティブ実行ファイル、画面は WebAssembly（WASM。ブラウザーの実行形式）にコンパイルします。
 
-## 投稿アプリを動かす
+## ビルドと起動
 
 リポジトリのルートで実行します。
 
 ```sh
 nix develop -c cargo build
-nix develop -c target/debug/hibana hanabi/build.hb
-chmod +x target/hanabi/hanabi
+nix develop -c target/debug/hibana hanabi/demo/build.hb -- "$PWD"
+chmod +x target/hanabi/application
 cd target/hanabi
-./hanabi
+./application
 ```
 
-`http://127.0.0.1:8787` を開きます。投稿の作成・編集・一覧表示ができ、投稿は作業ディレクトリの `data/posts.json` に保存します。再起動後も同じ作業ディレクトリで起動してください。再ビルドする前にサーバーを終了してください。
+`http://127.0.0.1:8787` を開きます。投稿は起動ディレクトリの `data/posts.json` に保存します。ビルドの第2引数は出力ディレクトリの絶対経路、第3引数はポート番号です。テストは空きポートと一時ディレクトリを使います。
 
-## 入力条件を型で共有する
-
-[demo/domain.hb](demo/domain.hb) は、画面とサーバーが共有する投稿の契約です。細分化型（条件を満たす値だけを受け入れる型）を使います。
-
-```hb
-type PostId = int[id -> id > 0]
-type Title = String[s -> 1 <= len(s) && len(s) <= 120]
-type Body = String[s -> 1 <= len(s) && len(s) <= 4000]
-struct Draft { title: Title, body: Body }
+```sh
+nix develop -c target/debug/hibana hanabi/demo/build.hb -- "$PWD" /tmp/hanabi-app 18080
 ```
 
-`draft(title, body)` は空白を除き、`refine<Title>` と `refine<Body>` で実行時に条件を検査します。成功した値は `Title`・`Body` として使えます。画面とサーバーの両方がこの関数を呼びます。長さは Unicode の符号位置の数です。
+[build.hb](build.hb) は `Build` で指定したサービス、入口関数、ポート、クライアント、公開関数、配信ファイルを生成します。デモの指定は [demo/build.hb](demo/build.hb) にあります。静的ファイルは [demo/service.hb](demo/service.hb) の `Config.assets` に登録します。登録したファイルが不在なら 404、空ファイルが存在すれば 200 と空の本文を返します。
 
-## 保存先を with で渡す
+## 共有エンドポイント
 
-`Posts` はトレイト（型が提供する操作の契約）です。投稿操作は `with Posts(store)` で保存先を要求します。
-
-```hb
-fn create_post(input: Draft) -> Post ! Failure
-with Posts(store) { store.create(input) }
-```
-
-[demo/stores.hb](demo/stores.hb) に、JSON ファイルを使う `FilePosts` と、参照を使う `MemoryPosts` があります。アプリは `with Posts(FilePosts { path: 'data/posts.json' })` で実装を選びます。テストでは同じ操作に `MemoryPosts` を渡します。保存先の指定が無い呼び出しは型検査で拒否します。
-
-## 経路と失敗を宣言する
-
-[demo/server.hb](demo/server.hb) は次の形で経路を書きます。`routes` はマクロ（構文を展開する機能）で、メソッドと経路の重複をコンパイル時に拒否します。
+[demo/api.hb](demo/api.hb) が、メソッド・URL・経路引数・入力・出力・エラー・成功コードの正本です。
 
 ```hb
-fn endpoints(request: Request) -> Response ! Rejected, Failure
-with Posts(store) {
-    routes request {
-        GET '/api/posts' -> { ok(list_posts()) }
-        POST '/api/posts' -> { created(create_post(json_body<Draft>(request))) }
-        PUT '/api/posts' -> {
-            let input = json_body<Edit>(request)
-            ok(update_post(input.id, input.draft))
-        }
-    }
+api {
+    list_api GET '/api/posts' (unit, unit) -> Vec<Post> ! Fault = 200
+    create_api POST '/api/posts' (unit, Form) -> Post ! Fault = 201
+    update_api PUT '/api/posts/{id}' (PostId, Form) -> Post ! Fault = 200
 }
 ```
 
-`json_body<T>` は `Decode` の実装で JSON を `T` に変換します。`ok` と `created` は `ToJson` の実装で応答を作ります。[demo/codec.hb](demo/codec.hb) の `object { ... }` もマクロで、フィールドの値を `ToJson` で変換します。
+`api` は宣言マクロ（型や関数を生成する構文拡張）で、各定義から `Endpoint<P, I, O, E>` を返す関数を生成します。重複したメソッドと経路の形、不正な経路引数、成功コードの範囲違反はコンパイル時に拒否します。経路引数が一つならスカラー、複数なら `record` を使います。経路の文字列から、引数の型に従って復号します。
 
-入力の拒否 `Rejected` と投稿操作の失敗 `Failure` は、代数的効果（処理を呼び出し側に委ねる仕組み）です。`app` の `handle` が入力エラーを HTTP 422、投稿の欠落を 404、保存内容のエラーを 500 に変換します。処理しない効果は型検査で拒否します。
-
-## 画面と通信を hibana で書く
-
-[demo/client.hb](demo/client.hb) は `view` マクロで画面を作ります。
+サーバーは同じ定義へハンドラーを接続します。
 
 ```hb
-view article(class = 'post') {
-    view h3 { text(post.title) };
-    view p(class = 'post-body') { text(post.body) }
+routes request {
+    list_api -> fn(_, _) { stores.list(repo) };
+    create_api -> fn(_, form) { stores.create(repo, form) };
+    update_api -> fn(id, form) { stores.update(repo, id, form) }
 }
 ```
 
-子要素は `Html` 型です。`text` は `<` などを文字として表示する形に変換し、文字列を子要素に渡すと型検査で拒否します。属性の値も変換します。`Html` を直接構築する場合と、属性に URL やイベント処理を指定する場合の検査は呼び出し側の責任です。
+引数と結果の型が定義に合わなければ型エラーです。`routes` が入力の復号、経路引数の検査、成功応答、エラー応答を処理します。アプリに `handle` の入れ子はありません。`Fault` は `HttpError` と `Codec` を実装し、別のエラー型もこの二つを実装して使えます。
 
-`query` と `send<T: ToJson>` は `Remote` 効果を起こします。`client.run` が通信要求を JavaScript に渡し、応答時に WASM の `receive` を呼びます。現在の接続は通信を一件ずつ行い、応答はコールバックで処理します。効果の継続を通信完了まで保持する仕組みはありません。
+クライアントは `client.call(update_api(), id, form, fn(result) { Saved(result) })` と書きます。URL・メソッドの文字列をクライアントに再記述しません。返るメッセージの中身は `Result<Post, Fault>` です。
+
+## 型と変換の生成
+
+[demo/domain.hb](demo/domain.hb) で型とフィールドを宣言します。
+
+```hb
+scalar PostId(int[n -> n > 0])
+scalar Title(String[s -> 1 <= len(s) && len(s) <= 120])
+scalar Body(String[s -> 1 <= len(s) && len(s) <= 4000])
+record Form { title: String, body: String }
+record Draft { title: Title, body: Body }
+record Post { id: PostId, title: Title, body: Body }
+```
+
+`scalar` は細分化型（条件を満たす値だけを許す型）を持つ別型と `Codec` の実装を生成します。`Title('')` と `PostId(0)` はコンパイル時に拒否します。復号時は同じ条件を検査します。`record` は構造体、JSON の符号化・復号、経路引数の復号を生成します。アプリにフィールド名を繰り返す変換関数はありません。
+
+フォームの通信型は `Form`、検証後の業務入力は `Draft` です。サーバーが `Draft` を得るまで保存操作へ進みません。空入力や長さ違反もブラウザーから送信し、HTTP 422 の応答を画面へ戻します。文字数は Unicode の符号位置の数です。
+
+基盤の [types.hb](types.hb) には `Port`、`Status`、`Byte`、`Bytes`、`Socket` があります。[native.hb](native.hb) の `slice` は、前の引数を参照する細分化条件で `0 <= start <= end <= len(bytes)` を要求します。呼び出し側で証明できない値は渡せません。
+
+## JSX とイベント
+
+[view.hb](view.hb) は JSX（タグと式を組み合わせる構文）を展開します。
+
+```hb
+<article class="post">
+    <h3>{post.title.0}</h3>
+    <button type="button" disabled={model.busy} onClick={Edit(post.id)}>編集</button>
+</article>
+```
+
+`type`・`for` と、`aria-label` などの属性を書けます。自己終了タグも使えます。本文と属性値を HTML 用に変換し、閉じタグの不一致を拒否します。`disabled={false}` は属性を出しません。`onClick`・`onSubmit`・`onChange` は、`union Event { ... }` から生成した変換でメッセージを配送します。イベント名・投稿 ID の数値化・アプリの要素名を JavaScript に書きません。
+
+`Html` の直接構築と、URL を受け取る属性の安全性は呼び出し側で管理します。経路引数の生成では `/`・`?`・`#`・`%` を拒否します。URL の百分率復号は未対応です。
+
+## 状態・通信・保存の境界
+
+`Program<S, M>` が初期状態、更新関数、表示関数、イベント復号を持ちます。更新は `Change<S, M>` を返し、通信は `Command<M>` として返します。`Fetch` に要求と結果を受け取る関数を保持し、応答ごとに型付きメッセージを生成します。文字列フラグによる応答の振り分けはありません。
+
+`Session<S, M>` を `Ref`（値を保持する参照）で WASM 内に保持します。JavaScript には生成コードが管理する参照の取っ手を渡します。モデルや投稿を JavaScript の `Map` に保存しません。別の型・インスタンス・破棄済みの取っ手は生成コードで拒否します。
+
+`Transport.exchange` は応答を返す効果（処理をハンドラーへ委ねる操作）です。`client.perform` のテストでは `resume(reply)` で結果を差し替えます。ブラウザーは `Schedule` 効果をコマンドの予約に使い、通信完了時に `client.resolve` へ戻します。`Dom` 効果もテストで値の読み取り・描画・フォーカスを差し替えられます。
+
+`Storage` は JSON の保存・読み出し、バイナリ資産の読み出し、保存先の作成を表す能力です。`with Storage(...)` を要求し、`NativeStorage` と `MemoryStorage` で同じアプリの操作を実行します。ファイル不在と空ファイルは別の値です。書き込みは一時ファイルを同期してから置き換え、OS の読み書きの失敗は `Result` で返します。
 
 ## 検証
 
 ```sh
 # リポジトリのルート
-nix develop -c cargo test --test hanabi --test hanabi_native
+nix develop -c cargo build
+nix develop -c cargo test
+nix develop -c target/debug/hibana test hanabi/tests/contracts.hb
 
-# 上の手順でサーバーを起動してから、別の端末で実行
+# ブラウザー。テストがビルド・起動・再起動・終了まで行う
 cd hanabi
 nix develop -c npm ci
 nix develop -c npx playwright install chromium
 nix develop -c npm run test:browser
+nix develop -c npm run test:quality
 ```
 
-Rust のテストは保存先と効果の不足、型の違反、経路の重複、ネイティブサーバーの作成・編集・再起動後の読み込みを検証します。ブラウザーテストはデスクトップ幅とスマートフォン幅で入力拒否・作成・編集・再読み込み・文字の表示を確認します。ブラウザーテストは起動中のサーバーに投稿を追加します。
+Rust の統合テストは、ビルドスクリプトを実行して `target/hanabi/` を生成し、実バイナリとの HTTP 通信で作成・更新・一覧・不正入力・資産の不在・空ファイル・切断・再起動後の保存を確認します。ブラウザーテストはデスクトップ幅とスマートフォン幅で、フォーム送信による 422 とエラー表示、作成、編集、リロードとサーバー再起動後の保存を確認します。
 
 ## 実行範囲
 
-現在のサーバーは `127.0.0.1` で待ち受け、要求ごとにプロセスを作って順に処理します。HTTP ヘッダーは 16KiB、本文は 128KiB、保存ファイルは 1MiB 未満です。HTTP のチャンク転送は受け付けません。保存は一時ファイルを書いて同期してから置き換えます。ファイルやソケットのシステム呼び出しが失敗すると、そのプロセスは終了します。
+サーバーは `127.0.0.1` で待ち受け、一つのプロセスで要求を順に処理します。ヘッダーは 16KiB、本文は 128KiB、保存ファイルは 1MiB 未満です。認証、HTTPS、チャンク転送、並行書き込みには対応していません。
 
-認証、HTTPS、要求の時間制限、データベース、複数プロセスからの保存は未実装です。ネイティブの通信・ファイル操作を WASM に含めるとコンパイルエラーになります。
+hibana のヒープには自動回収がなく、継続して処理するサーバーと WASM セッションはメモリを消費します。WASM は `dispose()` でセッションの領域を再利用でき、破棄した参照は使えません。継続的な運用には言語のメモリ回収を実装する必要があります。

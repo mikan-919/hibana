@@ -1,13 +1,22 @@
-// ブラウザとの接続。画面の状態と表示内容は hibana 側で決める
-extern 'hanabi:browser' {
-    fn render(selector: String, html: String)
-    fn text(selector: String, text: String)
+use std -> *
+use './view.hb' -> { Html }
+use './types.hb' -> { RequestId }
+
+effect Dom {
     fn value(selector: String) -> String
-    fn set_value(selector: String, value: String)
+    fn paint(selector: String, html: Html)
     fn focus(selector: String)
-    fn state(key: String) -> String
-    fn set_state(key: String, value: String)
-    fn request(method: String, path: String, body: String)
-    fn busy(selector: String, value: int)
-    fn notice(selector: String, message: String, error: int)
+}
+extern 'hanabi:browser' {
+    fn read_value(selector: String) -> String
+    fn render(selector: String, html: String)
+    fn focus_element(selector: String)
+    fn schedule(id: RequestId, method: String, url: String, body: String)
+}
+fn browser<A>(action: () -> A ! Dom) -> A {
+    handle action() {
+        value(selector) -> resume(read_value(selector))
+        paint(selector, html) -> { render(selector, html.0); resume() }
+        focus(selector) -> { focus_element(selector); resume() }
+    }
 }

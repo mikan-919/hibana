@@ -108,7 +108,7 @@ pub fn link(program: &ir::Program, exports: &[String]) -> R<ir::Program> {
     let selected = select_exports(program, exports)?;
     let mut pending: Vec<&str> = selected.iter().map(|f| f.name.as_str()).collect();
     let has_str = |ts: &[ir::ValueType], r: ir::ValueType| {
-        ts.contains(&ir::ValueType::Str) || r == ir::ValueType::Str
+        ts.iter().chain([&r]).any(|t| matches!(t, ir::ValueType::Str | ir::ValueType::Ref(_)))
     };
     let mut visited = HashSet::new();
     let mut strings = selected
@@ -183,9 +183,20 @@ pub fn js_glue(metadata: &str) -> R<String> {
 export async function instantiate(bytes, imports = {}) {
   let instance;
   let active = false;
+  let handles = new WeakMap();
+  let persistent = false;
   const encoder = new TextEncoder();
   const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
   function encode(value, type) {
+    if (type.startsWith('ref:')) {
+      const handle = value && handles.get(value);
+      if (!handle || handle.type !== type) throw new TypeError('このインスタンスの同じ型の参照が必要');
+      return handle.value;
+    }
+    if (type === 'bool') {
+      if (typeof value !== 'boolean') throw new TypeError('真偽値が必要');
+      return value ? 1n : 0n;
+    }
     if (type === "unit") {
       if (value !== undefined) throw new TypeError("unit の戻り値は undefined が必要");
       return undefined;
@@ -208,6 +219,12 @@ export async function instantiate(bytes, imports = {}) {
     return n;
   }
   function decode(value, type) {
+    if (type.startsWith('ref:')) {
+      const token = Object.freeze(Object.create(null));
+      handles.set(token, { type, value });
+      return token;
+    }
+    if (type === 'bool') return value !== 0n;
     if (type === "unit") return undefined;
     if (type === "int") return value;
     if (type === "num") {
@@ -220,7 +237,8 @@ export async function instantiate(bytes, imports = {}) {
     return decoder.decode(new Uint8Array(instance.exports.memory.buffer, ptr, len));
   }
   const host = Object.create(null);
-  for (const [name, params, result] of __HOSTS__) {
+  const hostSignatures = __HOSTS__;
+  for (const [name, params, result] of hostSignatures) {
     const callback = imports.hibana_host?.[name];
     if (typeof callback !== "function") throw new TypeError("外部関数が必要: " + name);
     host[name] = (...args) => encode(callback(...args.map((value, i) => decode(value, params[i]))), result);
@@ -240,21 +258,28 @@ export async function instantiate(bytes, imports = {}) {
   const instantiated = await WebAssembly.instantiate(bytes, { ...imports, hibana_host: host, hibana });
   instance = instantiated instanceof WebAssembly.Instance ? instantiated : instantiated.instance;
   const functions = Object.create(null);
-  for (const [name, params, result] of __EXPORTS__) {
+  const exportSignatures = __EXPORTS__;
+  persistent = [...exportSignatures, ...hostSignatures].some(([, ps, r]) => [...ps, r].some(t => t.startsWith('ref:')));
+  for (const [name, params, result] of exportSignatures) {
     functions[name] = (...args) => {
       if (active) throw new Error("同じ WASM インスタンスへ再入できない");
       if (args.length !== params.length) throw new TypeError("引数の数が違う");
       active = true;
       try {
-        instance.exports.__hibana_reset?.();
+        if (!persistent) instance.exports.__hibana_reset?.();
         const value = instance.exports[name](...args.map((value, i) => encode(value, params[i])));
         return decode(value, result);
       } finally {
-        instance.exports.__hibana_reset?.();
+        if (!persistent) instance.exports.__hibana_reset?.();
         active = false;
       }
     };
   }
+  if (persistent) functions.dispose = () => {
+    if (active) throw new Error('実行中は破棄できない');
+    handles = new WeakMap();
+    instance.exports.__hibana_reset?.();
+  };
   return functions;
 }
 "#;
@@ -265,7 +290,7 @@ export async function instantiate(bytes, imports = {}) {
 }
 
 // JSON と JS 接続コードで、境界の型名とシグネチャの並びを共有する。
-type BoundarySignature<'a> = (&'a str, Vec<&'static str>, &'static str);
+type BoundarySignature<'a> = (&'a str, Vec<String>, String);
 
 struct BoundarySignatures<'a> {
     exports: Vec<BoundarySignature<'a>>,
@@ -277,16 +302,7 @@ fn boundary_signature<'a>(
     params: &[ir::ValueType],
     result: &ir::ValueType,
 ) -> BoundarySignature<'a> {
-    fn ty(t: &ir::ValueType) -> &'static str {
-        match t {
-            ir::ValueType::Int => "int",
-            ir::ValueType::Num => "num",
-            ir::ValueType::Str => "String",
-            ir::ValueType::Unit => "unit",
-            ir::ValueType::Bool => "bool",
-            ir::ValueType::Other => "other",
-        }
-    }
+    fn ty(t: &ir::ValueType) -> String { t.to_string() }
     (name, params.iter().map(ty).collect(), ty(result))
 }
 
@@ -312,7 +328,7 @@ fn select_exports<'a>(program: &'a ir::Program, names: &[String]) -> R<Vec<&'a i
     for name in names {
         if matches!(
             name.as_str(),
-            "memory" | "__hibana_alloc" | "__hibana_reset"
+            "memory" | "__hibana_alloc" | "__hibana_reset" | "dispose"
         ) {
             return Err(format!("公開する関数名 {name} は WASM の内部用に予約されている").into());
         }

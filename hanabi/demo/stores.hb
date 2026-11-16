@@ -1,56 +1,46 @@
 use std -> *
-use '../json.hb' -> { ToJson }
-use '../storage.hb'
+use '../types.hb' -> { FilePath }
+use '../storage.hb' -> { Storage }
+use '../json.hb' -> { Codec, decode }
+use '../endpoint.hb' -> { Fault }
 use './domain.hb' -> *
-use './codec.hb'
 
-struct FilePosts { path: String }
-struct MemoryPosts { posts: Ref<Vec<Post>> }
-
-fn load(path: String) -> Vec<Post> ! Failure {
-    match storage.read_json(path) { Ok(value) -> codec.posts(value) Err(e) -> fail(Storage(e)) }
+struct Repository { path: FilePath }
+fn storage_error(message: String) -> Fault { Fault { status: 500, message: message } }
+fn list(repo: Repository) -> Result<Vec<Post>, Fault>
+with Storage(storage) {
+    let value = match storage.load(repo.path) { Ok(value) -> value Err(e) -> return Err(storage_error(e)) }
+    match value {
+        None -> Ok([])
+        Some(value) -> match decode<Vec<Post>>(value) { Ok(items) -> Ok(items) Err(e) -> Err(storage_error(e)) }
+    }
 }
-fn persist(path: String, posts: Vec<Post>) ! Failure {
-    match storage.write_json(path, posts.to_json()) { Ok(_) -> {} Err(e) -> fail(Storage(e)) }
+fn save(repo: Repository, items: Vec<Post>) -> Result<unit, Fault>
+with Storage(storage) {
+    match storage.save(repo.path, items.encode()) { Ok(_) -> Ok({}) Err(e) -> Err(storage_error(e)) }
 }
-fn append(posts: Vec<Post>, d: Draft) -> Post {
-    let mut next: PostId = 1
-    for post in posts { if post.id >= next { next = post.id + 1 } }
-    Post { id: next, title: d.title, body: d.body }
+fn create(repo: Repository, form: Form) -> Result<Post, Fault>
+with Storage(storage) {
+    let draft = validate(form)?
+    let items = list(repo)?
+    let mut last: int[n -> n >= 0] = 0
+    for post in items { if post.id.0 > last { last = post.id.0 } }
+    let post = Post { id: PostId(last + 1), title: draft.title, body: draft.body }
+    save(repo, push(items, post))?
+    Ok(post)
 }
-fn replaced(posts: Vec<Post>, id: PostId, draft: Draft) -> Vec<Post> ! Failure {
-    let mut result: Vec<Post> = []
+fn update(repo: Repository, id: PostId, form: Form) -> Result<Post, Fault>
+with Storage(storage) {
+    let draft = validate(form)?
+    let items = list(repo)?
+    let post = Post { id: id, title: draft.title, body: draft.body }
+    let mut updated: Vec<Post> = []
     let mut found = false
-    for post in posts {
-        if post.id == id { result = push(result, Post { id: id, title: draft.title, body: draft.body }); found = true }
-        else { result = push(result, post) }
+    for item in items {
+        if item.id.0 == id.0 { updated = push(updated, post); found = true }
+        else { updated = push(updated, item) }
     }
-    if !found { fail(Missing(id)) }
-    result
-}
-impl Posts for FilePosts {
-    fn list(self) -> Vec<Post> ! Failure { load(self.path) }
-    fn create(self, draft: Draft) -> Post ! Failure {
-        let saved = load(self.path)
-        let post = append(saved, draft)
-        persist(self.path, push(saved, post))
-        post
-    }
-    fn update(self, id: PostId, draft: Draft) -> Post ! Failure {
-        persist(self.path, replaced(load(self.path), id, draft))
-        Post { id: id, title: draft.title, body: draft.body }
-    }
-}
-impl Posts for MemoryPosts {
-    fn list(self) -> Vec<Post> { read(self.posts) }
-    fn create(self, draft: Draft) -> Post {
-        let saved = read(self.posts)
-        let post = append(saved, draft)
-        write(self.posts, push(saved, post))
-        post
-    }
-    fn update(self, id: PostId, draft: Draft) -> Post ! Failure {
-        write(self.posts, replaced(read(self.posts), id, draft))
-        Post { id: id, title: draft.title, body: draft.body }
-    }
+    if !found { return Err(Fault { status: 404, message: '投稿が見つからない' }) }
+    save(repo, updated)?
+    Ok(post)
 }

@@ -328,6 +328,38 @@ fn test_cmd(files: &[&str]) -> Result<bool, String> {
 
 #[cfg(test)]
 mod tests {
+    // 並列テストで書き込み用の記述子が一時的に残る場合、Linux は ETXTBSY を返す。
+    // 実行結果と他の起動エラーはそのまま返す。
+    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+    fn native_output(path: &std::path::Path) -> std::io::Result<std::process::Output> {
+        for _ in 0..100 {
+            match std::process::Command::new(path).output() {
+                Err(e) if e.raw_os_error() == Some(26) => std::thread::sleep(std::time::Duration::from_millis(5)),
+                result => return result,
+            }
+        }
+        std::process::Command::new(path).output()
+    }
+
+    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+    #[test]
+    fn native_execution_waits_for_a_temporary_writer() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!("hibana-execution-{}", std::process::id()));
+        std::fs::write(&path, crate::to_native("fn main() { put(7) }").unwrap()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let writer = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        assert_eq!(std::process::Command::new(&path).output().unwrap_err().raw_os_error(), Some(26));
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            drop(writer);
+        });
+        let output = native_output(&path).unwrap();
+        release.join().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"7\n");
+        std::fs::remove_file(path).unwrap();
+    }
     #[test]
     fn update_arguments() {
         assert_eq!(super::update_target(&[]).unwrap(), None);
@@ -533,7 +565,7 @@ mod tests {
                     let exe = tmp.join(format!("{name}-{total}"));
                     std::fs::write(&exe, bytes).unwrap();
                     std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
-                    let r = std::process::Command::new(&exe).output().unwrap();
+                    let r = native_output(&exe).unwrap();
                     assert_eq!(String::from_utf8(r.stdout).unwrap(), want, "ネイティブ: {}", p.display());
                     native.push(name.clone());
                 }
@@ -587,7 +619,7 @@ mod tests {
             let exe = tmp.join(format!("e{i}"));
             std::fs::write(&exe, crate::to_native(src).unwrap()).unwrap();
             std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
-            let r = std::process::Command::new(&exe).output().unwrap();
+            let r = native_output(&exe).unwrap();
             assert_eq!(r.status.code(), Some(1), "{src}");
             assert_eq!(String::from_utf8(r.stdout).unwrap(), "1\n", "{src}");
             assert!(String::from_utf8(r.stderr).unwrap().contains(msg), "{src}");
@@ -596,7 +628,7 @@ mod tests {
         let exe = tmp.join("put");
         std::fs::write(&exe, crate::to_native(src).unwrap()).unwrap();
         std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let r = std::process::Command::new(&exe).output().unwrap();
+        let r = native_output(&exe).unwrap();
         assert_eq!(String::from_utf8(r.stdout).unwrap(), out(src).unwrap());
         std::fs::remove_dir_all(&tmp).unwrap();
     }

@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test:browser": "playwright test"
+    "test:browser": "playwright test",
+    "test:quality": "node tests/quality.mjs"
   },
   "devDependencies": {
     "@mizchi/vlmkit": "^0.23.0",

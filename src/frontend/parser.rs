@@ -469,6 +469,10 @@ pub fn parse(src: &str) -> R<Program> {
 }
 
 fn parse_toks(src: &str, toks: Vec<Token>) -> R<Program> {
+    parse_toks_depth(src, toks, 0)
+}
+fn parse_toks_depth(src: &str, toks: Vec<Token>, expansion: usize) -> R<Program> {
+    if expansion >= 64 { return Err("宣言マクロの展開が深すぎる".into()); }
     let mut p = Parser {
         helpers: Rc::default(),
         toks,
@@ -601,6 +605,7 @@ fn parse_toks(src: &str, toks: Vec<Token>) -> R<Program> {
     }
     g.validate()?;
     p.g = Rc::new(g);
+    let mut declarations = Vec::new();
     // 宣言の位置で照合した宣言のマクロ (始まり, 終わり, マクロの番号, 照合結果)
     // 1周目は宣言の名前を集める
     loop {
@@ -692,6 +697,7 @@ fn parse_toks(src: &str, toks: Vec<Token>) -> R<Program> {
                 for w in p.toks[start..p.pos].windows(2) {
                     if let (Tok::Punct("fn"), Tok::Ident(n)) = (&w[0].tok, &w[1].tok) {
                         let n = n.clone();
+                        generic_fns.insert(qual(&cur, &n));
                         declare(&cur, &n, &mut globals);
                     }
                 }
@@ -708,7 +714,13 @@ fn parse_toks(src: &str, toks: Vec<Token>) -> R<Program> {
                 test_starts.push(p.pos);
                 p.skip_fn()?;
             }
-            _ => return p.err("fn・type・effect・trait・impl・extern・syntax・macro・use のいずれかが必要"),
+            _ => {
+                p.types = Rc::new(types.clone());
+                let start = p.pos;
+                if let Some((k, node)) = p.declaration_macro()? {
+                    declarations.push((start, p.pos, k, node));
+                } else { return p.err("fn・type・effect・trait・impl・extern・syntax・macro・use・宣言マクロのいずれかが必要"); }
+            }
         }
     }
     p.types = Rc::new(types.clone());
@@ -730,6 +742,15 @@ fn parse_toks(src: &str, toks: Vec<Token>) -> R<Program> {
     p.uses = Rc::new(uses);
     p.modules = Rc::new(modules);
     p.module_at = Rc::new(module_at);
+    if !declarations.is_empty() {
+        let mut tokens = p.toks.clone();
+        for (start, end, k, node) in declarations.into_iter().rev() {
+            p.pos = end;
+            let generated = p.expand_declaration(k, node, p.toks[start].span)?;
+            tokens.splice(start..end, generated);
+        }
+        return parse_toks_depth(src, tokens, expansion + 1);
+    }
     let mut prog = Program::default();
     for s in effect_starts {
         p.pos = s;
@@ -985,10 +1006,30 @@ impl Parser<'_> {
             && (self.types.contains(&q)
                 || self.structs.contains_key(&q)
                 // 関数の名前は f<型>(...) の時だけ。他は局所変数かもしれないので resolve に任せる
-                || (self.generic_fns.contains(&q) && at(1) == Some(Tok::Punct("<"))))
+                || (self.generic_fns.contains(&q) && self.explicit_type_call(self.pos + 1)))
         {
             self.toks[self.pos].tok = Tok::Ident(q);
         }
+    }
+
+    // f<T>(...) と、局所変数と比較演算子の並びを区別する。
+    fn explicit_type_call(&self, start: usize) -> bool {
+        if self.toks.get(start).map(|t| &t.tok) != Some(&Tok::Punct("<")) { return false; }
+        let (mut angles, mut nested) = (0, 0);
+        for i in start..self.toks.len() {
+            match self.toks[i].tok {
+                Tok::Punct("(" | "[") => nested += 1,
+                Tok::Punct(")" | "]") => { if nested == 0 { return false; } nested -= 1; },
+                Tok::Punct("<") if nested == 0 => angles += 1,
+                Tok::Punct(">") if nested == 0 => {
+                    angles -= 1;
+                    if angles == 0 { return self.toks.get(i + 1).map(|t| &t.tok) == Some(&Tok::Punct("(")); }
+                }
+                Tok::Punct("{" | "}" | ";") | Tok::Eof if nested == 0 => return false,
+                _ => {}
+            }
+        }
+        false
     }
 
     // `...{式}...` の式を、今の名前の環境で読む
@@ -1040,18 +1081,8 @@ impl Parser<'_> {
         }
         let m = self.cur_module();
         let mut cands = vec![qual(&m, n)];
-        if m.is_empty() {
-            for u in self.uses.get(&m).into_iter().flatten() {
-                if u.names.takes(n) {
-                    cands.push(qual(&u.module, n))
-                }
-            }
-        } else {
-            for u in self.uses.get(&m).into_iter().flatten() {
-                if !matches!(u.names, UseNames::Qualified) {
-                    cands.push(qual(&u.module, n));
-                }
-            }
+        for u in self.uses.get(&m).into_iter().flatten() {
+            if u.names.takes(n) { cands.push(qual(&u.module, n)); }
         }
         let known = |c: &String| self.known.contains(c) || self.types.contains(c);
         cands.into_iter().find(known).unwrap_or(n.to_string())
@@ -2128,7 +2159,7 @@ impl Parser<'_> {
             }
             // f<型, ...>(引数) は型引数を明示した呼び出し。型引数を引数の先頭に並べる
             Tok::Ident(name)
-                if self.generic_fns.contains(&name) && self.peek() == &Tok::Punct("<") =>
+                if self.generic_fns.contains(&name) && self.explicit_type_call(self.pos) =>
             {
                 self.pos += 1;
                 let mut args = Vec::new();

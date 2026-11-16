@@ -22,7 +22,11 @@ fn builds_and_links_as_independent_steps() {
     let exports = vec!["twice".to_string(), "log".to_string()];
     let linked = pipeline::link(&all, &exports).unwrap();
     assert_eq!(user(&linked), ["add", "twice", "log"]);
-    let twice = linked.functions().iter().find(|f| f.name() == "twice").unwrap();
+    let twice = linked
+        .functions()
+        .iter()
+        .find(|f| f.name() == "twice")
+        .unwrap();
     assert_eq!(twice.param_types().len(), 1);
     assert!(!twice.body().is_empty());
     assert!(pipeline::link(&all, &["missing".into()]).is_err());
@@ -105,14 +109,7 @@ fn unused() -> int { unused_host() }
     )
     .unwrap();
     let glue = pipeline::emit_js_glue(&ir, &exports).unwrap();
-    assert!(glue.contains(&format!(
-        "for (const [name, params, result] of {})",
-        inspected["exports"]
-    )));
-    assert!(glue.contains(&format!(
-        "for (const [name, params, result] of {})",
-        inspected["imports"]
-    )));
+    // 生成した接続コードの順序と変換は、下で WASM を実行して確かめる。
 
     let dir = std::env::temp_dir().join(format!("hibana-signatures-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

@@ -1,60 +1,60 @@
-// DOM と非同期通信の接続。入力検証と表示の生成は WASM に委ねる
-import { instantiate } from './client.mjs';
-const state = new Map();
-let api;
-let pending = false;
-const element = selector => {
-  const node = document.querySelector(selector);
-  if (!node) throw new Error(`要素が見つかりません: ${selector}`);
-  return node;
-};
-const host = {
-  render: (selector, html) => { element(selector).innerHTML = html; },
-  text: (selector, text) => { element(selector).textContent = text; },
-  value: selector => element(selector).value,
-  set_value: (selector, value) => { element(selector).value = value; },
-  focus: selector => element(selector).focus(),
-  state: key => state.get(key) ?? '',
-  set_state: (key, value) => { state.set(key, value); },
-  busy: (selector, value) => {
-    const root = element(selector);
-    root.querySelectorAll('button').forEach(node => { node.disabled = Number(value) !== 0; });
-    root.setAttribute('aria-busy', String(Number(value) !== 0));
-  },
-  notice: (selector, message, error) => {
-    const notice = element(selector);
-    notice.textContent = message;
-    notice.dataset.error = String(Number(error) !== 0);
-  },
-  request: (method, path, body) => {
-    if (pending) return;
-    pending = true;
-    fetch(path, { method, headers: { 'Content-Type': 'application/json', 'X-Hanabi-Request': '1' }, body: method === 'GET' ? undefined : body })
-      .then(async response => { const text = await response.text(); pending = false; api.receive(response.status, text); })
-      .catch(() => { pending = false; api.network_error('通信に失敗しました。もう一度操作してください。'); });
-  },
-};
-document.addEventListener('submit', event => {
-  const form = event.target.closest('[data-hanabi-submit]');
-  if (!form) return;
-  event.preventDefault();
-  if (!pending) api?.[form.dataset.hanabiSubmit]?.();
-});
-document.addEventListener('click', event => {
-  const button = event.target.closest('button[data-hanabi-call]');
-  if (!button || pending) return;
-  const handler = api?.[button.dataset.hanabiCall];
-  if (typeof handler !== 'function') return;
-  if (button.dataset.id === undefined) handler();
-  else if (/^[1-9][0-9]*$/.test(button.dataset.id)) handler(BigInt(button.dataset.id));
-});
-try {
-  const response = await fetch('./client.wasm');
-  if (!response.ok) throw new Error('画面を読み込めませんでした');
-  const functions = Object.fromEntries(Object.entries(host).map(([name, callback]) => [`dom.${name}`, callback]));
-  api = await instantiate(await response.arrayBuffer(), { hibana_host: functions });
-  api.start();
-} catch (error) {
-  element('#app').textContent = '画面を読み込めませんでした。ページを再読み込みしてください。';
-  console.error(error);
+// WASM の型付きセッションへ DOM イベントと通信完了を配送する。
+export async function mount(config) {
+  const { instantiate } = await import(config.glue);
+  const response = await fetch(config.wasm);
+  if (!response.ok) throw new Error('WASM を読み込めない');
+  const element = selector => {
+    const node = document.querySelector(selector);
+    if (!node) throw new Error(`要素が見つからない: ${selector}`);
+    return node;
+  };
+  let api;
+  let session;
+  let disposed = false;
+  const controller = new AbortController();
+  const host = {
+    'dom.read_value': selector => element(selector).value,
+    'dom.render': (selector, html) => { element(selector).innerHTML = html; },
+    'dom.focus_element': selector => element(selector).focus(),
+    'dom.schedule': (id, method, url, body) => {
+      queueMicrotask(async () => {
+        let status;
+        let text;
+        try {
+          const reply = await fetch(url, {
+            method, headers: { 'Content-Type': 'application/json', 'X-Hanabi-Request': '1' },
+            body: method === 'GET' ? undefined : body, signal: controller.signal,
+          });
+          status = reply.status;
+          text = await reply.text();
+        } catch (error) {
+          if (disposed) return;
+          // ネットワーク障害も型付きのエラーへ変換する。プロトコル外の応答本文は渡さない。
+          status = 503;
+          text = '';
+        }
+        if (!disposed) api[config.resolve](session, id, status, text);
+      });
+    },
+  };
+  api = await instantiate(await response.arrayBuffer(), { hibana_host: host });
+  session = api[config.entry](config.root);
+  const root = element(config.root);
+  const handlers = ['click', 'submit', 'change'].map(kind => {
+    const listener = event => {
+      if (!(event.target instanceof Element)) return;
+      const node = event.target.closest(`[data-hanabi-${kind}]`);
+      if (!node || !root.contains(node) || node.disabled) return;
+      event.preventDefault();
+      api[config.dispatch](session, node.getAttribute(`data-hanabi-${kind}`));
+    };
+    root.addEventListener(kind, listener);
+    return [kind, listener];
+  });
+  return { dispose() {
+    disposed = true;
+    controller.abort();
+    for (const [kind, listener] of handlers) root.removeEventListener(kind, listener);
+    api.dispose();
+  } };
 }

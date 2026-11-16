@@ -1949,7 +1949,7 @@ impl Ck {
                 self.pop();
                 let Some(els) = els else {
                     // else が無い if の値は捨てる
-                    tt?;
+                    if tt? == prim("never") { self.add_fact(un("!", cv)); }
                     return Ok(prim("unit"));
                 };
                 // 片方の分岐だけで型が決まらない時（None や []）は、もう片方の型で確かめる

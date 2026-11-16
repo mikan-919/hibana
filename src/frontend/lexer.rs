@@ -8,6 +8,7 @@ pub enum Tok {
     // `...{式}...`。ソースのままの中身と、文字列と式の並び
     Template(String, Vec<TPart>),
     Ident(String),
+    Raw(char),
     // 記号とキーワードを共に表す
     Punct(&'static str),
     Eof,
@@ -74,7 +75,7 @@ pub const KEYWORDS: &[&str] = &[
 ];
 // 最長一致のため、2文字の記号を先に置く
 const PUNCTS: &[&str] = &[
-    "::", "->", "=>", "..", "**", "==", "!=", "<=", ">=", "&&", "||", "</", "(", ")", "{", "}", "[", "]", ",",
+    "::", "->", "=>", "..", "**", "==", "!=", "<=", ">=", "&&", "||", "</", "/>", "(", ")", "{", "}", "[", "]", ",",
     ";", ":", ".", "=", "<", ">", "+", "-", "*", "/", "%", "!", "@", "$", "~", "|", "?",
 ];
 
@@ -196,7 +197,7 @@ impl Lx<'_> {
                 Some('t') => Ok('\t'),
                 Some('r') => Ok('\r'),
                 Some('0') => Ok('\0'),
-                Some(c @ ('\\' | '\'' | '`' | '{' | '}')) => Ok(c),
+                Some(c @ ('\\' | '\'' | '"' | '`' | '{' | '}')) => Ok(c),
                 _ => self.err("不明なエスケープ"),
             },
             Some(c) => Ok(c),
@@ -251,10 +252,10 @@ fn lex_from(lx: &mut Lx, nested: bool) -> R<Vec<Token>> {
         };
         let tok = if c.is_ascii_digit() {
             lx.number()?
-        } else if c.is_ascii_alphabetic() || c == '_' {
+        } else if c.is_alphabetic() || c == '_' {
             while lx
                 .peek()
-                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+                .is_some_and(|c| c.is_alphanumeric() || c == '_')
             {
                 lx.bump();
             }
@@ -263,12 +264,10 @@ fn lex_from(lx: &mut Lx, nested: bool) -> R<Vec<Token>> {
                 Some(k) => Tok::Punct(k),
                 None => Tok::Ident(w.to_string()),
             }
-        } else if c == '"' {
-            return lx.err("文字列は '...' で書く");
-        } else if c == '\'' {
+        } else if c == '\'' || c == '"' {
             lx.bump();
             let mut s = String::new();
-            while lx.peek() != Some('\'') {
+            while lx.peek() != Some(c) {
                 s.push(lx.quoted_char()?);
             }
             lx.bump();
@@ -307,7 +306,8 @@ fn lex_from(lx: &mut Lx, nested: bool) -> R<Vec<Token>> {
             }
             Tok::Punct(p)
         } else {
-            return lx.err(&format!("不明な文字 {c:?}"));
+            lx.bump();
+            Tok::Raw(c)
         };
         out.push(Token {
             tok,
@@ -386,6 +386,6 @@ mod tests {
         let Tok::Template(raw, parts) = &ts[9].tok else { panic!() };
         assert_eq!(raw, "a{x}");
         assert!(matches!(&parts[..], [TPart::Lit(a), TPart::Code(c)] if a == "a" && c[0].tok == Tok::Ident("x".into())));
-        assert!(lex("\"a\"").is_err());
+        assert_eq!(lex("\"a\"").unwrap()[0].tok, Tok::Str("a".into()));
     }
 }

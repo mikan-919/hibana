@@ -96,7 +96,7 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
         })
         .collect();
     let has_str =
-        |ts: &[ValueType], r: ValueType| ts.contains(&ValueType::Str) || r == ValueType::Str;
+        |ts: &[ValueType], r: ValueType| ts.iter().chain([&r]).any(|t| matches!(t, ValueType::Str | ValueType::Ref(_)));
     let strings = exported
         .iter()
         .any(|f| has_str(&f.param_types, f.result_type))
@@ -324,6 +324,8 @@ fn from_raw(t: ValueType, at: u32, indices: &HashMap<&str, u32>) -> Vec<I<'stati
             I::Call(indices["__str_in"]),
         ],
         ValueType::Num => vec![I::I64ReinterpretF64, I::LocalSet(at), I::I64Const(ir::NUM), I::LocalGet(at), I::Call(indices["__num_checked"])],
+        ValueType::Bool => vec![I::LocalSet(at), I::I64Const(ir::BOOL), I::LocalGet(at)],
+        ValueType::Ref(_) => vec![I::LocalSet(at), I::I64Const(8), I::LocalGet(at)],
         _ => vec![I::LocalSet(at), I::I64Const(ir::INT), I::LocalGet(at)],
     }
 }

@@ -1,100 +1,109 @@
 use std -> *
-use '../client.hb' -> { Remote, query, send, mount }
-use '../client.hb'
+use '../client.hb' -> { Program, Session, Change }
 use '../dom.hb'
-use '../view.hb' -> { Html, text, each }
+use '../view.hb' -> { Html, each }
+use '../json.hb' -> { Codec, decode }
+use '../endpoint.hb' -> { Fault }
+use '../types.hb' -> { Status, RequestId }
 use './domain.hb' -> *
-use './codec.hb' -> { Edit }
-use './codec.hb'
+use './api.hb' -> *
 
-fn notice(message: String, error: int) { dom.notice('#notice', message, error) }
-fn busy(value: int) { dom.busy('#app', value) }
-fn load_posts() ! Remote { busy(1); dom.set_state('pending', 'load'); query('/api/posts') }
-
-fn shell() -> Html {
-    view div(class = 'shell') {
-        view header(class = 'topbar') { view a(class = 'brand', href = '/') { text('hanabi'); view span(class = 'brand-section') { text('投稿管理') } } };
-        view main {
-            view div(class = 'page-intro') { view div { view p(class = 'eyebrow') { text('WORKSPACE') }; view h1 { text('投稿') }; view p(class = 'intro-copy') { text('投稿の作成と編集。保存した内容は一覧に反映されます。') } } };
-            view div(id = 'notice', class = 'notice', role = 'status', aria_live = 'polite') { text('') };
-            view div(class = 'workspace') {
-                view section(class = 'posts-panel', aria_labelledby = 'posts-heading') {
-                    view div(class = 'panel-heading') { view h2(id = 'posts-heading') { text('投稿一覧') }; view span(class = 'count', id = 'post-count') { text('0 件') } };
-                    view div(id = 'posts', class = 'posts') { render_posts([]) }
-                };
-                view aside(class = 'editor-panel', aria_labelledby = 'editor-heading') {
-                    view div(class = 'editor-heading') { view h2(id = 'editor-heading') { text('新しい投稿') } };
-                    view form(id = 'post-form', data_hanabi_submit = 'submit', novalidate = 'novalidate') {
-                        view input(id = 'post-id', 'type' = 'hidden', value = '0') { text('') };
-                        view div(class = 'field') { view label('for' = 'title') { text('タイトル'); view span { text('必須') } }; view input(id = 'title', maxlength = '120', placeholder = '投稿のタイトル', aria_describedby = 'title-help') { text('') }; view p(id = 'title-help', class = 'field-help') { text('120文字以内') } };
-                        view div(class = 'field') { view label('for' = 'body') { text('本文'); view span { text('必須') } }; view textarea(id = 'body', maxlength = '4000', placeholder = '伝えたいことを書いてください', aria_describedby = 'body-help') { text('') }; view p(id = 'body-help', class = 'field-help') { text('4000文字以内') } };
-                        view div(class = 'form-actions') { view button(class = 'primary', 'type' = 'submit') { view span(id = 'save-label') { text('投稿を保存') } }; view button(class = 'secondary', 'type' = 'button', data_hanabi_call = 'cancel') { text('入力をクリア') } };
-                        view p(class = 'save-note') { text('投稿はこのサーバーに保存されます。') }
-                    }
+union Event { Reload(unit), Submit(unit), Edit(PostId), Cancel(unit) }
+enum Message { Ui(Event), Loaded(Result<Vec<Post>, Fault>), Saved(Result<Post, Fault>) }
+struct Model {
+    items: Vec<Post>, editing: Option<PostId>, form: Form,
+    busy: bool, notice: String, error: bool
+}
+type App = Ref<Session<Model, Message>>
+fn initial() -> Model {
+    Model { items: [], editing: None, form: Form { title: '', body: '' }, busy: false, notice: '', error: false }
+}
+fn load(model: Model) -> Change<Model, Message> {
+    Change {
+        state: Model { items: model.items, editing: model.editing, form: model.form, busy: true, notice: model.notice, error: model.error },
+        command: client.call(list_api(), {}, {}, fn(result) { Loaded(result) })
+    }
+}
+fn update(model: Model, message: Message) -> Change<Model, Message> ! dom.Dom {
+    match message {
+        Ui(event) -> match event {
+            Reload(_) -> load(model)
+            Submit(_) -> {
+                let form = Form { title: dom.value('#title'), body: dom.value('#body') }
+                let command = match model.editing {
+                    None -> client.call(create_api(), {}, form, fn(result) { Saved(result) })
+                    Some(id) -> client.call(update_api(), id, form, fn(result) { Saved(result) })
+                }
+                Change {
+                    state: Model { items: model.items, editing: model.editing, form: form, busy: true, notice: '', error: false },
+                    command: command
                 }
             }
+            Edit(id) -> {
+                let mut form = model.form
+                for post in model.items { if post.id.0 == id.0 { form = Form { title: post.title.0, body: post.body.0 } } }
+                client.stay(Model { items: model.items, editing: Some(id), form: form, busy: false, notice: '投稿を編集中', error: false })
+            }
+            Cancel(_) -> client.stay(Model { items: model.items, editing: None, form: Form { title: '', body: '' }, busy: false, notice: '入力をクリアしました', error: false })
+        }
+        Loaded(result) -> match result {
+            Ok(items) -> client.stay(Model { items: items, editing: model.editing, form: model.form, busy: false, notice: model.notice, error: model.error })
+            Err(e) -> client.stay(Model { items: model.items, editing: model.editing, form: model.form, busy: false, notice: e.message, error: true })
+        }
+        Saved(result) -> match result {
+            Ok(_) -> load(Model { items: model.items, editing: None, form: Form { title: '', body: '' }, busy: false, notice: '投稿を保存しました', error: false })
+            Err(e) -> client.stay(Model { items: model.items, editing: model.editing, form: model.form, busy: false, notice: e.message, error: true })
         }
     }
 }
-fn render_posts(posts: Vec<Post>) -> Html {
-    if len(posts) == 0 {
-        view div(class = 'empty') { view h3 { text('投稿はまだありません') }; view p { text('フォームから最初の投稿を作成してください。') } }
+fn view(model: Model) -> Html {
+    let heading = match model.editing { None -> '新しい投稿' Some(_) -> '投稿を編集' }
+    let save_label = match model.editing { None -> '投稿を保存' Some(_) -> '変更を保存' }
+    let posts = if len(model.items) == 0 {
+        <div class="empty"><h3>投稿はまだありません</h3><p>フォームから最初の投稿を作成してください。</p></div>
     } else {
-        each(posts, fn(post) {
-            view article(class = 'post') {
-                view div(class = 'post-meta') { view span { text('POST / ' + post.id.to_string()) }; view button(class = 'edit-button', 'type' = 'button', data_hanabi_call = 'edit', data_id = post.id.to_string(), aria_label = post.title + 'を編集') { text('編集') } };
-                view h3 { text(post.title) };
-                view p(class = 'post-body') { text(post.body) }
-            }
+        each(model.items, fn(post) {
+            <article class="post">
+                <div class="post-meta"><span>{'POST / ' + post.id.0.to_string()}</span><button class="edit-button" type="button" disabled={model.busy} onClick={Edit(post.id)} aria-label={post.title.0 + 'を編集'}>編集</button></div>
+                <h3>{post.title.0}</h3><p class="post-body">{post.body.0}</p>
+            </article>
         })
     }
+    <div class = "shell">
+    <header class = "topbar"><a class = "brand" href = "/">hanabi<span class = "brand-section">投稿管理</span></a></header>
+    <main>
+    <div class = "page-intro"><div><p class = "eyebrow">WORKSPACE</p><h1>投稿</h1><p class = "intro-copy">投稿の作成と編集。保存した内容は一覧に反映されます。</p></div></div>
+    <div id = "notice" class = { if model.error { 'notice error' } else { 'notice' } } role = "status" aria-live = "polite"> { model.notice }</div>
+    <div class = "workspace">
+    <section class = "posts-panel" aria-labelledby = "posts-heading">
+    <div class = "panel-heading"><h2 id = "posts-heading">投稿一覧</h2><span class = "count" id = "post-count"> { len(model.items).to_string() + ' 件' }</span></div>
+    <div id = "posts" class = "posts"> { posts }</div>
+    </section>
+    <aside class = "editor-panel" aria-labelledby = "editor-heading">
+    <div class = "editor-heading"><h2 id = "editor-heading"> { heading }</h2></div>
+    <form id = "post-form" onSubmit = { Submit({}) } novalidate = "novalidate">
+    <div class = "field"><label for = "title">タイトル<span>必須</span></label><input id = "title" value = { model.form.title } placeholder = "投稿のタイトル" aria-describedby = "title-help" /><p id = "title-help" class = "field-help">120文字以内</p></div>
+    <div class = "field"><label for = "body">本文<span>必須</span></label><textarea id = "body" placeholder = "伝えたいことを書いてください" aria-describedby = "body-help"> { model.form.body }</textarea><p id = "body-help" class = "field-help">4000文字以内</p></div>
+    <div class = "form-actions"><button class = "primary" type = "submit" disabled = { model.busy }> { save_label }</button><button class = "secondary" type = "button" disabled = { model.busy } onClick = { Cancel({}) }>入力をクリア</button></div>
+    <p class = "save-note">投稿はこのサーバーに保存されます。</p>
+    </form>
+    </aside>
+    </div>
+    </main>
+    </div>
 }
-fn ui(action: () -> unit ! Remote, Failure) {
-    client.run(fn() ! Remote {
-        handle action() { fail(error) -> { busy(0); match error { Invalid(message) -> notice(message, 1) Missing(id) -> notice('投稿 ' + id.to_string() + ' が見つからない', 1) Storage(message) -> notice(message, 1) } } }
-    })
+fn bootstrap(root: String) -> App {
+    let program = Program {
+        initial: initial(), update: update, view: view, root: root,
+        event: fn(value) { Ok(Ui(decode<Event>(value)?)) }
+    }
+    let app = dom.browser(fn() -> App ! dom.Dom { client.create(program) })
+    client.browser(fn() ! dom.Dom, client.Schedule { client.dispatch(app, Ui(Reload({}))) })
+    app
 }
-fn clear_form() {
-    dom.set_value('#post-id', '0'); dom.set_value('#title', ''); dom.set_value('#body', '')
-    dom.text('#editor-heading', '新しい投稿'); dom.text('#save-label', '投稿を保存')
+fn dispatch(app: App, payload: String) { client.browser(fn() ! dom.Dom, client.Schedule { client.event(app, payload) }) }
+fn resolve(app: App, id: int, status: int, body: String) {
+    let id = match refine<RequestId>(id) { Ok(id) -> id Err(e) -> panic(e) }
+    let status = match refine<Status>(status) { Ok(status) -> status Err(e) -> panic(e) }
+    client.browser(fn() ! dom.Dom, client.Schedule { client.resolve(app, id, status, body) })
 }
-fn start() { ui(fn() ! Remote, Failure { mount('#app', shell()); load_posts() }) }
-fn submit() {
-    ui(fn() ! Remote, Failure {
-        let input = draft(dom.value('#title'), dom.value('#body'))
-        let id = match parse_int(dom.value('#post-id')) { Ok(value) -> value Err(_) -> 0 }
-        busy(1)
-        if id == 0 { dom.set_state('pending', 'create'); send('POST', '/api/posts', input) }
-        else {
-            let id = match refine<PostId>(id) { Ok(value) -> value Err(e) -> fail(Invalid(e)) }
-            dom.set_state('pending', 'edit'); send('PUT', '/api/posts', Edit { id: id, draft: input })
-        }
-    })
-}
-fn edit(id: int) {
-    ui(fn() ! Remote, Failure {
-        for post in codec.parse_posts(dom.state('posts')) {
-            if post.id == id {
-                dom.set_value('#post-id', id.to_string()); dom.set_value('#title', post.title); dom.set_value('#body', post.body)
-                dom.text('#editor-heading', '投稿を編集'); dom.text('#save-label', '変更を保存')
-                notice('投稿 ' + id.to_string() + ' を編集中', 0); dom.focus('#title')
-            }
-        }
-    })
-}
-fn cancel() { clear_form(); notice('入力をクリアしました', 0); dom.focus('#title') }
-fn receive(status: int, body: String) {
-    busy(0)
-    ui(fn() ! Remote, Failure {
-        if status >= 400 { fail(Invalid(codec.error_message(body))) }
-        let pending = dom.state('pending')
-        if pending == 'load' {
-            let posts = codec.parse_posts(body)
-            dom.set_state('posts', body); mount('#posts', render_posts(posts)); dom.text('#post-count', len(posts).to_string() + ' 件')
-        } else {
-            clear_form(); notice(if pending == 'create' { '投稿を保存しました' } else { '変更を保存しました' }, 0)
-            load_posts()
-        }
-    })
-}
-fn network_error(message: String) { busy(0); notice(message, 1) }

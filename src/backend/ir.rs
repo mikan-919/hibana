@@ -33,6 +33,7 @@ pub enum ValueType {
     Int,
     Num,
     Bool,
+    Ref(u64),
     Str,
     Unit,
     Other,
@@ -140,10 +141,12 @@ pub enum Stmt {
 
 impl fmt::Display for ValueType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Self::Ref(key) = self { return write!(f, "ref:{key}"); }
         f.write_str(match self {
             Self::Int => "int",
             Self::Num => "num",
             Self::Bool => "bool",
+            Self::Ref(_) => unreachable!(),
             Self::Str => "String",
             Self::Unit => "unit",
             Self::Other => "other",
@@ -173,7 +176,7 @@ impl Import {
 }
 
 fn boundary(t: ValueType) -> bool {
-    matches!(t, ValueType::Int | ValueType::Num | ValueType::Str | ValueType::Unit)
+    matches!(t, ValueType::Int | ValueType::Num | ValueType::Bool | ValueType::Ref(_) | ValueType::Str | ValueType::Unit)
 }
 
 // 型検査は num の演算の引数を #num で包む。リテラルはそのまま残る。
@@ -277,6 +280,26 @@ fn value_type(e: &Ast) -> ValueType {
         Ast::Var(n) if n == "bool" => ValueType::Bool,
         Ast::Var(n) if n == "String" => ValueType::Str,
         Ast::Var(n) if n == "unit" => ValueType::Unit,
+        Ast::Call(n, a) if n == "Ref" && a.len() == 1 => {
+            use std::hash::{Hash, Hasher};
+            fn key(e: &Ast) -> String {
+                match e.peel() {
+                    Ast::Var(n) => n.clone(),
+                    Ast::Call(n, a) => format!("{n}<{}>", a.iter().map(key).collect::<Vec<_>>().join(",")),
+                    Ast::Refine(t, n, p) => format!("{}[{n}->{}]", key(t), key(p)),
+                    Ast::Int(n) => n.to_string(), Ast::Str(s) => format!("{s:?}"), Ast::Bool(b) => b.to_string(),
+                    Ast::Binary(op, a, b) => format!("({} {op} {})", key(a), key(b)),
+                    Ast::Unary(op, a) => format!("{op}{}", key(a)),
+                    Ast::Field(a, n) => format!("{}.{n}", key(a)),
+                    Ast::Pi(ps, ret, effects) => format!("({})->{}!{}", ps.iter().map(|(_, t)| key(t)).collect::<Vec<_>>().join(","), key(ret), effects.iter().map(key).collect::<Vec<_>>().join(",")),
+                    Ast::Index(a, i) => format!("{}[{}]", key(a), key(i)),
+                    other => format!("{other:?}"),
+                }
+            }
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            key(&a[0]).hash(&mut h);
+            ValueType::Ref(h.finish())
+        }
         Ast::Refine(base, _, _) => value_type(base),
         _ => ValueType::Other,
     }
@@ -361,24 +384,39 @@ pub fn lower(p: &parser::Program) -> R<Program> {
 /// exports から辿れる関数だけを変換する。None はすべての関数を変換する。
 pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>) -> R<Program> {
     let mut native_program = p.clone();
+    let aliases: HashMap<_, _> = p.fns.iter().filter(|f| f.alias && f.params.is_empty()).filter_map(|f| f.body.tail.as_ref().map(|e| (f.name.clone(), *e.clone()))).collect();
+    fn expand(e: &Ast, aliases: &HashMap<String, Ast>, depth: usize) -> Ast {
+        if depth > 64 { return e.clone(); }
+        match e.peel() {
+            Ast::Var(n) if aliases.contains_key(n) => expand(&aliases[n], aliases, depth + 1),
+            Ast::Call(n, a) => Ast::Call(n.clone(), a.iter().map(|e| expand(e, aliases, depth + 1)).collect()),
+            Ast::Refine(t, n, c) => Ast::Refine(Box::new(expand(t, aliases, depth + 1)), n.clone(), c.clone()),
+            _ => e.clone(),
+        }
+    }
+    for f in &mut native_program.fns {
+        for (_, t) in &mut f.params { *t = expand(t, &aliases, 0); }
+        if let Some(t) = &mut f.ret { *t = expand(t, &aliases, 0); }
+    }
     for f in &mut native_program.fns {
         if f.js.as_deref() == Some("hibana:native") {
             let name = f.name.rsplit('.').next().unwrap();
             let (params, ret): (&[&str], &str) = match name {
                 "listen" => (&["int"], "int"), "accept" => (&["int"], "int"),
-                "close" | "wait" => (&["int"], "unit"), "exit" => (&["int"], "never"), "fork" => (&[], "int"),
-                "read" => (&["int", "int"], "Vec<int>"), "write" => (&["int", "Vec<int>"], "unit"),
+                "close" => (&["int"], "unit"),
+                "read" => (&["int", "int"], "std.Result<Vec<int>,String>"), "write" => (&["int", "Vec<int>"], "std.Result<unit,String>"),
                 "slice" => (&["Vec<int>", "int", "int"], "Vec<int>"), "join" => (&["Vec<int>", "Vec<int>"], "Vec<int>"),
-                "read_file" => (&["String"], "Vec<int>"), "write_file" => (&["String", "Vec<int>"], "unit"),
-                "mkdir" => (&["String"], "unit"), "utf8" => (&["String"], "Vec<int>"), "decode" => (&["Vec<int>"], "String"),
+                "read_file" => (&["String"], "std.Result<std.Option<Vec<int>>,String>"), "write_file" => (&["String", "Vec<int>"], "std.Result<unit,String>"),
+                "mkdir" => (&["String"], "std.Result<unit,String>"), "utf8" => (&["String"], "Vec<int>"), "decode" => (&["Vec<int>"], "String"),
                 "valid_utf8" => (&["Vec<int>"], "bool"),
                 _ => return Err(format!("hibana:native の関数 {name} は未対応").into()),
             };
-            let ty = |e: &Ast| match e.peel() {
+            fn ty(e: &Ast) -> String { match e.peel() {
                 Ast::Var(n) => n.clone(),
-                Ast::Call(n, a) if n == "Vec" && a.len() == 1 && matches!(a[0].peel(), Ast::Var(n) if n == "int") => "Vec<int>".into(),
+                Ast::Call(n, a) => format!("{n}<{}>", a.iter().map(ty).collect::<Vec<_>>().join(",")),
+                Ast::Refine(t, _, _) => ty(t),
                 _ => "?".into(),
-            };
+            } }
             if f.params.len() != params.len() || f.params.iter().zip(params).any(|((_, t), expected)| ty(t) != *expected)
                 || f.ret.as_ref().map_or("unit".into(), ty) != ret {
                 return Err(format!("hibana:native の関数 {name} の型が契約と異なる").into());
@@ -433,7 +471,7 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>) -> R<Prog
                 }
                 if matches!(
                     name.as_str(),
-                    "memory" | "__hibana_alloc" | "__hibana_reset"
+                    "memory" | "__hibana_alloc" | "__hibana_reset" | "dispose"
                 ) {
                     return Err(format!("公開名 {name} は WASM ABI の予約名").into());
                 }
@@ -476,7 +514,7 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>) -> R<Prog
                 {
                     return Err(format!("IR は関数 {} の境界の型に未対応", f.name).into());
                 }
-                if param_types.contains(&ValueType::Str) || result_type == ValueType::Str {
+                if param_types.iter().chain([&result_type]).any(|t| matches!(t, ValueType::Str | ValueType::Ref(_))) {
                     pending.extend(["__str_in".to_string(), "__str_out".to_string()]);
                 }
                 imports.push(Import {
@@ -493,8 +531,7 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>) -> R<Prog
             if !function.boundary() {
                 return Err(format!("IR は関数 {} の境界の型に未対応", function.name).into());
             }
-            if function.param_types.contains(&ValueType::Str)
-                || function.result_type == ValueType::Str
+            if function.param_types.iter().chain([&function.result_type]).any(|t| matches!(t, ValueType::Str | ValueType::Ref(_)))
             {
                 pending.extend(["__str_in".to_string(), "__str_out".to_string()]);
             }
