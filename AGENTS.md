@@ -23,7 +23,6 @@ nix develop -c cargo run -q -- <ファイル>   # 実行（fmt / test / lsp は�
 | `src/check/` | 型検査（`typeck.rs`）。細分化型の証明、効果、トレイト。`prove.rs` は型の評価と細分化型の証明、`smt.rs` は Z3 の FFI |
 | `src/backend/` | インタプリタ（`eval.rs`）、JavaScript（`js.rs`）、WASM とネイティブの共通の構造化 IR（`ir.rs`）、WebAssembly（`wasm.rs`）、Cranelift によるネイティブ（`native.rs`。libc なしの静的 ELF） |
 | `src/tooling/` | フォーマッタ（`fmt.rs`）、Language Server（`lsp.rs`）、シンボルの索引（`index.rs`） |
-| `src/project/` | スクリプト（`scripts.rs`）、パッケージ管理（`pkg/`）、外部ツール管理（`tools/`） |
 | `src/cli/mod.rs` | CLI のコマンド処理と、全体のテスト（`mod tests`） |
 | `src/lib.rs` `src/main.rs` | ライブラリと CLI の入口。既存の `hibana::parser` などの API は再エクスポートで維持 |
 | `src/pipeline.rs` `src/error.rs` | コンパイルの各段階と、共通のエラー表現 |

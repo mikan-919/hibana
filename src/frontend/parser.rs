@@ -365,27 +365,13 @@ fn load(
     dir: &std::path::Path,
     span: crate::lexer::Span,
 ) -> R<(String, String, std::path::PathBuf)> {
-    // use web のように名前で書いたら組み込みのライブラリか hibana.toml の依存、文字列で書いたらファイルか npm
+    // 名前で書いたら組み込みのライブラリ、文字列で書いたらファイルか npm の型宣言
     if !is_str {
         if let Some((_, t)) = LIBS.iter().find(|l| l.0 == name) {
             return Ok((name.rsplit("__").next().unwrap().to_string(), t.to_string(), dir.to_path_buf()));
         }
-        let Some(e) = crate::pkg::entry(&base_dir(), name) else {
-            return Err(Error::from(format!("ライブラリ {name} が無い"))
-                .at(span)
-                .help(
-                "パッケージなら hibana.toml の [dependencies] に書き、hibana fetch で取ってくる"
-                    .into(),
-            ));
-        };
-        let text = std::fs::read_to_string(&e).map_err(|err| {
-            Error::from(format!(
-                "{}: {err}（hibana fetch で取ってくる）",
-                e.display()
-            ))
-            .at(span)
-        })?;
-        return Ok((name.to_string(), text, e.parent().unwrap().to_path_buf()));
+        return Err(Error::from(format!("ライブラリ {name} が無い")).at(span)
+            .help("組み込み以外は use './ファイル.hb' と書く".into()));
     }
     let read = |p: &str| {
         std::fs::read_to_string(dir.join(p)).map_err(|e| Error::from(format!("{p}: {e}")).at(span))

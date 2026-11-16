@@ -24,7 +24,7 @@ impl Checked {
 }
 
 /// use したファイルを `base_dir` から読み、構文解析に渡すソースを作る。
-/// パッケージ依存は事前に hibana fetch などで取得する。
+/// 組み込みのライブラリと、指定ディレクトリからのファイルを読み込む。
 pub fn load(source: &str, base_dir: &Path) -> R<String> {
     parser::with_base_dir(base_dir, || parser::with_uses(source))
 }

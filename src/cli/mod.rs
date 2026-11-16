@@ -1,4 +1,4 @@
-use crate::{error, eval, fmt, lexer, lsp, parser, pkg, typeck};
+use crate::{error, eval, fmt, lexer, lsp, parser, typeck};
 #[cfg(test)]
 use crate::{run, to_js, to_web};
 
@@ -29,172 +29,21 @@ pub fn main() {
 
 const STACK: usize = 256 << 20;
 
-fn script_usage() -> ! {
-    eprintln!("使い方: hibana <build|dev> [-- 引数...]");
-    std::process::exit(2);
-}
-
-// 識別子の後は解釈しない。先頭の区切り -- だけを取り除き、残りを実行先へ渡す。
-fn run_dlx(args: &[String]) -> Result<i32, String> {
-    let usage = "使い方: hibana dlx [--bin コマンド | --rev Gitの版] <npm:名前|cargo:名前|hibana:GitのURL|GitのURL> [--] 引数...";
-    let mut bin = None;
-    let mut rev = None;
-    let mut i = 0;
-    while let Some(flag) = args.get(i).filter(|s| s.starts_with('-')) {
-        if flag == "--" {
-            i += 1;
-            break;
-        }
-        let slot = match flag.as_str() {
-            "--bin" => &mut bin,
-            "--rev" => &mut rev,
-            _ => return Err(format!("不明な dlx オプション: {flag}\n{usage}")),
-        };
-        if slot.is_some() {
-            return Err(format!("{flag} は一度だけ指定できます"));
-        }
-        let value = args
-            .get(i + 1)
-            .filter(|s| !s.is_empty() && !s.starts_with('-'))
-            .ok_or_else(|| format!("{flag} に値が必要\n{usage}"))?;
-        *slot = Some(value.as_str());
-        i += 2;
-    }
-    let spec = args.get(i).filter(|s| !s.is_empty()).ok_or(usage)?;
-    let rest = &args[i + 1..];
-    let rest = if rest.first().is_some_and(|s| s == "--") {
-        &rest[1..]
-    } else {
-        rest
-    };
-    if spec.starts_with("npm:") || spec.starts_with("cargo:") {
-        if rev.is_some() {
-            return Err("--rev は Hibana パッケージ専用です。npm/Cargo は 名前@版 で指定してください".into());
-        }
-        crate::tools::dlx(spec, bin, rest)
-    } else {
-        if bin.is_some() {
-            return Err("--bin は npm/Cargo パッケージ専用です。Hibana は src/main.hb を実行します".into());
-        }
-        pkg::dlx(spec, rev, rest)
-    }
-}
-
-fn update_target<'a>(args: &[&'a str]) -> Result<Option<&'a str>, String> {
-    match args {
-        [] => Ok(None),
-        [name] if !name.is_empty() && !name.starts_with('-') => Ok(Some(*name)),
-        _ => Err("使い方: hibana update [依存名|npm:名前|cargo:名前]".into()),
-    }
-}
-
-fn remove_target<'a>(args: &[&'a str]) -> Result<(bool, &'a str), String> {
-    let usage = "使い方: hibana remove [-g|--global] <依存名|npm:名前|cargo:名前>";
-    match args {
-        [name] if !name.is_empty() && !name.starts_with('-') => Ok((false, *name)),
-        [flag, name]
-            if (*flag == "-g" || *flag == "--global")
-                && !name.is_empty()
-                && !name.starts_with('-') =>
-        {
-            Ok((true, *name))
-        }
-        [name, flag]
-            if (*flag == "-g" || *flag == "--global")
-                && !name.is_empty()
-                && !name.starts_with('-') =>
-        {
-            Ok((true, *name))
-        }
-        _ => Err(usage.into()),
-    }
-}
-
 fn run_cli() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args == ["lsp"] {
         lsp::serve();
         return;
     }
-    // build と dev は、設定したシェルスクリプトを実行する。
-    let script = match args.as_slice() {
-        [name] if matches!(name.as_str(), "dev" | "build") => Some((name.as_str(), &[][..])),
-        [name, sep, rest @ ..] if matches!(name.as_str(), "dev" | "build") && sep == "--" => Some((name.as_str(), rest)),
-        [cmd, ..] if matches!(cmd.as_str(), "dev" | "build") => script_usage(),
-        _ => None,
-    };
-    if let Some((name, extra)) = script {
-        let code = crate::scripts::run(name, extra).unwrap_or_else(|e| {
-            eprintln!("{e}");
-            1
-        });
-        std::process::exit(code);
-    }
-    // 外部ツールは取得元付き識別子で解決し、通常のコマンド名を実行する。
-    if args.first().is_some_and(|s| s == "dlx") {
-        let code = run_dlx(&args[1..]).unwrap_or_else(|e| {
-            eprintln!("{e}");
-            1
-        });
-        std::process::exit(code);
-    }
-    if args.first().is_some_and(|s| s == "add") {
-        let external = match args.as_slice() {
-            [_, flag, spec] if flag == "-g" || flag == "--global" => Some(crate::tools::add(spec, true)),
-            [_, spec, flag] if flag == "-g" || flag == "--global" => Some(crate::tools::add(spec, true)),
-            [_, spec] if spec.starts_with("npm:") || spec.starts_with("cargo:") => Some(crate::tools::add(spec, false)),
-            [_, spec, ..] if spec.starts_with("npm:") || spec.starts_with("cargo:") || spec.starts_with('-') => {
-                Some(Err("使い方: hibana add [-g] <npm:名前[@版]|cargo:名前[@版]>".into()))
-            }
-            _ => None,
-        };
-        if let Some(result) = external {
-            if let Err(e) = result {
-                eprintln!("{e}");
-                std::process::exit(1);
-            }
-            return;
-        }
-    }
-    // パッケージのコマンド
-    let here = || pkg::root(std::path::Path::new(".")).ok_or(format!("{} が無い（hibana new で作る）", pkg::MANIFEST));
-    let r = match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
-        ["new", name] => Some(pkg::new(name)),
-        ["fetch"] => Some(here().and_then(|r| pkg::fetch(&r))),
-        ["install"] => Some(crate::tools::install(false)),
-        ["install", "--frozen-lockfile"] => Some(crate::tools::install(true)),
-        ["install", ..] => Some(Err("使い方: hibana install [--frozen-lockfile]".into())),
-        ["update", rest @ ..] => Some(update_target(rest).and_then(|name| match name {
-            Some(name) if name.starts_with("npm:") || name.starts_with("cargo:") => {
-                crate::tools::update(name)
-            }
-            name => here().and_then(|r| pkg::update(&r, name)),
-        })),
-        ["remove", rest @ ..] => Some(remove_target(rest).and_then(|(global, name)| {
-            if name.starts_with("npm:") || name.starts_with("cargo:") {
-                crate::tools::remove(name, global)
-            } else if global {
-                Err("-g は npm/Cargo の global shim にだけ指定できます".into())
-            } else {
-                here().and_then(|r| pkg::remove(&r, name))
-            }
-        })),
-        ["test", files @ ..] => Some(test_cmd(files).and_then(|ok| if ok { Ok(()) } else { Err(String::new()) })),
-        ["add", url, tag @ ..] if tag.len() <= 1 => {
-            Some(here().and_then(|r| pkg::add(&r, url, tag.first().copied())).map(|n| eprintln!("追加: use {n}")))
-        }
-        _ => None,
-    };
-    if let Some(r) = r {
-        if let Err(e) = r {
-            if !e.is_empty() {
-                eprintln!("{e}");
-            }
-            std::process::exit(1);
+    if let ["test", files @ ..] = args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        match test_cmd(files) {
+            Ok(true) => {},
+            Ok(false) => std::process::exit(1),
+            Err(e) => { eprintln!("{e}"); std::process::exit(1); }
         }
         return;
     }
-    if let Some(cmd) = args.first().filter(|s| matches!(s.as_str(), "ir" | "wasm" | "glue" | "web" | "js" | "c" | "script" | "run")) {
+    if let Some(cmd) = args.first().filter(|s| matches!(s.as_str(), "ir" | "wasm" | "glue" | "web" | "js" | "c" | "script" | "run" | "new" | "add" | "fetch" | "install" | "update" | "remove" | "dlx" | "build" | "dev")) {
         eprintln!("不明なサブコマンド: {cmd}");
         std::process::exit(2);
     }
@@ -205,7 +54,7 @@ fn run_cli() {
         [p, ..] if p.ends_with(".hb") => ("eval", p.clone()),
         _ => {
             eprintln!(
-                "使い方: hibana install [--frozen-lockfile]（依存を取得） | hibana update [依存名|npm:名前|cargo:名前]（依存を更新） | hibana remove [-g] <依存名|npm:名前|cargo:名前>（依存を削除） | hibana <build|dev> [-- 引数...] | hibana <ファイル> [-- 引数...]（実行） | hibana fmt <ファイル>（整形して書き戻す） | hibana lsp（Language Server を標準入出力で動かす） | hibana new <名前> | hibana add <git の URL> [tag] | hibana add [-g] <npm:名前[@版]|cargo:名前[@版]> | hibana dlx [--bin コマンド | --rev Gitの版] <識別子> [--] 引数... | hibana fetch（依存を取ってくる） | hibana test [ファイル]（test を実行する）"
+                "使い方: hibana <ファイル> [-- 引数...]（実行） | hibana fmt <ファイル>（整形） | hibana lsp（言語サーバー） | hibana test <ファイル...>（テスト）"
             );
             std::process::exit(2);
         }
@@ -214,14 +63,6 @@ fn run_cli() {
         eprintln!("{path}: {e}");
         std::process::exit(2);
     });
-    // hibana.toml があれば、依存を取ってから（取ってあれば何もしない）コンパイルする
-    let dir = std::path::Path::new(&path).parent().unwrap_or(std::path::Path::new("."));
-    if let Some(root) = pkg::root(if dir.as_os_str().is_empty() { std::path::Path::new(".") } else { dir }) {
-        if let Err(e) = pkg::fetch(&root) {
-            eprintln!("{e}");
-            std::process::exit(1);
-        }
-    }
     // use に書いたファイルは、このファイルのディレクトリから探す
     parser::set_base_dir(
         std::path::Path::new(&path)
@@ -270,22 +111,10 @@ fn report(path: &str, src: &str, e: error::Error) -> miette::Report {
     }
 }
 
-// hibana test [ファイル...]: test "名前" { } をインタプリタで実行する。
-// ファイルを省くと、hibana.toml のあるディレクトリの src と tests の .hb すべて
+// hibana test <ファイル...>: 指定ファイルの test をインタプリタで実行する。
 fn test_cmd(files: &[&str]) -> Result<bool, String> {
-    let mut paths: Vec<std::path::PathBuf> = files.iter().map(Into::into).collect();
-    if paths.is_empty() {
-        let root = pkg::root(std::path::Path::new(".")).ok_or(format!("{} が無い（ファイルを指定する）", pkg::MANIFEST))?;
-        pkg::fetch(&root)?;
-        for d in ["src", "tests"] {
-            for e in std::fs::read_dir(root.join(d)).into_iter().flatten().flatten() {
-                if e.path().extension().is_some_and(|x| x == "hb") {
-                    paths.push(e.path());
-                }
-            }
-        }
-        paths.sort();
-    }
+    if files.is_empty() { return Err("使い方: hibana test <ファイル...>".into()); }
+    let paths: Vec<std::path::PathBuf> = files.iter().map(Into::into).collect();
     let (mut pass, mut total) = (0, 0);
     for p in &paths {
         let path = p.display().to_string();
@@ -360,49 +189,6 @@ mod tests {
         assert_eq!(output.stdout, b"7\n");
         std::fs::remove_file(path).unwrap();
     }
-    #[test]
-    fn update_arguments() {
-        assert_eq!(super::update_target(&[]).unwrap(), None);
-        assert_eq!(super::update_target(&["foo"]).unwrap(), Some("foo"));
-        assert_eq!(
-            super::update_target(&["npm:vite"]).unwrap(),
-            Some("npm:vite")
-        );
-        assert_eq!(
-            super::update_target(&["cargo:clap"]).unwrap(),
-            Some("cargo:clap")
-        );
-        for args in [
-            vec!["foo", "bar"],
-            vec!["--frozen-lockfile"],
-            vec!["--"],
-            vec![""],
-        ] {
-            assert_eq!(
-                super::update_target(&args).unwrap_err(),
-                "使い方: hibana update [依存名|npm:名前|cargo:名前]"
-            );
-        }
-    }
-
-    #[test]
-    fn remove_arguments() {
-        assert_eq!(super::remove_target(&["foo"]).unwrap(), (false, "foo"));
-        assert_eq!(super::remove_target(&["npm:vite"]).unwrap(), (false, "npm:vite"));
-        assert_eq!(super::remove_target(&["-g", "cargo:clap"]).unwrap(), (true, "cargo:clap"));
-        assert_eq!(super::remove_target(&["npm:vite", "--global"]).unwrap(), (true, "npm:vite"));
-        for args in [
-            vec![],
-            vec!["foo", "bar"],
-            vec!["--"],
-            vec!["-g"],
-            vec!["-g", "foo", "extra"],
-            vec![""],
-        ] {
-            assert!(super::remove_target(&args).is_err(), "{args:?}");
-        }
-    }
-
     // 階層化した例も、バックエンド比較から漏らさない。
     fn hb_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
         let mut files = Vec::new();

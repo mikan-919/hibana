@@ -30,7 +30,6 @@ fn main() {
 - マクロ: `syntax` と `macro` の宣言で文法を拡張する。展開の中で束縛した名前は付け替え、呼び出し側の変数を捕まえない
 - 実行: インタプリタ、JavaScript、共通の IR を経由した WebAssembly とネイティブ出力
 - 道具: フォーマッタ、テストランナー、Language Server、VS Code と Zed の拡張機能、tree-sitter の文法
-- パッケージ: Git のパッケージ、npm と Cargo のツールの追加と実行、ロックファイル
 
 ## 動かす
 
@@ -40,7 +39,7 @@ Nix の flake で開発環境（Rust、Z3、Node.js、tree-sitter）を作りま
 nix develop -c cargo build
 nix develop -c cargo run -q -- examples/first.hb       # 機能を組み合わせた例。色と1桁の整数を入力する
 nix develop -c cargo run -q -- tests/programs/types/refine.hb      # インタプリタで実行
-nix develop -c cargo run -q -- test                    # Hibana のテストを実行
+nix develop -c cargo run -q -- test tests/programs/stdlib/stdlib.hb # Hibana のテストを実行
 nix develop -c cargo test
 ```
 
@@ -52,7 +51,6 @@ Rust の実装は `src/` 内で役割ごとに分けています。
 - `check/`: 型検査と Z3 による証明
 - `backend/`: インタプリタ、JavaScript、共通の IR、WebAssembly、ネイティブ出力
 - `tooling/`: フォーマッタ、Language Server、シンボルの索引
-- `project/`: スクリプト、パッケージ管理（`pkg/`）、外部ツール管理（`tools/`）
 - `cli/`: CLI のコマンド処理と統合的なテスト
 
 `src/lib.rs` と `src/main.rs` が入口で、`pipeline.rs` はコンパイルの各段階、`error.rs` は共通のエラー表現を扱います。標準ライブラリは `lib/`、エディター連携は `editors/` にあります。

@@ -185,26 +185,9 @@ fn main() ! Async { put(twice_later(5)) }
 - 腕の中では `Async` を起こせません（腕は同期的に呼びます）。
 - `all` は、失敗した処理があっても残りを中断せず、すべて終わるのを待ってから最初の失敗を投げます。
 
-### 3.6 パッケージ
+### 3.6 ライブラリの読み込み
 
-パッケージは git のリポジトリで、入口は `src/lib.hb` です。プロジェクトの直下の `hibana.toml` に依存を書くと、`use 名前` で使えます。名前は組み込みのライブラリ（`std`）、`hibana.toml` の依存の順に探します。
-
-```
-[package]
-name = "app"
-version = "0.1.0"
-
-[dependencies]
-greet = { git = "https://github.com/someone/hibana-greet", tag = "v0.1.0" }   # tag の代わりに branch か rev も書ける。無ければ既定のブランチ
-```
-
-- `hibana fetch` は依存（依存の依存も）を `${XDG_DATA_HOME:-$HOME/.local/share}/hibana/` に保存し、`config.hibana.lock.toml` にコミットの SHA を書きます。`XDG_DATA_HOME` は絶対パスのみ有効です。ロックにある依存はそのコミットを使います。版を上げるときは `config.hibana.lock.toml` から消して取り直します。
-- ファイルは内容の SHA-256 と実行属性で識別して共通ストアに一度だけ保存し、パッケージのツリーへハードリンクします。同じ内容・実行属性なら、プロジェクト・版・取得元をまたいで共有します。プロジェクトにはコピーせず、共通のツリーを直接参照します。保存したファイルは読み取り専用です。
-- 取得用の git 履歴は一時領域だけに置き、保存時に `.git` を除きます。パッケージ内に収まる相対シンボリックリンクのみ使えます。ハードリンクできない環境ではコピーせずエラーにします。旧 `XDG_CACHE_HOME` のキャッシュは移行・削除せず、新しい保存先に再取得します。ストアの自動削除・GC はまだありません。
-- `hibana.toml` のあるディレクトリの下のファイルを実行・変換すると、取ってきていない依存を先に取ってきます。
-- パッケージの中の `use 'x.hb'` は、そのファイルのディレクトリから探します。
-- 同じ名前のパッケージは一つの版だけ使えます。違う git の URL で二つ要るとエラーです。版の範囲（semver）の解決とレジストリはまだありません。
-- JavaScript のパッケージは npm で入れます（3.4 節）。
+名前で指定する `use` は組み込みのライブラリを読みます。ほかの hibana ファイルは `use './lib.hb'` のように経路で指定します。
 
 ### 3.7 トレイト
 
@@ -471,75 +454,9 @@ macro unless('unless' expr:Expr block:Block) {
 
 目標は Web とネイティブの両方です。型検査を通ったプログラムから型を消し、出力先ごとのバックエンドでコードを作ります。型と証明は実行に影響しないので、どのバックエンドも普通の値と関数だけを扱います。
 
-### 11.1 プロジェクトのスクリプト
+### 11.1 ビルドファイル
 
-`config.hibana.toml` の `[scripts]` に、実行するシェルコマンドを文字列で定義します。パッケージと依存を記述する `hibana.toml` とは別のファイルです。
-
-```toml
-[scripts]
-build = "hibana build.hb"
-dev = "hibana dev.hb"
-```
-
-`hibana build` と `hibana dev` は同名のスクリプトを呼びます。任意名のスクリプトを呼び出す CLI はありません。現在のディレクトリから親へ探し、最初に見つかった `config.hibana.toml` だけを読みます。そのファイルにスクリプトが無くても、さらに親の設定には戻りません。設定ファイルのあるディレクトリを作業ディレクトリとして、`sh -c` で実行します。標準入出力と環境変数を継承し、実行中の hibana のディレクトリを `PATH` に追加します。
-
-追加引数は `hibana dev -- --port 3000` や `hibana dev -- "src with spaces"` のように `--` の後へ書きます。引数がある場合、コマンド文字列の末尾に `"$@"` を付け、引数の値自体はシェルの位置引数として渡します。空白やシェルのメタ文字を含む値も一つの引数として保ちます。複数のコマンドをつないだスクリプトでは、末尾のコマンドへの追加になります。
-
-スクリプトの終了コードを CLI の終了コードにします。Unix でシェルがシグナルにより終了した場合は `128 + シグナル番号` にします。設定が無い・不正な TOML・`[scripts]` がテーブルでない・値が文字列でない・名前が未定義の場合は診断を出し、終了コード 1 にします。CLI の引数の書式が不正なら終了コード 2 です。
-
-`[dependencies]` に記録した外部ツールのコマンドを、スクリプト実行時の `PATH` の先頭へ追加します。それ以外は継承した `PATH` から解決します。異なる依存が同じコマンド名を公開した場合は診断を出します。その場合はスクリプトに `hibana dlx --bin コマンド npm:名前` のように識別子を書いて区別してください。`hibana new` はこの設定ファイルを作りません。
-
-外部ツールは取得元を含む `npm:名前[@版]` または `cargo:名前[@版]` で指定します。npm の scoped package は `npm:@scope/名前[@版]` です。パッケージの識別子と、そのパッケージが公開するコマンド名は別です。
-
-```sh
-hibana add npm:vite@6.1.0      # プロジェクトの設定に追加して取得
-hibana add -g cargo:ripgrep   # ユーザー共通の bin にコマンドを公開
-hibana dlx npm:vite --help # 設定には追加せず取得・実行
-hibana dlx --bin コマンド npm:パッケージ 引数
-```
-
-```toml
-[dependencies]
-"npm:vite" = "6.1.0"
-"cargo:ripgrep" = "*"
-
-[scripts]
-build = "vite build"
-```
-
-`add` は最も近い `config.hibana.toml` を更新し、無ければ現在のディレクトリに作ります。値は版の文字列（省略時 `"*"`）です。コメントや書式は保持しません。Git ベースの言語パッケージは引き続き `hibana.toml` で管理します。
-
-npm はシステムの `npm install`、Cargo は `cargo install` を使います。npm ツールの実行には Node.js、Cargo の初回取得にはビルド環境が必要です。取得・ビルド時にはパッケージ由来のスクリプトも実行されるため、信頼できるパッケージだけを指定してください。取得結果は `${XDG_DATA_HOME:-$HOME/.local/share}/hibana/` 内の `tools/v3/`（プロジェクト npm）、`tools/v4/`（プロジェクト Cargo）または `tools/v1/`（dlx・global）に保存し、言語パッケージと同じファイル単位 CAS を使います。Cargo の一時ビルド成果物は公開前に除きますが、npm/Cargo 自身のキャッシュはそれぞれ残ります。
-
-`add -g` のコマンド配置先は同じデータディレクトリの `bin/` です。利用するにはそのパスをシェルの `PATH` に追加してください。別パッケージや手動配置の同名ファイルは上書きしません。`dlx` はパッケージ内の唯一のコマンド、またはパッケージ名と同名のコマンドを選び、それ以外は `--bin` を要求します。作業ディレクトリと標準入出力を継承し、終了コードも返します。
-
-`dlx` の Hibana 側オプションは識別子より前に指定します。識別子の後ろは、先頭にある任意の `--` 一つだけを除き、すべて実行先への引数です。たとえば `hibana dlx cargo:bottom --version` は `--version` を bottom へ渡します。後ろの `--bin` や `--rev` も実行先への引数になり、Hibana は解釈しません。
-
-Git ベースの Hibana パッケージも `dlx` で取得・実行できます。
-
-```sh
-hibana dlx hibana:https://example.com/hibana-tool.git
-hibana dlx https://example.com/hibana-tool.git
-hibana dlx --rev v1.0.0 hibana:https://example.com/hibana-tool.git
-```
-
-`hibana:` は省略できます。パッケージには `hibana.toml` と実行入口の `src/main.hb` が必要です。Git の取得結果は言語パッケージと同じ共通 CAS に保存し、URL と指定した版ごとに初回の解決結果を再利用します。実行時は一時ツリーを作り、依存を取得してからインタプリタで実行します。共通ストア内のファイルは変更せず、呼び出し元の設定や lock にも追加しません。作業ディレクトリ・標準入出力・終了コードは継承します。`--rev` は Hibana 専用、`--bin` は npm/Cargo 専用です。追加引数は子プロセスへ渡しますが、現状の Hibana 言語には引数を読み出す API がありません。Git 取得とプログラム実行は信頼できる取得元に限ってください。
-
-`hibana install` は現在のディレクトリから祖先へたどり、最も近い `config.hibana.toml` または `hibana.toml` のディレクトリをプロジェクトとして選びます。そのディレクトリの npm/Cargo ツールと Hibana の Git 依存をまとめて取得します。既存の lock と設定の条件が同じ依存は固定版を使い、新規・条件を変更した依存は解決して `config.hibana.lock.toml` を更新します。設定から削除したツールの lock 記録は取り除きます。依存が無いプロジェクトでも空の lock を作れます。
-
-`hibana install --frozen-lockfile` は lock の存在を必須とし、依存の記録不足・設定条件の変更・設定に無いツールの記録をエラーにします。保存先が空でも lock の固定版を取得しますが、成功・失敗にかかわらず lock の内容や書式は変更しません。CI ではこの形式を使えます。Hibana の Git 依存は URL と tag/branch/rev の指定も照合します。古い lock に指定条件が記録されていない場合、版指定のある依存は通常の `install` で再解決してから共有してください。
-
-プロジェクトの `add` は設定ファイルと同じディレクトリの `config.hibana.lock.toml` に、指定した条件と取得した正確な版を記録します。スクリプト実行時もこの版を使い、別環境で保存済みツールが無い場合はその版を取得します。lock が無い依存は実行前に解決・記録します。条件を変更した依存だけ再解決し、同じ条件での `add` は既存の lock を使います。
-
-```toml
-[tools."npm:vite"]
-requirement = "^6.0.0"
-version = "6.1.0"
-```
-
-既存の Git 依存の記録は保持します。ただし従来形式の Hibana 依存名 `tools` はこの表と衝突するため併用できません。破損した lock は自動的に無視せずエラーにします。設定・lock のコメントや書式は保持しません。
-
-npm ツールは各記録の `npm_lock` に npm の package-lock JSON（lockfileVersion 2/3）を文字列として保存します。推移依存の版・取得 URL・integrity を含み、別環境での再取得には `npm ci` を使います。同じ直接版でも異なる依存ツリーは別キャッシュとして扱い、ファイル内容の重複は共通 CAS で排除します。registry の HTTP(S) 配布だけを対象とし、local/git/link 依存や不正な integrity はエラーにします。ハッシュと取得内容の照合は npm が行います。旧形式で `npm_lock` が無い場合、通常の `install`・`add`・スクリプト実行で補完しますが、`--frozen-lockfile` は拒否します。Cargo ツールは `cargo_lock` に Cargo.lock の TOML を文字列として保存します。再取得時は crate ソースへ lock を復元し、`--locked` でビルドします。直接版・推移依存と registry checksum を検査し、異なる lock は別キャッシュに保存します。Cargo.lock は version 3/4 に対応し、依存の取得元は crates.io に限定します（git・path・別 registry は非対応）。`cargo_lock` の無い旧記録は通常の install・add・スクリプト実行で補完し、frozen は拒否します。Cargo のビルド環境は固定しません。npm の install scripts や OS 別依存、ビルド環境による差まで含めた同一バイナリは保証しません。`dlx` と `add -g` はプロジェクトの lock を読み書きせず、識別子・OS・CPU ごとに初回取得結果を再利用します。自動更新は行いません。`hibana update npm:名前` または `hibana update cargo:名前` は、`config.hibana.toml` に登録されたプロジェクト依存だけを対象にし、指定した版の範囲内で直接・推移依存を解決し直して lock に記録します。他の依存の lock は維持し、対象が見つからない場合や解決に失敗した場合は lock を書き換えません。引数なし・通常の依存名での `update` は Git 依存を対象にします。`dlx`・グローバル追加の個別更新は未対応です。Git 依存の `hibana remove 名前` は `hibana.toml` の直接依存を外し、残る依存を解決して lock の不要な Git 記録を取り除きます。npm/Cargo の `hibana remove npm:名前` / `hibana remove cargo:名前` は `config.hibana.toml` の依存と該当 lock だけを外します。`hibana remove -g npm:名前` / `hibana remove -g cargo:名前` は共通 `bin/` 内の該当ツール所有 shim だけを削除します。依存削除では共通 CAS のファイル・ツリーは削除しません。store の GC は未実装です。
+`hibana build.hb` のように、ビルド処理を書くファイルを実行します。`compile_file` で対象のソースをコンパイルし、`write_bytes` で成果物を保存します（9 節）。
 
 ### 11.2 コマンドとコード生成 API
 
@@ -547,15 +464,9 @@ npm ツールは各記録の `npm_lock` に npm の package-lock JSON（lockfile
 
 | コマンド | 出力 | 用途 |
 |---|---|---|
-| `hibana build [-- 引数...]` / `hibana dev [-- 引数...]` | 設定のスクリプトを実行 | ビルドと開発 |
 | `hibana <ファイル> [-- 引数...]` | 構文木を直接評価して実行 | 開発中の確認。マクロもこの評価器で行う |
 | `hibana fmt <ファイル>` | ファイルを整形して書き戻す | 整形。トークンの並びと改行の位置は変えず、字下げ（空白4つ）・行内の空白（`,` の後、`=` `==` `&&` `->` などの前後、`{ }` の内側。`->` の前に揃えるための空白が2つ以上あれば残す）・空行（続く空行は1行、括弧の直後と閉じ括弧の前は無し）・コメントの位置を整える。設定は無い。JSX の要素と `$( )` `${ }` の中は元のまま（JSX の本文は空白も文字列になるため）。`+ - * /` の前後は元の空白のまま。行の長さで改行の位置は変えない |
-| `hibana new <名前>` | `hibana.toml` と `src/main.hb` のディレクトリを作る | パッケージ（3.6 節） |
-| `hibana add <git の URL> [tag]` | `hibana.toml` に依存を足して取ってくる。名前は URL の最後の部分（`hibana-` は除く） | パッケージ（3.6 節） |
-| `hibana remove [-g] <依存名|npm:名前|cargo:名前>` | 言語依存・プロジェクトツール依存を設定と lock から外す。`-g` は global shim のみ削除 | パッケージ・外部ツール |
-| `hibana install [--frozen-lockfile]` | 設定の全依存を取得。frozen は lock を変更せず検証 | パッケージ・外部ツール |
-| `hibana fetch` | Hibana の Git 依存を取ってきて `config.hibana.lock.toml` を書く | パッケージ（3.6 節） |
-| `hibana test [ファイル...]` | `test` をインタプリタで実行し、成功した数を表示する。失敗があれば終了コード 1。ファイルを省くと、`hibana.toml` のあるディレクトリの `src` と `tests` の `.hb` すべて | テスト（3.8 節） |
+| `hibana test <ファイル...>` | `test` をインタプリタで実行し、成功した数を表示する。失敗があれば終了コード 1。ファイルを引数で指定する | テスト（3.8 節） |
 | `hibana lsp` | Language Server を標準入出力で動かす | エディタ（エラーの表示・整形・hover・定義へのジャンプ・補完・色付け）。VS Code と Zed の拡張機能は `editors/`（`editors/README.md`） |
 
 WASM 出力は関数を名前で公開します。整数は符号付き64ビットで、JavaScript からは `BigInt` で渡します。`num` は `f64` と JavaScript の `Number` で渡し、有限性を検査します。`put` は取り込み `hibana.write(fd, 位置, 長さ)`、`input` は `hibana.read(fd, 位置, 長さ) -> 読み取ったバイト数`、`now_ms` は `hibana.now_ms()` を呼びます。JavaScript の接続コードは、出力を `imports.hibana.print`（無ければ `console.log`）に渡します。読み取りは `imports.hibana.read(fd, Uint8Array) -> バイト数` を使い、指定が無ければ Node.js の標準入力を読みます。入力終了は0、失敗は負の値です。実行時エラーでは、メッセージの文字列の位置を memory の24番地に書いて WASM の実行を停止します。

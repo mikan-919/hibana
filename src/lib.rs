@@ -5,18 +5,15 @@ pub mod cli;
 pub mod error;
 pub mod frontend;
 pub mod pipeline;
-pub mod project;
 pub mod tooling;
 
 // 既存の利用側は、機能別ディレクトリへの移動後も同じパスで参照できる。
 pub use backend::{eval, ir, js, native, wasm};
 pub use check::{smt, typeck};
 pub use frontend::{lexer, meta, parser};
-pub use project::pkg;
 pub use tooling::{fmt, index, lsp};
 
 pub(crate) use frontend::{resolve, ts};
-pub(crate) use project::{scripts, tools};
 
 use std::io::Write;
 
