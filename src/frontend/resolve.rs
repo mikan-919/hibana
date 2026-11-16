@@ -219,6 +219,7 @@ impl Resolver<'_> {
                 self.locals.pop();
             }
             Expr::Int(_)
+            | Expr::Num(_)
             | Expr::Bool(_)
             | Expr::Str(_)
             | Expr::Return(None)

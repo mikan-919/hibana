@@ -8,14 +8,16 @@ use std::collections::HashMap;
 
 const PRELUDE: &str = r#""use strict";
 const $MIN = -(2n ** 63n), $MAX = 2n ** 63n - 1n;
-function $chk(x) { if (x < $MIN || x > $MAX) throw new Error("オーバーフロー"); return x; }
+function $chk(x) { if (typeof x === "number") { if (!Number.isFinite(x)) throw new Error("num の演算結果が有限でない"); return x; } if (x < $MIN || x > $MAX) throw new Error("オーバーフロー"); return x; }
 function $add(a, b) { return typeof a === "string" ? a + b : $chk(a + b); }
 function $sub(a, b) { return $chk(a - b); }
 function $mul(a, b) { return $chk(a * b); }
-function $div(a, b) { if (b === 0n) throw new Error("0 で除算した"); return $chk(a / b); }
-function $rem(a, b) { if (b === 0n) throw new Error("0 で除算した"); if (a === $MIN && b === -1n) throw new Error("オーバーフロー"); return a % b; }
-function $pow(a, b) { if (b < 0n) throw new Error("負の指数"); if (b > 64n) { if (a > 1n || a < -1n) throw new Error("オーバーフロー"); b = 64n + b % 2n; } return $chk(a ** b); }
+function $div(a, b) { if (b === 0n || b === 0) throw new Error("0 で除算した"); return $chk(a / b); }
+function $rem(a, b) { if (b === 0n || b === 0) throw new Error("0 で除算した"); if (a === $MIN && b === -1n) throw new Error("オーバーフロー"); return $chk(a % b); }
+function $pow(a, b) { if (typeof a === "number") return $chk(a ** b); if (b < 0n) throw new Error("負の指数"); if (b > 64n) { if (a > 1n || a < -1n) throw new Error("オーバーフロー"); b = 64n + b % 2n; } return $chk(a ** b); }
 function $neg(a) { return $chk(-a); }
+function $num_floor(n) { const x = Math.floor(n); if (!(x >= -(2 ** 63) && x < 2 ** 63)) throw new Error("floor の結果が int の範囲外"); return BigInt(x); }
+function $num_sqrt(n) { if (n < 0) throw new Error("sqrt の引数が負"); return Math.sqrt(n); }
 let $w;
 // 最後に通った、失敗しうる式の位置
 let $at;
@@ -30,7 +32,18 @@ function $eq(a, b) {
   if (a && b && typeof a === "object" && typeof b === "object") return a.$c === b.$c && $eq(a.$f, b.$f);
   return false;
 }
+function $numstr(v) {
+  if (Object.is(v, -0)) return "-0";
+  const s = String(v);
+  if (!s.includes("e")) return s;
+  const [mantissa, exponent] = s.split("e"), sign = v < 0 ? "-" : "", m = mantissa.replace("-", "");
+  const digits = m.replace(".", ""), point = (m.includes(".") ? m.indexOf(".") : m.length) + Number(exponent);
+  if (point <= 0) return sign + "0." + "0".repeat(-point) + digits;
+  if (point >= digits.length) return sign + digits + "0".repeat(point - digits.length);
+  return sign + digits.slice(0, point) + "." + digits.slice(point);
+}
 function $show(v) {
+  if (typeof v === "number") return $numstr(v);
   if (typeof v === "bigint" || typeof v === "boolean") return String(v);
   if (typeof v === "string") return JSON.stringify(v);
   if (v === undefined) return "()";
@@ -536,6 +549,7 @@ impl Gen<'_> {
         match e {
             Expr::At(..) => unreachable!("expr で外している"),
             Expr::Int(n) => format!("{n}n"),
+            Expr::Num(n) => format!("{n:?}"),
             Expr::Bool(b) => b.to_string(),
             Expr::Str(s) => lit(s),
             Expr::Var(n) => match self.lookup(n) {
@@ -576,6 +590,8 @@ impl Gen<'_> {
                 }
                 let mut vs = if name == "len" { vec![self.look(&args[0])] } else { self.args(args) };
                 let v = match name.as_str() {
+                    "#num" => format!("Number({})", vs[0]),
+                    "num_floor" | "num_sqrt" => format!("${name}({})", vs[0]),
                     // 腕の値として返し、$op が操作の戻り値にする
                     "resume" => format!(
                         "$d(\"$resume\", [{}])",

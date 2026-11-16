@@ -723,6 +723,7 @@ fn emit(v: &Value, dollar: &Token, out: &mut Vec<Token>) -> R<()> {
             return Ok(());
         }
         Value::Int(n) => Tok::Int(*n),
+        Value::Num(n) => Tok::Float(*n),
         Value::Bool(b) => Tok::Punct(if *b { "true" } else { "false" }),
         Value::Str(s) => Tok::Str(s.to_string()),
         Value::Ty(t) => Tok::Ident(t.to_string()),

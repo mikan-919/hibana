@@ -413,6 +413,36 @@ mod tests {
     }
 
     #[test]
+    fn numeric_values() {
+        let src = include_str!("../../tests/fixtures/num.hb");
+        assert_eq!(out(src).unwrap(), "2.5\n1.5\n1.5\n-0.5\n0.25\n1\n1.5\n2\ntrue\ntrue\ntrue\n[0.5, 2.5]\n-0\n0.00000001\n1000000000000000000000\n");
+        for src in [
+            "fn main() { let x: int = 0.5 }",
+            "fn main() { let x: num[x -> x > 0] = -0.5 }",
+            "fn main() { let x: num[x -> x > 9007199254740992] = 9007199254740993 }",
+            "struct P { x: num }\nfn f(p: P) -> int[x -> x == 1] { if p.x > 0 && p.x < 1 { 0 } else { 1 } }\nfn main() {}",
+            "fn f(x: num) { let mut y: num = x\n if y > 0 { y = -1.0\n let z: num[z -> z > 0] = y } }\nfn main() {}",
+            "fn f(x: num) -> num[y -> y >= 1] { if x > 0 { x } else { 1 } }\nfn main() {}",
+            "fn f(x: num) -> num[y -> y > x] { x + 1.0 }\nfn main() {}",
+        ] { assert!(out(src).is_err(), "{src}"); }
+        let math = include_str!("../../tests/fixtures/math.hb");
+        assert_eq!(out(math).unwrap(), "3\n1.5\n2\n-3\n5\n");
+        for (name, source) in [("num", src), ("math", math)] {
+            let path = std::env::temp_dir().join(format!("hibana-{name}-{}.cjs", std::process::id()));
+            std::fs::write(&path, super::to_js(source).unwrap()).unwrap();
+            let result = std::process::Command::new("node").arg(&path).output().unwrap();
+            assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+            assert_eq!(String::from_utf8(result.stdout).unwrap(), out(source).unwrap());
+            std::fs::remove_file(path).unwrap();
+            assert!(crate::to_wasm(source).is_err());
+            assert!(crate::to_native(source).is_err());
+        }
+        for src in ["use std::math -> *\nfn main() { put(sqrt(-1)) }", "use std::math -> *\nfn main() { put(floor(1000000000000000000000.0)) }", "fn main() { put(1.0 / 0.0) }"] {
+            assert!(out(src).is_err(), "{src}");
+        }
+    }
+
+    #[test]
     fn capability_scopes() {
         let src = include_str!("../../tests/programs/types/capabilities.hb");
         assert_eq!(out(src).unwrap(), "created\nplain\n[DEBUG] inner\nrestored\n[OTHER] other\n");

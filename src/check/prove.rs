@@ -17,6 +17,31 @@ pub(crate) enum Term {
     Proj(V, String),
     // 型の計算で扱えない式（while・代入・put など）。どの値とも等しくない
     Opaque(usize),
+    // num の値。整数用の証明規則を適用しないための印
+    Num(V),
+}
+
+pub(super) fn num(v: V) -> V {
+    match v {
+        V::Int(n) => V::Num(n as f64),
+        V::Num(_) => v,
+        V::Neu(ref n) if matches!(&**n, Term::Num(_)) => v,
+        _ => neu(Term::Num(v)),
+    }
+}
+
+fn has_num(v: &V) -> bool {
+    match v {
+        V::Num(_) => true,
+        V::Neu(n) => match &**n {
+            Term::Num(_) => true,
+            Term::Un(_, v) | Term::Proj(v, _) => has_num(v),
+            Term::Bin(_, a, b) => has_num(a) || has_num(b),
+            Term::Call(_, args) => args.iter().any(has_num),
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 // 項と定数の和に分ける。定数だけなら項は 0
@@ -123,6 +148,10 @@ pub(super) fn prove<'a>(
     facts: impl Iterator<Item = &'a V> + Clone,
     smt: &mut super::smt::Smt,
 ) -> bool {
+    // ponytail: num の証明は定数評価と事実の一致だけ。浮動小数点用の証明器を導入するまで整数用の規則と Z3 の Int に渡さない
+    if has_num(goal) || facts.clone().any(has_num) {
+        return *goal == V::Bool(true) || facts.clone().any(|f| f == goal);
+    }
     if prove_facts(goal, facts.clone()) {
         return true;
     }
@@ -165,6 +194,7 @@ pub(super) fn un(op: &'static str, v: V) -> V {
     }
     match (op, v) {
         ("-", V::Int(n)) if n != i64::MIN => V::Int(-n),
+        ("-", V::Num(n)) => V::Num(-n),
         ("!", V::Bool(b)) => V::Bool(!b),
         (op, v) => neu(Term::Un(op, v)),
     }
@@ -172,7 +202,19 @@ pub(super) fn un(op: &'static str, v: V) -> V {
 
 pub(super) fn bin(op: &'static str, a: V, b: V) -> V {
     use V::*;
+    let numeric = |v: &V| match v {
+        Num(_) => true,
+        Neu(n) => matches!(&**n, Term::Num(_) | Term::Un("-", _) | Term::Bin("+" | "-" | "*" | "/" | "%" | "**", ..)) && has_num(v),
+        _ => false,
+    };
+    let (a, b) = if numeric(&a) || numeric(&b) { (num(a), num(b)) } else { (a, b) };
     let r = match (op, &a, &b) {
+        (op, Num(x), Num(y)) => match op {
+            "+" => Some(Num(x + y)), "-" => Some(Num(x - y)), "*" => Some(Num(x * y)),
+            "/" if *y != 0.0 => Some(Num(x / y)), "%" if *y != 0.0 => Some(Num(x % y)), "**" => Some(Num(x.powf(*y))),
+            "<" => Some(Bool(x < y)), "<=" => Some(Bool(x <= y)), ">" => Some(Bool(x > y)), ">=" => Some(Bool(x >= y)),
+            "==" => Some(Bool(x == y)), "!=" => Some(Bool(x != y)), _ => None,
+        },
         ("+", Int(x), Int(y)) => x.checked_add(*y).map(Int),
         ("+", Str(x), Str(y)) => Some(Str(format!("{x}{y}").into())),
         ("-", Int(x), Int(y)) => x.checked_sub(*y).map(Int),
@@ -373,6 +415,7 @@ impl Eval {
         Ok(match e {
             Expr::At(_, x) => self.eval(x, env)?,
             Expr::Int(n) => V::Int(*n),
+            Expr::Num(n) => V::Num(*n),
             Expr::Bool(b) => V::Bool(*b),
             Expr::Str(s) => V::Str(s.as_str().into()),
             Expr::Var(n) => match env.iter().rev().find_map(|s| s.get(n)) {
@@ -405,6 +448,7 @@ impl Eval {
                 let b = self.eval(r, env)?;
                 bin(op, a, b)
             }
+            Expr::Call(name, args) if name == "#num" => num(self.eval(&args[0], env)?),
             Expr::Call(name, _) if name == "put" || SYN_FNS.iter().any(|s| s.0 == name) => {
                 return Err(Halt::Stuck);
             }
@@ -506,6 +550,7 @@ impl Eval {
             V::Neu(n) => match &**n {
                 Term::Var(i, _) if *i == id => by.clone(),
                 Term::Var(..) | Term::Opaque(_) => v.clone(),
+                Term::Num(x) => num(self.subst(x, id, by)?),
                 Term::Un(op, x) => un(op, self.subst(x, id, by)?),
                 Term::Bin(op, a, b) => {
                     let (a, b) = (self.subst(a, id, by)?, self.subst(b, id, by)?);

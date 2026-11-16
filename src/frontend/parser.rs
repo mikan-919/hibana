@@ -7,6 +7,7 @@ use std::rc::Rc;
 #[allow(dead_code)] // Field と Method の中身は型検査が対応するまで読まれない
 pub enum Expr {
     Int(i64),
+    Num(f64),
     Bool(bool),
     Str(String),
     Var(String),
@@ -243,6 +244,7 @@ pub struct Program {
 // 組み込みのライブラリ。実行ファイルに埋め込むので、どこからでも use できる
 const LIBS: &[(&str, &str)] = &[
     ("std", include_str!("../../lib/std.hb")),
+    ("std__math", include_str!("../../lib/math.hb")),
 ];
 
 // use した名前の取り込み方
@@ -364,7 +366,7 @@ fn load(
     // use web のように名前で書いたら組み込みのライブラリか hibana.toml の依存、文字列で書いたらファイルか npm
     if !is_str {
         if let Some((_, t)) = LIBS.iter().find(|l| l.0 == name) {
-            return Ok((name.to_string(), t.to_string(), dir.to_path_buf()));
+            return Ok((name.rsplit("__").next().unwrap().to_string(), t.to_string(), dir.to_path_buf()));
         }
         let Some(e) = crate::pkg::entry(&base_dir(), name) else {
             return Err(Error::from(format!("ライブラリ {name} が無い"))
@@ -504,6 +506,9 @@ fn parse_toks(src: &str, toks: Vec<Token>) -> R<Program> {
         "args", "read_text", "read_bytes", "write_text", "write_bytes", "compile_file", "inspect_file_exports", "js_glue",
         "error",
         "int",
+        "num",
+        "num_floor",
+        "num_sqrt",
         "bool",
         "String",
         "syn",
@@ -937,6 +942,12 @@ impl Parser<'_> {
         let Tok::Ident(n) = self.peek().clone() else {
             return;
         };
+        if let Some((module, member)) = n.split_once("__")
+            && self.modules.contains(module)
+        {
+            self.toks[self.pos].tok = Tok::Ident(format!("{module}.{member}"));
+            return;
+        }
         let at = |k: usize| self.toks.get(self.pos + k).map(|t| t.tok.clone());
         if self.modules.contains(&n)
             && at(1) == Some(Tok::Punct("."))
@@ -1032,6 +1043,7 @@ impl Parser<'_> {
     fn use_decl(&mut self) -> R<Use> {
         self.expect("use")?;
         let module = match self.next() {
+            Tok::Ident(n) if LIBS.iter().any(|(name, _)| *name == n) => n.rsplit("__").next().unwrap().to_string(),
             Tok::Ident(n) => n,
             Tok::Str(f) => module_name(&f),
             _ => return self.err("use の後にはライブラリ名かファイル名が必要"),
@@ -1994,6 +2006,7 @@ impl Parser<'_> {
         self.qualify_here();
         let mut e = match self.next() {
             Tok::Int(n) => Expr::Int(n),
+            Tok::Float(n) => Expr::Num(n),
             Tok::Str(s) => Expr::Str(s),
             // `a{x}b` は 'a' + to_str(x) + 'b'
             Tok::Template(_, parts) => {

@@ -9,6 +9,7 @@ use std::rc::Rc;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Int(i64),
+    Num(f64),
     Bool(bool),
     Unit,
     Str(Rc<str>),
@@ -155,6 +156,7 @@ fn show(v: &Value) -> String {
     match v {
         Value::Arr(xs) => format!("[{}]", xs.iter().map(show).collect::<Vec<_>>().join(", ")),
         Value::Int(n) => n.to_string(),
+        Value::Num(n) => n.to_string(),
         Value::Bool(b) => b.to_string(),
         Value::Str(s) => format!("{s:?}"),
         Value::Ty(t) => t.to_string(),
@@ -461,6 +463,7 @@ impl Interp<'_> {
                 r?
             }
             Expr::Int(n) => Value::Int(*n),
+            Expr::Num(n) => Value::Num(*n),
             Expr::Bool(b) => Value::Bool(*b),
             Expr::Str(s) => Value::Str(s.as_str().into()),
             Expr::Method(..) | Expr::Macro(..) => unreachable!("型検査で弾く"),
@@ -538,7 +541,9 @@ impl Interp<'_> {
                 None => Value::Ty(n.as_str().into()),
             },
             Expr::Unary("-", x) => {
-                let n = int(self.expr(x, env)?);
+                let value = self.expr(x, env)?;
+                if let Value::Num(n) = value { return Ok(Value::Num(-n)); }
+                let n = int(value);
                 Value::Int(
                     n.checked_neg()
                         .ok_or(Flow::Error("オーバーフロー".into()))?,
@@ -553,6 +558,18 @@ impl Interp<'_> {
             }
             Expr::Binary(op, l, r) => {
                 let (a, b) = (self.expr(l, env)?, self.expr(r, env)?);
+                if let (Value::Num(x), Value::Num(y)) = (&a, &b) {
+                    return match *op {
+                        "==" => Ok(Value::Bool(x == y)), "!=" => Ok(Value::Bool(x != y)),
+                        "<" => Ok(Value::Bool(x < y)), "<=" => Ok(Value::Bool(x <= y)), ">" => Ok(Value::Bool(x > y)), ">=" => Ok(Value::Bool(x >= y)),
+                        "/" | "%" if *y == 0.0 => error("0 で除算した".into()),
+                        op => {
+                            let n = match op { "+" => x + y, "-" => x - y, "*" => x * y, "/" => x / y, "%" => x % y, "**" => x.powf(*y), _ => unreachable!("型検査済み") };
+                            if !n.is_finite() { return error("num の演算結果が有限でない".into()); }
+                            Ok(Value::Num(n))
+                        }
+                    };
+                }
                 match *op {
                     "+" if matches!(a, Value::Str(_)) => {
                         Value::Str(format!("{}{}", str_val(a), str_val(b)).into())
@@ -580,7 +597,19 @@ impl Interp<'_> {
                 for a in args {
                     vs.push(self.expr(a, env)?);
                 }
-                if let Some(f) = env.iter().rev().find_map(|s| s.get(name)).cloned() {
+                if name == "#num" {
+                    match vs.remove(0) { Value::Int(n) => Value::Num(n as f64), v @ Value::Num(_) => v, _ => unreachable!("型検査済み") }
+                } else if name == "num_floor" || name == "num_sqrt" {
+                    let Value::Num(n) = vs[0] else { unreachable!("型検査済み") };
+                    if name == "num_floor" {
+                        let n = n.floor();
+                        if !(-9223372036854775808.0..9223372036854775808.0).contains(&n) { return error("floor の結果が int の範囲外".into()); }
+                        Value::Int(n as i64)
+                    } else {
+                        if n < 0.0 { return error("sqrt の引数が負".into()); }
+                        Value::Num(n.sqrt())
+                    }
+                } else if let Some(f) = env.iter().rev().find_map(|s| s.get(name)).cloned() {
                     self.apply(&f, vs)?
                 } else if name == "all" && !self.fns.contains_key(name.as_str()) {
                     // 並行の処理が無いので順に実行する
@@ -711,6 +740,7 @@ impl Interp<'_> {
                 } else if name == "put" {
                     let s = match &vs[0] {
                         Value::Int(n) => n.to_string(),
+                        Value::Num(n) => n.to_string(),
                         Value::Bool(b) => b.to_string(),
                         Value::Unit => "()".into(),
                         Value::Str(s) => s.to_string(),

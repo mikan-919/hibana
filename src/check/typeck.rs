@@ -26,6 +26,7 @@ use crate::lexer::Span;
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum V {
     Int(i64),
+    Num(f64),
     Bool(bool),
     Str(Rc<str>),
     Unit,
@@ -61,7 +62,7 @@ pub(crate) struct PiV {
 
 // js は JavaScript の値をそのまま持ち回る型（extern で使う）。never は戻らない効果の操作（fail など）の戻り値の型
 // Effect は効果の並びの型（<E: Effect> の効果の変数に使う）
-pub(super) const PRIMS: &[&str] = &["int", "bool", "String", "syn", "unit", "js", "never", "Effect"];
+pub(super) const PRIMS: &[&str] = &["int", "num", "bool", "String", "syn", "unit", "js", "never", "Effect"];
 
 // マクロ本体の中でだけ使える組み込み関数 (名前, 引数, 戻り値)
 pub(super) const SYN_FNS: &[(&str, &[&str], &str)] = &[
@@ -81,6 +82,8 @@ pub(crate) const BUILD_FNS: &[&str] = &["compile", "inspect_exports", "utf8", "a
 const BUILTINS: &[&str] = &[
     "put",
     "input",
+    "num_floor",
+    "num_sqrt",
     "len",
     "Vec",
     "Type",
@@ -106,6 +109,8 @@ const BUILTINS: &[&str] = &[
 
 // 文字列の組み込み関数 (名前, 引数, 戻り値)。split の戻り値は Vec<String>
 const STR_FNS: &[(&str, &[&str], &str)] = &[
+    ("num_floor", &["num"], "int"),
+    ("num_sqrt", &["num"], "num"),
     ("input", &[], "String"),
     ("split", &["String", "String"], "Vec<String>"),
     ("starts_with", &["String", "String"], "bool"),
@@ -162,6 +167,7 @@ pub(super) fn bound() -> V {
 fn show(v: &V) -> String {
     match v {
         V::Int(n) => n.to_string(),
+        V::Num(n) => n.to_string(),
         V::Bool(b) => b.to_string(),
         V::Str(s) => format!("{s:?}"),
         V::Unit => "()".into(),
@@ -220,6 +226,7 @@ fn show(v: &V) -> String {
             ),
             Term::Proj(x, f) => format!("{}.{f}", show(x)),
             Term::Opaque(_) => "?".into(),
+            Term::Num(v) => show(v),
         },
     }
 }
@@ -276,6 +283,7 @@ fn mentions(v: &V, id: usize) -> bool {
             Term::Proj(x, _) => mentions(x, id),
             Term::Call(_, args) => args.iter().any(|a| mentions(a, id)),
             Term::Opaque(_) => false,
+            Term::Num(v) => mentions(v, id),
         },
         _ => false,
     }
@@ -955,6 +963,7 @@ impl Ck {
 
     // 変数を束縛し、型の細分化の条件をその変数についての事実として加える
     fn bind(&mut self, name: &str, ty: V, val: V, mutable: bool) -> R<()> {
+        let val = if base(&ty) == prim("num") { super::prove::num(val) } else { val };
         for p in split(&ty).1 {
             let f = self.norm.subst(&p, 0, &val)?;
             self.add_fact(f);
@@ -1022,7 +1031,8 @@ impl Ck {
         };
         let (ty, val) = (en.ty.clone(), en.val.clone());
         let V::Neu(n) = &val else { return Ok(()) };
-        let Term::Var(id, _) = &**n else { return Ok(()) };
+        let term = if let Term::Num(V::Neu(inner)) = &**n { &**inner } else { &**n };
+        let Term::Var(id, _) = term else { return Ok(()) };
         for s in &mut self.scopes {
             s.facts.retain(|f| !mentions(f, *id));
         }
@@ -1038,9 +1048,20 @@ impl Ck {
     }
 
     // got 型の式 e を expected 型として使えるか。expected の細分化の条件は証明する
-    fn subsume(&mut self, e: &Expr, got: &V, expected: &V) -> R<()> {
+    fn subsume(&mut self, e: &mut Expr, got: &V, expected: &V) -> R<()> {
         let (eb, eps) = split(expected);
         let (gb, gps) = split(got);
+        if eb == prim("num") && (gb == prim("int") || gb == prim("num"))
+            && !matches!(e.peel(), Expr::Call(n, _) if n == "#num")
+            && !matches!(e.peel(), Expr::Num(_))
+        {
+            let mut addresses = Vec::new();
+            addrs(e, &mut addresses);
+            let old = std::mem::replace(e, Expr::Int(0));
+            *e = Expr::Call("#num".into(), vec![old]);
+            if let Expr::Call(_, args) = e { self.remap(&addresses, &args[0]); }
+            if gb == prim("int") { return self.subsume(e, &prim("num"), expected); }
+        }
         if !same(&eb, &gb) {
             return Err(format!("{} が必要だが {}", show(expected), show(got)).into());
         }
@@ -1326,10 +1347,16 @@ impl Ck {
                 prim("String")
             }
             "+" | "-" | "*" | "**" | "/" | "%" | "<" | "<=" | ">" | ">=" => {
-                want(&int, &lt, &op)?;
-                want(&int, &rt, &op)?;
+                let numeric = if base(&lt) == prim("num") || base(&rt) == prim("num") { prim("num") } else { int.clone() };
+                if numeric == prim("num") {
+                    self.check(&mut l, &numeric)?;
+                    self.check(&mut r, &numeric)?;
+                } else {
+                    want(&int, &lt, &op)?;
+                    want(&int, &rt, &op)?;
+                }
                 if matches!(op, "+" | "-" | "*" | "**" | "/" | "%") {
-                    int
+                    numeric
                 } else {
                     boolean
                 }
@@ -1342,6 +1369,12 @@ impl Ck {
             _ => {
                 // == と !=
                 let lt = base(&lt);
+                if (lt == prim("num") && base(&rt) == int) || (lt == int && base(&rt) == prim("num")) {
+                    self.check(&mut l, &prim("num"))?;
+                    self.check(&mut r, &prim("num"))?;
+                    *e = Expr::Binary(op, l, r);
+                    return Ok(boolean);
+                }
                 want(&lt, &base(&rt), &op)?;
                 if lt == prim("syn") {
                     return Err("syn は比較できない".into());
@@ -1520,6 +1553,10 @@ impl Ck {
             Expr::At(..) => unreachable!("先頭で外している"),
             Expr::Method(..) => unreachable!("expr_inner の先頭で分けている"),
             Expr::Int(_) => int,
+            Expr::Num(n) => {
+                if !n.is_finite() { return Err("num の値は有限でなければならない".into()); }
+                prim("num")
+            }
             Expr::Bool(_) => boolean,
             Expr::Str(_) => prim("String"),
             Expr::Var(n) => match self.lookup(n) {
@@ -1595,9 +1632,15 @@ impl Ck {
                 V::Type
             }
             Expr::Unary(op, x) => {
-                let t = if *op == "-" { int } else { boolean };
-                want(&t, &self.expr(x)?, op)?;
+                let xt = self.expr(x)?;
+                let t = if *op == "-" && base(&xt) == prim("num") { prim("num") } else if *op == "-" { int } else { boolean };
+                want(&t, &xt, op)?;
                 t
+            }
+            Expr::Call(name, args) if name == "#num" => {
+                let t = base(&self.expr(&mut args[0])?);
+                if t != int && t != prim("num") { return Err("num への変換には int か num が必要".into()); }
+                prim("num")
             }
             Expr::Binary(..) => unreachable!("expr で分けている"),
             Expr::Handle(body, arms) => return self.handle(body, arms),
