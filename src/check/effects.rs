@@ -29,7 +29,7 @@ pub(super) fn op_site(fns: &HashMap<Name, Fn>, f: &Fn, eff: &str) -> Option<Span
             && let Expr::Call(n, _) = inner.peel()
             && found.is_none()
             && fns
-                .get(n.as_str())
+                .get(&n)
                 .is_some_and(|g| g.op.as_deref() == Some(eff))
         {
             found = Some(*sp);
@@ -158,7 +158,7 @@ impl Ck {
         }
         let mut effs: Vec<Name> = Vec::new();
         for a in &mut *arms {
-            let Some(f) = self.norm.fns.get(a.ctor.as_str()).cloned() else {
+            let Some(f) = self.norm.fns.get(&a.ctor).cloned() else {
                 return Err(at_opt(format!("未定義の操作 {}", a.ctor).into(), a.span));
             };
             let Some(e) = &f.op else {
@@ -199,7 +199,7 @@ impl Ck {
 
     // handle の腕を、handle の値の型 t で検査する。resume には操作の戻り値の型の値を渡す
     pub(super) fn arm(&mut self, a: &mut Arm, insts: &[(Name, Option<V>)], t: &V) -> R<()> {
-        let f = self.norm.fns[a.ctor.as_str()].clone();
+        let f = self.norm.fns[&a.ctor].clone();
         let eff = f.op.as_ref().unwrap();
         let Some((_, Some(V::DataT(d)))) = insts.iter().find(|(n, _)| n == eff) else {
             return Err(format!("handle の本体が効果 {eff} を起こしていない").into());

@@ -12,7 +12,7 @@ impl Ck {
         let tr = if method == "eq" { "std.Eq" } else { "std.Display" };
         // Vec の表示は組み込みのまま（文字列の要素を引用符で囲む）。Show<Vec<A>> は制約で求められた時だけ使う
         let builtin_vec = method != "eq" && matches!(base(t), V::VecT(_));
-        if builtin_vec || matches!(base(t), V::Prim(_)) || !self.norm.datas.contains_key(tr) {
+        if builtin_vec || matches!(base(t), V::Prim(_)) || !self.norm.datas.contains_key(&Name::from(tr)) {
             return Ok(None);
         }
         let goal = V::DataT(Rc::new((tr.into(), vec![base(t)])));
@@ -43,7 +43,7 @@ impl Ck {
                 return Ok(c);
             }
             if let V::DataT(d) = base(&t)
-                && let Some(data) = self.norm.datas.get(d.0.as_str())
+                && let Some(data) = self.norm.datas.get(&d.0)
             {
                 for (fname, _) in data.ctors.iter().flat_map(|c| &c.fields) {
                     if fname.is_supertrait() {

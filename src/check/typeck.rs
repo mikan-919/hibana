@@ -58,7 +58,7 @@ pub(crate) struct PiV {
 
 // js は JavaScript の値をそのまま持ち回る型（extern で使う）。never は戻らない効果の操作（fail など）の戻り値の型
 // Effect は効果の並びの型（<E: Effect> の効果の変数に使う）
-pub(super) const PRIMS: &[&str] = &["int", "num", "bool", "String", "syn", "unit", "js", "never", "Effect"];
+pub(super) const PRIMS: &[&str] = &["int", "num", "number", "bool", "String", "syn", "unit", "js", "never", "Effect"];
 
 // マクロ本体の中でだけ使える組み込み関数 (名前, 引数, 戻り値)
 pub(super) const SYN_FNS: &[(&str, &[&str], &str)] = &[
@@ -120,6 +120,7 @@ const STR_FNS: &[(&str, &[&str], &str)] = &[
 ];
 
 pub(super) fn prim(name: &str) -> V {
+    let name = if name == "number" { "num" } else { name };
     V::Prim(
         PRIMS
             .iter()
@@ -547,7 +548,7 @@ fn check_prog(prog: &mut Program, require_main: bool) -> R<Info> {
     }
     for d in &prog.datas { ck.data_level(d).map_err(|e| at_opt(e, d.span))?; }
     if require_main {
-        match ck.norm.fns.get("main") {
+        match ck.norm.fns.get(&Name::from("main")) {
             Some(f) if f.params.is_empty() => {}
             _ => return Err("引数なしの main 関数が必要".into()),
         }
@@ -777,6 +778,9 @@ impl Ck {
         if let Expr::At(sp, inner) = e {
             return self.check(inner, expected).map_err(|err| err.at(*sp));
         }
+        if let Expr::Id(_, inner) = e {
+            return self.check(inner, expected);
+        }
         match e {
             Expr::If(c, then, Some(els)) => {
                 want(&prim("bool"), &self.expr(c)?, "if の条件")?;
@@ -815,7 +819,7 @@ impl Ck {
                     && self
                         .norm
                         .fns
-                        .get(n.as_str())
+                        .get(n)
                         .is_some_and(|f| f.implicit > 0) =>
             {
                 let mut call = std::mem::replace(e, Expr::Int(0));
@@ -854,12 +858,12 @@ impl Ck {
                 }
                 self.lam_check(params, ret, body, &p)
             }
-            Expr::Call(n, args) if self.norm.ctors.contains_key(n.as_str()) => {
+            Expr::Call(n, args) if self.norm.ctors.contains_key(n) => {
                 let t = self.ctor_call(n, args, Some(expected))?;
                 self.subsume(e, &t, expected)
             }
             Expr::Var(n)
-                if self.lookup(n).is_none() && self.norm.ctors.contains_key(n.as_str()) =>
+                if self.lookup(n).is_none() && self.norm.ctors.contains_key(n) =>
             {
                 let t = self.ctor_call(n, &mut [], Some(expected))?;
                 self.subsume(e, &t, expected)
@@ -1003,21 +1007,21 @@ impl Ck {
         // 組み込みの型（String など）のメソッドは、どのモジュールで宣言してもよい
         // ponytail: 同じ名前を複数のモジュールが宣言すれば最初の1つ。重なりの検査はトレイトに寄せる時に足す
         if let Some(ty) = &ty
-            && !self.norm.fns.contains_key(name.as_str())
-            && !ty.contains('.')
+            && !self.norm.fns.contains_key(&name)
+            && !matches!(ty.kind, crate::parser::NameKind::Qualified(..))
         {
             if let Some(k) = self.norm.fns.keys().filter(|candidate| candidate.local() == &name).min() {
                 name = k.clone();
             }
         }
         // T::f が無ければ、f をメソッドに持つトレイトのうち、x の型に実装があるもの
-        if !self.norm.fns.contains_key(name.as_str()) {
+        if !self.norm.fns.contains_key(&name) {
             let mut traits: Vec<(Name, Name)> = self
                 .norm
                 .datas
                 .values()
                 .filter(|d| {
-                    matches!(d.ctors.as_slice(), [c] if c.name.structure_owner() == Some(&d.name)
+                    matches!(d.ctors.as_slice(), [c] if c.name.structure_owner() == Some(d.name.clone())
                         && c.fields.iter().any(|(n, _)| *n == f))
                 })
                 .map(|d| (d.name.clone(), crate::parser::qual(&d.module, &f)))
@@ -1111,18 +1115,18 @@ impl Ck {
                 None if self
                     .norm
                     .fns
-                    .get(n.as_str())
+                    .get(n)
                     .is_some_and(|f| f.alias && f.params.is_empty()) =>
                 {
                     let mut call = Expr::Call(n.clone(), vec![]);
                     return self.expr(&mut call);
                 }
-                None if self.norm.ctors.contains_key(n.as_str()) => {
+                None if self.norm.ctors.contains_key(n) => {
                     return self.ctor_call(n, &mut [], None);
                 }
-                None if self.norm.datas.contains_key(n.as_str()) => return self.data_app(n, &mut []),
-                None if self.norm.fns.contains_key(n.as_str()) => {
-                    let f = self.norm.fns[n.as_str()].clone();
+                None if self.norm.datas.contains_key(n) => return self.data_app(n, &mut []),
+                None if self.norm.fns.contains_key(n) => {
+                    let f = self.norm.fns[n].clone();
                     return self.fn_type(&f);
                 }
                 None => {
@@ -1307,10 +1311,10 @@ impl Ck {
                 prim("unit")
             }
             Expr::Call(name, _) if name == "Type" => return Err("Type に引数は指定できない".into()),
-            Expr::Call(name, args) if self.norm.ctors.contains_key(name.as_str()) => {
+            Expr::Call(name, args) if self.norm.ctors.contains_key(&name) => {
                 return self.ctor_call(name, args, None);
             }
-            Expr::Call(name, args) if self.norm.datas.contains_key(name.as_str()) => {
+            Expr::Call(name, args) if self.norm.datas.contains_key(&name) => {
                 return self.data_app(name, args);
             }
             Expr::Apply(f, args) => {
@@ -1387,7 +1391,7 @@ impl Ck {
                 prim(ret)
             }
             Expr::Call(name, args) if name != "to_str" && !STR_FNS.iter().any(|s| s.0 == name) => {
-                if !self.norm.fns.contains_key(name.as_str()) {
+                if !self.norm.fns.contains_key(&name) {
                     let e: Error = format!("未定義の関数 {name}").into();
                     return Err(self.suggest(e, name));
                 }
@@ -1553,7 +1557,7 @@ impl Ck {
     }
 
     // トップレベルの関数の呼び出し。ジェネリック引数を省いた時は、メタ変数にして引数と期待する型から求める
-    fn call_fn(&mut self, name: &str, args: &mut Vec<Expr>, expected: Option<&V>, addr: NodeId) -> R<V> {
+    fn call_fn(&mut self, name: &Name, args: &mut Vec<Expr>, expected: Option<&V>, addr: NodeId) -> R<V> {
         let f = self.norm.fns[name].clone();
         let explicit = f.params.len() - f.implicit - f.insts;
         // with の要求は、内側のスコープで選ばれた値を引数にして渡す。
@@ -1571,10 +1575,10 @@ impl Ck {
         // 明示した型引数と、補完済みの辞書引数は個数が一致する場合がある。
         let type_argument = args.first().is_some_and(|e| match e.peel() {
             Expr::Var(n) => self.lookup(n).is_some_and(|e| e.ty == V::Type)
-                || PRIMS.contains(&n.as_str()) || self.norm.datas.contains_key(n.as_str())
-                || self.norm.fns.get(n.as_str()).is_some_and(|f| f.alias),
-            Expr::Call(n, _) => n == "Vec" || n == "Ref" || self.norm.datas.contains_key(n.as_str())
-                || self.norm.fns.get(n.as_str()).is_some_and(|f| f.alias),
+                || PRIMS.contains(&n.as_str()) || self.norm.datas.contains_key(n)
+                || self.norm.fns.get(n).is_some_and(|f| f.alias),
+            Expr::Call(n, _) => n == "Vec" || n == "Ref" || self.norm.datas.contains_key(n)
+                || self.norm.fns.get(n).is_some_and(|f| f.alias),
             Expr::Refine(..) | Expr::Pi(..) => true,
             _ => false,
         });
@@ -2016,7 +2020,7 @@ impl Ck {
     }
 
     // 型名に引数を渡して型を作る。引数の型の細分化の条件は前の引数の値を参照できる
-    fn data_app(&mut self, name: &str, args: &mut [Expr]) -> R<V> {
+    fn data_app(&mut self, name: &Name, args: &mut [Expr]) -> R<V> {
         let d = self.norm.datas[name].clone();
         if d.params.len() != args.len() {
             return Err(format!("型 {name} の引数は{}個", d.params.len()).into());
@@ -2032,7 +2036,7 @@ impl Ck {
         Ok(V::Type)
     }
 
-    fn ctor_call(&mut self, name: &str, args: &mut [Expr], expected: Option<&V>) -> R<V> {
+    fn ctor_call(&mut self, name: &Name, args: &mut [Expr], expected: Option<&V>) -> R<V> {
         let (d, c) = self.norm.ctors[name].clone();
         if c.fields.len() != args.len() {
             return Err(format!("構築子 {name} の引数は{}個", c.fields.len()).into());
@@ -2090,7 +2094,7 @@ impl Ck {
         let V::DataT(dt) = &st else {
             return Err(format!("match は data 型の値に使う（実際は {}）", show(&st)).into());
         };
-        let Some(d) = self.norm.datas.get(dt.0.as_str()).cloned() else {
+        let Some(d) = self.norm.datas.get(&dt.0).cloned() else {
             return Err(format!("match は data 型の値に使う（実際は {}）", show(&st)).into());
         };
         let mut covered = Vec::new();
@@ -2104,7 +2108,7 @@ impl Ck {
             if arm.ctor == "_" {
                 wildcard = true;
             } else {
-                let Some((dd, c)) = self.norm.ctors.get(arm.ctor.as_str()).cloned() else {
+                let Some((dd, c)) = self.norm.ctors.get(&arm.ctor).cloned() else {
                     self.pop();
                     return Err(at(format!("不明な構築子 {}", arm.ctor).into()));
                 };
@@ -2157,8 +2161,8 @@ impl Ck {
     }
 
     // 構造体の値 x のフィールド f の型。フィールドの型の細分化の条件は前のフィールドの値を参照できる
-    fn struct_field(&mut self, d: &(Name, Vec<V>), x: &Expr, f: &str) -> R<V> {
-        let Some(data) = self.norm.datas.get(d.0.as_str()).cloned() else {
+    fn struct_field(&mut self, d: &(Name, Vec<V>), x: &Expr, f: &Name) -> R<V> {
+        let Some(data) = self.norm.datas.get(&d.0).cloned() else {
             return Err(format!("型 {} は構造体でないのでフィールドは無い", d.0).into());
         };
         let [c] = data.ctors.as_slice() else {
@@ -2217,7 +2221,7 @@ impl Ck {
                 Q::Tok(_) | Q::Field(_) => {}
                 Q::Var { path, .. } => {
                     let t = self
-                        .lookup(&path[0])
+                        .lookup(&Name::from(&path[0]))
                         .ok_or(format!("未定義の変数 {}", path[0]))?
                         .ty
                         .clone();

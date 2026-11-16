@@ -15,7 +15,7 @@ impl Ck {
     pub(super) fn struct_facts(&mut self, ty: &V, val: &V) -> R<()> {
         let V::DataT(d) = base(ty) else { return Ok(()) };
         // Ref と Async は宣言の無い組み込みの型
-        let Some(data) = self.norm.datas.get(d.0.as_str()).cloned() else {
+        let Some(data) = self.norm.datas.get(&d.0).cloned() else {
             return Ok(());
         };
         let [c] = data.ctors.as_slice() else {
@@ -59,7 +59,7 @@ impl Ck {
         Ok(())
     }
 
-    pub(super) fn lookup(&self, name: &str) -> Option<&Entry> {
+    pub(super) fn lookup(&self, name: &Name) -> Option<&Entry> {
         self.scopes.iter().rev().find_map(|s| s.vars.get(name))
     }
 
@@ -75,7 +75,7 @@ impl Ck {
     }
 
     // name = x の後の len(name) の値。x の長さが len(name) を含むなら、len(name) == t の事実で置き換える
-    pub(super) fn new_len(&mut self, name: &str, x: &Expr) -> R<Option<(V, V)>> {
+    pub(super) fn new_len(&mut self, name: &Name, x: &Expr) -> R<Option<(V, V)>> {
         let val = self.lookup(name).unwrap().val.clone();
         let V::Neu(n) = &val else { return Ok(None) };
         let Term::Var(id, _) = &**n else {
@@ -107,7 +107,7 @@ impl Ck {
     }
 
     // 変数の値が変わるので、その変数についての事実を捨てる。型の条件は代入でも保たれるので残す
-    pub(super) fn forget(&mut self, name: &str) -> R<()> {
+    pub(super) fn forget(&mut self, name: &Name) -> R<()> {
         let Some(en) = self.lookup(name) else {
             return Ok(());
         };
@@ -214,7 +214,7 @@ impl Ck {
     // 実行時の検査を通常の if と構築子へ展開し、成功する枝で細分化条件を証明する。
     // ponytail: 基本型の条件式だけを扱う。データ型は条件式の再構築と証明の対応を足してから対応する。
     pub(super) fn refine_value(&mut self, e: &mut Expr) -> R<V> {
-        fn predicate(v: &V, name: &str) -> R<Expr> {
+        fn predicate(v: &V, name: &Name) -> R<Expr> {
             Ok(match v {
                 V::Int(n) => Expr::Int(*n), V::Num(n) => Expr::Num(*n), V::Bool(b) => Expr::Bool(*b), V::Str(s) => Expr::Str(s.to_string()),
                 V::Neu(n) => match &**n {

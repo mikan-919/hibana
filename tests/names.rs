@@ -2,6 +2,75 @@ use hibana::parser::{NameKind, Program};
 use std::process::Command;
 
 #[test]
+fn generated_names_are_distinct_even_when_their_spellings_match() {
+    use hibana::parser::Name;
+    use std::collections::{BTreeSet, HashMap, HashSet};
+
+    for names in [
+        vec![
+            Name::temporary("match", 0),
+            Name::hygienic("match", 0),
+            Name::from("match#0"),
+        ],
+        vec![
+            Name::structure("Point".into()),
+            Name::tuple_structure("Point".into()),
+            Name::from("Point{}"),
+        ],
+    ] {
+        assert!(names.iter().all(|name| name.as_str() == names[0].as_str()));
+        let map: HashMap<_, _> = names.iter().cloned().zip(0..).collect();
+        assert_eq!(map.len(), names.len());
+        assert_eq!(
+            names.iter().cloned().collect::<HashSet<_>>().len(),
+            names.len()
+        );
+        assert_eq!(
+            names.iter().cloned().collect::<BTreeSet<_>>().len(),
+            names.len()
+        );
+        for (index, name) in names.iter().enumerate() {
+            assert_eq!(map.get(name), Some(&index));
+        }
+    }
+}
+
+#[test]
+fn qualification_preserves_the_identity_of_generated_and_associated_names() {
+    use hibana::parser::Name;
+    use std::collections::HashMap;
+
+    let owner = Name::from("model.Point");
+    let cases = [
+        (
+            Name::associated(owner.clone(), "get".into()),
+            Name::qualified("model", Name::associated("Point".into(), "get".into())),
+        ),
+        (
+            Name::structure(owner.clone()),
+            Name::qualified("model", Name::structure("Point".into())),
+        ),
+        (
+            Name::tuple_structure(owner.clone()),
+            Name::qualified("model", Name::tuple_structure("Point".into())),
+        ),
+        (
+            Name::trait_accessor(owner.clone()),
+            Name::qualified("model", Name::trait_accessor("Point".into())),
+        ),
+        (
+            Name::default_method(owner, "get".into()),
+            Name::qualified("model", Name::default_method("Point".into(), "get".into())),
+        ),
+    ];
+    for (left, right) in cases {
+        assert_eq!(left, right);
+        let values = HashMap::from([(left, 42)]);
+        assert_eq!(values.get(&right), Some(&42));
+    }
+}
+
+#[test]
 fn qualified_names_are_distinct_from_user_identifiers() {
     let tokens = hibana::lexer::lex("Point::get Point__get").unwrap();
     let hibana::lexer::Tok::Ident(qualified) = &tokens[0].tok else {

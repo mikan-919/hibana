@@ -451,7 +451,7 @@ mod tests {
             "50\nHIBANA!\n18\n3\n3\nHello, world\n6\n20\n[3, 5]\n[\"a2a\", \"b4b\"]\n[20, 40]\n"
         );
         let e = out(&src).unwrap_err();
-        assert!(e.contains("JS ターゲット"), "{e}");
+        assert!(e.contains("JavaScript 出力"), "{e}");
         // 型宣言が無いモジュールは型が分からないので使えない
         let e = out("use './nope.js'\nfn main() {}").unwrap_err();
         assert!(e.contains("型宣言 ./nope.d.ts が無い"), "{e}");

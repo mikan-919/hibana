@@ -1,4 +1,4 @@
-// JavaScript / TypeScript のモジュールを use する例（JS ターゲットでだけ動く: hibana js examples/interop/js_interop.hb）
+// JavaScript / TypeScript のモジュールを use する例。hibana::to_js で生成し、Node.js で実行する。
 // 型は TypeScript の型宣言から読む。モジュール名はファイル名（util・greet）
 use './js/util.ts'
 use './js/greet.js'

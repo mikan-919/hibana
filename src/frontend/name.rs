@@ -1,7 +1,7 @@
 //! 名前の構造と、コンパイラが生成する名前の種類。
 use std::fmt;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum NameKind {
     User,
     Associated(Box<Name>, Box<Name>),
@@ -19,14 +19,14 @@ pub enum NameKind {
     Temporary(String, usize),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum StructureStyle {
     Record,
     Tuple,
 }
 
-/// 綴りは名前の表の検索と出力に使い、種類の判定には kind を使う。
-#[derive(Debug, Clone)]
+/// 綴りは表示に使い、名前の同一性には種類と構造も含める。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Name {
     spelling: String,
     pub kind: NameKind,
@@ -38,6 +38,9 @@ impl Name {
     }
 
     pub fn associated(owner: Name, member: Name) -> Self {
+        if let NameKind::Qualified(module, local) = &owner.kind {
+            return Self::qualified(module, Self::associated(*local.clone(), member));
+        }
         Self {
             spelling: format!("{owner}::{member}"),
             kind: NameKind::Associated(Box::new(owner), Box::new(member)),
@@ -45,6 +48,9 @@ impl Name {
     }
 
     pub fn qualified(module: &str, member: Name) -> Self {
+        if let Some((first, rest)) = module.split_once('.') {
+            return Self::qualified(first, Self::qualified(rest, member));
+        }
         if module.is_empty() {
             member
         } else {
@@ -70,6 +76,9 @@ impl Name {
     }
 
     pub fn implementation_method(implementation: Name, method: Name) -> Self {
+        if let NameKind::Qualified(module, local) = &implementation.kind {
+            return Self::qualified(module, Self::implementation_method(*local.clone(), method));
+        }
         Self {
             spelling: format!("{implementation}#{method}"),
             kind: NameKind::ImplementationMethod(Box::new(implementation), Box::new(method)),
@@ -77,6 +86,9 @@ impl Name {
     }
 
     pub fn structure(owner: Name) -> Self {
+        if let NameKind::Qualified(module, local) = &owner.kind {
+            return Self::qualified(module, Self::structure(*local.clone()));
+        }
         Self {
             spelling: format!("{owner}{{}}"),
             kind: NameKind::Structure(Box::new(owner), StructureStyle::Record),
@@ -84,6 +96,9 @@ impl Name {
     }
 
     pub fn tuple_structure(owner: Name) -> Self {
+        if let NameKind::Qualified(module, local) = &owner.kind {
+            return Self::qualified(module, Self::tuple_structure(*local.clone()));
+        }
         Self {
             spelling: format!("{owner}{{}}"),
             kind: NameKind::Structure(Box::new(owner), StructureStyle::Tuple),
@@ -98,6 +113,9 @@ impl Name {
     }
 
     pub fn default_method(trait_name: Name, method: Name) -> Self {
+        if let NameKind::Qualified(module, local) = &trait_name.kind {
+            return Self::qualified(module, Self::default_method(*local.clone(), method));
+        }
         Self {
             spelling: format!("{trait_name}#default#{method}"),
             kind: NameKind::DefaultMethod(Box::new(trait_name), Box::new(method)),
@@ -105,6 +123,9 @@ impl Name {
     }
 
     pub fn trait_accessor(trait_name: Name) -> Self {
+        if let NameKind::Qualified(module, local) = &trait_name.kind {
+            return Self::qualified(module, Self::trait_accessor(*local.clone()));
+        }
         Self {
             spelling: format!("{trait_name}#get"),
             kind: NameKind::TraitAccessor(Box::new(trait_name)),
@@ -158,9 +179,12 @@ impl Name {
         }
     }
 
-    pub fn structure_owner(&self) -> Option<&Name> {
-        match &self.local().kind {
-            NameKind::Structure(owner, _) => Some(owner),
+    pub fn structure_owner(&self) -> Option<Name> {
+        match &self.kind {
+            NameKind::Qualified(module, local) => local
+                .structure_owner()
+                .map(|owner| Self::qualified(module, owner)),
+            NameKind::Structure(owner, _) => Some(*owner.clone()),
             _ => None,
         }
     }
@@ -223,60 +247,34 @@ impl fmt::Display for Name {
         f.write_str(self.as_str())
     }
 }
-impl PartialEq for Name {
-    fn eq(&self, other: &Self) -> bool {
-        self.spelling == other.spelling
-    }
-}
-impl Eq for Name {}
-impl std::hash::Hash for Name {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.spelling.hash(state);
-    }
-}
-impl PartialOrd for Name {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-impl Ord for Name {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.spelling.cmp(&other.spelling)
-    }
-}
-impl std::borrow::Borrow<str> for Name {
-    fn borrow(&self) -> &str {
-        self.as_str()
-    }
-}
 impl PartialEq<str> for Name {
     fn eq(&self, other: &str) -> bool {
-        self.as_str() == other
+        self == &Name::from(other)
     }
 }
 impl PartialEq<&str> for Name {
     fn eq(&self, other: &&str) -> bool {
-        self.as_str() == *other
+        self == &Name::from(*other)
     }
 }
 impl PartialEq<String> for Name {
     fn eq(&self, other: &String) -> bool {
-        self.as_str() == other
+        self == &Name::from(other)
     }
 }
 impl PartialEq<Name> for str {
     fn eq(&self, other: &Name) -> bool {
-        self == other.as_str()
+        Name::from(self) == *other
     }
 }
 impl PartialEq<Name> for &str {
     fn eq(&self, other: &Name) -> bool {
-        *self == other.as_str()
+        Name::from(*self) == *other
     }
 }
 impl PartialEq<Name> for String {
     fn eq(&self, other: &Name) -> bool {
-        self.as_str() == other.as_str()
+        Name::from(self.as_str()) == *other
     }
 }
 impl From<Name> for String {

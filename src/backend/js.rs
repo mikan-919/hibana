@@ -132,6 +132,7 @@ function $slice(s, i, j) {
 }
 // extern の関数の境界で、宣言した型 d に従って値を変換する。$to は hibana から JS へ、$from は JS から hibana へ
 function $to(d, v) {
+  if (d === "num") return $chk(v);
   if (d === "int") return Number(v);
   if (d.vec) return v.map((x) => $to(d.vec, x));
   if (d.fn && d.async) return (...a) => Promise.resolve(v(...a.map((x, i) => $from(d.fn[i], x)))).then((r) => $to(d.ret, r));
@@ -140,6 +141,10 @@ function $to(d, v) {
   return v;
 }
 function $from(d, v) {
+  if (d === "num") {
+    if (typeof v !== "number") throw new Error("JavaScript の値 " + v + " は num でない");
+    return $chk(v);
+  }
   if (d === "int") {
     if (typeof v === "bigint") return $chk(v);
     if (!Number.isInteger(v)) throw new Error("JavaScript の値 " + v + " は int でない");
@@ -206,7 +211,7 @@ pub fn emit(prog: &Program, info: &crate::typeck::Info) -> String {
             Some(crate::frontend::name::StructureStyle::Tuple) => 2,
             None => 0,
         };
-        format!("{}: [{}, {kind}]", lit(&ctor.name), lit(ctor.name.structure_owner().unwrap_or(&ctor.name)))
+        format!("{}: [{}, {kind}]", lit(&ctor.name), lit(&ctor.name.structure_owner().unwrap_or_else(|| ctor.name.clone())))
     }).collect();
     out += &format!("const $constructors = {{ {} }};\n", constructors.join(", "));
     // 構築子ごとの、フィールドの名前から位置への表
@@ -234,6 +239,7 @@ fn desc(prog: &Program, t: &Expr, depth: usize) -> String {
         return "\"any\"".into();
     }
     match t.peel() {
+        Expr::Var(n) if n == "num" || n == "number" => "\"num\"".into(),
         Expr::Var(n) if n == "int" || n == "unit" => lit(n),
         Expr::Refine(b, ..) => desc(prog, b, depth + 1),
         Expr::Call(n, args) if n == "Vec" && args.len() == 1 => {

@@ -14,10 +14,10 @@ fn compiled_numbers_match_interpreter_at_float_boundaries() {
         let n = f64::from_bits(state);
         if n.is_finite() { numbers.push(n); }
     }
-    let mut source = String::from("use std::math\nfn main() {\n");
+    let mut source = String::from("use std::math\nfn as_number(value: num) -> number { value }\nfn as_num(value: number) -> num { value }\nfn main() {\n");
     let mut expected = String::new();
     for n in numbers {
-        source += &format!("put({})\n", literal(n));
+        source += &format!("put(as_num(as_number({})))\n", literal(n));
         expected += &format!("{n}\n");
     }
     for (a, b) in [(f64::MAX, 3.0), (f64::MAX, f64::from_bits(1)), (-5.5, 2.0), (f64::MIN_POSITIVE, f64::from_bits(3)), (1.0, -0.5)] {
@@ -44,7 +44,10 @@ fn compiled_numbers_match_interpreter_at_float_boundaries() {
     std::fs::write(dir.join("glue.mjs"), web.javascript).unwrap();
     let script = dir.join("run.mjs");
     std::fs::write(&script, "import {readFileSync} from 'node:fs'; import {instantiate} from './glue.mjs'; const api = await instantiate(readFileSync(new URL('./numeric.wasm', import.meta.url))); api.main();").unwrap();
-    let mut commands = vec![{ let mut c = Command::new("node"); c.arg(script); c }];
+    let mut commands = vec![
+        { let mut c = Command::new("node"); c.arg(script); c },
+        { let mut c = Command::new("node"); c.args(["-e", &hibana::to_js(&source).unwrap()]); c },
+    ];
     #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -63,7 +66,7 @@ fn compiled_numbers_match_interpreter_at_float_boundaries() {
 
 #[test]
 fn wasm_num_boundary_checks_arguments_and_host_results() {
-    let source = "use std::math\nextern 'host' { fn twice(x: num) -> num }\nfn identity(x: num) -> num { x }\nfn calculate(x: num) -> num { twice(x) + 0.25 }\nfn floor(x: num) -> int { math::floor(x) }\nfn touch() { twice(1.0) }";
+    let source = "use std::math\nextern 'host' { fn twice(x: number) -> num }\nfn identity(x: number) -> number { x }\nfn calculate(x: num) -> number { twice(x) + 0.25 }\nfn floor(x: number) -> int { math::floor(x) }\nfn touch() { twice(1.0) }";
     let dir = std::env::temp_dir().join(format!("hibana-numeric-boundary-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let web = hibana::to_web(source, &["identity".into(), "calculate".into(), "floor".into()]).unwrap();
@@ -100,4 +103,22 @@ for (const value of [Infinity, -Infinity, NaN]) {
     let result = Command::new("node").arg(script).output().unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn number_alias_checks_javascript_host_results() {
+    let source = "extern '' { fn echo(value: number) -> number }\nfn main() { let value: num = echo(1.5)\n put(value) }";
+    let javascript = hibana::to_js(source).unwrap();
+    for (result, valid) in [("value", true), ("Infinity", false), ("NaN", false), ("'wrong'", false)] {
+        let output = Command::new("node")
+            .args(["-e", &format!("globalThis.echo = value => {{ if (typeof value !== 'number') throw Error('引数の型'); return {result}; }};\n{javascript}")])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.success(), valid, "{}", String::from_utf8_lossy(&output.stderr));
+        if valid {
+            assert_eq!(output.stdout, b"1.5\n");
+        } else {
+            assert!(String::from_utf8_lossy(&output.stderr).contains("num"));
+        }
+    }
 }

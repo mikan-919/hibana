@@ -177,8 +177,8 @@ pub struct Parser<'s> {
     pub generic_fns: Rc<HashSet<Name>>,
     // 大域の名前（関数・型・構築子・組み込み・パターンのリテラル）
     pub globals: Rc<HashSet<Name>>,
-    // 構造体の名前からフィールド名の並び
-    pub structs: Rc<HashMap<Name, Vec<Name>>>,
+    // 構造体の名前から構築子とフィールド名の並び
+    pub structs: Rc<HashMap<Name, Structure>>,
     // 戻り値の型を読んでいる間は、続く { を構造体の値と読まない
     pub no_struct: bool,
     // このファイルを含むモジュール（利用者のファイルは ""）
@@ -221,6 +221,12 @@ pub struct Data {
 pub struct Ctor {
     pub name: Name,
     pub fields: Vec<(Name, Expr)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Structure {
+    pub constructor: Name,
+    pub fields: Vec<Name>,
 }
 
 // 型の形に値の引数を使う依存型は受け付けない。細分化型の条件は値を参照できる。
@@ -449,6 +455,7 @@ fn parse_modules_tokens(
         "error",
         "int",
         "num",
+        "number",
         "num_floor",
         "num_sqrt",
         "bool",
@@ -485,13 +492,13 @@ fn parse_modules_tokens(
     let mut uses: HashMap<String, Vec<Use>> = HashMap::new();
     let mut modules: HashSet<String> = HashSet::new();
     // 名前を宣言する。同じモジュールで既に宣言していれば false
-    let mut declare = |m: &str, n: &str, globals: &mut HashSet<Name>| {
+    let mut declare = |m: &str, n: &Name, globals: &mut HashSet<Name>| {
         mod_names
             .entry(m.to_string())
             .or_default()
-            .insert(n.to_string().into());
+            .insert(n.clone());
         if m.is_empty() {
-            globals.insert(n.to_string().into());
+            globals.insert(n.clone());
         }
         known.insert(qual(m, n))
     };
@@ -705,14 +712,14 @@ fn parse_modules_tokens(
             prog.fns.extend(fs);
         }
     }
-    let structs: Rc<HashMap<Name, Vec<Name>>> = Rc::new(
+    let structs: Rc<HashMap<Name, Structure>> = Rc::new(
         prog.datas
             .iter()
             .filter(|d| d.ctors.len() == 1 && d.ctors[0].name.structure_owner().is_some())
             .map(|d| {
                 (
                     d.name.clone(),
-                    d.ctors[0].fields.iter().map(|f| f.0.clone()).collect(),
+                    Structure { constructor: d.ctors[0].name.clone(), fields: d.ctors[0].fields.iter().map(|field| field.0.clone()).collect() },
                 )
             })
             .collect(),
@@ -962,7 +969,7 @@ impl Parser<'_> {
             if let Some(Tok::Ident(x)) = at(2) {
                 self.pos += 2;
                 // 巻き戻して読み直した時は、既に書き換えてある
-                if !x.contains('.') {
+                if !matches!(x.kind, NameKind::Qualified(..)) {
                     self.toks[self.pos].tok = Tok::Ident(Name::qualified(&n, x));
                 }
             }
@@ -1038,7 +1045,7 @@ impl Parser<'_> {
     // 修飾していない名前 n を、今のモジュールから見た大域の名前にする。自分のモジュール、利用者のファイル、
     // use で取り込んだ名前の順に探す。見つからなければ n のまま
     pub fn qualify(&self, n: &Name) -> Name {
-        if n.contains('.') {
+        if matches!(n.kind, NameKind::Qualified(..)) {
             return n.clone();
         }
         let m = self.cur_module();
@@ -1278,11 +1285,11 @@ impl Parser<'_> {
     }
 
     // 名前がトレイトなら、修飾した形
-    fn trait_name(&self, c: &str) -> Option<Name> {
+    fn trait_name(&self, c: &Name) -> Option<Name> {
         if self.traits.contains_key(c) {
-            return Some(c.to_string().into());
+            return Some(c.clone());
         }
-        let q = self.qualify(&Name::from(c));
+        let q = self.qualify(c);
         self.traits.contains_key(&q).then_some(q)
     }
 
@@ -2051,11 +2058,11 @@ impl Parser<'_> {
                 if self
                     .structs
                     .get(&name)
-                    .is_some_and(|fs| fs.first().is_some_and(|f| f == "0"))
+                    .is_some_and(|structure| structure.constructor.structure_style() == Some(super::name::StructureStyle::Tuple))
                     && !self.at_newline()
                     && self.eat("(") =>
             {
-                Expr::Call(Name::structure(name.clone()), self.args()?)
+                Expr::Call(self.structs[&name].constructor.clone(), self.args()?)
             }
             // 型の名前に続く < は型引数。比較の < と区別する
             Tok::Ident(name)
@@ -2081,9 +2088,9 @@ impl Parser<'_> {
                     given.push((f, self.expr()?));
                     self.eat(",");
                 }
-                let order = self.structs[&name].clone();
+                let structure = self.structs[&name].clone();
                 let mut args = Vec::new();
-                for f in &order {
+                for f in &structure.fields {
                     let Some(i) = given.iter().position(|g| &g.0 == f) else {
                         return self.err_at(format!("構造体 {name} のフィールド {f} が無い"));
                     };
@@ -2092,7 +2099,7 @@ impl Parser<'_> {
                 if let Some((f, _)) = given.first() {
                     return self.err_at(format!("構造体 {name} にフィールド {f} は無い"));
                 }
-                Expr::Call(Name::structure(name.clone()), args)
+                Expr::Call(structure.constructor, args)
             }
             Tok::Ident(name) if self.types.contains(&name) && self.peek() == &Tok::Punct("<") => {
                 self.pos += 1;

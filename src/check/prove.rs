@@ -334,14 +334,14 @@ impl Eval {
     }
 
     // 構造体のフィールド。値が分からなければ x.f という項にする
-    pub(super) fn proj(&self, x: V, f: &str) -> V {
+    pub(super) fn proj(&self, x: V, f: &Name) -> V {
         if let V::Data(d) = &x
-            && let Some((_, c)) = self.ctors.get(d.0.as_str())
+            && let Some((_, c)) = self.ctors.get(&d.0)
             && let Some(i) = c.fields.iter().position(|(n, _)| n == f)
         {
             return d.1[i].clone();
         }
-        neu(Term::Proj(x, f.to_string().into()))
+        neu(Term::Proj(x, f.clone()))
     }
 
     // 関数型の式を評価する。型は引数の値に依存しない
@@ -372,8 +372,8 @@ impl Eval {
     }
 
     // 関数を展開する。中で止まったら呼び出しのまま残す
-    pub(super) fn call(&mut self, name: &str, args: Vec<V>) -> R<V> {
-        match (name, args.as_slice()) {
+    pub(super) fn call(&mut self, name: &Name, args: Vec<V>) -> R<V> {
+        match (name.as_str(), args.as_slice()) {
             ("len", [v]) => return Ok(len(v.clone())),
             ("Vec", [a]) => return Ok(V::VecT(Rc::new(a.clone()))),
             ("Ref", [a]) => return Ok(ref_t(a.clone())),
@@ -438,17 +438,17 @@ impl Eval {
                 None if PRIMS.contains(&n.as_str()) => prim(n),
                 None if self
                     .fns
-                    .get(n.as_str())
+                    .get(n)
                     .is_some_and(|f| f.alias && f.params.is_empty()) =>
                 {
                     self.call(n, vec![]).map_err(Halt::Err)?
                 }
-                None if self.ctors.contains_key(n.as_str())
-                    || self.datas.contains_key(n.as_str()) =>
+                None if self.ctors.contains_key(n)
+                    || self.datas.contains_key(n) =>
                 {
                     self.call(n, vec![]).map_err(Halt::Err)?
                 }
-                None if self.fns.contains_key(n.as_str()) => return Err(Halt::Stuck),
+                None if self.fns.contains_key(n) => return Err(Halt::Stuck),
                 None => return Err(Halt::Err(format!("未定義の変数 {n}").into())),
             },
             Expr::Unary(op, x) => un(op, self.eval(x, env)?),

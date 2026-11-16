@@ -60,7 +60,7 @@ type R<T> = Result<T, Flow>;
 struct Interp<'a> {
     fns: HashMap<&'a str, &'a Fn>,
     // 構築子の名前からフィールド名の並び
-    ctors: HashMap<&'a str, (&'a Name, Vec<&'a str>)>,
+    ctors: HashMap<&'a str, (&'a Name, Vec<&'a Name>)>,
     out: &'a mut dyn Write,
     // 処理中の handle (番号, 操作の名前から腕の関数)。内側ほど後ろ
     handlers: Vec<(usize, HashMap<Name, Value>)>,
@@ -89,7 +89,7 @@ pub fn run_fn(
             .map(|c| {
                 (
                     c.name.as_str(),
-                    (&c.name, c.fields.iter().map(|f| f.0.as_str()).collect()),
+                    (&c.name, c.fields.iter().map(|field| &field.0).collect()),
                 )
             })
             .collect(),
@@ -123,7 +123,7 @@ pub fn run_macro(b: &Block, vars: Vec<(Name, Value)>, prog: &Program) -> Result<
             .map(|c| {
                 (
                     c.name.as_str(),
-                    (&c.name, c.fields.iter().map(|f| f.0.as_str()).collect()),
+                    (&c.name, c.fields.iter().map(|field| &field.0).collect()),
                 )
             })
             .collect(),
@@ -402,11 +402,11 @@ impl Interp<'_> {
         let f = self.fns[name];
         if f.op.is_some() {
             let k = args.len() - (f.params.len() - f.implicit);
-            return self.perform(name, args[k..].to_vec());
+            return self.perform(&f.name, args[k..].to_vec());
         }
         if f.js.is_some() {
             return error(format!(
-                "extern の関数 {name} は JS ターゲット（hibana js）でだけ使える"
+                "extern の関数 {name} は JavaScript 出力（hibana::to_js）でだけ使える"
             ));
         }
         // 型検査で推論したジェネリック引数は実行時には消えている
@@ -426,7 +426,7 @@ impl Interp<'_> {
     }
 
     // 操作を、それを処理する一番内側の handle の腕で実行する。腕の中の操作は、その handle より外で処理する
-    fn perform(&mut self, op: &str, args: Vec<Value>) -> R<Value> {
+    fn perform(&mut self, op: &Name, args: Vec<Value>) -> R<Value> {
         let Some(i) = self.handlers.iter().rposition(|h| h.1.contains_key(op)) else {
             return error(format!("操作 {op} を処理する handle が無い"));
         };
@@ -504,7 +504,7 @@ impl Interp<'_> {
                 if let Value::Data(d) = &v {
                     let i = self.ctors[d.0.as_str()].1
                         .iter()
-                        .position(|f| f == name)
+                        .position(|field| *field == name)
                         .expect("型検査済み");
                     return Ok(d.1[i].clone());
                 }

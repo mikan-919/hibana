@@ -152,3 +152,21 @@ fn effect_diagnostics_keep_the_call_and_operation_in_their_own_files() {
         dependency.find("log('entry')").unwrap()
     );
 }
+
+#[test]
+fn declaration_macros_keep_generated_names_in_imported_modules() {
+    let files = Files::new(
+        "generated-declarations",
+        &[(
+            "generated.hb",
+            "macro install('install') -> Decl { let exported = ident('answer')\n quote { fn hidden() -> int { 42 }\n fn $exported() -> int { hidden() } } }\ninstall",
+        )],
+    );
+    let mut program = files
+        .parse("use './generated.hb'\nfn main() { put(generated.answer()) }")
+        .unwrap();
+    hibana::typeck::check(&mut program).unwrap();
+    let mut output = Vec::new();
+    hibana::eval::run(&program, &mut output).unwrap();
+    assert_eq!(output, b"42\n");
+}

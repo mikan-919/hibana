@@ -273,7 +273,7 @@ fn each_block<'a>(b: &'a Block, f: &mut impl FnMut(Node<'a>)) {
 fn value_type(e: &Ast) -> ValueType {
     match e.peel() {
         Ast::Var(n) if n == "int" => ValueType::Int,
-        Ast::Var(n) if n == "num" => ValueType::Num,
+        Ast::Var(n) if n == "num" || n == "number" => ValueType::Num,
         Ast::Var(n) if n == "bool" => ValueType::Bool,
         Ast::Var(n) if n == "String" => ValueType::Str,
         Ast::Var(n) if n == "unit" => ValueType::Unit,
@@ -552,7 +552,7 @@ impl<'a> Ctx<'a> {
                 if name == "__ctor_name" {
                     f.body.push(if_return(
                         eq(Expr::Local(0), i as i64),
-                        Expr::Str(cn.structure_owner().unwrap_or(cn).to_string()),
+                        Expr::Str(cn.structure_owner().unwrap_or_else(|| (*cn).clone()).to_string()),
                     ));
                     continue;
                 }
@@ -962,7 +962,7 @@ impl Lower<'_, '_> {
         })
     }
 
-    fn call(&mut self, n: &str, args: &[Ast]) -> R<Expr> {
+    fn call(&mut self, n: &Name, args: &[Ast]) -> R<Expr> {
         if let Some(i) = self.vars.get(n) {
             let i = *i;
             let args = self.args(args)?;
@@ -971,7 +971,7 @@ impl Lower<'_, '_> {
         let mut args = self.args(args)?;
         if n == "#num" { return Ok(call("__num", args)); }
         if let Some(p) = intrinsic(n) {
-            return Ok(match n {
+            return Ok(match n.as_str() {
                 "__getv" => {
                     let mut stmts = Vec::new();
                     let a = self.temp(args.remove(0), &mut stmts);
@@ -989,12 +989,12 @@ impl Lower<'_, '_> {
                 _ => prim(p.unwrap(), args),
             });
         }
-        if let Some((i, fields)) = self.cx.ctors.get(n) {
+        if let Some((i, fields)) = self.cx.ctors.get(n.as_str()) {
             let (i, nf) = (*i, fields.len() as i64);
             let new = call("__data_new", vec![int(i), int(nf)]);
             return Ok(self.object(DATA, new, 16, args));
         }
-        if let Some(src) = self.cx.sources.get(n) {
+        if let Some(src) = self.cx.sources.get(n.as_str()) {
             let f = src.f;
             // 操作は、引数を Vec にして内側の handle から腕を探す。推論した型の引数は渡さない
             if f.op.is_some() {
@@ -1015,7 +1015,7 @@ impl Lower<'_, '_> {
             let c = call(n, args);
             return Ok(if effects { self.checked(c) } else { c });
         }
-        if matches!(n, "Vec" | "Type" | "Ref" | "Async") || self.cx.types.contains(n) {
+        if matches!(n.as_str(), "Vec" | "Type" | "Ref" | "Async") || self.cx.types.contains(n.as_str()) {
             return Ok(mkv(TY, Expr::Str(n.to_string())));
         }
         let rt = format!("__{n}");
