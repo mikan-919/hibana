@@ -1073,8 +1073,7 @@ impl Parser<'_> {
     fn use_decl(&mut self) -> R<Use> {
         self.expect("use")?;
         let module = match self.next() {
-            Tok::Ident(n) if LIBS.iter().any(|(name, _)| *name == n) => n.rsplit("::").next().unwrap().to_string(),
-            Tok::Ident(n) => n.to_string(),
+            Tok::Ident(n) => n.rsplit("::").next().unwrap().to_string(),
             Tok::Str(f) => super::modules::external_module_name(&f)
                 .map_err(|error| error.at(self.toks[self.pos - 1].span))?,
             _ => return self.err("use の後にはライブラリ名かファイル名が必要"),

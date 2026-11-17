@@ -809,6 +809,11 @@ fn main() {
             crate::smt::without_z3(|| {
                 if name == "wasm_web.hb" {
                     super::to_web(&src, &["echo".into(), "answer".into(), "greet".into()]).map(|_| ())
+                } else if !src.contains("fn main(") {
+                    // main のない依存ファイルも、ライブラリとして証明を検査する。
+                    let modules = crate::pipeline::load(&src, p.parent().unwrap())?;
+                    let program = crate::pipeline::parse(modules)?;
+                    crate::pipeline::check(program, crate::pipeline::Kind::Library).map(|_| ())
                 } else {
                     super::to_js(&src).map(|_| ())
                 }

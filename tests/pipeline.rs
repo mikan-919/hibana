@@ -147,5 +147,11 @@ fn load_uses_explicit_base_directory_without_changing_caller() {
     assert!(loaded.modules.iter().any(|module| module.source.text.contains("-> String")));
     let loaded = hibana::parser::load_modules(source, &a).unwrap();
     assert!(loaded.modules.iter().any(|module| module.source.text.contains("-> int")));
+    std::fs::write(a.join("util.hb"), "fn value() -> int { 1 }").unwrap();
+    std::fs::write(b.join("util.hb"), "fn value() -> int { 2 }").unwrap();
+    let loaded = pipeline::load("use util", &b).unwrap();
+    assert!(loaded.modules.iter().any(|module| module.source.text.contains("{ 2 }")));
+    let loaded = hibana::parser::load_modules("use util", &a).unwrap();
+    assert!(loaded.modules.iter().any(|module| module.source.text.contains("{ 1 }")));
     std::fs::remove_dir_all(dir).unwrap();
 }

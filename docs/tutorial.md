@@ -173,6 +173,7 @@ test 'join' {
 
 ## 6. 道具
 
+- hibana のファイルは `use util` で `util.hb`、`use foo::bar` で `foo/bar.hb` を読みます。経路は読み込み元のファイルのディレクトリを基準にします。`use foo::bar` の関数は `bar.foo()`、`use foo::bar -> {foo}` なら `foo()` と呼びます。
 - `hibana fmt <ファイル>` はファイルを整形して書き戻します。設定はありません。
 - JavaScript と TypeScript のモジュールは `use './util.ts'` で読めます。型は TypeScript の宣言から読みます。詳細は仕様の 3.4 節です。
 

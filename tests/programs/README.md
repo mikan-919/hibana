@@ -8,6 +8,7 @@
 - [types/](types/): 細分化型、構造体、トレイト、`with` による依存注入、等値性、Z3 による証明
 - [effects/](effects/): `with` による要求と提供、要求の多相、非同期
 - [macros/](macros/): 文法拡張、マクロの衛生性、.do() を使う雛形のマクロ
+- [modules/](modules/): 名前によるファイル読み込み、階層のある名前、依存ファイルの読み込み
 - [stdlib/](stdlib/): 標準ライブラリの使用例とテスト
 - [interop/](interop/): JavaScript / TypeScript との連携（補助ファイルは `interop/js/`）
 - [wasm/](wasm/): WebAssembly とブラウザの連携
