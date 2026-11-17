@@ -22,6 +22,25 @@ fn arg(n: int) -> int {
     n
 }
 
+fn name(n: int) -> String ! Async {
+    'n' + n.to_string()
+}
+
+effect Fail {
+    fn fail(msg: String) -> never
+}
+
+// Async のほかの効果は .await の時に起きる
+fn checked(n: int) -> int ! Async, Fail {
+    if n < 0 { fail('negative') } else { n }
+}
+
+fn checked_or(n: int) -> int ! Async {
+    handle checked(n).await {
+        fail(m) -> 0
+    }
+}
+
 fn main() ! Async {
     // .await を付けない呼び出しは本体を走らせない
     let a = work(arg(1))
@@ -31,4 +50,14 @@ fn main() ! Async {
     put(later(work(10)).await)
     // 効果の多相な関数を通す呼び出しには .await を書かない
     put(map([1, 2], fn(x) { work(x).await + 1 }))
+    // all は Async<T> の値を並行に走らせて合流する。結果の順は Vec の順
+    put(all([name(1), name(2), name(3)]).await)
+    // join は種類の違う 2 つを合流する
+    let p = join(name(4), checked_or(5)).await
+    put(p.first + ' ' + p.second.to_string())
+    // 合流の中の失敗は、合流を待った所で起きる
+    let r = handle len(all([checked(1), checked(-1)]).await).to_string() {
+        fail(m) -> m
+    }
+    put(r)
 }

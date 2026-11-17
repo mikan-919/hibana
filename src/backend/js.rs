@@ -67,15 +67,11 @@ function $show(v) {
 // 並べ替えずに作り直す（並行に動く処理と共有するため）。await の後は $k で、待つ前の並びに戻す
 let $h = [];
 function $k(h, v) { $h = h; return v; }
-// all。すべて終わるのを待ち、失敗したものがあれば最初の失敗を投げる
-// ponytail: 失敗しても残りを中断しない（終わるまで待つだけ）。中断するなら AbortSignal を各処理に渡す
+// all。Async<T> の値（Promise を返す引数なしの関数）を全部走らせ、全部終わるのを待つ。最初の失敗で戻り、残りの結果は捨てる
+// ponytail: 失敗した時、残りの処理は走り続ける。取り消すには AbortSignal を各処理に通す必要がある
 async function $all(fs) {
   const h = $h;
-  const rs = await Promise.allSettled(fs.map((f) => { $h = h; return f(); }));
-  $h = h;
-  const bad = rs.find((r) => r.status === "rejected");
-  if (bad) throw bad.reason;
-  return rs.map((r) => r.value);
+  try { return await Promise.all(fs.map((f) => { $h = h; return f(); })); } finally { $h = h; }
 }
 class $Abort { constructor(h, v) { this.h = h; this.v = v; } }
 function $op(op, args) {

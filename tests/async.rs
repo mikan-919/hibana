@@ -8,7 +8,7 @@ fn apply<E: Effect>(f: () -> int ! E) -> int ! E { f() }
 fn main() ! Async {
     let result: num = apply(fn() { delay(7).await })
     put(result)
-    put(all([fn() { delay(2).await }, fn() { delay(3).await }]))
+    put(all([delay(2), delay(3)]).await)
 }
 "#;
     let mut program = hibana::parser::parse(source).unwrap();

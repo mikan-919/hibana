@@ -47,9 +47,9 @@ fn each(xs: Vec<String>, f: (String) -> unit ! Log) ! Log {
     for x in xs { f(x) }
 }
 
-// all は Async の効果。インタプリタでは順に実行する
+// all は Async<T> の値を並行に走らせて合流する。インタプリタでは順に実行する
 fn main() ! Async {
-    put(all([fn() { describe_or('7') }, fn() { describe_or('0') }]))
+    put(all([describe_later('7'), describe_later('0')]).await)
     handle each(['a', 'b'], fn(x) { log('each ' + x) }) {
         log(msg) -> {
             put(msg)
@@ -69,4 +69,8 @@ fn main() ! Async {
         i = i + 1
     }
     put(i)
+}
+
+fn describe_later(id: String) -> String ! Async {
+    describe_or(id)
 }

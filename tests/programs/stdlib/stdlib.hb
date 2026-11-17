@@ -16,7 +16,7 @@ test 'vec' {
 }
 
 test 'String' {
-    assert_eq(join(['a', 'b', 'c'], ', '), 'a, b, c')
+    assert_eq(['a', 'b', 'c'].join(', '), 'a, b, c')
     assert_eq(repeat('ab', 3), 'ababab')
     assert(ends_with('hibana', 'ana'))
     assert(!ends_with('a', 'ana'))
@@ -27,9 +27,17 @@ test 'String' {
     assert_eq(lines('x\ny'), ['x', 'y'])
 }
 
-fn main() {
-    put(join(map(range(1, 4), fn(x) { (x * x).to_string() }), ' '))
+fn main() ! Async {
+    put(map(range(1, 4), fn(x) { (x * x).to_string() }).join(' '))
+    // join は種類の違う 2 つの Async の値を並行に走らせ、両方の結果を Pair で返す
+    let p = join(twice_later(2), show_later(3)).await
+    assert_eq(p.first, 4)
+    assert_eq(p.second, '3')
 }
+
+fn twice_later(n: int) -> int ! Async { n * 2 }
+
+fn show_later(n: int) -> String ! Async { n.to_string() }
 
 test 'json string escapes' {
     assert_eq(stringify(JStr('a\t\r\nb')), '"a\\t\\r\\nb"')

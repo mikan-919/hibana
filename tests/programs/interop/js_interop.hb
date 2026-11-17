@@ -41,7 +41,7 @@ fn main() ! Async {
     put(twice_later(5).await)
     // Async の関数型の値も渡せる。JavaScript からは Promise を返す関数に見える
     put(util.mapLater([1, 2], fn(x) { util.later(x).await + 1 }).await)
-    put(all([fn() { job('a', 1).await }, fn() { job('b', 2).await }]))
+    put(all([job('a', 1), job('b', 2)]).await)
     // 効果の多相な関数にも Async を渡せる。効果の変数を通した呼び出しには .await を書かない（JavaScript では map の async 版を呼んで待つ）
     put(map([1, 2], fn(x) { util.later(x).await * 10 }))
     // 期待する関数型の Async は、無名関数が Promise を返す関数でも使える

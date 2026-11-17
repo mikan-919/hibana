@@ -1299,64 +1299,21 @@ impl Ck {
                 self.in_range(v, i)?;
                 t
             }
+            // all(xs) は Async<T> の Vec をまとめた Async<Vec<T>>。待つと全部を並行に走らせ、全部が終わるまで戻らない
             Expr::Call(name, args) if name == "all" && self.lookup(name).is_none() => {
                 let [a] = args.as_mut_slice() else {
                     return Err("all の引数は1個".into());
                 };
-                let async_eff = V::DataT(Rc::new(("Async".into(), vec![])));
-                let el = match a.peel_mut() {
-                    // all([fn() { ... }, ...]) の無名関数では Async の効果を起こしてよい
-                    Expr::Array(items)
-                        if !items.is_empty()
-                            && items.iter().all(
-                                |i| matches!(i.peel(), Expr::Lam(ps, _, _, _) if ps.is_empty()),
-                            ) =>
-                    {
-                        let mut t: Option<V> = None;
-                        for it in items {
-                            let Expr::Lam(_, ret, _, body) = it.peel_mut() else {
-                                unreachable!()
-                            };
-                            let rt = match ret {
-                                Some(r) => Some(self.eval_type(r)?),
-                                None => None,
-                            };
-                            self.awaits.insert(body.id);
-                            self.push();
-                            let avail = vec![(Name::from("Async"), Some(async_eff.clone()))];
-                            let c = self.fn_body(body, rt, avail);
-                            self.pop();
-                            let c = base(&c?);
-                            match &t {
-                                None => t = Some(c),
-                                Some(t0) => want(t0, &c, "all の要素")?,
-                            }
-                        }
-                        t.unwrap()
-                    }
-                    _ => {
-                        let at = self.expr(a)?;
-                        let msg = || {
-                            format!(
-                                "all には () -> T ! Async の Vec を渡す（実際は {}）",
-                                show(&at)
-                            )
-                        };
-                        let V::VecT(f) = base(&at) else {
-                            return Err(msg().into());
-                        };
-                        match base(&f) {
-                            V::Pi(p)
-                                if p.doms.is_empty() && p.effs.iter().all(|e| *e == async_eff) =>
-                            {
-                                p.cod.clone()
-                            }
-                            _ => return Err(msg().into()),
-                        }
-                    }
+                let at = self.expr(a)?;
+                let el = match base(&at) {
+                    V::VecT(x) => async_of(&x),
+                    _ => None,
                 };
-                self.use_effect(async_eff)?;
-                V::VecT(Rc::new(el))
+                let Some((t, rest)) = el else {
+                    return Err(format!("all には Async<T> の Vec を渡す（実際は {}）", show(&at)).into());
+                };
+                self.async_calls.insert(addr);
+                async_t(V::VecT(Rc::new(t)), rest)
             }
             Expr::Call(name, args) if name == "resume" && self.lookup(name).is_none() => {
                 let Some(t) = self.resume.last().cloned() else {

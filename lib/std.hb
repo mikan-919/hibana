@@ -240,9 +240,27 @@ fn find<A, E: Effect>(xs: Vec<A>, f: (A) -> bool ! E) -> Option<A> ! E {
     None
 }
 
+// ---- 非同期 ----
+
+// 2 つの値の組
+struct Pair<A, B> { first: A, second: B }
+
+// 種類の違う 2 つの Async の値を並行に走らせ、両方が終わるまで待つ。最初の失敗で戻る
+fn join<A, B>(a: Async<A>, b: Async<B>) -> Pair<A, B> ! Async {
+    let ra: Ref<Option<A>> = new_ref(None)
+    let rb: Ref<Option<B>> = new_ref(None)
+    all([join_into(a, ra), join_into(b, rb)]).await
+    Pair { first: read(ra).unwrap(), second: read(rb).unwrap() }
+}
+
+fn join_into<T>(a: Async<T>, r: Ref<Option<T>>) ! Async {
+    write(r, Some(a.await))
+}
+
 // ---- 文字列 ----
 
-fn join(xs: Vec<String>, sep: String) -> String {
+// xs.join(sep)。要素の間に sep を挟んでつなぐ（関数の join は Async の合流）
+fn Vec::join(xs: Vec<String>, sep: String) -> String {
     let mut s = ''
     for i in 0..len(xs) {
         if i > 0 { s = s + sep }

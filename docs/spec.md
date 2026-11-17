@@ -153,8 +153,9 @@ fn main() {
 - 引数の並びの中で、効果を持つ関数型の後に名前の無い引数が続く時は、関数型を括弧で囲みます（`(int, ((int) -> int ! Log), String) -> int`）。
 - `resume(値)`（unit なら `resume()`）は続きを1回だけ再開します。腕の最後（腕の値になる位置）にだけ書けます。戻り値の型が `never` の操作は再開できません。
 - `main` が起こせる効果は `Async` だけです。
-- `all(fs)` は、`() -> T ! Async` の `Vec` の関数を並行に実行し、結果を `Vec<T>` で返します（`Async` の効果を起こす）。`all([fn() { ... }, ...])` と書けば、無名関数の中で `Async` を起こせます。すべての処理が終わるまで `all` から戻りません（構造化並行性）。インタプリタでは順に実行します。
-- JavaScript では、処理中の handle の並びを作り直しで更新し、`await` の後に待つ前の並びへ戻すので、並行に動く処理の handle は混ざりません。
+- `all(xs)` は、`Async<T>` の値の `Vec` をまとめた `Async<Vec<T>>` の値です。`all(xs).await` で全部を並行に走らせ、全部が終わるまで戻りません（構造化並行性）。結果の順は `xs` の順です。最初の失敗で戻り、残りの結果は捨てます。インタプリタ・WASM・ネイティブでは順に実行します。
+- `join(a, b)`（std）は、種類の違う 2 つの値 `Async<A>` と `Async<B>` をまとめた `Async<Pair<A, B>>` の値です。`all` で書いてあり、`join(a, b).await` で両方を並行に走らせ、`Pair { first, second }` を返します。
+- JavaScript では、処理中の handle の並びを作り直しで更新し、待った後に待つ前の並びへ戻すので、並行に動く処理の handle は混ざりません。
 
 #### 非同期
 
@@ -197,7 +198,7 @@ fn main() ! Async {
 - 効果の操作そのものは値として使えません（`let f = log` は不可。`fn(m) { log(m) }` と包む）。
 - `handle` の中では `return` を使えません。
 - 腕の中では `Async` を起こせません（腕は同期的に呼びます）。
-- `all` は、失敗した処理があっても残りを中断せず、すべて終わるのを待ってから最初の失敗を投げます。
+- `all` と `join` は最初の失敗で戻りますが、JavaScript では残りの処理は走り続けます（結果は捨てます）。取り消すには AbortSignal を各処理に通す必要があります。
 
 ### 3.6 ライブラリの読み込み
 
@@ -423,7 +424,7 @@ macro unless('unless' expr:Expr block:Block) {
 | `new_ref(x)` `read(r)` `write(r, x)` | `T -> Ref<T>`、`Ref<T> -> T`、`(Ref<T>, T) -> unit` |
 | `push(v, x)` | `(Vec<T>, T) -> Vec<T>`。`v` の後ろに `x` を足した新しい `Vec`（`v` は変わらない）。`xs = push(xs, x)` の形で、`xs` の配列を他から指していなければ、写さずにその場で足す（平均 O(1)） |
 | `set_at(v, i, x)` | `(Vec<T>, int, T) -> Vec<T>`。`v` の `i` 番目を `x` にした新しい `Vec`。`i` が範囲内であることを添字と同じく証明する。`xs = set_at(xs, i, x)` の形は `push` と同じく、その場で書き換える（O(1)） |
-| `all(fs)` | `(Vec<() -> T ! Async>) -> Vec<T> ! Async`（3.5 節） |
+| `all(xs)` | `(Vec<Async<T>>) -> Async<Vec<T>>`。`.await` で待つ（3.5 節） |
 | `resume(x)` | `handle` の腕の中で、続きを再開する（3.5 節） |
 
 ## 10. ライブラリ
@@ -446,8 +447,9 @@ macro unless('unless' expr:Expr block:Block) {
 | `assert(ok)` `assert_eq(got, want)` | テスト（3.8 節）。偽か等しくなければ実行時エラー |
 | `map(xs, f)` `filter(xs, f)` `fold(xs, init, f)` | `Vec` の高階関数。`f` の効果をそのまま起こす（効果の多相） |
 | `concat(a, b)` `reverse(xs)` `take(xs, n)` `drop(xs, n)` `last(xs)` `range(a, b)` `sum(xs)` | `Vec` の操作。`last` は `Option` を返す。`range` は `a` 以上 `b` 未満の `int` の `Vec` |
+| `Pair<A, B>` = `{ first, second }`、`join(a, b)` | 2 つの値の組と、`Async<A>` と `Async<B>` の合流（3.5 節） |
 | `some(xs, f)` `every(xs, f)` `find(xs, f)` | 一つでも・すべてが条件を満たすか、最初の要素（`Option`）。`f` の効果をそのまま起こす。`all` は並行実行の組み込みなので `every` と呼ぶ |
-| `join(xs, sep)` `repeat(s, n)` `trim(s)` `replace(s, from, to)` `lines(s)` `ends_with(s, w)` `includes(s, w)` | 文字列の操作 |
+| `xs.join(sep)` `repeat(s, n)` `trim(s)` `replace(s, from, to)` `lines(s)` `ends_with(s, w)` `includes(s, w)` | 文字列の操作 |
 | `Map<V>`、`empty()` `get(m, k)` `set(m, k, v)` `keys(m)` | 文字列のキーから値への表。`set` は新しい `Map` を返す。線形探索 |
 | `Json` = `JNull` \| `JBool` \| `JInt` \| `JStr` \| `JArr(Vec<Json>)` \| `JObj(Vec<Field>)`、`Field { key, value }` | JSON の値 |
 | `stringify(j)` `quote_str(s)` | JSON の文字列にする |
