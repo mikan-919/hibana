@@ -21,11 +21,11 @@ fn first_example_matches_all_backends() {
         std::fs::set_permissions(&native, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
     let hb = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/first.hb");
-    let prefix = "Hello, world!\n[section] start: math test\n20.248456731316587\n0\n[section] end: math test\nuid = 1\n100 / d = 20\nCircle at (0, 0), r=10\n[DEBUG] Empty shape\nWhat color do you like?\n";
+    let prefix = "Hello, world!\n[section] start: math test\n20.248456731316587\n0\n[section] end: math test\nuid = 1\n100 / d = 20\nCircle at (0, 0), r=10\n[DEBUG] Empty shape\nuser1: 10\n[\"user2: 20\", \"user3: 30\"]\nWhat color do you like?\n";
     for (input, suffix) in [
-        ("red\n7\n", "nice\nPick a digit\ndigit: 7\n"),
-        ("blue\n12\n", "cool\nPick a digit\nerror: not a digit\n"),
-        ("green\nno\n", "ok\nPick a digit\nerror: 整数として読めない\n"),
+        ("red\n7\n", "nice\nPick a digit\ndigit: 7\nnotified user1: 10\n"),
+        ("blue\n12\n", "cool\nPick a digit\nerror: not a digit\nnotified user1: 10\n"),
+        ("green\nno\n", "ok\nPick a digit\nerror: 整数として読めない\nnotified user1: 10\n"),
     ] {
         let mut commands = vec![Command::new(env!("CARGO_BIN_EXE_hibana")), Command::new("node"), Command::new("node")];
         commands[0].arg(&hb);
