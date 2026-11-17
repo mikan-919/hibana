@@ -57,6 +57,8 @@ pub enum Expr {
     Pi(Vec<(Name, Expr)>, Box<Expr>, Vec<Expr>, Vec<Name>),
     // 式の値の関数を呼ぶ
     Apply(Box<Expr>, Vec<Expr>),
+    // 式.await。Async<T> の値を待つ。型検査が呼び出しか Apply に書き換えるので、出力には残らない
+    Await(Box<Expr>),
     // handle 式 { 操作(引数) => 式 ... }。腕の ctor は操作の名前、binds は引数
     Handle(Box<Expr>, Vec<Arm>),
     // for x in 式 { } と for x in a..b { }
@@ -459,7 +461,7 @@ fn parse_modules_tokens(
     }
     g.validate()?;
     let grammar = Rc::new(g);
-    let mut types: HashSet<Name> = ["Vec", "Ref", "Type"].map(Name::from).into();
+    let mut types: HashSet<Name> = ["Vec", "Ref", "Type", "Async"].map(Name::from).into();
     let mut generic_fns: HashSet<Name> = [Name::from("refine")].into();
     // 組み込みと利用者のファイルの名前・モジュール名・パターンのリテラル。マクロの衛生性で名前を付け替えない
     let mut globals: HashSet<Name> = [
@@ -2427,6 +2429,10 @@ impl Parser<'_> {
                     Arm { span: None, ctor: err.clone(), binds: vec![value.clone()], body: Expr::Return(Some(Box::new(Expr::Call(err, vec![Expr::Var(value)])))) },
                 ]);
             } else if self.eat(".") {
+                if self.eat("await") {
+                    e = Expr::Await(Box::new(e));
+                    continue;
+                }
                 // struct Name(型, ...) のフィールドは x.0
                 let name = match self.peek().clone() {
                     Tok::Int(k) => {

@@ -11,7 +11,7 @@ hibana は、細分化型と、構文を拡張できるマクロを根幹に置�
 - `` `Hello {name}!` `` は埋め込み付きの文字列です。`{ }` の中に式を1つ書き、その値を文字列にしてつなぎます（`'Hello ' + name.to_string() + '!'` と同じ）。`{ }` の中には `'...'` や入れ子の `` `...` `` も書けます。
 - `型の名前::名前`（`Response::text`）は1つの名前です（3.9 節）。
 - コメントは `// 行末まで` と `/* ... */` です。
-- キーワード: `fn let mut if else while for in return match type struct enum trait impl syntax macro quote use module extern effect handle true false`
+- キーワード: `fn let mut if else while for in return match type struct enum trait impl syntax macro quote use module extern effect handle await true false`
 - 各トークンは、直前に空白があるか（`gap_before`）と改行があるか（`nl_before`）を持ちます。前者はマクロのパターンの `~`（空白なしで続く）に、後者は文の区切りに使います。
 
 ## 2. 文の区切り
@@ -114,7 +114,7 @@ fn main() {
 | `T[]` `Array<T>` | `Vec<T>` | 要素ごと |
 | `(x: A) => B` | `(A) -> B` | 引数と戻り値を変換するよう包む |
 | `interface P { ... }`、`type P = { ... }`、オブジェクト型 | 構造体 | 同じフィールド名のオブジェクト |
-| `Promise<T>`（戻り値） | `T` と `! Async`（3.5 節） | 呼び出しを `await` する |
+| `Promise<T>`（戻り値） | `T` と `! Async`（3.5 節） | 呼ぶと `Async<T>` の値になり、`.await` で Promise を待つ |
 | `(x: A) => Promise<B>` | `(A) -> B ! Async` | hibana の関数は Promise を返す関数として渡す |
 | 共用体・ジェネリクス・`any` などそれ以外 | `js` | JavaScript の値をそのまま持ち回る |
 
@@ -123,7 +123,7 @@ fn main() {
 
 ### 3.5 効果
 
-非同期・失敗・依存の注入などは、代数的エフェクト（効果の「操作」を呼ぶと、外側の `handle` の腕がそれを処理し、必要なら呼んだ所から続きを再開する仕組み）で書きます。Promise や `await` は書きません。例は `tests/programs/effects/effects.hb` です。
+非同期・失敗・依存の注入などは、代数的エフェクト（効果の「操作」を呼ぶと、外側の `handle` の腕がそれを処理し、必要なら呼んだ所から続きを再開する仕組み）で書きます。非同期は効果 `Async` で表し、待つ場所に `.await` を書きます（後述）。例は `tests/programs/effects/effects.hb` と `tests/programs/effects/async.hb` です。
 
 ```
 effect Fail<E> { fn fail(e: E) -> never }
@@ -156,25 +156,39 @@ fn main() {
 - `all(fs)` は、`() -> T ! Async` の `Vec` の関数を並行に実行し、結果を `Vec<T>` で返します（`Async` の効果を起こす）。`all([fn() { ... }, ...])` と書けば、無名関数の中で `Async` を起こせます。すべての処理が終わるまで `all` から戻りません（構造化並行性）。インタプリタでは順に実行します。
 - JavaScript では、処理中の handle の並びを作り直しで更新し、`await` の後に待つ前の並びへ戻すので、並行に動く処理の handle は混ざりません。
 
-`Async` は組み込みの効果で、待つ処理を表します。TypeScript の `Promise<T>` を返す関数は、`T` を返して `Async` の効果を起こす関数として読みます（3.4 節）。
+#### 非同期
+
+`Async` は組み込みの効果で、待つ処理を表します。関数は `! Async` か `with Async` で宣言します。TypeScript の `Promise<T>` を返す関数は、`T` を返して `Async` の効果を起こす関数として読みます（3.4 節）。
 
 ```
 use './js/util.ts'        // export async function later(x: number): Promise<number>
 
 fn twice_later(x: int) -> int ! Async {
-    util.later(x) + util.later(x)       // await は書かない
+    util.later(x).await + util.later(x).await    // 待つ場所に .await を書く
 }
 
-fn main() ! Async { put(twice_later(5)) }
+fn main() ! Async {
+    let a = twice_later(5)     // Async<int>。まだ走らない
+    put(a.await)               // ここで走らせて待つ
+}
 ```
+
+- 宣言に `Async` を書いた関数（`extern` の `! Async` と `Promise<T>` を返す TypeScript の関数を含む）と、関数型に `Async` を書いた値の呼び出しは、型 `Async<T>` の値になります。この値は、呼び出しの時点では効果を起こさず、本体も走りません。引数は呼び出しの時点で評価します。
+- `e.await` は `Async<T>` の値 `e` を走らせて待ち、型は `T` です。この式が `Async` の効果を起こします。`.await` は `Async<T>` の値にだけ付けられます。`f(x).await` は、この 2 つの規則の組み合わせです。
+- 呼び出す関数が `Async` のほかの効果も持つなら、その効果は `.await` の時に起きます（型は `Async<T ! Fail<E>>` と表示します）。
+- 同じ `Async<T>` の値を 2 回待つと、本体を 2 回走らせます。
+- 効果の変数（`<E: Effect>`）を通した呼び出しには `.await` を書きません。`E` に `Async` が入るかは本体から分からないため、`E` に `Async` が入った呼び出しは、その場で待ちます（`map(xs, fn(x) { fetch(x).await })` の `map` の呼び出しも同じです）。書くと型エラーです。
+- `T` の位置に `Async<T>` の値を使うと型エラーで、`.await` を付けるか `Async<T>` のまま受け取るよう伝えます。`Async<T>` の値を捨てる文（`fetch(x)` だけの文）と、戻り値が `unit` の関数の最後の式も型エラーです（警告の仕組みが無いため）。`put` と文字列化にも渡せません。
 
 実装:
 
 | 実行方式 | 操作の呼び出し | resume しない腕 | Async |
 |---|---|---|---|
-| インタプリタ | 処理中の handle の並びから、一番内側の腕を呼ぶ | 抜け出す理由（`Flow::Abort`）として handle まで戻す | 意味を持たない |
-| JavaScript | `$op` が同じように腕を呼ぶ | 例外（`$Abort`）で handle の `try` まで戻す | `Async` を持つ関数を `async function` にし、呼び出しを `await` する |
-| WASM・ネイティブ（IR） | ランタイムの `__perform` が同じように腕を呼ぶ | 中断の印を置き、効果を持つ関数・関数の値の呼び出しの後で調べて 1 段ずつ戻す。handle の本体は `Catch` で抜ける | 意味を持たない（`all` は順に実行する） |
+| インタプリタ | 処理中の handle の並びから、一番内側の腕を呼ぶ | 抜け出す理由（`Flow::Abort`）として handle まで戻す | `Async<T>` は引数を閉じ込めた関数で、`.await` で呼ぶ（順に実行する） |
+| JavaScript | `$op` が同じように腕を呼ぶ | 例外（`$Abort`）で handle の `try` まで戻す | `Async` を持つ関数を `async function` にする。`Async<T>` は Promise を返す引数なしの関数で、`.await` は `await v()` |
+| WASM・ネイティブ（IR） | ランタイムの `__perform` が同じように腕を呼ぶ | 中断の印を置き、効果を持つ関数・関数の値の呼び出しの後で調べて 1 段ずつ戻す。handle の本体は `Catch` で抜ける | インタプリタと同じ（`all` は順に実行する） |
+
+型検査は、`.await` の直下の呼び出しをそのまま待つ呼び出しに、それ以外の `Async<T>` を作る呼び出しを「引数を一時変数に置き、その呼び出しを本体にした引数なしの無名関数」に、それ以外の `.await` をその値の呼び出しに書き換えます。出力側はこの書き換えの結果だけを扱います。
 
 制限:
 
@@ -302,6 +316,7 @@ fn main() {
 | `int` `bool` `String` `unit` | 64ビット整数・真偽値・文字列・値の無いこと |
 | `Vec<T>` | 配列。書き換えられないので、`Vec<int[x -> x > 0]>` は `Vec<int>` として使える |
 | `Ref<T>` | 書き換えられる参照。`new_ref(x)` で作り、`read(r)` で読み、`write(r, x)` で書く。無名関数や handle の腕が写し取っても同じ値を指す（`mut` 変数は写し取った時の値になる） |
+| `Async<T>` | まだ走っていない非同期の処理。`.await` で待つと `T` になる（3.5 節） |
 | `(x: A, B) -> C` | 関数型。引数名は省ける。細分化型の条件では前の引数の値を参照できる |
 | `T[x -> 条件]` | 細分化型。条件を満たす `T` の値だけを許す |
 | `Type` | 型引数に指定する種類。`<A: Type>` は `<A>` と同じ |

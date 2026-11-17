@@ -180,6 +180,7 @@ impl Resolver<'_> {
                 self.with(&[x], |r| r.expr(p));
             }
             Expr::Array(xs) => self.exprs(xs),
+            Expr::Await(x) => self.expr(x),
             Expr::Apply(f, args) | Expr::Method(f, _, args) => {
                 self.expr(f);
                 self.exprs(args);

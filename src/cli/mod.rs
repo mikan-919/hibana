@@ -291,6 +291,29 @@ mod tests {
         assert_eq!(out(multiple).unwrap(), "5\n");
     }
 
+    // .await の規則（tests/programs/effects/async.hb が正しい使い方）
+    #[test]
+    fn async_await_rules() {
+        let work = "fn work(n: int) -> int ! Async { n }\n";
+        let err = |body: &str| out(&format!("use std -> *\n{work}{body}")).unwrap_err().to_string();
+        // 書き忘れ
+        let e = err("fn main() ! Async { let x: int = work(1) }");
+        assert!(e.contains(".await を付けるか、Async<int> のまま受け取る"), "{e}");
+        // 効果の多相を通した呼び出しには .await を書かない
+        let e = err("fn app<E: Effect>(f: () -> int ! E) -> int ! E { f().await }\nfn main() {}");
+        assert!(e.contains("効果の変数を通した呼び出しは .await を書かずに待つ"), "{e}");
+        // Async<T> の値を捨てる文
+        let e = err("fn main() ! Async { work(1) }");
+        assert!(e.contains("値を捨てている"), "{e}");
+        let e = err("fn main() ! Async { work(1)\n put(1) }");
+        assert!(e.contains("値を捨てている"), "{e}");
+        // .await は Async の効果を起こす
+        let e = err("fn main() { put(work(1).await) }");
+        assert!(e.contains("! Async"), "{e}");
+        // Async<T> の値は表示できない
+        assert!(err("fn main() ! Async { put(work(1)) }").contains(".await"));
+    }
+
     #[test]
     fn result_propagation() {
         let src = "use std -> *\nfn get_result(ok: bool) -> Result<int, String> { if ok { Ok(7) } else { Err('bad') } }\nfn twice(ok: bool) -> Result<int, String> { let n = get_result(ok)?\n Ok(n * 2) }\nfn main() { put(twice(true))\n put(twice(false)) }";

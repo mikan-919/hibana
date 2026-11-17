@@ -6,9 +6,9 @@ fn async_annotations_survive_cloning_and_numeric_elaboration() {
 extern '' { fn delay(n: int) -> int ! Async }
 fn apply<E: Effect>(f: () -> int ! E) -> int ! E { f() }
 fn main() ! Async {
-    let result: num = apply(fn() { delay(7) })
+    let result: num = apply(fn() { delay(7).await })
     put(result)
-    put(all([fn() { delay(2) }, fn() { delay(3) }]))
+    put(all([fn() { delay(2).await }, fn() { delay(3).await }]))
 }
 "#;
     let mut program = hibana::parser::parse(source).unwrap();

@@ -244,4 +244,85 @@ impl Ck {
         }
     }
 
+    // e.await。e は Async<T> の値で、式の型は T。Async と、値が持つ残りの効果を起こす。
+    // 直下が Async<T> を作る呼び出しなら、その呼び出しをその場で待つ。それ以外は値（引数なしの関数）を呼んで待つ
+    pub(super) fn await_(&mut self, e: &mut Expr, addr: NodeId) -> R<V> {
+        let Expr::Await(x) = e else { unreachable!() };
+        let mut inner: &mut Expr = x;
+        while let Expr::At(_, y) = inner {
+            inner = y;
+        }
+        let (target, _) = inner.identified();
+        let saved = self.direct_await.replace(target);
+        let t = self.expr(x);
+        self.direct_await = saved;
+        let t = t?;
+        let Some((v, rest)) = async_of(&t) else {
+            self.async_calls.remove(&target);
+            let poly = self.var_awaits.contains(&target) || self.async_inst.contains(&target);
+            return Err(format!(
+                ".await は Async<T> の値にだけ付けられる（実際は {}）{}",
+                show(&t),
+                if poly { "。効果の変数を通した呼び出しは .await を書かずに待つ" } else { "" }
+            )
+            .into());
+        };
+        self.use_effect(async_t_effect())?;
+        for r in rest {
+            self.use_effect(r)?;
+        }
+        let x = std::mem::replace(&mut **x, Expr::Int(0));
+        *e = if self.async_calls.remove(&target) {
+            x
+        } else {
+            self.awaits.insert(addr);
+            Expr::Apply(Box::new(x), vec![])
+        };
+        Ok(v)
+    }
+
+    // 呼び出し id が Async<T> の値を作り、.await の直下でなければ、引数をその場で評価して閉じ込めた、引数なしの関数にする。
+    // 本体はその関数を呼んだ時（.await と合流の時）に初めて走る
+    pub(super) fn delay(&mut self, id: NodeId, e: &mut Expr) {
+        if self.direct_await == Some(id) || !self.async_calls.remove(&id) {
+            return;
+        }
+        let mut stmts = Vec::new();
+        let call = match std::mem::replace(e, Expr::Int(0)) {
+            Expr::Call(n, args) => {
+                // 明示した型引数は値でないので、そのまま渡す
+                let skip = self.norm.fns.get(&n).filter(|f| args.len() == f.params.len()).map_or(0, |f| f.implicit);
+                Expr::Call(n, self.hold(args, skip, &mut stmts))
+            }
+            Expr::Apply(f, args) => {
+                let f = self.hold(vec![*f], 0, &mut stmts).remove(0);
+                Expr::Apply(Box::new(f), self.hold(args, 0, &mut stmts))
+            }
+            other => unreachable!("Async<T> を作るのは呼び出しだけ: {other:?}"),
+        };
+        let body = Block { id: NodeId::default(), stmts: vec![], tail: Some(Box::new(Expr::Id(id, Box::new(call)))) };
+        self.awaits.insert(body.id);
+        let thunk = Expr::Lam(vec![], None, vec![], body);
+        *e = Expr::Block(Block { id: NodeId::default(), stmts, tail: Some(Box::new(thunk)) });
+    }
+
+    // 引数を一時変数に置き、その変数の並びを返す。変数とリテラルはそのまま
+    fn hold(&mut self, args: Vec<Expr>, skip: usize, stmts: &mut Vec<Stmt>) -> Vec<Expr> {
+        let mut out = Vec::new();
+        for (i, a) in args.into_iter().enumerate() {
+            if i < skip || matches!(a.peel(), Expr::Var(_) | Expr::Int(_) | Expr::Num(_) | Expr::Bool(_) | Expr::Str(_)) {
+                out.push(a);
+                continue;
+            }
+            let tmp = Name::temporary("arg", self.norm.fresh());
+            stmts.push(Stmt::Let { name: tmp.clone(), mutable: false, ty: None, init: a });
+            out.push(Expr::Var(tmp));
+        }
+        out
+    }
+}
+
+// 効果の Async
+pub(super) fn async_t_effect() -> V {
+    V::DataT(Rc::new(("Async".into(), vec![])))
 }

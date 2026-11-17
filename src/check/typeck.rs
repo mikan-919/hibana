@@ -152,6 +152,35 @@ fn ref_of(t: &V) -> Option<V> {
     }
 }
 
+// まだ走っていない値の型 Async<T>。効果の Async（引数なし）とは引数の有無で区別する。
+// rest は .await の時に起きる Async 以外の効果（Async<T> と書いた型では空）
+pub(super) fn async_t(t: V, rest: Vec<V>) -> V {
+    let mut args = vec![t];
+    if !rest.is_empty() {
+        args.push(V::Arr(Rc::new(rest)));
+    }
+    V::DataT(Rc::new(("Async".into(), args)))
+}
+
+// Async<T> の値の型なら (T, 待つ時に起きる Async 以外の効果)
+pub(super) fn async_of(t: &V) -> Option<(V, Vec<V>)> {
+    match base(t) {
+        V::DataT(d) if d.0 == "Async" && !d.1.is_empty() => {
+            Some((d.1[0].clone(), d.1.get(1).map(|e| flat(std::slice::from_ref(e))).unwrap_or_default()))
+        }
+        _ => None,
+    }
+}
+
+// Async<T> の値を捨てる文は誤り。待つ場所を書き忘れた可能性が高い
+// ponytail: 警告の仕組みが無いので型エラーにする。文と関数の本体の最後の値だけを見る（else の無い if の分岐などは見ない）
+fn no_drop(t: &V) -> R<()> {
+    if async_of(t).is_some() {
+        return Err(format!("{} の値を捨てている（.await を付けて待つか、spawn で走らせる）", show(t)).into());
+    }
+    Ok(())
+}
+
 pub(super) fn neu(n: Term) -> V {
     V::Neu(Rc::new(n))
 }
@@ -170,6 +199,11 @@ fn show(v: &V) -> String {
         V::Unit => "()".into(),
         V::Arr(v) => format!("[{}]", v.iter().map(show).collect::<Vec<_>>().join(", ")),
         V::Type => "Type".into(),
+        // 待つ時に Async 以外の効果も起こす値
+        V::DataT(d) if d.0 == "Async" && d.1.len() == 2 => {
+            let rest = flat(&d.1[1..]).iter().map(show).collect::<Vec<_>>().join(", ");
+            format!("Async<{} ! {rest}>", show(&d.1[0]))
+        }
         V::DataT(d) if !d.1.is_empty() => format!(
             "{}<{}>",
             d.0,
@@ -298,6 +332,10 @@ struct Ck {
     var_awaits: std::collections::HashSet<NodeId>,
     // 効果の変数に Async を入れた、多相な関数の呼び出し。async 版を呼ぶ
     async_inst: std::collections::HashSet<NodeId>,
+    // Async<T> の値を作った呼び出し。.await の直下ならそのまま待ち、それ以外は引数を閉じ込めた関数に書き換える
+    async_calls: std::collections::HashSet<NodeId>,
+    // 検査中の .await の直下の式
+    direct_await: Option<NodeId>,
     // 効果を推論している無名関数の本体で起きた効果
     collected: Option<Vec<V>>,
     // impl から作った、実装の値を作る関数（名前の順）
@@ -331,8 +369,18 @@ fn want(e: &V, got: &V, what: &str) -> R<()> {
     if same(e, got) {
         Ok(())
     } else {
-        Err(format!("{what}: {} が必要だが {}", show(e), show(got)).into())
+        Err(format!("{what}: {}", mismatch(e, got)).into())
     }
+}
+
+// 型の不一致の説明。T の位置の Async<T> には .await の書き忘れを伝える
+fn mismatch(e: &V, got: &V) -> String {
+    let hint = if async_of(got).is_some_and(|(t, _)| same(e, &t)) {
+        format!("（.await を付けるか、{} のまま受け取る）", show(got))
+    } else {
+        String::new()
+    };
+    format!("{} が必要だが {}{hint}", show(e), show(got))
 }
 
 // 関数 f の本体で、効果 eff の操作を呼んでいる最初の位置
@@ -368,6 +416,7 @@ pub(crate) fn walk(e: &Expr, f: &mut dyn FnMut(&Expr)) {
     };
     match e {
         Expr::At(_, x) | Expr::Id(_, x)
+        | Expr::Await(x)
         | Expr::Unary(_, x)
         | Expr::Field(x, _)
         | Expr::Assign(_, x)
@@ -501,6 +550,8 @@ fn check_prog(prog: &mut Program, require_main: bool) -> R<Info> {
         awaits: Default::default(),
         var_awaits: Default::default(),
         async_inst: Default::default(),
+        async_calls: Default::default(),
+        direct_await: None,
         collected: None,
         impls: {
             let mut v: Vec<Fn> = prog.fns.iter().filter(|f| is_impl(&f.name)).cloned().collect();
@@ -619,7 +670,7 @@ fn check_fn(ck: &mut Ck, f: &mut Fn) -> R<()> {
     let ret = ck.ret.clone();
     // 戻り値が unit の関数は最後の式の値を捨てる
     if ret == prim("unit") {
-        ck.block(&mut f.body).ctx(r)?;
+        no_drop(&ck.block(&mut f.body).ctx(r)?).ctx(r)?;
     } else if never_fn {
         if ck.block(&mut f.body).ctx(r)? != prim("never") {
             return Err(
@@ -662,6 +713,8 @@ fn check_macro_body(
         awaits: Default::default(),
         var_awaits: Default::default(),
         async_inst: Default::default(),
+        async_calls: Default::default(),
+        direct_await: None,
         collected: None,
         impls: Vec::new(),
         effect_names: Default::default(),
@@ -750,7 +803,11 @@ impl Ck {
                         self.add_fact(bin("==", len(val), l));
                     }
                 }
-                Stmt::Expr(e) => diverges |= self.expr(e)? == prim("never"),
+                Stmt::Expr(e) => {
+                    let t = self.expr(e)?;
+                    no_drop(&t)?;
+                    diverges |= t == prim("never");
+                }
             }
         }
         let t = match (b.tail.as_mut(), expected) {
@@ -824,6 +881,7 @@ impl Ck {
                 let (id, expression) = call.identified();
                 let Expr::Call(name, args) = expression else { unreachable!() };
                 let t = self.call_fn(name, args, Some(expected), id)?;
+                self.delay(id, expression);
                 *e = call;
                 self.subsume(e, &t, expected)
             }
@@ -890,7 +948,10 @@ impl Ck {
             return self.expr(inner).map_err(|err| err.at(*sp));
         }
         if let Expr::Id(id, inner) = e {
-            return self.expr_inner(inner, *id);
+            let id = *id;
+            let t = self.expr_inner(inner, id)?;
+            self.delay(id, inner);
+            return Ok(t);
         }
         if matches!(e, Expr::Call(n, _) if n == "refine") { return self.refine_value(e); }
         // 長い a + b + ... は左に深く再帰するので、大きな expr_inner のフレームを通らずに検査する
@@ -898,7 +959,9 @@ impl Ck {
             return self.binary(e);
         }
         let (id, expression) = e.identified();
-        self.expr_inner(expression, id)
+        let t = self.expr_inner(expression, id)?;
+        self.delay(id, expression);
+        Ok(t)
     }
 
     #[inline(never)]
@@ -992,6 +1055,7 @@ impl Ck {
             *e = Expr::Method(Box::new(Expr::Var(tmp.clone())), f, xs);
             let (id, expression) = e.identified();
             let r = self.method(expression, id)?;
+            self.delay(id, expression);
             let inner = std::mem::replace(e, Expr::Int(0));
             *e = Expr::Block(Block { id: Default::default(),
                 stmts: vec![Stmt::Let { name: tmp, mutable: false, ty: None, init: *x }],
@@ -1072,6 +1136,9 @@ impl Ck {
             return Err("to_str の引数は1個".into());
         };
         let t = self.expr(a)?;
+        if async_of(&t).is_some() {
+            return Err(format!("{} の値は文字列にできない（.await を付けて待つ）", show(&t)).into());
+        }
         match self.trait_inst("show", &t)? {
             Some(inst) => {
                 let a = args.remove(0);
@@ -1198,6 +1265,14 @@ impl Ck {
             }
             Expr::Binary(..) => unreachable!("expr で分けている"),
             Expr::Handle(body, arms) => return self.handle(body, arms),
+            Expr::Await(_) => return self.await_(e, addr),
+            Expr::Call(name, args) if name == "Async" && self.lookup(name).is_none() => {
+                let [a] = args.as_mut_slice() else {
+                    return Err("Async の引数は1個".into());
+                };
+                self.type_level(a).ctx(|e| format!("Async の引数: {e}"))?;
+                V::Type
+            }
             // push(v, x) は v の後ろに x を足した新しい Vec
             Expr::Call(name, args) if name == "push" && self.lookup(name).is_none() => {
                 let [v, x] = args.as_mut_slice() else {
@@ -1307,6 +1382,9 @@ impl Ck {
                     return Err("put の引数は1個".into());
                 }
                 let t = self.expr(&mut args[0])?;
+                if async_of(&t).is_some() {
+                    return Err(format!("put: {} の値は表示できない（.await を付けて待つ）", show(&t)).into());
+                }
                 if let Some(inst) = self.trait_inst("show", &t)? {
                     let a = args.remove(0);
                     let shown = Expr::Call("std.to_string".into(), vec![a, inst]);
@@ -1563,6 +1641,11 @@ impl Ck {
     // トップレベルの関数の呼び出し。ジェネリック引数を省いた時は、メタ変数にして引数と期待する型から求める
     fn call_fn(&mut self, name: &Name, args: &mut Vec<Expr>, expected: Option<&V>, addr: NodeId) -> R<V> {
         let f = self.norm.fns[name].clone();
+        // 宣言に Async を書いた関数の呼び出しは、効果を起こさずに Async<T> の値になる（.await で待つ）。
+        // 効果の変数を通して Async が入る呼び出しは、今までどおりその場で待つ
+        let delayed = f.effects.iter().any(|e| matches!(e.peel(), Expr::Var(n) if n == "Async"));
+        let expected_async = expected.and_then(async_of).map(|(t, _)| t);
+        let expected = if delayed { expected_async.as_ref() } else { expected };
         let explicit = f.params.len() - f.implicit - f.insts;
         // with の要求は、内側のスコープで選ばれた値を引数にして渡す。
         let caps: Vec<_> = f.params[f.implicit..f.params.len() - f.insts]
@@ -1714,6 +1797,7 @@ impl Ck {
         let poly = f.params[..f.implicit]
             .iter()
             .any(|(_, t)| matches!(t.peel(), Expr::Var(k) if k == "Effect"));
+        let mut rest = Vec::new();
         for ef in &f.effects {
             for v in self.effect_inst(ef, &mut fenv)? {
                 let k = eff_key(&v);
@@ -1723,6 +1807,13 @@ impl Ck {
                 }
                 if k.is_effect_parameter() {
                     self.var_awaits.insert(addr);
+                }
+                // Async<T> の値を待つ時に起こす
+                if delayed {
+                    if k != "Async" {
+                        rest.push(v);
+                    }
+                    continue;
                 }
                 let s = show(&v);
                 let origin = op_site(&self.norm.fns, &f, &k);
@@ -1741,7 +1832,13 @@ impl Ck {
             Some(t) => self.norm.eval_or_opaque(t, &mut fenv)?,
             None => prim("unit"),
         };
-        self.apply(&sol, &ret)
+        let ret = self.apply(&sol, &ret)?;
+        if delayed {
+            self.async_calls.insert(addr);
+            let rest = rest.iter().map(|v| self.apply(&sol, v)).collect::<R<Vec<_>>>()?;
+            return Ok(async_t(ret, rest));
+        }
+        Ok(ret)
     }
 
     // 未定義の名前のエラーに、綴りの近い名前を提案する
@@ -1826,6 +1923,9 @@ impl Ck {
             args.push(Expr::Var(cap));
         }
         args.extend(insts);
+        // 関数型に直接 Async を書いた値の呼び出しは Async<T> の値になる（効果の変数に入った Async は除く）
+        let delayed = p.effs.iter().any(|e| matches!(e, V::DataT(d) if d.0 == "Async"));
+        let mut rest = Vec::new();
         for eff in &p.effs {
             for eff in flat(&[eff.clone()]) {
                 if eff_key(&eff) == "Async" {
@@ -1834,10 +1934,20 @@ impl Ck {
                 if eff_key(&eff).is_effect_parameter() {
                     self.var_awaits.insert(addr);
                 }
+                if delayed {
+                    if eff_key(&eff) != "Async" {
+                        rest.push(eff);
+                    }
+                    continue;
+                }
                 let s = show(&eff);
                 self.use_effect(eff)
                     .map_err(|er| er.help(format!("呼んだ関数型の値が ! {s} を持つ")))?;
             }
+        }
+        if delayed {
+            self.async_calls.insert(addr);
+            return Ok(async_t(p.cod.clone(), rest));
         }
         Ok(p.cod.clone())
     }
@@ -1857,7 +1967,7 @@ impl Ck {
             Some(rt) => {
                 self.ret = rt.clone();
                 if rt == prim("unit") {
-                    self.block(body).map(|_| rt)
+                    self.block(body).and_then(|t| no_drop(&t)).map(|_| rt)
                 } else {
                     self.check_block(body, &rt).map(|_| rt)
                 }

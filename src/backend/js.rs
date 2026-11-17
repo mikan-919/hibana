@@ -809,7 +809,7 @@ impl Gen<'_> {
             }
             Expr::Pi(..) => lit("fn"),
             Expr::Refine(..) => lit("refine"),
-            Expr::Macro(..) | Expr::Quote(_) | Expr::Method(..) => unreachable!("型検査で弾く"),
+            Expr::Macro(..) | Expr::Quote(_) | Expr::Method(..) | Expr::Await(_) => unreachable!("型検査で弾く・書き換える"),
         }
     }
 

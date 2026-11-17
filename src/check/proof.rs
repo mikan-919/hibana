@@ -142,7 +142,7 @@ impl Ck {
             if gb == prim("int") { return self.subsume(e, &prim("num"), expected); }
         }
         if !same(&eb, &gb) {
-            return Err(format!("{} が必要だが {}", show(expected), show(got)).into());
+            return Err(mismatch(expected, got).into());
         }
         if eps.is_empty() || gb == prim("never") {
             return Ok(());

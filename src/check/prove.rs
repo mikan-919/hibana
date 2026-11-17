@@ -379,6 +379,7 @@ impl Eval {
             ("len", [v]) => return Ok(len(v.clone())),
             ("Vec", [a]) => return Ok(V::VecT(Rc::new(a.clone()))),
             ("Ref", [a]) => return Ok(ref_t(a.clone())),
+            ("Async", [a]) => return Ok(V::DataT(Rc::new(("Async".into(), vec![a.clone()])))),
             _ if self.ctors.contains_key(name) => return Ok(V::Data(Rc::new((name.into(), args)))),
             _ if self.datas.contains_key(name) => {
                 return Ok(V::DataT(Rc::new((name.into(), args))));
@@ -522,6 +523,7 @@ impl Eval {
             | Expr::Return(_)
             | Expr::Handle(..)
             | Expr::Method(..)
+            | Expr::Await(_)
             | Expr::Quote(_)
             | Expr::Macro(..) => return Err(Halt::Stuck),
         })
