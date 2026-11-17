@@ -188,7 +188,7 @@ pub(super) fn neu(n: Term) -> V {
     V::Neu(Rc::new(n))
 }
 
-// 細分化型の条件の中の変数
+// 細分化型の条件で束縛する変数。ソースの変数名にかかわらず同じ番号と名前にそろえる
 pub(super) fn bound() -> V {
     neu(Term::Var(0, "_".into()))
 }
@@ -351,15 +351,16 @@ struct Ck {
     effect_names: std::collections::HashSet<Name>,
 }
 
-// never はどの型とも一致する。細分化された値は元の型として使える
-fn same(a: &V, b: &V) -> bool {
+// got を expected として使えるか。型の同一性ではなく、向きのある判定。
+// never はどの型とも一致する。got の細分化は外せるが、expected の条件は残す。
+fn same(expected: &V, got: &V) -> bool {
     let never = V::Prim("never");
-    if a == b || *a == never || *b == never {
+    if expected == got || *expected == never || *got == never {
         return true;
     }
-    // Vec は書き換えられないので、要素の細分化を外して使ってよい
-    match (a, &base(b)) {
-        (V::VecT(x), V::VecT(y)) => same(x, y),
+    match (expected, &base(got)) {
+        // Vec の要素も同じ向きで判定する。両側の base を取ると、必要な条件まで失われる。
+        (V::VecT(expected), V::VecT(got)) => same(expected, got),
         // 種類の分からない syn とは互いに使える
         (V::Prim("syn"), V::Syn(_)) | (V::Syn(_), V::Prim("syn")) => true,
         // 下の階層の型は上の階層の型としても使える
@@ -2560,6 +2561,42 @@ mod tests {
         let source = "fn items() -> Vec<int> { [1] }\nfn main() { let xs = items()\n put(xs[0]) }";
         assert!(check(source).unwrap_err().to_string().contains("添字の範囲"));
         check(&source.replace("put(xs[0])", "if len(xs) > 0 { put(xs[0]) }")).unwrap();
+    }
+
+    #[test]
+    fn vector_refinement_compatibility_is_directional() {
+        for (expected, got, accepted) in [
+            ("Vec<int>", "Vec<int[x -> x > 0]>", true),
+            ("Vec<int[x -> x > 0]>", "Vec<int>", false),
+            ("Vec<int[x -> x > 0]>", "Vec<int[x -> x < 0]>", false),
+            ("Vec<Vec<int>>", "Vec<Vec<int[x -> x > 0]>>", true),
+            ("Vec<Vec<int[x -> x > 0]>>", "Vec<Vec<int>>", false),
+        ] {
+            let source = format!(
+                "fn convert(xs: {got}) -> {expected} {{ xs }}\nfn main() {{}}"
+            );
+            let result = check(&source);
+            if accepted {
+                result.unwrap();
+            } else {
+                let error = result.unwrap_err();
+                assert!(error.contains("が必要だが"), "{source}: {error}");
+            }
+        }
+    }
+
+    #[test]
+    fn refinement_binder_names_do_not_change_types() {
+        for container in ["Vec", "Box"] {
+            let source = format!(
+                "enum Box<A> {{ Boxed(value: A) }}\n\
+fn convert(xs: {container}<int[x -> x > 0]>) -> {container}<int[y -> y > 0]> {{ xs }}\n\
+fn main() {{}}"
+            );
+            check(&source).unwrap();
+            let error = check(&source.replace("y > 0", "y < 0")).unwrap_err();
+            assert!(error.contains("が必要だが"), "{error}");
+        }
     }
 
     #[test]
