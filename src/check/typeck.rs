@@ -205,7 +205,7 @@ fn show(v: &V) -> String {
         // 待つ時に Async 以外の効果も起こす値
         V::DataT(d) if d.0 == "Async" && d.1.len() == 2 => {
             let rest = flat(&d.1[1..]).iter().map(show).collect::<Vec<_>>().join(", ");
-            format!("Async<{} ! {rest}>", show(&d.1[0]))
+            format!("Async<{} with {rest}>", show(&d.1[0]))
         }
         V::DataT(d) if !d.1.is_empty() => format!(
             "{}<{}>",

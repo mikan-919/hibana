@@ -1,7 +1,7 @@
 // TypeScript の型宣言（.ts と .d.ts）から、hibana のモジュールの本文を作る。
 // export した関数・interface・type を読み、関数は extern の宣言に、interface とオブジェクト型は構造体にする。
 // 本体は読み飛ばす。読めない宣言（ジェネリクス・可変長引数など）は無視する
-// Promise<T> を返す関数は、T を返す Async の効果の関数にする
+// Promise<T> を返す関数は、T を返して Async を要求する関数にする
 // ponytail: TypeScript の型の一部だけを読む。共用体・ジェネリクスなどは js 型か無視になる
 use crate::error::R;
 
@@ -310,7 +310,7 @@ impl P {
         } else {
             Some(Ty::Js)
         };
-        // Promise<T> を返す関数は、T を返す Async の効果の関数にする
+        // Promise<T> を返す関数は、T を返して Async を要求する関数にする
         let (ret, is_async) = match ret {
             Some(Ty::Promise(t)) => (Some(*t), true),
             r => (r, false),

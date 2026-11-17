@@ -1,4 +1,4 @@
-//! 効果の検査、ハンドラーと継続の制約。
+//! 要求（with）の検査。提供（with ブロック）と exit の規則、要求の推論
 use super::*;
 
 pub(super) fn eff_key(v: &V) -> Name {
