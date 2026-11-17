@@ -268,7 +268,7 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
     let mut init = Vec::new();
     init.extend(heap.to_le_bytes());
     init.extend((pages * 65536).to_le_bytes());
-    // 実行時エラーの文字列、中断、処理中の handle は 0 から始める
+    // 実行時エラーの文字列、中断、処理中の with は 0 から始める
     init.extend([0u8; 48]);
     init.extend(data);
     let mut datas = DataSection::new();

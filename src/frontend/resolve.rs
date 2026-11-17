@@ -205,7 +205,15 @@ impl Resolver<'_> {
                 self.with(&[x], |r| r.block(body));
             }
             Expr::Block(b) => self.block(b),
-            Expr::Match(s, arms) | Expr::Handle(s, arms) => {
+            Expr::Handle(_, s, arms) => {
+                self.expr(s);
+                for a in arms {
+                    let binds = a.binds.clone();
+                    self.with(&binds, |r| r.expr(&mut a.body));
+                }
+            }
+            Expr::Exit(_, x) => self.expr(x),
+            Expr::Match(s, arms) => {
                 self.expr(s);
                 for a in arms {
                     if a.ctor != "_" {
@@ -230,7 +238,7 @@ impl Resolver<'_> {
                 self.block(body);
                 self.locals.pop();
             }
-            Expr::Pi(binders, ret, effs, _) => {
+            Expr::Pi(binders, ret, effs) => {
                 self.locals.push(Vec::new());
                 for (n, t) in binders.iter_mut() {
                     self.expr(t);

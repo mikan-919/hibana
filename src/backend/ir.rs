@@ -3,7 +3,7 @@ use crate::parser::Name;
 // 制御フローは WASM と同じ入れ子の形（if・while・return）で持ち、goto を持たない。
 // 値はすべて V（型の番号 tag と中身 payload の 2 つの 64 ビット整数）で表す。番号は runtime.hb の先頭を参照。
 // 文字列の連結・比較・表示などはランタイム（runtime.hb）の関数を呼ぶ。ランタイムも同じ変換で IR にする。
-// 効果の handle は、中断の印を置いて呼び出しの後で調べ、1 段ずつ戻って抜ける（Lower::checked）。resume は腕の末尾でだけ使える（C 版と同じ）
+// with（Handle）は、中断の印を置いて呼び出しの後で調べ、1 段ずつ戻って抜ける（Lower::checked）。腕の値は #resume で呼んだ所へ返し、exit で with を抜ける
 // ponytail: Vec の push は毎回写す（runtime.hb の __arr_push）
 use crate::error::R;
 use crate::parser::{self, Expr as Ast, Stmt as AstStmt};
@@ -502,7 +502,7 @@ impl<'a> Ctx<'a> {
         let src = &self.sources[name];
         let (f, runtime) = (src.f, src.runtime);
         if f.op.is_some() {
-            return Err(format!("IR は効果の操作 {} に未対応", f.name).into());
+            return Err(format!("IR は要求の操作 {} に未対応", f.name).into());
         }
         let mut l = Lower {
             cx: self,
@@ -957,7 +957,13 @@ impl Lower<'_, '_> {
                 self.effect(e, &mut stmts)?;
                 block(stmts, unit())
             }
-            Ast::Handle(body, arms) => self.handle(body, arms)?,
+            Ast::Handle(node, body, arms) => self.handle(*node, body, arms)?,
+            // exit は、行き先の with の番号に中断の印を置き、呼び出しの後の検査と同じく 1 段ずつ戻る
+            Ast::Exit(target, x) => {
+                let v = self.expr(x)?;
+                let h = self.vars[&exit_name(target.expect("型検査が行き先を書き込む"))];
+                self.checked(call("__exit", vec![Expr::Local(h), v]))
+            }
             _ => return Err("IR はこの式に未対応".into()),
         })
     }
@@ -1018,9 +1024,10 @@ impl Lower<'_, '_> {
         if matches!(n.as_str(), "Vec" | "Type" | "Ref" | "Async") || self.cx.types.contains(n.as_str()) {
             return Ok(mkv(TY, Expr::Str(n.to_string())));
         }
-        let rt = format!("__{n}");
+        // with の腕の #resume は、ランタイムの __resume
+        let rt = if n == "#resume" { "__resume".to_string() } else { format!("__{n}") };
         if let Some(s) = self.cx.sources.get(rt.as_str()).filter(|s| s.runtime) {
-            // 省いた引数（resume() など）は unit で埋める
+            // 省いた引数は unit で埋める
             while args.len() < s.f.params.len() {
                 args.push(unit());
             }
@@ -1089,8 +1096,11 @@ impl Lower<'_, '_> {
         Ok(self.object(FN, new, 16, items))
     }
 
-    // handle 式 { 操作(引数) => 式 ... }。腕は無名関数にして登録し、本体は Catch の中で評価する
-    fn handle(&mut self, body: &Ast, arms: &[parser::Arm]) -> R<Expr> {
+    // with を書き換えた Handle。番号を先に決めて腕（無名関数）に写し取らせ（exit の行き先）、腕を登録し、本体は Catch の中で評価する
+    fn handle(&mut self, node: parser::NodeId, body: &Ast, arms: &[parser::Arm]) -> R<Expr> {
+        let h = self.local();
+        let mut stmts = vec![Stmt::Set(h, call("__handle_id", vec![]))];
+        self.vars.insert(exit_name(node), h);
         let mut ops = Vec::new();
         let mut fns = Vec::new();
         for a in arms {
@@ -1102,10 +1112,10 @@ impl Lower<'_, '_> {
             fns.push(self.lambda(&[Name::from("#args")], &a.binds, &b)?);
         }
         let n = int(ops.len() as i64);
+        self.vars.remove(&exit_name(node));
         let ops = self.object(ARR, call("__arr_new", vec![n.clone()]), 8, ops);
         let fns = self.object(ARR, call("__arr_new", vec![n]), 8, fns);
-        let h = self.local();
-        let mut stmts = vec![Stmt::Set(h, call("__handle_push", vec![ops, fns]))];
+        stmts.push(Stmt::Eval(call("__handle_push", vec![Expr::Local(h), ops, fns])));
         self.catch_depth += 1;
         let v = self.expr(body);
         self.catch_depth -= 1;
@@ -1256,4 +1266,9 @@ mod tests {
         assert!(crate::to_ir(src).unwrap_err().contains("未対応"));
         assert!(crate::to_ir("fn main() { let x = 1 + true }").is_err());
     }
+}
+
+// with（Handle）の番号を腕に写し取らせる変数の名前
+fn exit_name(node: parser::NodeId) -> Name {
+    Name::temporary("exit", node.raw() as usize)
 }

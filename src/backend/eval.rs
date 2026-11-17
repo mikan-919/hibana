@@ -681,8 +681,8 @@ impl Interp<'_> {
                     let mut xs = xs.to_vec();
                     xs[i as usize] = x;
                     Value::Arr(Rc::new(xs))
-                } else if name == "resume" {
-                    // 腕の値として返し、perform が操作の戻り値にする
+                } else if name == "#resume" {
+                    // 腕の値として返し、perform が呼んだ所の値にする
                     Value::Data(Rc::new((
                         "$resume".into(),
                         vec![vs.pop().unwrap_or(Value::Unit)],
@@ -734,13 +734,15 @@ impl Interp<'_> {
                     .collect(),
             })),
             Expr::Pi(..) => Value::Ty("fn".into()),
-            Expr::Handle(body, arms) => {
+            Expr::Handle(node, body, arms) => {
                 self.next_h += 1;
                 let id = self.next_h;
-                let captured: HashMap<Name, Value> = env
+                let mut captured: HashMap<Name, Value> = env
                     .iter()
                     .flat_map(|s| s.iter().map(|(k, v)| (k.clone(), v.clone())))
                     .collect();
+                // 腕の中の exit は、この with の番号へ抜ける
+                captured.insert(exit_name(*node), Value::Int(id as i64));
                 let arms = arms
                     .iter()
                     .map(|a| {
@@ -764,6 +766,14 @@ impl Interp<'_> {
                     Err(Flow::Abort(h, v)) if h == id => v,
                     r => r?,
                 }
+            }
+            Expr::Exit(target, x) => {
+                let v = self.expr(x, env)?;
+                let name = exit_name(target.expect("型検査が行き先を書き込む"));
+                let Some(Value::Int(h)) = env.iter().rev().find_map(|s| s.get(&name)) else {
+                    unreachable!("exit は with の腕の中だけ")
+                };
+                return Err(Flow::Abort(*h as usize, v));
             }
             Expr::Apply(f, args) => {
                 let f = self.expr(f, env)?;
@@ -863,4 +873,9 @@ impl Interp<'_> {
             }
         })
     }
+}
+
+// with（Handle）の番号を腕に渡す変数の名前
+fn exit_name(node: crate::parser::NodeId) -> Name {
+    Name::temporary("exit", node.raw() as usize)
 }

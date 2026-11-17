@@ -151,14 +151,14 @@ fn unwrap_or<A>(o: Option<A>, d: A) -> A {
 
 // ---- Vec の高階関数 ----
 
-// f が起こす効果を E として、そのまま起こす（効果の多相）
-fn map<A, B, E: Effect>(xs: Vec<A>, f: (A) -> B ! E) -> Vec<B> ! E {
+// f の要求を R として、そのまま要求する（要求の多相）
+fn map<A, B, R: Effect>(xs: Vec<A>, f: (A) -> B with R) -> Vec<B> with R {
     let mut out: Vec<B> = []
     for x in xs { out = push(out, f(x)) }
     out
 }
 
-fn filter<A, E: Effect>(xs: Vec<A>, f: (A) -> bool ! E) -> Vec<A> ! E {
+fn filter<A, R: Effect>(xs: Vec<A>, f: (A) -> bool with R) -> Vec<A> with R {
     let mut out: Vec<A> = []
     for x in xs {
         if f(x) { out = push(out, x) }
@@ -166,7 +166,7 @@ fn filter<A, E: Effect>(xs: Vec<A>, f: (A) -> bool ! E) -> Vec<A> ! E {
     out
 }
 
-fn fold<A, B, E: Effect>(xs: Vec<A>, init: B, f: (B, A) -> B ! E) -> B ! E {
+fn fold<A, B, R: Effect>(xs: Vec<A>, init: B, f: (B, A) -> B with R) -> B with R {
     let mut acc = init
     for x in xs { acc = f(acc, x) }
     acc
@@ -219,25 +219,39 @@ fn sum(xs: Vec<int>) -> int {
     s
 }
 
-fn some<A, E: Effect>(xs: Vec<A>, f: (A) -> bool ! E) -> bool ! E {
+fn some<A, R: Effect>(xs: Vec<A>, f: (A) -> bool with R) -> bool with R {
     for x in xs {
         if f(x) { return true }
     }
     false
 }
 
-fn every<A, E: Effect>(xs: Vec<A>, f: (A) -> bool ! E) -> bool ! E {
+fn every<A, R: Effect>(xs: Vec<A>, f: (A) -> bool with R) -> bool with R {
     for x in xs {
         if !f(x) { return false }
     }
     true
 }
 
-fn find<A, E: Effect>(xs: Vec<A>, f: (A) -> bool ! E) -> Option<A> ! E {
+fn find<A, R: Effect>(xs: Vec<A>, f: (A) -> bool with R) -> Option<A> with R {
     for x in xs {
         if f(x) { return Some(x) }
     }
     None
+}
+
+// ---- 要求 ----
+
+// 失敗。with Fail<E> で要求し、fail(e) で失敗する。提供する側は exit で抜けるか、try で Result にする
+trait Fail<E> {
+    fn fail(self, e: E) -> never
+}
+
+// f の失敗を Err に、成功を Ok にする。f のほかの要求 R はそのまま要求する
+fn try<T, E, R: Effect>(f: () -> T with Fail<E>, R) -> Result<T, E> with R {
+    with Fail(fn(e) { exit Err(e) }) {
+        Ok(f())
+    }
 }
 
 // ---- 非同期 ----
@@ -246,14 +260,14 @@ fn find<A, E: Effect>(xs: Vec<A>, f: (A) -> bool ! E) -> Option<A> ! E {
 struct Pair<A, B> { first: A, second: B }
 
 // 種類の違う 2 つの Async の値を並行に走らせ、両方が終わるまで待つ。最初の失敗で戻る
-fn join<A, B>(a: Async<A>, b: Async<B>) -> Pair<A, B> ! Async {
+fn join<A, B>(a: Async<A>, b: Async<B>) -> Pair<A, B> with Async {
     let ra: Ref<Option<A>> = new_ref(None)
     let rb: Ref<Option<B>> = new_ref(None)
     all([join_into(a, ra), join_into(b, rb)]).await
     Pair { first: read(ra).unwrap(), second: read(rb).unwrap() }
 }
 
-fn join_into<T>(a: Async<T>, r: Ref<Option<T>>) ! Async {
+fn join_into<T>(a: Async<T>, r: Ref<Option<T>>) with Async {
     write(r, Some(a.await))
 }
 

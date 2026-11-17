@@ -15,8 +15,8 @@
 
 // ランタイムの状態は __static() から 64 バイト:
 //   +0 確保の次の位置、+8 区画の終わり、+16 実行時エラーの文字列（WASM だけ使う）
-//   +24 中断の行き先（handle の番号。0 は中断していない）、+32 中断で handle に渡す値
-//   +48 処理中のいちばん内側の handle、+56 最後に付けた handle の番号
+//   +24 中断の行き先（with の番号。0 は中断していない）、+32 中断で with に渡す値
+//   +48 処理中のいちばん内側の with、+56 最後に付けた with の番号
 fn __alloc(n: int) -> int {
     let st = __static()
     let size = (n + 7) / 8 * 8
@@ -946,17 +946,23 @@ fn __str_out(s: String) -> int {
     __or(__shl(__load(p), 32), p + 8)
 }
 
-// 効果。handle の本体を抜ける中断は、行き先の番号を置き、呼び出しの後の検査で 1 段ずつ戻って伝える（ir.rs の checked）
+// 要求と提供（with）。with の本体を抜ける中断は、行き先の番号を置き、呼び出しの後の検査で 1 段ずつ戻って伝える（ir.rs の checked）
 
 fn __aborting() -> bool {
     __load(__static() + 24) != 0
 }
 
-// 処理中の handle: [外側の handle][番号][操作の名前の Vec][腕の Vec]
-fn __handle_push(ops: int, arms: int) -> int {
+// with の番号を決める。腕を作る前に決め、腕の中の exit の行き先にする
+fn __handle_id() -> int {
     let st = __static()
     let id = __load(st + 56) + 1
     __store(st + 56, id)
+    id
+}
+
+// 処理中の with: [外側の with][番号][操作の名前の Vec][腕の Vec]
+fn __handle_push(id: int, ops: int, arms: int) -> int {
+    let st = __static()
     let h = __alloc(48)
     __store(h, __load(st + 48))
     __store(h + 8, id)
@@ -966,7 +972,7 @@ fn __handle_push(ops: int, arms: int) -> int {
     id
 }
 
-// 本体を終えた handle を外す。この handle への中断なら、腕の値が handle の値になる
+// 本体を終えた with を外す。この with への中断なら、腕の値が with の値になる
 fn __handle_end(id: int, v: int) -> int {
     let st = __static()
     __store(st + 48, __load(__load(st + 48)))
@@ -977,14 +983,22 @@ fn __handle_end(id: int, v: int) -> int {
     v
 }
 
-// resume した腕の値は構築子の番号 -1 の値で表す
+// exit。番号 id の with へ、値 v で抜ける中断の印を置く
+fn __exit(id: int, v: int) -> int {
+    let st = __static()
+    __store(st + 24, id)
+    __setv(st + 32, v)
+    0
+}
+
+// #resume した腕の値は構築子の番号 -1 の値で表す
 fn __resume(v: int) -> int {
     let p = __data_new(0 - 1, 1)
     __setv(p + 16, v)
     __mkv(5, p)
 }
 
-// 操作を、内側の handle から探して腕を呼ぶ。腕はその handle より外で処理する
+// 要求の呼び出しを、内側の with から探して腕で処理する。腕の中の要求は、その with より外で処理する
 fn __perform(name: String, args: int) -> int {
     let st = __static()
     let mut h = __load(st + 48)
@@ -1013,5 +1027,5 @@ fn __perform(name: String, args: int) -> int {
         }
         h = __load(h)
     }
-    __die('操作を処理する handle が無い')
+    __die('要求を提供する with が無い')
 }

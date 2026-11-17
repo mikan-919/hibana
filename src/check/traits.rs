@@ -130,14 +130,25 @@ impl Ck {
                 true
             }
             (V::VecT(x), V::VecT(y)) => self.unify(x, y, metas, sol)?,
-            (V::Pi(x), V::Pi(y)) if x.doms.len() == y.doms.len() && x.reqs == y.reqs => {
+            (V::Pi(x), V::Pi(y)) if x.doms.len() == y.doms.len() => {
                 for (p, q) in x.doms.iter().zip(&y.doms).chain([(&x.cod, &y.cod)]) {
                     if !self.unify(p, q, metas, sol)? {
                         return Ok(false);
                     }
                 }
-                // 効果の変数が1つなら、相手の効果のうち残りをその値にする
-                let (xe, ye) = (flat(&x.effs), flat(&y.effs));
+                // 同じ要求（Fail<?E> と Fail<String>）は型引数を合わせる。効果の変数が1つなら、相手の効果のうち残りをその値にする
+                let (xe, mut ye) = (flat(&x.effs), flat(&y.effs));
+                for e in &xe {
+                    if let V::DataT(d) = e
+                        && let Some(k) = ye.iter().position(|y| matches!(y, V::DataT(o) if o.0 == d.0))
+                    {
+                        if !self.unify(e, &ye[k], metas, sol)? {
+                            return Ok(false);
+                        }
+                        ye.remove(k);
+                    }
+                }
+                let xe: Vec<V> = xe.into_iter().filter(|e| !matches!(e, V::DataT(_))).collect();
                 let vars: Vec<usize> = xe
                     .iter()
                     .filter_map(|e| match e {

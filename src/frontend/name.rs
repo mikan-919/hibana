@@ -15,7 +15,8 @@ pub enum NameKind {
     TraitAccessor(Box<Name>),
     Hygienic(String, usize),
     EffectParameter(Box<Name>, usize),
-    Capability(Box<Name>, bool),
+    Requirement(Box<Name>),
+    TraitMethod(Box<Name>, Box<Name>),
     Temporary(String, usize),
 }
 
@@ -157,33 +158,30 @@ impl Name {
         matches!(self.kind, NameKind::EffectParameter(..))
     }
 
-    pub fn capability(trait_name: Name, type_parameter: bool) -> Self {
-        let prefix = if type_parameter { "captype" } else { "cap" };
-        Self {
-            spelling: format!("{prefix}#{trait_name}"),
-            kind: NameKind::Capability(Box::new(trait_name), type_parameter),
+    // トレイト T を with で要求した時の効果の型。綴りはトレイトと同じで、種類で区別する
+    pub fn requirement(trait_name: Name) -> Self {
+        if let NameKind::Qualified(module, local) = &trait_name.kind {
+            return Self::qualified(module, Self::requirement(*local.clone()));
         }
+        Self { spelling: trait_name.spelling.clone(), kind: NameKind::Requirement(Box::new(trait_name)) }
+    }
+
+    pub fn is_requirement(&self) -> bool {
+        matches!(self.local().kind, NameKind::Requirement(_))
+    }
+
+    // トレイトのメソッドを、実装の辞書を通して呼ぶ関数（x.m() の行き先）
+    pub fn trait_method(trait_name: Name, method: Name) -> Self {
+        if let NameKind::Qualified(module, local) = &trait_name.kind {
+            return Self::qualified(module, Self::trait_method(*local.clone(), method));
+        }
+        Self { spelling: format!("{trait_name}#{method}"), kind: NameKind::TraitMethod(Box::new(trait_name), Box::new(method)) }
     }
 
     pub fn temporary(hint: &str, index: usize) -> Self {
         Self {
             spelling: format!("{hint}#{index}"),
             kind: NameKind::Temporary(hint.into(), index),
-        }
-    }
-
-    pub fn capability_trait(&self) -> Option<&Name> {
-        match &self.kind {
-            NameKind::Capability(trait_name, false) => Some(trait_name),
-            _ => None,
-        }
-    }
-
-    // 型の引数に使う、要求（with の値の型）のトレイトの名前
-    pub fn capability_type_trait(&self) -> Option<&Name> {
-        match &self.kind {
-            NameKind::Capability(trait_name, true) => Some(trait_name),
-            _ => None,
         }
     }
 

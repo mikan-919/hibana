@@ -272,7 +272,7 @@ impl P {
             Ty::Fn(ps, r) => {
                 let ps: Vec<String> = ps.iter().map(|p| self.hib(p)).collect();
                 match &**r {
-                    Ty::Promise(r) => format!("(({}) -> {} ! Async)", ps.join(", "), self.hib(r)),
+                    Ty::Promise(r) => format!("(({}) -> {} with Async)", ps.join(", "), self.hib(r)),
                     r => format!("({}) -> {}", ps.join(", "), self.hib(r)),
                 }
             }
@@ -328,7 +328,7 @@ impl P {
             .map(|(i, p)| format!("a{i}: {}", self.hib(p)))
             .collect();
         let ret = self.hib(&ret);
-        let eff = if is_async { " ! Async" } else { "" };
+        let eff = if is_async { " with Async" } else { "" };
         self.fns
             .push(format!("    fn {name}({}) -> {ret}{eff}\n", ps.join(", ")));
     }

@@ -282,11 +282,11 @@ mod tests {
         let src = include_str!("../../tests/programs/types/capabilities.hb");
         assert_eq!(out(src).unwrap(), "created\nplain\n[DEBUG] inner\nrestored\n[OTHER] other\n");
         let missing = src.replace("with Logger(make_logger())", "");
-        assert!(out(&missing).unwrap_err().to_string().contains("with Logger が必要"));
+        assert!(out(&missing).unwrap_err().to_string().contains("with Logger を書く"));
         let invalid = src.replace("with Logger(make_logger())", "with Logger(0)");
         assert!(out(&invalid).is_err());
         let escaped = src.replace("fn main() {", "fn main() { emit('outside')\n");
-        assert!(out(&escaped).unwrap_err().to_string().contains("with Logger が必要"));
+        assert!(out(&escaped).unwrap_err().to_string().contains("with Logger を書く"));
         let multiple = "trait First { fn first(self) -> int }\ntrait Second { fn second(self) -> int }\nimpl First for int { fn first(self) -> int { self } }\nimpl Second for int { fn second(self) -> int { self } }\nfn sum() -> int with First(a), Second(b) { a.first() + b.second() }\nfn main() { with First(2) { with Second(3) { put(sum()) } } }";
         assert_eq!(out(multiple).unwrap(), "5\n");
     }
@@ -294,35 +294,35 @@ mod tests {
     // .await の規則（tests/programs/effects/async.hb が正しい使い方）
     #[test]
     fn async_await_rules() {
-        let work = "fn work(n: int) -> int ! Async { n }\n";
+        let work = "fn work(n: int) -> int with Async { n }\n";
         let err = |body: &str| out(&format!("use std -> *\n{work}{body}")).unwrap_err().to_string();
         // 書き忘れ
-        let e = err("fn main() ! Async { let x: int = work(1) }");
+        let e = err("fn main() with Async { let x: int = work(1) }");
         assert!(e.contains(".await を付けるか、Async<int> のまま受け取る"), "{e}");
-        // 効果の多相を通した呼び出しには .await を書かない
-        let e = err("fn app<E: Effect>(f: () -> int ! E) -> int ! E { f().await }\nfn main() {}");
-        assert!(e.contains("効果の変数を通した呼び出しは .await を書かずに待つ"), "{e}");
+        // 要求の多相を通した呼び出しには .await を書かない
+        let e = err("fn app<E: Effect>(f: () -> int with E) -> int with E { f().await }\nfn main() {}");
+        assert!(e.contains("要求の変数を通した呼び出しは .await を書かずに待つ"), "{e}");
         // Async<T> の値を捨てる文
-        let e = err("fn main() ! Async { work(1) }");
+        let e = err("fn main() with Async { work(1) }");
         assert!(e.contains("値を捨てている"), "{e}");
-        let e = err("fn main() ! Async { work(1)\n put(1) }");
+        let e = err("fn main() with Async { work(1)\n put(1) }");
         assert!(e.contains("値を捨てている"), "{e}");
-        // .await は Async の効果を起こす
-        let e = err("effect Log { fn log() }\nfn g() ! Log { put(work(1).await) }\nfn main() {}");
-        assert!(e.contains("! Async"), "{e}");
+        // .await は Async を要求する
+        let e = err("trait Log { fn log(self) }\nfn g() with Log { put(work(1).await) }\nfn main() {}");
+        assert!(e.contains("with Async"), "{e}");
         // Async<T> の値は表示できない
-        assert!(err("fn main() ! Async { put(work(1)) }").contains(".await"));
-        // spawn に渡せるのは Async だけを起こす値。then の関数は効果を持たない
-        let e = err("effect Fail { fn fail() -> never }\nfn bad() -> int ! Async, Fail { fail() }\nfn main() { spawn(bad()) }");
+        assert!(err("fn main() with Async { put(work(1)) }").contains(".await"));
+        // spawn に渡せるのは Async だけを要求する値。then の関数は要求を持たない
+        let e = err("fn bad() -> int with Async, Fail<String> { fail('x') }\nfn main() { spawn(bad()) }");
         assert!(e.contains("Result にしてから渡す"), "{e}");
-        let e = err("effect Log { fn log() }\nfn main() { spawn(work(1)).then(fn(x) { log() }) }");
-        assert!(e.contains("効果 Log"), "{e}");
+        let e = err("trait Log { fn log(self) }\nfn main() { spawn(work(1)).then(fn(x) { log() }) }");
+        assert!(e.contains("要求 Log"), "{e}");
     }
 
     // wait() はネイティブでだけ使える。JavaScript と WASM は呼び出しの位置を付けて拒む
     #[test]
     fn task_wait_is_native_only() {
-        let src = "fn work(n: int) -> int ! Async { n + 1 }\nfn main() {\n    let t = spawn(work(1))\n    put(t.wait())\n}";
+        let src = "fn work(n: int) -> int with Async { n + 1 }\nfn main() {\n    let t = spawn(work(1))\n    put(t.wait())\n}";
         assert_eq!(out(src).unwrap(), "2\n");
         for e in [super::to_js(src).unwrap_err(), crate::to_wasm(src).unwrap_err()] {
             let e = e.to_string();
@@ -580,7 +580,7 @@ fn main() {
         );
     }
 
-    // 効果の型検査。3つの実行方式で同じ結果になることは tests/programs/effects/effects.hb で確かめる
+    // 要求と提供の型検査。4 つの実行方式で同じ結果になることは tests/programs/effects/effects.hb と with.hb で確かめる
     #[test]
     fn effects() {
         let src = include_str!("../../tests/programs/effects/effects.hb");
@@ -588,73 +588,77 @@ fn main() {
             out(src).unwrap(),
             "[\"u7\", \"not found: 0\"]\neach a\neach b\n[log] find 1\nuser1\n[log] find 0\nnot found: 0\n[log] find 2\nuser2\n3\n"
         );
-        let p = "effect Log { fn log(msg: String) }\neffect Ask { fn ask() -> int }\neffect Fail { fn fail(m: String) -> never }\n";
+        let p = "trait Log { fn log(self, msg: String) }\ntrait Ask { fn ask(self) -> int }\ntrait Fail { fn fail(self, m: String) -> never }\ntrait Need<T> { fn need(self) -> T }\n";
         for (src, msg) in [
+            ("fn main() { log('x') }", "with Log を書く"),
+            ("fn f() with Log { log('x') }\nfn main() { f() }", "with Log を書く"),
+            ("fn main() with Log { }", "Async だけ"),
+            ("fn main() { with Log(fn(m) { exit 1 }) { log('a') } }", "exit の値"),
+            ("fn main() { let x = with Ask(fn() { 's' }) { ask() + 1 } }", "int が必要だが String"),
+            ("fn main() { with Fail(fn(m) { 0 }) { fail('a') } }", "never のメソッドを提供する関数は値を返せない"),
+            ("fn main() { let x = with Need(fn() { 2 }) { 1 } }", "要求 Need を使っていない"),
+            ("fn main() { let g = fn() { log('a') }\n g() }", "with Log を書く"),
+            ("fn f() with Log { let g = log }\nfn main() {}", "未定義の変数 log"),
             (
-                "fn main() { log('x') }",
-                "! Log を書くか、handle で処理する",
-            ),
-            (
-                "fn f() ! Log { log('x') }\nfn main() { f() }",
-                "! Log を書くか",
-            ),
-            ("fn main() ! Log { }", "Async だけ"),
-            (
-                "fn main() { handle log('a') { log(m) -> { resume()\nprint(m) } } }",
-                "resume は腕の最後に置く",
-            ),
-            (
-                "fn main() { let x = handle ask() + 1 { ask() -> resume('s') } }",
-                "int が必要だが String",
-            ),
-            (
-                "fn main() { handle fail('a') { fail(m) -> resume() } }",
-                "never の操作は resume できない",
-            ),
-            (
-                "fn main() { let x = handle 1 { ask() -> resume(2) } }",
-                "効果 Ask を起こしていない",
-            ),
-            (
-                "fn main() { let g = fn() { log('a') }\n g() }",
-                "! Log を書くか",
-            ),
-            (
-                "fn f() ! Log { let g = log }\nfn main() {}",
-                "値として使えない",
-            ),
-            (
-                "fn twice(f: (int) -> int, x: int) -> int { f(f(x)) }\nfn n(x: int) -> int ! Log { x }\nfn main() { handle twice(n, 1) { log(m) -> resume() } }",
-                "(int) -> int が必要だが (int) -> int ! Log",
+                "fn twice(f: (int) -> int, x: int) -> int { f(f(x)) }\nfn n(x: int) -> int with Log { x }\nfn main() { with Log(fn(m) {}) { twice(n, 1) } }",
+                "(int) -> int が必要だが (int) -> int with Log",
             ),
             ("fn g() -> never { 1 }\nfn main() {}", "戻らない式で終わる"),
             ("fn g() -> never { return panic('x') }\nfn main() {}", "return を使えない"),
-            // 効果の多相: E は渡した関数の効果になり、呼ぶ側で処理する必要がある
-            (
-                "fn ap<E: Effect>(f: () -> unit ! E) ! E { f() }\nfn n() ! Log { log('a') }\nfn main() { ap(n) }",
-                "! Log を書くか",
-            ),
-            (
-                "fn ap<E: Effect>(f: () -> unit ! E) ! E { log('a') }\nfn main() {}",
-                "! Log を書くか",
-            ),
-            (
-                "fn ap<E: Effect>(f: (int) -> unit ! E) ! E { f(1) }\nfn main() { ap(fn(x) { log('a') }) }",
-                "! Log を書くか",
-            ),
-            (
-                "fn f() -> int { handle { return 1 } { ask() -> resume(2) } }\nfn main() {}",
-                "return を使えない",
-            ),
+            // 要求の多相: E は渡した関数の要求になり、呼ぶ側で提供する必要がある
+            ("fn ap<E: Effect>(f: () -> unit with E) with E { f() }\nfn n() with Log { log('a') }\nfn main() { ap(n) }", "with Log を書く"),
+            ("fn ap<E: Effect>(f: () -> unit with E) with E { log('a') }\nfn main() {}", "with Log を書く"),
+            ("fn ap<E: Effect>(f: (int) -> unit with E) with E { f(1) }\nfn main() { ap(fn(x) { log('a') }) }", "with Log を書く"),
+            ("fn f() -> int { with Ask(fn() { 2 }) { return 1 } }\nfn main() {}", "return を使えない"),
         ] {
             let e = out(&format!("{p}{src}")).unwrap_err();
             assert!(e.contains(msg), "{src} => {e}");
         }
-        // 腕の中の操作は外側の handle が処理し、resume しない腕は handle の値になる
+        // 提供する関数の中の要求は外側の with が提供し、exit した値は with の値になる
         let src = format!(
-            "{p}fn main() {{\n let x = handle {{ handle {{ fail('in')\n 1 }} {{ fail(m) -> {{ log(m)\n 2 }} }} }} {{ log(m) -> {{ put('log ' + m)\n resume() }} }}\n put(x) }}"
+            "{p}fn main() {{\n let x = with Log(fn(m) {{ put('log ' + m) }}) {{ with Fail(fn(m) {{ log(m)\n exit 2 }}) {{ fail('in')\n 1 }} }}\n put(x) }}"
         );
         assert_eq!(out(&src).unwrap(), "log in\n2\n");
+    }
+
+    // with の規則（tests/programs/effects/with.hb が正しい使い方）
+    #[test]
+    fn with_rules() {
+        let src = include_str!("../../tests/programs/effects/with.hb");
+        assert_eq!(
+            out(src).unwrap(),
+            "u42\nnot found: 0\ninner quiet a\n[inner] loud a\n[outer] loud b\nlog: tick\nlog: tick\n8\n-1\nok 3\nerr bad: x\n40\n41\n"
+        );
+        let err = |from: &str, to: &str| {
+            assert!(src.contains(from), "{from}");
+            out(&src.replacen(from, to, 1)).unwrap_err().to_string()
+        };
+        // exit を書けるのは with の見出しの無名関数の中だけ（impl のメソッド・本体・入れ子の無名関数では書けない）
+        for (from, to) in [
+            ("fn log(self, msg: String) {}", "fn log(self, msg: String) { exit 1 }"),
+            ("parse('x') + 100", "exit 5"),
+            ("Fail(fn(e) { exit 'not found: ' + e.id })", "Fail(fn(e) { map([1], fn(x) { exit 'x' })\n exit '' })"),
+        ] {
+            let e = err(from, to);
+            assert!(e.contains("exit は with の見出しに書いた無名関数の中でだけ使える"), "{to} => {e}");
+        }
+        // 名前の無い要求のメソッドが重なる時は、修飾なしで呼べない
+        let e = err("fn both(msg: String) with Log, Logger(out) {", "fn both(msg: String) with Log, Logger {\n    let out = 0");
+        assert!(e.contains("log は要求 Log と Logger のどれのメソッドか決まらない"), "{e}");
+        // 名前を付けた要求は、名前.メソッド でだけ使える
+        let e = err("out.log('loud ' + msg)", "put(out)");
+        assert!(e.contains("名前を付けた要求 out"), "{e}");
+        // Async を使えるのは、メソッドの宣言に with Async があるトレイトの提供だけ
+        let e = err("with Need(fn() { Db { prefix: 'u' } })", "with Need(fn() { Db { prefix: fetch(1).await.to_string() } })");
+        assert!(e.contains("with で提供する関数の中では Async を使えない"), "{e}");
+        // Async は提供できない。要求は ! でなく with で書く
+        let e = err("put(lookup('42'))", "with Async(1) { put(1) }");
+        assert!(e.contains("Async は with で提供できない"), "{e}");
+        let e = err("fn parse(s: String) -> int with Fail<String> {", "fn parse(s: String) -> int ! Fail<String> {");
+        assert!(e.contains("要求は ! でなく with で書く"), "{e}");
+        // 無名関数で提供できるのは、メソッドが 1 つのトレイトだけ
+        let e = out("trait Two {\n fn a(self)\n fn b(self)\n}\nfn main() { with Two(fn() {}) { } }").unwrap_err();
+        assert!(e.contains("メソッドが 1 つのトレイトだけ"), "{e}");
     }
 
     // トレイト: 既定の実装・条件付きの実装・制約・親のトレイト・== と to_str と put
@@ -715,9 +719,9 @@ fn main() {
         assert_eq!(e.help.as_deref(), Some("count のことか"));
         let e = out("fn main() { prnt(1) }").unwrap_err();
         assert_eq!(e.help.as_deref(), Some("put のことか"));
-        let src = "effect Log {\n fn log(m: String)\n}\nfn n() ! Log { log('a') }\nfn main() { n() }";
+        let src = "trait Log {\n fn log(self, m: String)\n}\nfn n() with Log { log('a') }\nfn main() { n() }";
         let e = out(src).unwrap_err();
-        assert_eq!(e.help.as_deref(), Some("関数 n の型が ! Log を持つ"));
+        assert_eq!(e.help.as_deref(), Some("関数 n が with Log を要求する"));
         let (at, n) = e.origin.unwrap();
         assert_eq!(&src[at..at + n], "log('a')");
     }
@@ -837,10 +841,9 @@ fn main() {
             ("fn main() { let x = quote { 1 } }", "マクロ本体の中でだけ"),
             ("macro m('m' a:Ident) { quote { put('${a') } }\nfn main() {}", "対応する }"),
             ("macro m('m' a:Ident) { quote { put('${}') } }\nfn main() {}", "式が無い"),
-            ("trait Logger { fn log(self, msg: String) }\nfn apply(f: (String) -> unit with Logger) { f('x') }\nfn main() {}", "with Logger が必要"),
+            ("trait Logger { fn log(self, msg: String) }\nfn apply(f: (String) -> unit with Logger) { f('x') }\nfn main() { apply(fn(s) {}) }", "with Logger を書く"),
             ("trait Logger { fn log(self, msg: String) }\nfn emit(msg: String) with Logger(l) { l.log(msg) }\nfn take(f: (String) -> unit) {}\nfn main() { take(emit) }", "with Logger"),
-            ("trait Logger { fn log(self, msg: String) }\nfn emit<A>(x: A, msg: String) with Logger(l) { l.log(msg) }\nfn main() { let f = emit }", "総称関数"),
-            ("trait Logger { fn log(self, msg: String) }\nfn g() with Logger { }\nfn main() {}", "with Logger(名前)"),
+            ("trait Logger { fn log(self, msg: String) }\nfn g() with Logger, Logger(l) { }\nfn main() {}", "要求 Logger は一度だけ書ける"),
         ] {
             let e = out(src).unwrap_err();
             assert!(e.contains(msg), "{src} => {e}");

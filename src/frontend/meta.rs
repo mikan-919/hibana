@@ -427,7 +427,7 @@ thread_local! {
 }
 static NEXT_EXPANSION: AtomicUsize = AtomicUsize::new(1);
 
-// quote の中で束縛される名前。let と for の変数、fn の引数、match と handle の腕の束縛。
+// quote の中で束縛される名前。let と for の変数、fn の引数、match と with の腕の束縛。
 // 大域の名前と同じでも、束縛された名前は改名する（呼び出し側の同じ名前を隠さないため）
 // ponytail: 同じ quote で、束縛した名前と同じ名前の大域の関数や構築子を呼ぶと、その呼び出しも改名される。呼び出しの位置で大域かどうかを見分けるなら、束縛の範囲を追う必要がある
 fn bound_names(q: &[Q]) -> HashSet<Name> {

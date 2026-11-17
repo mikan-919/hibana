@@ -52,10 +52,8 @@ pub(crate) enum V {
 pub(crate) struct PiV {
     pub(super) doms: Vec<V>,
     pub(super) cod: V,
-    // 呼ぶと起きる効果
+    // 呼ぶと起きる要求（トレイトの要求・Async・効果の変数）
     pub(super) effs: Vec<V>,
-    // 呼ぶ時に、呼ぶ側のスコープから渡す要求（トレイトの名前）。引数の後ろに、要求の値、実装の順に足す
-    pub(super) reqs: Vec<Name>,
 }
 
 // js は JavaScript の値をそのまま持ち回る型（extern で使う）。never は戻らない効果の操作（fail など）の戻り値の型
@@ -92,7 +90,6 @@ const BUILTINS: &[&str] = &[
     "char_from_codepoint",
     "now_ms",
     "panic",
-    "resume",
     "all",
     "push",
     "set_at",
@@ -226,13 +223,11 @@ fn show(v: &V) -> String {
         V::Refine(r) => format!("{}[_ -> {}]", show(&r.0), show(&r.1)),
         V::Pi(p) => {
             let effs = flat(&p.effs).iter().map(show).collect::<Vec<_>>().join(", ");
-            let reqs = p.reqs.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(", ");
             format!(
-                "({}) -> {}{}{}",
+                "({}) -> {}{}",
                 p.doms.iter().map(show).collect::<Vec<_>>().join(", "),
                 show(&p.cod),
-                if effs.is_empty() { String::new() } else { format!(" ! {effs}") },
-                if reqs.is_empty() { String::new() } else { format!(" with {reqs}") },
+                if effs.is_empty() { String::new() } else { format!(" with {effs}") },
             )
         }
         V::Syn(k) => format!("syn<{k}>"),
@@ -330,8 +325,12 @@ struct Ck {
     avail: Vec<(Name, Option<V>)>,
     // 検査中の handle の腕で、resume に渡す値の型
     resume: Vec<V>,
-    // 検査中の handle の腕の入れ子の深さ
+    // 検査中の with の腕の入れ子の深さ（Async を使えない腕だけ数える）
     in_arm: usize,
+    // exit の行き先（with の識別子と値の型）。with の見出しの無名関数に入ると積み、ほかの無名関数に入ると None を積む
+    exits: Vec<Option<(NodeId, V)>>,
+    // 囲む with が提供している要求。無名関数の中でも、修飾なしの呼び出しの候補を絞るのに使う
+    provided: Vec<Name>,
     // JavaScript で待つ呼び出しの式と、async にする無名関数の本体（節点の識別子）
     awaits: std::collections::HashSet<NodeId>,
     // 効果の変数を通して効果を起こす呼び出しと、効果の変数を持つ無名関数の本体。多相な関数の async 版で待つ
@@ -367,7 +366,7 @@ fn same(a: &V, b: &V) -> bool {
         // 起こす効果の少ない関数は、多い関数として使える
         (V::Pi(x), V::Pi(y)) => {
             let xe = flat(&x.effs);
-            x.doms == y.doms && x.cod == y.cod && x.reqs == y.reqs && flat(&y.effs).iter().all(|e| xe.contains(e))
+            x.doms == y.doms && x.cod == y.cod && flat(&y.effs).iter().all(|e| xe.contains(e))
         }
         (a, b) => a == b,
     }
@@ -450,10 +449,11 @@ pub(crate) fn walk(e: &Expr, f: &mut dyn FnMut(&Expr)) {
             block(b, f);
         }
         Expr::Block(b) => block(b, f),
-        Expr::Match(s, arms) | Expr::Handle(s, arms) => {
+        Expr::Match(s, arms) | Expr::Handle(_, s, arms) => {
             walk(s, f);
             arms.iter().for_each(|a| walk(&a.body, f));
         }
+        Expr::Exit(_, x) => walk(x, f),
         Expr::Lam(_, _, _, b) => block(b, f),
         Expr::For(_, a, b, body) => {
             walk(a, f);
@@ -555,6 +555,8 @@ fn check_prog(prog: &mut Program, require_main: bool) -> R<Info> {
         avail: Vec::new(),
         resume: Vec::new(),
         in_arm: 0,
+        exits: Vec::new(),
+        provided: Vec::new(),
         awaits: Default::default(),
         var_awaits: Default::default(),
         async_inst: Default::default(),
@@ -587,6 +589,10 @@ fn check_prog(prog: &mut Program, require_main: bool) -> R<Info> {
         })
         .chain(prog.fns.iter().map(|f| (&f.name, f.span)))
     {
+        // 要求の型はトレイトと同じ綴り
+        if n.is_requirement() {
+            continue;
+        }
         let reserved = BUILTINS.contains(&n.as_str())
             || PRIMS.contains(&n.as_str())
             || SYN_FNS.iter().any(|s| s.0 == n);
@@ -625,6 +631,7 @@ fn check_prog(prog: &mut Program, require_main: bool) -> R<Info> {
 // 関数 1 つを検査する
 fn check_fn(ck: &mut Ck, f: &mut Fn) -> R<()> {
     let r = |e: &str| format!("関数 {}: {e}", f.name);
+    ck.exits = Vec::new();
     ck.scopes = vec![Scope::default()];
     for (n, t) in &f.params {
         let ty = ck.eval_type(t).ctx(|e| r(&format!("引数 {n}: {e}")))?;
@@ -639,14 +646,16 @@ fn check_fn(ck: &mut Ck, f: &mut Fn) -> R<()> {
         ck.avail.push((Name::from("*"), None));
         ck.collected = Some(Vec::new());
     }
+    ck.provided = Vec::new();
     let declared = if ck.inferring { &[][..] } else { &f.effects[..] };
     for e in declared {
         let mut env = ck.val_env();
         for v in ck.effect_inst(e, &mut env).ctx(r)? {
             let k = eff_key(&v);
+            ck.provided.push(k.clone());
             if f.name == "main" && k != "Async" {
                 return Err(r(
-                    "main 関数が起こせる効果は Async だけ（ほかの効果は handle で処理する）",
+                    "main が要求できるのは Async だけ（ほかの要求は with で提供する）",
                 )
                 .into());
             }
@@ -728,6 +737,8 @@ fn check_macro_body(
         avail: Vec::new(),
         resume: Vec::new(),
         in_arm: 0,
+        exits: Vec::new(),
+        provided: Vec::new(),
         awaits: Default::default(),
         var_awaits: Default::default(),
         async_inst: Default::default(),
@@ -800,6 +811,18 @@ impl Ck {
                     ty,
                     init,
                 } => {
+                    // 名前を付けた要求（with Logger(logger)）。名前は要求の型を持ち、name.m(...) で要求の操作を呼ぶ。実行時の値は無い
+                    // ponytail: 名前は name.m(...) の形でだけ使える。値として渡すなら、関数の入口で with の並びから提供を取り出して束縛する
+                    if let Expr::Call(n, xs) = &*init
+                        && n == "#named"
+                    {
+                        let mut env = self.val_env();
+                        let v = self.effect_inst(&xs[0], &mut env)?.remove(0);
+                        let id = self.norm.fresh();
+                        self.bind(name, v, neu(Term::Var(id, name.clone())), false)?;
+                        *init = Expr::Block(Block { id: Default::default(), stmts: vec![], tail: None });
+                        continue;
+                    }
                     let t = match ty {
                         Some(ty) => {
                             let t = self.eval_type(ty)?;
@@ -855,6 +878,7 @@ impl Ck {
         if let Expr::Id(_, inner) = e {
             return self.check(inner, expected);
         }
+        self.requirement_call(e)?;
         match e {
             Expr::If(c, then, Some(els)) => {
                 want(&prim("bool"), &self.expr(c)?, "if の条件")?;
@@ -888,6 +912,7 @@ impl Ck {
             }
             Expr::Block(b) => self.check_block(b, expected),
             Expr::Match(s, arms) => self.check_match(s, arms, Some(expected)).map(|_| ()),
+            Expr::Handle(id, body, arms) => self.handle(*id, body, arms, Some(expected)).map(|_| ()),
             Expr::Call(n, args)
                 if self.lookup(n).is_none()
                     && self
@@ -923,7 +948,7 @@ impl Ck {
                     for v in self.effect_inst(e, &mut env)? {
                         if !flat(&p.effs).contains(&v) {
                             return Err(format!(
-                                "{} が必要だが、効果 {} を起こす無名関数",
+                                "{} が必要だが、要求 {} を使う無名関数",
                                 show(expected),
                                 show(&v)
                             )
@@ -931,11 +956,7 @@ impl Ck {
                         }
                     }
                 }
-                if p.reqs.is_empty() {
-                    self.lam_check(params, ret, body, &p)
-                } else {
-                    self.lam_with_reqs(params, ret, body, &p)
-                }
+                self.lam_check(params, ret, body, &p)
             }
             Expr::Call(n, args) if self.norm.ctors.contains_key(n) => {
                 let t = self.ctor_call(n, args, Some(expected))?;
@@ -1044,7 +1065,7 @@ impl Ck {
                     return Err("syn は比較できない".into());
                 }
                 if let Some(inst) = self.trait_inst("eq", &lt)? {
-                    let call = Expr::Call("std.eq".into(), vec![*l, *r, inst]);
+                    let call = Expr::Call(Name::trait_method("std.Eq".into(), "eq".into()), vec![*l, *r, inst]);
                     *e = if op == "!=" {
                         Expr::Unary("!".into(), Box::new(call))
                     } else {
@@ -1064,6 +1085,17 @@ impl Ck {
         let Expr::Method(mut x, f, xs) = std::mem::replace(e, Expr::Int(0)) else {
             unreachable!()
         };
+        // 名前を付けた要求の logger.log(m) は、要求の操作 Logger::log(m) の呼び出し
+        if let Expr::Var(n) = x.peel()
+            && let Some(V::DataT(d)) = self.lookup(n).map(|en| en.ty.clone())
+            && d.0.is_requirement()
+        {
+            let Some(op) = self.requirement_op(&d.0, &f) else {
+                return Err(format!("要求 {} にメソッド {f} は無い", d.0).into());
+            };
+            *e = Expr::Call(op, xs);
+            return self.expr_inner(e, addr);
+        }
         let t = self.expr(&mut x)?;
         // 呼び出しの結果に対するメソッドは、結果を一時変数に置いてから呼ぶ。
         // 検査済みの呼び出しをもう一度検査すると、制約の実装の引数を二重に足すため
@@ -1118,7 +1150,8 @@ impl Ck {
                     matches!(d.ctors.as_slice(), [c] if c.name.structure_owner() == Some(d.name.clone())
                         && c.fields.iter().any(|(n, _)| *n == f))
                 })
-                .map(|d| (d.name.clone(), crate::parser::qual(&d.module, &f)))
+                .map(|d| (d.name.clone(), Name::trait_method(d.name.clone(), f.clone())))
+                .filter(|(_, m)| self.norm.fns.contains_key(m))
                 .collect();
             traits.sort();
             // Self 以外の型引数（trait Fail<E> の E）は、実装に合わせて決める
@@ -1159,6 +1192,62 @@ impl Ck {
         r
     }
 
+    // 要求 req（トレイト T の要求の型）のメソッド m の操作 T::m
+    fn requirement_op(&self, req: &Name, m: &Name) -> Option<Name> {
+        self.norm.fns.values().find(|g| g.op.as_ref() == Some(req) && op_method(&g.name) == Some(m)).map(|g| g.name.clone())
+    }
+
+    // 修飾なしの m(...) で、m が関数・変数でなくトレイトのメソッドなら、要求の操作 T::m の呼び出しにする。
+    // 候補は、今使える名前の無い要求のうち m を持つもの。無ければ、m を持つすべてのトレイト（推論と、要求を書き忘れた時のエラーのため）
+    fn requirement_call(&mut self, e: &mut Expr) -> R<()> {
+        let Expr::Call(n, _) = e else { return Ok(()) };
+        if self.lookup(n).is_some()
+            || self.norm.fns.contains_key(n)
+            || self.norm.ctors.contains_key(n)
+            || self.norm.datas.contains_key(n)
+            || BUILTINS.contains(&n.as_str())
+            || STR_FNS.iter().any(|s| s.0 == n)
+            || SYN_FNS.iter().any(|s| s.0 == n)
+            || matches!(n.as_str(), "put" | "to_str" | "#resume" | "#named")
+        {
+            return Ok(());
+        }
+        let mut cands: Vec<(Name, Name)> = self
+            .norm
+            .fns
+            .values()
+            .filter(|g| op_method(&g.name) == Some(n.local()))
+            .filter_map(|g| Some((g.op.clone()?, g.name.clone())))
+            .collect();
+        cands.sort();
+        let named = |ck: &Self, req: &Name| ck.scopes.iter().any(|s| s.vars.values().any(|en| matches!(&en.ty, V::DataT(d) if d.0 == *req)));
+        let in_scope: Vec<(Name, Name)> =
+            cands.iter().filter(|(req, _)| (self.avail.iter().any(|(k, _)| k == req) || self.provided.contains(req)) && !named(self, req)).cloned().collect();
+        let pick = if in_scope.is_empty() { &cands } else { &in_scope };
+        match pick.as_slice() {
+            // 要求の操作でなければ、トレイトのメソッドの関数（self の無い fn value() -> Self など）
+            [] => {
+                let mut ms = self.norm.fns.keys().filter(|g| matches!(&g.local().kind, crate::parser::NameKind::TraitMethod(_, m) if **m == *n.local()));
+                if let (Some(m), None) = (ms.next(), ms.next()) {
+                    *n = m.clone();
+                }
+                Ok(())
+            }
+            [(_, op)] => {
+                *n = op.clone();
+                Ok(())
+            }
+            many => {
+                let reqs = many.iter().map(|(r, _)| r.to_string()).collect::<Vec<_>>().join(" と ");
+                Err(format!(
+                    "{n} は要求 {reqs} のどれのメソッドか決まらない。with {}(名前) と名前を付けて 名前.{n}(...) と呼ぶ",
+                    many[0].0
+                )
+                .into())
+            }
+        }
+    }
+
     // to_str(x) は、std.Display の実装があれば std.to_string(x, 実装) にする
     fn to_str(&mut self, e: &mut Expr) -> R<V> {
         let Expr::Call(_, mut args) = std::mem::replace(e, Expr::Int(0)) else {
@@ -1174,7 +1263,7 @@ impl Ck {
         match self.trait_inst("show", &t)? {
             Some(inst) => {
                 let a = args.remove(0);
-                let shown = Expr::Call("std.to_string".into(), vec![a, inst]);
+                let shown = Expr::Call(Name::trait_method("std.Display".into(), "to_string".into()), vec![a, inst]);
                 *e = shown;
             }
             // 構文片（syn）は、ソースの綴りを文字列にする（str_of と同じ）
@@ -1195,6 +1284,7 @@ impl Ck {
         if matches!(e, Expr::Method(..)) {
             return self.method(e, addr);
         }
+        self.requirement_call(e)?;
         if matches!(e, Expr::Call(n, _) if n == "to_str") {
             return self.to_str(e);
         }
@@ -1212,6 +1302,9 @@ impl Ck {
             Expr::Bool(_) => boolean,
             Expr::Str(_) => prim("String"),
             Expr::Var(n) => match self.lookup(n) {
+                Some(en) if matches!(&en.ty, V::DataT(d) if d.0.is_requirement()) => {
+                    return Err(format!("名前を付けた要求 {n} は {n}.メソッド(...) の形でだけ使える").into());
+                }
                 Some(en) => en.ty.clone(),
                 None if n == "Type" => V::Type,
                 None if PRIMS.contains(&n.as_str()) => V::Type,
@@ -1296,7 +1389,15 @@ impl Ck {
                 prim("num")
             }
             Expr::Binary(..) => unreachable!("expr で分けている"),
-            Expr::Handle(body, arms) => return self.handle(body, arms),
+            Expr::Handle(id, body, arms) => return self.handle(*id, body, arms, None),
+            Expr::Exit(target, x) => {
+                let Some(Some((id, t))) = self.exits.last().cloned() else {
+                    return Err("exit は with の見出しに書いた無名関数の中でだけ使える（ほかの場所の失敗は try で Result にする）".into());
+                };
+                self.check(x, &t).ctx(|e| format!("exit の値（with の値）: {e}"))?;
+                *target = Some(id);
+                prim("never")
+            }
             Expr::Await(_) => return self.await_(e, addr),
             Expr::Call(name, args) if (name == "Async" || name == "Task") && self.lookup(name).is_none() => {
                 let [a] = args.as_mut_slice() else {
@@ -1316,7 +1417,7 @@ impl Ck {
                 };
                 if !rest.is_empty() {
                     return Err(format!(
-                        "spawn に渡す値は Async のほかの効果を起こせない（{} を起こす）。失敗は本体の中で handle して Result にしてから渡す",
+                        "spawn に渡す値は Async のほかの要求を持てない（{} を要求する）。失敗は本体の中で try などで Result にしてから渡す",
                         flat(&rest).iter().map(show).collect::<Vec<_>>().join(", ")
                     )
                     .into());
@@ -1342,7 +1443,7 @@ impl Ck {
                 match name.as_str() {
                     // 終わった時に呼ぶ関数は効果を持たない
                     "task_then" => {
-                        let f = V::Pi(Rc::new(PiV { doms: vec![d.1[0].clone()], cod: prim("unit"), effs: vec![], reqs: vec![] }));
+                        let f = V::Pi(Rc::new(PiV { doms: vec![d.1[0].clone()], cod: prim("unit"), effs: vec![] }));
                         self.check(&mut args[1], &f)?;
                         prim("unit")
                     }
@@ -1392,18 +1493,18 @@ impl Ck {
                 self.async_calls.insert(addr);
                 async_t(V::VecT(Rc::new(t)), rest)
             }
-            Expr::Call(name, args) if name == "resume" && self.lookup(name).is_none() => {
-                let Some(t) = self.resume.last().cloned() else {
-                    return Err("resume は handle の腕の中でだけ使える".into());
-                };
+            // with の腕の #resume(値)。値はメソッドの戻り値の型で、呼んだ所の値になる
+            Expr::Call(name, args) if name == "#resume" => {
+                let t = self.resume.last().cloned().expect("#resume は with の腕にだけ置く");
+                let [a] = args.as_mut_slice() else { unreachable!("#resume の引数は1個") };
+                // never はどの型とも一致するので、戻り値が never のメソッドは別に確かめる
                 if t == prim("never") {
-                    return Err("戻り値の型が never の操作は resume できない".into());
-                }
-                // resume() は unit で再開する
-                match args.as_mut_slice() {
-                    [] => want(&t, &prim("unit"), "resume")?,
-                    [a] => self.check(a, &t)?,
-                    _ => return Err("resume の引数は1個".into()),
+                    let at = self.expr(a)?;
+                    if at != t {
+                        return Err(format!("戻り値が never のメソッドを提供する関数は値を返せない（exit で抜ける。実際は {}）", show(&at)).into());
+                    }
+                } else {
+                    self.check(a, &t)?;
                 }
                 prim("never")
             }
@@ -1421,7 +1522,7 @@ impl Ck {
                 }
                 if let Some(inst) = self.trait_inst("show", &t)? {
                     let a = args.remove(0);
-                    let shown = Expr::Call("std.to_string".into(), vec![a, inst]);
+                    let shown = Expr::Call(Name::trait_method("std.Display".into(), "to_string".into()), vec![a, inst]);
                     args.push(shown);
                 }
                 prim("unit")
@@ -1440,7 +1541,7 @@ impl Ck {
             Expr::Lam(params, ret, effs, body) => {
                 return self.lam_infer(params, ret, effs, body, None);
             }
-            Expr::Pi(binders, ret, effs, reqs) => return self.pi_type(binders, ret, effs, reqs),
+            Expr::Pi(binders, ret, effs) => return self.pi_type(binders, ret, effs),
             Expr::Match(s, arms) => return self.check_match(s, arms, None),
             // 書き換えられる参照。new_ref(x) で作り、read(r) で読み、write(r, x) で書く
             Expr::Call(name, args) if name == "Ref" => {
@@ -1681,17 +1782,6 @@ impl Ck {
         let expected_async = expected.and_then(async_of).map(|(t, _)| t);
         let expected = if delayed { expected_async.as_ref() } else { expected };
         let explicit = f.params.len() - f.implicit - f.insts;
-        // with の要求は、内側のスコープで選ばれた値を引数にして渡す。
-        let caps: Vec<_> = f.params[f.implicit..f.params.len() - f.insts]
-            .iter().filter(|(name, _)| name.capability_trait().is_some()).map(|(name, _)| name.clone()).collect();
-        if !caps.is_empty() && args.len() == explicit - caps.len() {
-            for cap in caps {
-                if self.lookup(&cap).is_none() {
-                    return Err(format!("関数 {name} には with {} が必要", cap.capability_trait().unwrap()).into());
-                }
-                args.push(Expr::Var(cap));
-            }
-        }
         let n = args.len();
         // 明示した型引数と、補完済みの辞書引数は個数が一致する場合がある。
         let type_argument = args.first().is_some_and(|e| match e.peel() {
@@ -1763,7 +1853,6 @@ impl Ck {
                 let at = if let Expr::Lam(ps, ret, effs, body) = a.peel_mut()
                     && let V::Pi(p) = base(&t)
                     && !p.doms.iter().any(open)
-                    && p.reqs.is_empty()
                 {
                     // 引数の型が決まっていれば、無名関数の引数の型を省ける。戻り値の型と効果は本体から求める
                     let collect = effs.is_empty() && p.effs.iter().any(open);
@@ -1838,7 +1927,7 @@ impl Ck {
                 .map(|(p, _)| fenv[0][p].clone())
                 .collect();
             self.use_effect(V::DataT(Rc::new((eff.clone(), args))))
-                .map_err(|er| er.help(format!("{name} は効果 {eff} の操作")))?;
+                .map_err(|er| er.help(format!("{name} は要求 {eff} のメソッド")))?;
         }
         // 効果の変数に Async が入れば、JavaScript では多相な関数の async 版を呼んで待つ
         let poly = f.params[..f.implicit]
@@ -1871,7 +1960,7 @@ impl Ck {
                             er.origin_source = Some(span.source);
                         }
                     }
-                    er.help(format!("関数 {name} の型が ! {s} を持つ"))
+                    er.help(format!("関数 {name} が with {s} を要求する"))
                 })?;
             }
         }
@@ -1898,7 +1987,6 @@ impl Ck {
             .chain(STR_FNS.iter().map(|s| s.0))
             .chain([
                 "put", "len", "push", "set_at", "to_str", "new_ref", "read", "write", "all",
-                "resume",
             ])
             .map(|k| k.to_string());
         let best = names
@@ -1914,31 +2002,14 @@ impl Ck {
     fn fn_type(&mut self, f: &Fn) -> R<V> {
         if f.op.is_some() {
             return Err(format!(
-                "効果の操作 {} は値として使えない（呼び出しだけができる）",
+                "要求のメソッド {} は値として使えない（呼び出しだけができる）",
                 f.name
             )
             .into());
         }
         let ret = f.ret.clone().unwrap_or(Expr::Var("unit".into()));
         let mut env: Env = vec![HashMap::new()];
-        // with の要求を持つ関数は、要求を型に載せる。値として呼ぶ時は、呼ぶ側のスコープの値と実装を引数の後ろに受け取る
-        // ponytail: 要求の集合を型引数にする（with R で多相にする）は未対応。高階関数（map など）は要求を転送できず、要求の並びが完全に一致する関数だけ渡せる。転送するには要求の並びを型引数にし、呼び出しごとに値の並びを作る
-        let captured = &f.params[..f.implicit];
-        let (params, reqs) = if captured.iter().any(|(n, _)| n.capability_type_trait().is_some()) {
-            if !captured.iter().all(|(n, _)| n.capability_type_trait().is_some()) {
-                return Err(format!("総称関数 {} は値として使えない（with の要求だけなら使える）", f.name).into());
-            }
-            let body = &f.params[f.implicit..f.params.len() - f.insts];
-            let explicit: Vec<(Name, Expr)> = body.iter().filter(|(n, _)| n.capability_trait().is_none()).cloned().collect();
-            let reqs: Vec<Name> = body.iter().filter_map(|(n, _)| n.capability_trait().cloned()).collect();
-            if reqs.len() != f.insts {
-                return Err(format!("制約つきの関数 {} は値として使えない", f.name).into());
-            }
-            (explicit, reqs)
-        } else {
-            (f.params.clone(), Vec::new())
-        };
-        match self.norm.eval_pi(&params, &ret, &f.effects, &reqs, &mut env) {
+        match self.norm.eval_pi(&f.params, &ret, &f.effects, &mut env) {
             Ok(v) => Ok(v),
             Err(Halt::Stuck) => Ok(self.norm.opaque()),
             Err(Halt::Err(e)) => Err(e),
@@ -1958,18 +2029,6 @@ impl Ck {
             self.check(a, &p.doms[i])
                 .ctx(|e| format!("{} 番目の引数: {e}", i + 1))?;
         }
-        // with の要求は、呼ぶ側のスコープの値と実装を引数の後ろに足す（関数の宣言と同じ並び）
-        let mut insts = Vec::new();
-        for tr in &p.reqs {
-            let cap = Name::capability(tr.clone(), false);
-            let Some(entry) = self.lookup(&cap) else {
-                return Err(format!("この関数の値を呼ぶには with {tr} が必要").into());
-            };
-            let ty = entry.ty.clone();
-            insts.push(self.resolve_inst(&V::DataT(Rc::new((tr.clone(), vec![ty]))), 0)?);
-            args.push(Expr::Var(cap));
-        }
-        args.extend(insts);
         // 関数型に直接 Async を書いた値の呼び出しは Async<T> の値になる（効果の変数に入った Async は除く）
         let delayed = p.effs.iter().any(|e| matches!(e, V::DataT(d) if d.0 == "Async"));
         let mut rest = Vec::new();
@@ -1989,7 +2048,7 @@ impl Ck {
                 }
                 let s = show(&eff);
                 self.use_effect(eff)
-                    .map_err(|er| er.help(format!("呼んだ関数型の値が ! {s} を持つ")))?;
+                    .map_err(|er| er.help(format!("呼んだ関数型の値が with {s} を要求する")))?;
             }
         }
         if delayed {
@@ -2010,6 +2069,8 @@ impl Ck {
             std::mem::replace(&mut self.avail, avail),
             std::mem::take(&mut self.resume),
         );
+        // 無名関数の中では、外側の with の exit は使えない
+        let saved_exits = std::mem::take(&mut self.exits);
         let r = match rt {
             Some(rt) => {
                 self.ret = rt.clone();
@@ -2027,6 +2088,7 @@ impl Ck {
         };
         self.ret = saved;
         (self.avail, self.resume) = saved_eff;
+        self.exits = saved_exits;
         if let Ok(V::Type) = r.as_ref().map(base) {
             return Err("関数は型を返せない。型を計算するなら type で定義する".into());
         }
@@ -2111,49 +2173,10 @@ impl Ck {
                 self.note_body(&e, body);
                 es.push(e);
             }
-            Ok(V::Pi(Rc::new(PiV { doms, cod, effs: es, reqs: Vec::new() })))
+            Ok(V::Pi(Rc::new(PiV { doms, cod, effs: es })))
         })();
         self.pop();
         r
-    }
-
-    // 要求を持つ期待する関数型で無名関数を検査する。要求の値と実装は、無名関数の引数の後ろに足す（本体では名前で使える）
-    fn lam_with_reqs(
-        &mut self,
-        params: &mut Vec<(Name, Option<Expr>)>,
-        ret: &Option<Box<Expr>>,
-        body: &mut Block,
-        p: &PiV,
-    ) -> R<()> {
-        self.push();
-        let hidden = self.bind_reqs(&p.reqs);
-        let r = match &hidden {
-            Ok(_) => self.lam_check(params, ret, body, p),
-            Err(_) => Ok(()),
-        };
-        self.pop();
-        let hidden = hidden?;
-        r?;
-        params.extend(hidden.iter().map(|(cap, _)| (cap.clone(), None)));
-        params.extend(hidden.iter().map(|(_, inst)| (inst.clone(), None)));
-        Ok(())
-    }
-
-    // 要求ごとに、値と実装の名前を今のスコープに束縛する。値の型は、呼ぶ側が決める未知の型（変数）
-    fn bind_reqs(&mut self, reqs: &[Name]) -> R<Vec<(Name, Name)>> {
-        let mut hidden = Vec::new();
-        for tr in reqs {
-            let id = self.norm.fresh();
-            let ty = neu(Term::Var(id, Name::capability(tr.clone(), true)));
-            let cap = Name::capability(tr.clone(), false);
-            let value = self.norm.fresh();
-            self.bind(&cap, ty.clone(), neu(Term::Var(value, cap.clone())), false)?;
-            let inst = Name::instance(self.norm.fresh());
-            let inst_value = self.norm.fresh();
-            self.bind(&inst, V::DataT(Rc::new((tr.clone(), vec![ty]))), neu(Term::Var(inst_value, inst.clone())), false)?;
-            hidden.push((cap, inst));
-        }
-        Ok(hidden)
     }
 
     // 無名関数を、期待する関数型 p で検査する。引数の型は省いてよい
@@ -2196,7 +2219,7 @@ impl Ck {
     }
 
     // 関数型 (x: A, ...) -> B の型を検査する
-    fn pi_type(&mut self, binders: &[(Name, Expr)], ret: &Expr, effs: &[Expr], _reqs: &[Name]) -> R<V> {
+    fn pi_type(&mut self, binders: &[(Name, Expr)], ret: &Expr, effs: &[Expr]) -> R<V> {
         self.push();
         let r = (|| {
             for (n, t) in binders {
@@ -2683,5 +2706,13 @@ fn main() {
             let e = check(&src.replace(from, to)).unwrap_err();
             assert!(e.contains(msg), "{to} => {e}");
         }
+    }
+}
+
+// 要求の操作 T::m の m
+fn op_method(name: &Name) -> Option<&Name> {
+    match &name.local().kind {
+        crate::parser::NameKind::Associated(_, m) => Some(m),
+        _ => None,
     }
 }
