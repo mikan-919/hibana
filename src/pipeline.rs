@@ -24,7 +24,7 @@ impl Checked {
 }
 
 /// use したファイルを `base_dir` から読み、構文解析に渡すモジュール表を作る。
-/// 組み込みのライブラリと、指定ディレクトリからのファイルを読み込む。
+/// 組み込みライブラリと、指定ディレクトリから JavaScript / TypeScript の型宣言を読み込む。
 pub fn load(source: &str, base_dir: &Path) -> R<parser::ModuleSet> {
     parser::load_modules(source, base_dir)
 }

@@ -30,15 +30,24 @@ fn find_dts(spec: &str, directory: &std::path::Path) -> Option<String> {
         .find_map(|p| std::fs::read_to_string(p).ok())
 }
 
-// use の対象のモジュール名と本文。組み込みのライブラリ、.hb のファイル、JavaScript / TypeScript のモジュール
-// use を読み込んだ結果 (モジュール名, ソース, そのソースの use "x.hb" の起点)
+// 文字列で指定した use の名前を検査し、JavaScript / TypeScript のモジュール名を返す。
+pub(super) fn external_module_name(name: &str) -> R<String> {
+    if name.ends_with(".hb")
+        || (name.starts_with('.') && std::path::Path::new(name).extension().is_none())
+    {
+        return Err(Error::from("hibana ファイルは use で読み込めない（組み込みライブラリか JavaScript / TypeScript のモジュールを指定する）"));
+    }
+    Ok(module_name(name))
+}
+
+// use の対象のモジュール名と本文。組み込みのライブラリか JavaScript / TypeScript のモジュール。
 fn load(
     name: &str,
     is_str: bool,
     dir: &std::path::Path,
     span: crate::lexer::Span,
 ) -> R<(String, String, std::path::PathBuf)> {
-    // 名前で書いたら組み込みのライブラリ、文字列で書いたらファイルか npm の型宣言
+    // 名前で書いたら組み込みのライブラリ、文字列で書いたら JavaScript / TypeScript の型宣言
     if !is_str {
         if let Some((_, t)) = LIBS.iter().find(|l| l.0 == name) {
             return Ok((
@@ -49,22 +58,12 @@ fn load(
         }
         return Err(Error::from(format!("ライブラリ {name} が無い"))
             .at(span)
-            .help("組み込み以外は use './ファイル.hb' と書く".into()));
+            .help("名前で指定できるのは組み込みライブラリだけ（std、std::math）".into()));
     }
+    let module = external_module_name(name).map_err(|error| error.at(span))?;
     let read = |p: &str| {
         std::fs::read_to_string(dir.join(p)).map_err(|e| Error::from(format!("{p}: {e}")).at(span))
     };
-    // use './lib' は lib.hb を読む
-    let hb = format!("{name}.hb");
-    let name = if name.starts_with('.') && !name.ends_with(".hb") && dir.join(&hb).is_file() {
-        hb.as_str()
-    } else {
-        name
-    };
-    if name.ends_with(".hb") {
-        let sub = dir.join(name).parent().unwrap().to_path_buf();
-        return Ok((module_name(name), read(name)?, sub));
-    }
     // JavaScript / TypeScript は型宣言から extern の宣言を作る（JS ターゲットでだけ使える）
     let dts = if name.ends_with(".ts") {
         read(name)?
@@ -80,7 +79,7 @@ fn load(
         return Err(Error::from(format!("ライブラリ {name} が無い")).at(span));
     };
     let text = crate::ts::module_text(&dts, name).map_err(|e| e.at(span))?;
-    Ok((module_name(name), text, dir.to_path_buf()))
+    Ok((module, text, dir.to_path_buf()))
 }
 
 /// 読み込んだファイルと、そのファイルで使うモジュール名。
@@ -175,11 +174,6 @@ pub fn load_modules(source: &str, directory: &std::path::Path) -> R<ModuleSet> {
                 .map_err(|error| error.with_sources(loaded.modules.iter().map(|m| &m.source)))?;
             let identity = if is_file {
                 let path = dir.join(&spec);
-                let path = if path.extension().is_none() && path.with_extension("hb").is_file() {
-                    path.with_extension("hb")
-                } else {
-                    path
-                };
                 path.canonicalize().unwrap_or(path).display().to_string()
             } else {
                 format!("builtin:{spec}")

@@ -39,7 +39,7 @@ nix develop -c cargo run -q -- tests/programs/types/refine.hb
 
 ![loadからparseとcheckを経て、eval、js、irへ分岐し、irからwasmとnativeへ進む処理](figures/overview.svg)
 
-`load` は `use` で指定されたファイルと組み込みライブラリを読み込みます。`parse` は字句・構文解析を行い、マクロ展開と名前解決を終えた構文木（ソースの構造を表すデータ）を作ります。[構文解析器](../src/frontend/parser.rs)がこれらの処理をまとめています。
+`load` は組み込みライブラリと、`use` で指定されたJavaScript・TypeScriptの型宣言を読み込みます。ほかのhibanaファイルを経路で読み込む機能はありません。`parse` は字句・構文解析を行い、マクロ展開と名前解決を終えた構文木（ソースの構造を表すデータ）を作ります。[構文解析器](../src/frontend/parser.rs)がこれらの処理をまとめています。
 
 `check` は型、トレイト、要求、細分化型の条件を検査し、省略された引数を補完します。実行用では `main` を要求し、ライブラリ用では要求しません。証明はこの段階で行い、実行時の証明処理としては残しません。
 

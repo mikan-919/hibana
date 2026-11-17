@@ -1279,7 +1279,7 @@ impl Parser<'_> {
         let wrap = |e: &str| format!("マクロ {} の展開: {e}", m.name);
         // 展開ごとに番号を振り、quote に書いた名前をその番号で付け替える
         let id = NEXT_EXPANSION.fetch_add(1, Ordering::Relaxed);
-        // 自分のモジュールの名前と、そのモジュールが use で修飾なしに取り込んだ名前（use './lib' -> * など）
+        // 自分のモジュールの名前と、そのモジュールが use で修飾なしに取り込んだ名前（use std -> * など）
         let mut names: HashMap<Name, Name> = HashMap::new();
         for u in self.uses.get(&m.module).into_iter().flatten() {
             for n in self.mod_names.get(&u.module).into_iter().flatten() {

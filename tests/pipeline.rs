@@ -139,13 +139,13 @@ fn load_uses_explicit_base_directory_without_changing_caller() {
     let b = dir.join("b");
     std::fs::create_dir_all(&a).unwrap();
     std::fs::create_dir_all(&b).unwrap();
-    std::fs::write(a.join("util.hb"), "fn value() -> int { 1 }").unwrap();
-    std::fs::write(b.join("util.hb"), "fn value() -> int { 2 }").unwrap();
-    let source = "use 'util.hb'\n";
+    std::fs::write(a.join("util.ts"), "export function value(): number { return 1; }").unwrap();
+    std::fs::write(b.join("util.ts"), "export function value(): string { return 'two'; }").unwrap();
+    let source = "use './util.ts'\n";
     hibana::parser::set_base_dir(&a);
     let loaded = pipeline::load(source, &b).unwrap();
-    assert!(loaded.modules.iter().any(|module| module.source.text.contains("{ 2 }")));
+    assert!(loaded.modules.iter().any(|module| module.source.text.contains("-> String")));
     let loaded = hibana::parser::load_modules(source, &a).unwrap();
-    assert!(loaded.modules.iter().any(|module| module.source.text.contains("{ 1 }")));
+    assert!(loaded.modules.iter().any(|module| module.source.text.contains("-> int")));
     std::fs::remove_dir_all(dir).unwrap();
 }
