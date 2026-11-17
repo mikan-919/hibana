@@ -95,7 +95,7 @@ fn main() {
 
 トレイトは、型ごとに実装を書けるメソッドの組です。`<A: Describe>` は、`A` に `Describe` の実装があることを要求します。実装が無い型を渡すとエラーです。
 
-効果（代数的効果）は、関数が外部に頼む操作です。`effect` で操作を宣言し、使う関数は `! 効果名` で宣言します。`handle` が操作を受け取って処理し、`resume()` で操作の呼び出しの直後から実行を再開します（再開は 1 回だけです）。
+効果（代数的効果）は、関数が外部に頼む操作です。`effect` で操作を宣言し、使う関数は `! 効果名` で宣言します（宣言を省くと、本体から推論します）。`handle` が操作を受け取って処理し、`resume()` で操作の呼び出しの直後から実行を再開します（再開は 1 回だけです）。
 
 ```
 use std -> *
@@ -128,6 +128,28 @@ fn main() {
 ```
 
 出力は `int 3, int 3`、`log: start`、`log: end` です。
+
+非同期は組み込みの効果 `Async` です。`Async` を持つ関数を呼ぶと、まだ走っていない値 `Async<T>` になり、`.await` を付けた所で走らせて待ちます。`all` は `Async<T>` の値の `Vec` を、`join` は種類の違う 2 つの値を並行に走らせて合流します。`Async` を持たない関数からは、`spawn` で走らせ始め、`then` で結果を受け取ります。
+
+```
+use std -> *
+
+fn fetch(id: int) -> String ! Async { 'item' + id.to_string() }
+
+fn load() -> String ! Async {
+    let first = fetch(1).await          // 待つ
+    let rest = all([fetch(2), fetch(3)])  // まだ走らない
+    first + ' ' + rest.await.join(' ')  // 並行に走らせて合流する
+}
+
+fn on_click() {                         // Async を持たない
+    spawn(load()).then(fn(s) { put(s) })
+}
+
+fn main() { on_click() }
+```
+
+出力は `item1 item2 item3` です。詳しくは仕様の 3.5 節にあります。
 
 - `==` は `Eq` の実装があればそれを使い、無ければ構造の比較をします。
 

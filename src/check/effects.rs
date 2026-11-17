@@ -257,6 +257,11 @@ impl Ck {
         let t = self.expr(x);
         self.direct_await = saved;
         let t = t?;
+        // 推論の途中では、呼んだ関数が Async を持つとまだ分かっていないことがある。.await を書いたので Async を起こすとみなす
+        if self.inferring && async_of(&t).is_none() {
+            self.use_effect(async_t_effect())?;
+            return Ok(t);
+        }
         let Some((v, rest)) = async_of(&t) else {
             self.async_calls.remove(&target);
             let poly = self.var_awaits.contains(&target) || self.async_inst.contains(&target);
@@ -325,4 +330,71 @@ impl Ck {
 // 効果の Async
 pub(super) fn async_t_effect() -> V {
     V::DataT(Rc::new(("Async".into(), vec![])))
+}
+
+// 効果の型の値を、関数の宣言に書く形の式に戻す。戻せない形（関数型・細分化型など）は None
+// ponytail: 関数型と細分化型を引数に持つ効果は宣言に戻せず、推論から落ちる（本当の検査でその効果のエラーになる）。戻すには Pi と Refine も式に戻す
+fn quote_type(v: &V) -> Option<Expr> {
+    Some(match v {
+        V::Prim(p) => Expr::Var(Name::from(*p)),
+        V::DataT(d) if d.1.is_empty() => Expr::Var(d.0.clone()),
+        V::DataT(d) => Expr::Call(d.0.clone(), d.1.iter().map(quote_type).collect::<Option<_>>()?),
+        V::VecT(a) => Expr::Call(Name::from("Vec"), vec![quote_type(a)?]),
+        V::Neu(n) => match &**n {
+            Term::Var(_, name) => Expr::Var(name.clone()),
+            _ => return None,
+        },
+        _ => return None,
+    })
+}
+
+// 効果の節（! と with の効果）を省いた関数の効果を、本体から推論して宣言に書き込む。
+// 本体の複製を検査して起きた効果を集め、変わらなくなるまで繰り返す（再帰と相互再帰の不動点）。
+// ponytail: 毎回すべての対象を検査し直し、回数は 8 回まで。遅くなれば呼び出しの依存の順に、変わった関数の呼び出し元だけを検査する
+pub(super) fn infer_effects(ck: &mut Ck, prog: &mut Program) {
+    let targets: Vec<usize> = (0..prog.fns.len())
+        .filter(|&i| {
+            let f = &prog.fns[i];
+            f.effects.is_empty() && f.op.is_none() && f.js.is_none() && !f.alias && !is_impl(&f.name)
+        })
+        .collect();
+    ck.inferring = true;
+    for _ in 0..8 {
+        let mut changed = false;
+        for &i in &targets {
+            let mut g = prog.fns[i].clone();
+            let _ = check_fn(ck, &mut g);
+            let mut found = ck.collected.take().unwrap_or_default();
+            if g.name == "main" && ck.avail.iter().any(|(k, v)| k == "Async" && v.is_some()) {
+                found.push(async_t_effect());
+            }
+            let mut effs: Vec<(String, Expr)> = Vec::new();
+            for v in flat(&found) {
+                let key = show(&v);
+                if let Some(e) = quote_type(&v)
+                    && !effs.iter().any(|(k, _)| *k == key)
+                {
+                    effs.push((key, e));
+                }
+            }
+            effs.sort_by(|a, b| a.0.cmp(&b.0));
+            let shown = |es: &[Expr]| es.iter().map(|e| format!("{e:?}")).collect::<Vec<_>>();
+            let effs: Vec<Expr> = effs.into_iter().map(|(_, e)| e).collect();
+            if shown(&effs) != shown(&prog.fns[i].effects) {
+                changed = true;
+                prog.fns[i].effects = effs;
+                ck.norm.fns.insert(prog.fns[i].name.clone(), prog.fns[i].clone());
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    ck.inferring = false;
+    ck.collected = None;
+    // 推論のための検査で記録したものは捨て、本当の検査で記録し直す
+    ck.awaits.clear();
+    ck.var_awaits.clear();
+    ck.async_inst.clear();
+    ck.async_calls.clear();
 }

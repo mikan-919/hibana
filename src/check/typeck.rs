@@ -4,7 +4,7 @@ mod traits;
 mod effects;
 #[path = "proof.rs"]
 mod proof;
-use effects::{eff_key, flat, op_site};
+use effects::{eff_key, flat, infer_effects, op_site};
 use traits::is_impl;
 
 // 型検査。型別名と細分化型の条件を評価して比べる
@@ -342,6 +342,8 @@ struct Ck {
     async_calls: std::collections::HashSet<NodeId>,
     // 検査中の .await の直下の式
     direct_await: Option<NodeId>,
+    // 効果の節を省いた関数の効果を推論している（本体の複製を検査して、起きた効果を集める）
+    inferring: bool,
     // 効果を推論している無名関数の本体で起きた効果
     collected: Option<Vec<V>>,
     // impl から作った、実装の値を作る関数（名前の順）
@@ -558,6 +560,7 @@ fn check_prog(prog: &mut Program, require_main: bool) -> R<Info> {
         async_inst: Default::default(),
         async_calls: Default::default(),
         direct_await: None,
+        inferring: false,
         collected: None,
         impls: {
             let mut v: Vec<Fn> = prog.fns.iter().filter(|f| is_impl(&f.name)).cloned().collect();
@@ -608,6 +611,7 @@ fn check_prog(prog: &mut Program, require_main: bool) -> R<Info> {
             _ => return Err("引数なしの main 関数が必要".into()),
         }
     }
+    infer_effects(&mut ck, prog);
     for f in &mut prog.fns {
         check_fn(&mut ck, f).map_err(|e| at_opt(e, f.span))?;
     }
@@ -628,7 +632,15 @@ fn check_fn(ck: &mut Ck, f: &mut Fn) -> R<()> {
         ck.bind(n, ty, neu(Term::Var(id, n.clone())), false).ctx(r)?;
     }
     ck.avail = Vec::new();
-    for e in &f.effects {
+    // 効果を推論している関数は、起きた効果を集める。main は Async だけを起こせるので、Async を起こしたかだけを見る
+    if ck.inferring && f.name == "main" {
+        ck.avail.push((Name::from("Async"), None));
+    } else if ck.inferring {
+        ck.avail.push((Name::from("*"), None));
+        ck.collected = Some(Vec::new());
+    }
+    let declared = if ck.inferring { &[][..] } else { &f.effects[..] };
+    for e in declared {
         let mut env = ck.val_env();
         for v in ck.effect_inst(e, &mut env).ctx(r)? {
             let k = eff_key(&v);
@@ -721,6 +733,7 @@ fn check_macro_body(
         async_inst: Default::default(),
         async_calls: Default::default(),
         direct_await: None,
+        inferring: false,
         collected: None,
         impls: Vec::new(),
         effect_names: Default::default(),
@@ -2049,7 +2062,7 @@ impl Ck {
                 None => None,
             };
             // 書いた効果があればそれだけを起こせる。無ければ、効果の変数を持つ関数型に渡す時は本体で起きた効果を集め、
-            // それ以外の関数型に渡す時はその効果を起こせる。期待する型の無い無名関数は効果を起こせない
+            // それ以外の関数型に渡す時はその効果を起こせる。期待する型の無い無名関数も本体で起きた効果を集める
             let mut es = Vec::new();
             let mut avail = Vec::new();
             for e in effs {
@@ -2060,7 +2073,7 @@ impl Ck {
                     es.push(v);
                 }
             }
-            let collect = matches!(hint, Some((_, true)));
+            let collect = matches!(hint, Some((_, true))) || (hint.is_none() && effs.is_empty());
             if let (Some((p, false)), true) = (hint, effs.is_empty()) {
                 for e in &p.effs {
                     for e in flat(&[e.clone()]) {

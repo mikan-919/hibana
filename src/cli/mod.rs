@@ -308,7 +308,7 @@ mod tests {
         let e = err("fn main() ! Async { work(1)\n put(1) }");
         assert!(e.contains("値を捨てている"), "{e}");
         // .await は Async の効果を起こす
-        let e = err("fn main() { put(work(1).await) }");
+        let e = err("effect Log { fn log() }\nfn g() ! Log { put(work(1).await) }\nfn main() {}");
         assert!(e.contains("! Async"), "{e}");
         // Async<T> の値は表示できない
         assert!(err("fn main() ! Async { put(work(1)) }").contains(".await"));
@@ -616,7 +616,7 @@ fn main() {
                 "効果 Ask を起こしていない",
             ),
             (
-                "fn f() ! Log { let g = fn() { log('a') } }\nfn main() {}",
+                "fn main() { let g = fn() { log('a') }\n g() }",
                 "! Log を書くか",
             ),
             (

@@ -41,6 +41,30 @@ fn checked_or(n: int) -> int ! Async {
     }
 }
 
+// 効果の節を省いた関数は、本体から効果を推論する。再帰も扱う（ここでは Async）
+fn sum_to(n: int) -> int {
+    if n == 0 { 0 } else { work(n).await + sum_to(n - 1).await }
+}
+
+effect Note {
+    fn note(m: String)
+}
+
+// 相互再帰の関数の効果も推論する（ここでは Note）
+fn ping(n: int) {
+    if n > 0 {
+        note('ping')
+        pong(n - 1)
+    }
+}
+
+fn pong(n: int) {
+    if n > 0 {
+        note('pong')
+        ping(n - 1)
+    }
+}
+
 fn main() ! Async {
     // .await を付けない呼び出しは本体を走らせない
     let a = work(arg(1))
@@ -60,6 +84,18 @@ fn main() ! Async {
         fail(m) -> m
     }
     put(r)
+    put(sum_to(2).await)
+    // 期待する型の無い無名関数も、本体から効果を推論する
+    let shout = fn(m: String) { note(m + '!') }
+    handle {
+        ping(3)
+        shout('hey')
+    } {
+        note(m) -> {
+            put(m)
+            resume()
+        }
+    }
     // spawn は Async<T> を走らせ始め、効果を持たない Task<T> を返す。then は終わった時に呼ぶ
     // JavaScript では main が戻った後に終わるので、出力が実行方式で揃うよう最後に置く
     spawn(name(6)).then(fn(s) { put('then ' + s) })
