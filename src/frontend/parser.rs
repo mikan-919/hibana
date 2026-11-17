@@ -1382,11 +1382,15 @@ impl Parser<'_> {
         let module = self.cur_module();
         let name = qual(&module, &self.ident()?);
         let span = self.span_of(start);
-        // trait Name { fn f(self) } は、対象の型を型引数 Self に持つ trait Name<Self>
-        if self.peek() == &Tok::Punct("<") {
-            return self.err("トレイトは trait Name { fn f(self) ... } と書く（対象の型は Self）");
+        // trait Name<E> { fn f(self) } は、対象の型を先頭の型引数 Self に持つ trait Name<Self, E>
+        let mut params = vec![(Name::from("Self"), Expr::Var("Type".into()))];
+        if self.eat("<") {
+            let extra = self.type_params()?;
+            if extra.iter().any(|p| p.0.is_instance()) {
+                return self.err("トレイトの型引数には制約を書けない");
+            }
+            params.extend(extra);
         }
-        let params = vec![(Name::from("Self"), Expr::Var("Type".into()))];
         let me = Expr::Call(
             name.clone(),
             params.iter().map(|p| Expr::Var(p.0.clone())).collect(),
@@ -1515,14 +1519,17 @@ impl Parser<'_> {
         let cons: Vec<_> = generics
             .extract_if(.., |p| p.0.is_instance())
             .collect();
-        // impl Name for 型 は impl Name<型>
+        // impl Name<E> for 型 は impl Name<型, E>
         let tname = self.ret_ty()?;
-        let Expr::Var(tn) = tname.peel() else {
-            return self.err("impl は impl トレイト for 型 { ... } と書く");
+        let (tn, extra) = match tname.peel() {
+            Expr::Var(tn) => (tn.clone(), vec![]),
+            Expr::Call(tn, xs) => (tn.clone(), xs.clone()),
+            _ => return self.err("impl は impl トレイト for 型 { ... } と書く"),
         };
-        let tn = tn.clone();
         self.expect("for")?;
-        let head = Expr::Call(tn.clone(), vec![self.ret_ty()?]);
+        let mut targs = vec![self.ret_ty()?];
+        targs.extend(extra);
+        let head = Expr::Call(tn.clone(), targs);
         let Expr::Call(tn, targs) = head.peel() else {
             unreachable!()
         };
@@ -1699,21 +1706,22 @@ impl Parser<'_> {
             // <A: Show + Eq> はトレイトの制約。A は型で、実装を inst#k の引数で受け取る
             let mut leaves = Vec::new();
             plus_leaves(&t, &mut leaves);
-            let traits: Option<Vec<Name>> = leaves
+            // <A: Fail<E>> の実装の型は Fail<A, E>
+            let traits: Option<Vec<(Name, Vec<Expr>)>> = leaves
                 .iter()
                 .map(|l| match l.peel() {
-                    Expr::Var(c) if self.trait_name(c).is_some() => self.trait_name(c),
+                    Expr::Var(c) => self.trait_name(c).map(|c| (c, vec![])),
+                    Expr::Call(c, xs) => self.trait_name(c).map(|c| (c, xs.clone())),
                     _ => None,
                 })
                 .collect();
             if let Some(ts) = traits {
                 params.push((n.clone(), Expr::Var("Type".into())));
-                for c in ts {
+                for (c, xs) in ts {
                     let k = params.iter().filter(|p| p.0.is_instance()).count();
-                    params.push((
-                        Name::instance(k),
-                        Expr::Call(c, vec![Expr::Var(n.clone())]),
-                    ));
+                    let mut args = vec![Expr::Var(n.clone())];
+                    args.extend(xs);
+                    params.push((Name::instance(k), Expr::Call(c, args)));
                 }
             } else {
                 if !matches!(t.peel(), Expr::Var(name) if name == "Type" || name == "Effect") {

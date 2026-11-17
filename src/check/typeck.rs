@@ -1121,9 +1121,13 @@ impl Ck {
                 .map(|d| (d.name.clone(), crate::parser::qual(&d.module, &f)))
                 .collect();
             traits.sort();
+            // Self 以外の型引数（trait Fail<E> の E）は、実装に合わせて決める
             let has_impl = traits.iter().find(|(tr, _)| {
-                let goal = V::DataT(Rc::new((tr.clone(), vec![base(&t)])));
-                self.resolve_inst(&goal, 0).is_ok()
+                let metas: Vec<usize> = (1..self.norm.datas[tr].params.len()).map(|_| self.norm.fresh()).collect();
+                let mut args = vec![base(&t)];
+                args.extend(metas.iter().map(|id| neu(Term::Var(*id, "?".into()))));
+                let goal = V::DataT(Rc::new((tr.clone(), args)));
+                self.resolve_in(&goal, 0, &metas).is_ok()
             });
             match (has_impl, traits.first()) {
                 (Some((_, m)), _) => name = m.clone(),
@@ -1777,6 +1781,19 @@ impl Ck {
             let v = self.eval_value(a)?;
             vals.push(v.clone());
             fenv[0].insert(pn.clone(), v);
+        }
+        // 引数から決まらない型引数（trait Convert<T> の T）は、制約の実装から決める
+        if infer && omit && ids.iter().any(|id| !sol.contains_key(id)) {
+            for (_, pt) in &f.params[f.params.len() - f.insts..] {
+                let t = self.norm.eval_or_opaque(pt, &mut fenv.clone())?;
+                let t = self.apply(&sol, &t)?;
+                let open: Vec<usize> = ids.iter().copied().filter(|id| !sol.contains_key(id) && mentions(&t, *id)).collect();
+                if !open.is_empty()
+                    && let Ok((_, it)) = self.resolve_in(&t, 0, &open)
+                {
+                    self.unify(&t, &it, &ids, &mut sol)?;
+                }
+            }
         }
         if infer {
             let mut solved = Vec::new();

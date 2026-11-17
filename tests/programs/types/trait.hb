@@ -38,6 +38,7 @@ fn main() {
     put([1, 2].describe())
     put(twice([Point { x: 3, y: 4 }]))
     report()
+    convert_all()
 }
 
 // 親のトレイト: Ord の実装には Eq の実装が要る。Ord の制約から Eq も使える
@@ -66,4 +67,26 @@ fn report() {
     put(same_or_max(3, 7))
     put('to_string: ' + min(p, q).to_string())
     put(contains([p, q], Point { x: 5, y: 0 }))
+}
+
+// トレイトの型引数: trait Convert<T> の実装の型は Convert<Self, T>。T は実装から決まる
+trait Convert<T> {
+    fn convert(self) -> T
+}
+
+impl Convert<String> for int {
+    fn convert(self) -> String { 'n' + self.to_string() }
+}
+
+struct Wrap<A> { value: A }
+
+impl<A> Convert<A> for Wrap<A> {
+    fn convert(self) -> A { self.value }
+}
+
+fn label<A: Convert<String>>(x: A) -> String { x.convert() + '!' }
+
+fn convert_all() {
+    put(label(3))
+    put(Wrap { value: 'w' }.convert())
 }

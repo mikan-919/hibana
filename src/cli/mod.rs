@@ -663,7 +663,7 @@ fn main() {
         let o = out(include_str!("../../tests/programs/types/trait.hb")).unwrap();
         assert_eq!(
             o,
-            "int 1\nint 2!\n(1, 2)\nPOINT\n[int 1;int 2;]\n[(3, 4);] [(3, 4);]\ntrue\ntrue\nP5,0\n7\nto_string: P1,2\ntrue\n"
+            "int 1\nint 2!\n(1, 2)\nPOINT\n[int 1;int 2;]\n[(3, 4);] [(3, 4);]\ntrue\ntrue\nP5,0\n7\nto_string: P1,2\ntrue\nn3!\nw\n"
         );
         // == は Eq の実装を使う（x だけ比べる実装なら y が違っても等しい）
         let src = "use std -> *\nstruct P { x: int, y: int }\nimpl Eq for P {\n fn eq(self, other: P) -> bool { self.x == other.x }\n}\nfn main() { put(P { x: 1, y: 2 } == P { x: 1, y: 3 }) }";
