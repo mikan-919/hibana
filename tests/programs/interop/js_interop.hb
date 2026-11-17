@@ -5,8 +5,13 @@ use './js/greet.js'
 use std -> *
 
 // Promise を返す関数は Async の効果を持つ。呼ぶ関数にも ! Async を書き、await は書かない
-fn twice_later(x: int) -> int ! Async {
+fn twice_later(x: int) -> int with Async {
     util.later(x) + util.later(x)
+}
+
+// 関数型の要求にも Async を書ける（! Async と同じ）。引数の関数は、Promise を返す関数でも普通の関数でもよい
+fn run_later(f: (int) -> int with Async, x: int) -> int with Async {
+    f(x) + 1
 }
 
 // all は並行に待つ。並行に動く処理の handle は互いに混ざらない
@@ -39,4 +44,6 @@ fn main() ! Async {
     put(all([fn() { job('a', 1) }, fn() { job('b', 2) }]))
     // 効果の多相な関数にも Async を渡せる（JavaScript では map の async 版を呼んで待つ）
     put(map([1, 2], fn(x) { util.later(x) * 10 }))
+    // 期待する関数型の Async は、無名関数が Promise を返す関数でも使える
+    put(run_later(fn(x) { util.later(x) }, 3))
 }

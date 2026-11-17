@@ -1181,12 +1181,23 @@ impl Parser<'_> {
         } else {
             None
         };
-        let effects = self.effects()?;
+        let mut effects = self.effects()?;
         let mut capabilities = Vec::new();
         if matches!(self.peek(), Tok::Ident(n) if n == "with") {
             self.pos += 1;
             loop {
                 let trait_name = self.ident()?;
+                // 括弧の無い名前は効果（with Async は ! Async と同じ）。トレイトの要求は、値の名前を括弧で書く
+                if self.peek() != &Tok::Punct("(") {
+                    if self.trait_name(&trait_name).is_some() {
+                        return self.err("トレイトの要求は with Logger(名前) と書く");
+                    }
+                    effects.push(Expr::Var(trait_name));
+                    if !self.eat(",") {
+                        break;
+                    }
+                    continue;
+                }
                 let Some(tr) = self.trait_name(&trait_name) else {
                     return self.err_at(format!("{trait_name} はトレイトでない"));
                 };

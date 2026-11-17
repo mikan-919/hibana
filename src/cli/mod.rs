@@ -448,7 +448,7 @@ mod tests {
         std::fs::remove_file(&js).unwrap();
         assert_eq!(
             String::from_utf8(r.stdout).unwrap(),
-            "50\nHIBANA!\n18\n3\n3\nHello, world\n6\n20\n[3, 5]\n[\"a2a\", \"b4b\"]\n[20, 40]\n"
+            "50\nHIBANA!\n18\n3\n3\nHello, world\n6\n20\n[3, 5]\n[\"a2a\", \"b4b\"]\n[20, 40]\n7\n"
         );
         let e = out(&src).unwrap_err();
         assert!(e.contains("JavaScript 出力"), "{e}");
@@ -792,6 +792,7 @@ fn main() {
             ("trait Logger { fn log(self, msg: String) }\nfn apply(f: (String) -> unit with Logger) { f('x') }\nfn main() {}", "with Logger が必要"),
             ("trait Logger { fn log(self, msg: String) }\nfn emit(msg: String) with Logger(l) { l.log(msg) }\nfn take(f: (String) -> unit) {}\nfn main() { take(emit) }", "with Logger"),
             ("trait Logger { fn log(self, msg: String) }\nfn emit<A>(x: A, msg: String) with Logger(l) { l.log(msg) }\nfn main() { let f = emit }", "総称関数"),
+            ("trait Logger { fn log(self, msg: String) }\nfn g() with Logger { }\nfn main() {}", "with Logger(名前)"),
         ] {
             let e = out(src).unwrap_err();
             assert!(e.contains(msg), "{src} => {e}");
