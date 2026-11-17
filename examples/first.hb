@@ -1,3 +1,4 @@
+use std -> *
 use std::math
 use std::math -> { floor }
 
@@ -25,7 +26,7 @@ macro TaggedBlock(ann:Annotation block:Block) {
 
 type Digit = int[x -> 0 <= x && x < 10]
 type NonZero = int[x -> x != 0]
-type Positive = num[x -> x > 0]
+type Positive = number[x -> x > 0]
 
 // 別型として厳密に区別したいものは struct で包む
 struct UserId(int[x -> x > 0])
@@ -35,8 +36,8 @@ struct UserId(int[x -> x > 0])
 // ==========================================
 
 struct Point {
-    x: num
-    y: num
+    x: number
+    y: number
 }
 
 enum Shape {
@@ -92,7 +93,7 @@ impl Logger for PrefixLogger {
 
 // with なしの純粋関数。Z3によりゼロ除算が起きないことが静的に保証される
 fn safe_div(a: int, b: NonZero) -> int {
-    floor(a / b)
+    a / b
 }
 
 // Logger コンテキストを要求する関数
@@ -100,7 +101,7 @@ fn describe_shape(shape: Shape)
 with Logger(logger) {
     match shape {
         Shape::Circle(center, r) -> {
-            // Positive は num の部分型(type)なので .to_string() がそのまま呼べる
+            // Positive は number の部分型(type)なので .to_string() がそのまま呼べる
             logger.log('Circle at ' + center.to_string() + ', r=' + r.to_string())
         }
         Shape::Rect(p1, p2) -> {
