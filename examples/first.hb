@@ -129,10 +129,36 @@ fn parse_digit(s: String) -> Result<Digit, String> {
 }
 
 // ==========================================
-// 7. エントリポイント
+// 7. 非同期 (with Async / .await / join / spawn)
 // ==========================================
 
-fn main() {
+// Async を要求する関数。呼んだだけでは走らず、Async<T> の値になる
+// (実際は TypeScript の Promise を返す関数などを呼ぶ。ここでは値をそのまま返す)
+fn fetch_name(id: UserId) -> String with Async {
+    'user' + id.to_string()
+}
+
+fn fetch_score(id: UserId) -> int with Async {
+    id.0 * 10
+}
+
+// 待つ場所に .await を書く。種類の違う 2 つは join で並行に走らせて合流する
+fn profile(id: UserId) -> String with Async {
+    let p = join(fetch_name(id), fetch_score(id)).await
+    p.first + ': ' + p.second.to_string()
+}
+
+// Async を持たない関数から始めるには spawn を使う (色を止める)
+// spawn は Async<T> を走らせ始め、要求を持たない Task<T> を返す
+fn notify(id: UserId) {
+    spawn(profile(id)).then(fn(s) { put('notified ' + s) })
+}
+
+// ==========================================
+// 8. エントリポイント
+// ==========================================
+
+fn main() with Async {
     put('Hello, world!')
 
     // カスタム構文マクロ (@section)
@@ -163,6 +189,13 @@ fn main() {
         describe_shape(Shape::Empty)
     }
 
+    // 非同期: .await を付けない呼び出しは走らない値になる
+    let later = profile(uid)
+    put(later.await)
+    // 無名関数で包めば、待たずに Async<T> の Vec を作れる。all で並行に走らせる
+    let ids = [UserId(2), UserId(3)]
+    put(all(map(ids, fn(id) { profile(id) })).await)
+
     // 標準入力 × パターンマッチ
     put('What color do you like?')
     let str = input()
@@ -178,4 +211,8 @@ fn main() {
         Ok(digit) -> { put('digit: ' + digit.to_string()) }
         Err(e)    -> { put('error: ' + e) }
     }
+
+    // spawn した処理は、JavaScript では main が戻った後に終わる
+    // 出力の順を実行方式で揃えるため、最後に置く
+    notify(uid)
 }
