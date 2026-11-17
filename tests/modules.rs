@@ -139,7 +139,7 @@ fn same_named_constructors_resolve_through_their_type_and_module() {
 
 #[test]
 fn effect_diagnostics_keep_the_call_and_operation_in_their_own_files() {
-    let dependency = "effect Log { fn log(message: String) }\nfn trigger() ! Log { log('entry') }";
+    let dependency = "trait Log { fn log(self, message: String) }\nfn trigger() with Log { log('entry') }";
     let files = Files::new("effect-origin", &[("dep.hb", dependency)]);
     let mut program = files
         .parse("use './dep.hb'\nfn main() { dep.trigger() }")

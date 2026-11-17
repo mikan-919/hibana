@@ -481,7 +481,7 @@ impl Interp<'_> {
             Expr::Num(n) => Value::Num(*n),
             Expr::Bool(b) => Value::Bool(*b),
             Expr::Str(s) => Value::Str(s.as_str().into()),
-            Expr::Method(..) | Expr::Macro(..) => unreachable!("型検査で弾く"),
+            Expr::Method(..) | Expr::Macro(..) | Expr::Await(_) => unreachable!("型検査で弾く・書き換える"),
             // 細分化型は実行時には名前だけを持つ型
             Expr::Refine(..) => Value::Ty("refine".into()),
             Expr::Array(items) => {
@@ -636,6 +636,20 @@ impl Interp<'_> {
                         out.push(self.apply(f, vec![])?);
                     }
                     Value::Arr(Rc::new(out))
+                } else if matches!(name.as_str(), "spawn" | "task_then" | "task_done" | "task_value" | "task_wait")
+                    && !self.fns.contains_key(name.as_str())
+                {
+                    // spawn の時点で最後まで実行し、Task<T> は結果の値そのものにする
+                    // ponytail: 実行の待ち行列を持たないので、spawn した処理が JavaScript より先に走る。待ち行列を持てば同じ順序にできる
+                    match name.as_str() {
+                        "spawn" => self.apply(&vs[0], vec![])?,
+                        "task_then" => {
+                            let t = vs.remove(0);
+                            self.apply(&vs[0], vec![t])?
+                        }
+                        "task_done" => Value::Bool(true),
+                        _ => vs.remove(0),
+                    }
                 } else if name == "new_ref" && !self.fns.contains_key(name.as_str()) {
                     Value::Ref(Rc::new(std::cell::RefCell::new(vs.pop().unwrap())))
                 } else if name == "read" && !self.fns.contains_key(name.as_str()) {
@@ -667,8 +681,8 @@ impl Interp<'_> {
                     let mut xs = xs.to_vec();
                     xs[i as usize] = x;
                     Value::Arr(Rc::new(xs))
-                } else if name == "resume" {
-                    // 腕の値として返し、perform が操作の戻り値にする
+                } else if name == "#resume" {
+                    // 腕の値として返し、perform が呼んだ所の値にする
                     Value::Data(Rc::new((
                         "$resume".into(),
                         vec![vs.pop().unwrap_or(Value::Unit)],
@@ -720,13 +734,15 @@ impl Interp<'_> {
                     .collect(),
             })),
             Expr::Pi(..) => Value::Ty("fn".into()),
-            Expr::Handle(body, arms) => {
+            Expr::Handle(node, body, arms) => {
                 self.next_h += 1;
                 let id = self.next_h;
-                let captured: HashMap<Name, Value> = env
+                let mut captured: HashMap<Name, Value> = env
                     .iter()
                     .flat_map(|s| s.iter().map(|(k, v)| (k.clone(), v.clone())))
                     .collect();
+                // 腕の中の exit は、この with の番号へ抜ける
+                captured.insert(exit_name(*node), Value::Int(id as i64));
                 let arms = arms
                     .iter()
                     .map(|a| {
@@ -750,6 +766,14 @@ impl Interp<'_> {
                     Err(Flow::Abort(h, v)) if h == id => v,
                     r => r?,
                 }
+            }
+            Expr::Exit(target, x) => {
+                let v = self.expr(x, env)?;
+                let name = exit_name(target.expect("型検査が行き先を書き込む"));
+                let Some(Value::Int(h)) = env.iter().rev().find_map(|s| s.get(&name)) else {
+                    unreachable!("exit は with の腕の中だけ")
+                };
+                return Err(Flow::Abort(*h as usize, v));
             }
             Expr::Apply(f, args) => {
                 let f = self.expr(f, env)?;
@@ -849,4 +873,9 @@ impl Interp<'_> {
             }
         })
     }
+}
+
+// with（Handle）の番号を腕に渡す変数の名前
+fn exit_name(node: crate::parser::NodeId) -> Name {
+    Name::temporary("exit", node.raw() as usize)
 }

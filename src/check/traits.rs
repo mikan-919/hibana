@@ -25,6 +25,11 @@ impl Ck {
     // トレイトの実装を探す。引数の実装（inst#k）とその親、impl の順
     // ponytail: impl が重なれば名前の順で最初のもの。重なりの検査は孤児ルールと一緒に足す
     pub(super) fn resolve_inst(&mut self, goal: &V, depth: usize) -> R<Expr> {
+        self.resolve_in(goal, depth, &[]).map(|r| r.0)
+    }
+
+    // goal の中のメタ変数 metas は、実装に合わせて決めてよい（トレイトの型引数が分からない時のメソッドの探索）。見つけた実装の型も返す
+    pub(super) fn resolve_in(&mut self, goal: &V, depth: usize, metas: &[usize]) -> R<(Expr, V)> {
         if depth > 16 {
             return Err(format!("{} の実装を探すのが終わらない", show(goal)).into());
         }
@@ -39,8 +44,8 @@ impl Ck {
         while i < cands.len() {
             let mut c = cands[i].clone();
             let t = self.expr(&mut c)?;
-            if self.unify(&t, goal, &[], &mut HashMap::new())? {
-                return Ok(c);
+            if self.unify(&t, goal, metas, &mut HashMap::new())? {
+                return Ok((c, t));
             }
             if let V::DataT(d) = base(&t)
                 && let Some(data) = self.norm.datas.get(&d.0)
@@ -65,6 +70,7 @@ impl Ck {
                 .norm
                 .eval_or_opaque(f.ret.as_ref().unwrap(), &mut fenv)?;
             let mut sol = HashMap::new();
+            ids.extend_from_slice(metas);
             if !self.unify(&rt, goal, &ids, &mut sol)? {
                 continue;
             }
@@ -80,7 +86,8 @@ impl Ck {
                 let t = self.apply(&sol, &t)?;
                 subs.push(self.resolve_inst(&t, depth + 1)?);
             }
-            return Ok(Expr::Call(f.name.clone(), subs));
+            let rt = self.apply(&sol, &rt)?;
+            return Ok((Expr::Call(f.name.clone(), subs), rt));
         }
         Err(format!("{} の実装が無い（impl で書く）", show(goal)).into())
     }
@@ -123,14 +130,25 @@ impl Ck {
                 true
             }
             (V::VecT(x), V::VecT(y)) => self.unify(x, y, metas, sol)?,
-            (V::Pi(x), V::Pi(y)) if x.doms.len() == y.doms.len() && x.reqs == y.reqs => {
+            (V::Pi(x), V::Pi(y)) if x.doms.len() == y.doms.len() => {
                 for (p, q) in x.doms.iter().zip(&y.doms).chain([(&x.cod, &y.cod)]) {
                     if !self.unify(p, q, metas, sol)? {
                         return Ok(false);
                     }
                 }
-                // 効果の変数が1つなら、相手の効果のうち残りをその値にする
-                let (xe, ye) = (flat(&x.effs), flat(&y.effs));
+                // 同じ要求（Fail<?E> と Fail<String>）は型引数を合わせる。効果の変数が1つなら、相手の効果のうち残りをその値にする
+                let (xe, mut ye) = (flat(&x.effs), flat(&y.effs));
+                for e in &xe {
+                    if let V::DataT(d) = e
+                        && let Some(k) = ye.iter().position(|y| matches!(y, V::DataT(o) if o.0 == d.0))
+                    {
+                        if !self.unify(e, &ye[k], metas, sol)? {
+                            return Ok(false);
+                        }
+                        ye.remove(k);
+                    }
+                }
+                let xe: Vec<V> = xe.into_iter().filter(|e| !matches!(e, V::DataT(_))).collect();
                 let vars: Vec<usize> = xe
                     .iter()
                     .filter_map(|e| match e {

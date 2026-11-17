@@ -350,7 +350,6 @@ impl Eval {
         binders: &[(Name, Expr)],
         ret: &Expr,
         effs: &[Expr],
-        reqs: &[Name],
         env: &mut Env,
     ) -> H<V> {
         let mut doms = Vec::new();
@@ -369,7 +368,6 @@ impl Eval {
             doms,
             cod,
             effs: es,
-            reqs: reqs.to_vec(),
         })))
     }
 
@@ -379,6 +377,7 @@ impl Eval {
             ("len", [v]) => return Ok(len(v.clone())),
             ("Vec", [a]) => return Ok(V::VecT(Rc::new(a.clone()))),
             ("Ref", [a]) => return Ok(ref_t(a.clone())),
+            ("Async" | "Task", [a]) => return Ok(V::DataT(Rc::new((name.into(), vec![a.clone()])))),
             _ if self.ctors.contains_key(name) => return Ok(V::Data(Rc::new((name.into(), args)))),
             _ if self.datas.contains_key(name) => {
                 return Ok(V::DataT(Rc::new((name.into(), args))));
@@ -478,7 +477,7 @@ impl Eval {
                     None => self.call(name, vs).map_err(Halt::Err)?,
                 }
             }
-            Expr::Pi(binders, ret, effs, reqs) => self.eval_pi(binders, ret, effs, reqs, env)?,
+            Expr::Pi(binders, ret, effs) => self.eval_pi(binders, ret, effs, env)?,
             Expr::Array(items) => {
                 let mut vs = Vec::new();
                 for a in items {
@@ -521,7 +520,9 @@ impl Eval {
             | Expr::While(..)
             | Expr::Return(_)
             | Expr::Handle(..)
+            | Expr::Exit(..)
             | Expr::Method(..)
+            | Expr::Await(_)
             | Expr::Quote(_)
             | Expr::Macro(..) => return Err(Halt::Stuck),
         })
@@ -562,7 +563,6 @@ impl Eval {
                     .iter()
                     .map(|x| self.subst(x, id, by))
                     .collect::<R<_>>()?,
-                reqs: p.reqs.clone(),
             })),
             V::Neu(n) => match &**n {
                 Term::Var(i, _) if *i == id => by.clone(),

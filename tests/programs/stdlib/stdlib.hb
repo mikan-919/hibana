@@ -15,8 +15,19 @@ test 'vec' {
     assert_eq(find([1, 2, 3], fn(x) { x > 1 }), Some(2))
 }
 
+// try は Fail の失敗を Err に、成功を Ok にする
+fn half(n: int) -> int with Fail<String> {
+    if n % 2 == 0 { n / 2 } else { fail('odd') }
+}
+
+test 'try' {
+    assert(match try(fn() { half(4) }) { Ok(n) -> n == 2 Err(_) -> false })
+    assert(match try(fn() { half(3) }) { Ok(_) -> false Err(e) -> e == 'odd' })
+    assert(match try(fn() { map([2, 4], half) }) { Ok(xs) -> xs == [1, 2] Err(_) -> false })
+}
+
 test 'String' {
-    assert_eq(join(['a', 'b', 'c'], ', '), 'a, b, c')
+    assert_eq(['a', 'b', 'c'].join(', '), 'a, b, c')
     assert_eq(repeat('ab', 3), 'ababab')
     assert(ends_with('hibana', 'ana'))
     assert(!ends_with('a', 'ana'))
@@ -27,9 +38,17 @@ test 'String' {
     assert_eq(lines('x\ny'), ['x', 'y'])
 }
 
-fn main() {
-    put(join(map(range(1, 4), fn(x) { (x * x).to_string() }), ' '))
+fn main() with Async {
+    put(map(range(1, 4), fn(x) { (x * x).to_string() }).join(' '))
+    // join は種類の違う 2 つの Async の値を並行に走らせ、両方の結果を Pair で返す
+    let p = join(twice_later(2), show_later(3)).await
+    assert_eq(p.first, 4)
+    assert_eq(p.second, '3')
 }
+
+fn twice_later(n: int) -> int with Async { n * 2 }
+
+fn show_later(n: int) -> String with Async { n.to_string() }
 
 test 'json string escapes' {
     assert_eq(stringify(JStr('a\t\r\nb')), '"a\\t\\r\\nb"')

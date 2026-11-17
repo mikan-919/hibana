@@ -67,7 +67,7 @@ fn main() {
 出力は `3`、`12`、`[10, 20, 30]`、`20` です。
 
 - 型引数は `<>` で書きます。`Vec<int>` は `int` の配列、`Option<A>` は値が無いかもしれないことを表し、`None` か `Some(値)` です。
-- `use std -> *` は標準ライブラリ（`lib/std.hb`）の名前を修飾なしで使えるようにします。`map`、`filter`、`fold`、`range`、`join`、`trim` などがあります。一覧は仕様の 10 章にあります。
+- `use std -> *` は標準ライブラリ（`lib/std.hb`）の名前を修飾なしで使えるようにします。`map`、`filter`、`fold`、`range`、`trim` などの関数と、`xs.join(sep)` などのメソッドがあります。一覧は仕様の 10 章にあります。
 - `fn(x) { ... }` は無名関数（クロージャ）で、外側の変数を使えます。引数の型は呼び出し先から推論します。
 
 ## 3. 検査される条件
@@ -91,11 +91,11 @@ fn main() {
 
 `mut` の `Vec` も、初期値と `push`・`set_at` の代入から長さを追います。ループと分岐の後は長さが分からなくなるので、添字の前に `if i < len(xs)` で確かめます。
 
-## 4. トレイト・効果
+## 4. トレイトと with
 
 トレイトは、型ごとに実装を書けるメソッドの組です。`<A: Describe>` は、`A` に `Describe` の実装があることを要求します。実装が無い型を渡すとエラーです。
 
-効果（代数的効果）は、関数が外部に頼む操作です。`effect` で操作を宣言し、使う関数は `! 効果名` で宣言します。`handle` が操作を受け取って処理し、`resume()` で操作の呼び出しの直後から実行を再開します（再開は 1 回だけです）。
+`with` は、呼び出し側の文脈から受け取るものです。関数は `with Log` のようにトレイトを要求し、要求したトレイトのメソッドを `log(msg)` と修飾なしで呼べます（要求を省くと、本体から推論します）。呼ぶ側は `with Log(値) { ... }` で提供します。値は `impl` を持つ値か、メソッドが 1 つのトレイトなら無名関数です。無名関数が値を返すと、呼んだ所から続きが動きます。`exit 値` は `with` ブロックを抜け、ブロックの値をその値にします。
 
 ```
 use std -> *
@@ -110,24 +110,52 @@ impl Describe for int {
 
 fn twice<A: Describe>(x: A) -> String { x.describe() + ', ' + x.describe() }
 
-effect Log {
-    fn log(msg: String)
+trait Log {
+    fn log(self, msg: String)
 }
 
-fn work() ! Log {
+fn work() with Log {
     log('start')
     log('end')
 }
 
+fn check(n: int) -> int with Fail<String> {
+    if n < 0 { fail('negative') } else { n }
+}
+
 fn main() {
     put(twice(3))
-    handle work() {
-        log(msg) -> { put('log: ' + msg); resume() }
+    with Log(fn(msg) { put('log: ' + msg) }) {
+        work()
     }
+    let n = with Fail(fn(e) { exit 0 }) { check(-1) }
+    put(n)
 }
 ```
 
-出力は `int 3, int 3`、`log: start`、`log: end` です。
+出力は `int 3, int 3`、`log: start`、`log: end`、`0` です。`Fail<E>` は std にあり、std の `try(fn() { check(-1) })` は失敗を `Err` にした `Result` を返します。
+
+非同期は組み込みの要求 `Async` です。`Async` を持つ関数を呼ぶと、まだ走っていない値 `Async<T>` になり、`.await` を付けた所で走らせて待ちます。`all` は `Async<T>` の値の `Vec` を、`join` は種類の違う 2 つの値を並行に走らせて合流します。`Async` を持たない関数からは、`spawn` で走らせ始め、`then` で結果を受け取ります。
+
+```
+use std -> *
+
+fn fetch(id: int) -> String with Async { 'item' + id.to_string() }
+
+fn load() -> String with Async {
+    let first = fetch(1).await          // 待つ
+    let rest = all([fetch(2), fetch(3)])  // まだ走らない
+    first + ' ' + rest.await.join(' ')  // 並行に走らせて合流する
+}
+
+fn on_click() {                         // Async を持たない
+    spawn(load()).then(fn(s) { put(s) })
+}
+
+fn main() { on_click() }
+```
+
+出力は `item1 item2 item3` です。詳しくは仕様の 3.5 節にあります。
 
 - `==` は `Eq` の実装があればそれを使い、無ければ構造の比較をします。
 
@@ -139,7 +167,7 @@ fn main() {
 use std -> *
 
 test 'join' {
-    assert_eq(join(['a', 'b'], '-'), 'a-b')
+    assert_eq(['a', 'b'].join('-'), 'a-b')
 }
 ```
 
@@ -151,4 +179,4 @@ test 'join' {
 ## 7. 次に読むもの
 
 - 言語の規則と既知の制約: `docs/spec.md`
-- [カテゴリ別の例](../tests/programs/README.md)（効果は `tests/programs/effects/effects.hb`、トレイトは `tests/programs/types/trait.hb`、マクロは `tests/programs/macros/macros.hb`）
+- [カテゴリ別の例](../tests/programs/README.md)（with は `tests/programs/effects/with.hb`、トレイトは `tests/programs/types/trait.hb`、マクロは `tests/programs/macros/macros.hb`）
