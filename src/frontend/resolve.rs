@@ -229,7 +229,7 @@ impl Resolver<'_> {
                 self.block(body);
                 self.locals.pop();
             }
-            Expr::Pi(binders, ret, effs) => {
+            Expr::Pi(binders, ret, effs, _) => {
                 self.locals.push(Vec::new());
                 for (n, t) in binders.iter_mut() {
                     self.expr(t);

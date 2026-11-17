@@ -245,7 +245,7 @@ fn desc(prog: &Program, t: &Expr, depth: usize) -> String {
         Expr::Call(n, args) if n == "Vec" && args.len() == 1 => {
             format!("{{ vec: {} }}", desc(prog, &args[0], depth + 1))
         }
-        Expr::Pi(bs, r, effs) => {
+        Expr::Pi(bs, r, effs, _) => {
             let ps: Vec<String> = bs.iter().map(|(_, t)| desc(prog, t, depth + 1)).collect();
             format!(
                 "{{ fn: [{}], ret: {}, async: {} }}",
@@ -591,6 +591,10 @@ impl Gen<'_> {
                 None => match self.fns.get(n.as_str()) {
                     Some(f) if f.alias && f.params.is_empty() => {
                         self.let_(format!("{}()", ident("f_", n)))
+                    }
+                    // 要求を持つ関数の値は、呼ぶ側が要求の値と実装を後ろに足すので、型引数の位置を undefined で埋めて並びを合わせる
+                    Some(f) if f.params[..f.implicit].iter().any(|(n, _)| n.capability_type_trait().is_some()) => {
+                        format!("((...a) => {}({}...a))", ident("f_", n), "undefined, ".repeat(f.implicit))
                     }
                     Some(_) => ident("f_", n),
                     // 型は名前の文字列

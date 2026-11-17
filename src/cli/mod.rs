@@ -789,6 +789,9 @@ fn main() {
             ("fn main() { let x = quote { 1 } }", "マクロ本体の中でだけ"),
             ("macro m('m' a:Ident) { quote { put('${a') } }\nfn main() {}", "対応する }"),
             ("macro m('m' a:Ident) { quote { put('${}') } }\nfn main() {}", "式が無い"),
+            ("trait Logger { fn log(self, msg: String) }\nfn apply(f: (String) -> unit with Logger) { f('x') }\nfn main() {}", "with Logger が必要"),
+            ("trait Logger { fn log(self, msg: String) }\nfn emit(msg: String) with Logger(l) { l.log(msg) }\nfn take(f: (String) -> unit) {}\nfn main() { take(emit) }", "with Logger"),
+            ("trait Logger { fn log(self, msg: String) }\nfn emit<A>(x: A, msg: String) with Logger(l) { l.log(msg) }\nfn main() { let f = emit }", "総称関数"),
         ] {
             let e = out(src).unwrap_err();
             assert!(e.contains(msg), "{src} => {e}");

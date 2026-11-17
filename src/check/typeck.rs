@@ -54,6 +54,8 @@ pub(crate) struct PiV {
     pub(super) cod: V,
     // 呼ぶと起きる効果
     pub(super) effs: Vec<V>,
+    // 呼ぶ時に、呼ぶ側のスコープから渡す要求（トレイトの名前）。引数の後ろに、要求の値、実装の順に足す
+    pub(super) reqs: Vec<Name>,
 }
 
 // js は JavaScript の値をそのまま持ち回る型（extern で使う）。never は戻らない効果の操作（fail など）の戻り値の型
@@ -182,21 +184,17 @@ fn show(v: &V) -> String {
         V::Prim(p) => p.to_string(),
         V::VecT(a) => format!("Vec<{}>", show(a)),
         V::Refine(r) => format!("{}[_ -> {}]", show(&r.0), show(&r.1)),
-        V::Pi(p) if flat(&p.effs).is_empty() => format!(
-            "({}) -> {}",
-            p.doms.iter().map(show).collect::<Vec<_>>().join(", "),
-            show(&p.cod)
-        ),
-        V::Pi(p) => format!(
-            "({}) -> {} ! {}",
-            p.doms.iter().map(show).collect::<Vec<_>>().join(", "),
-            show(&p.cod),
-            flat(&p.effs)
-                .iter()
-                .map(show)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
+        V::Pi(p) => {
+            let effs = flat(&p.effs).iter().map(show).collect::<Vec<_>>().join(", ");
+            let reqs = p.reqs.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(", ");
+            format!(
+                "({}) -> {}{}{}",
+                p.doms.iter().map(show).collect::<Vec<_>>().join(", "),
+                show(&p.cod),
+                if effs.is_empty() { String::new() } else { format!(" ! {effs}") },
+                if reqs.is_empty() { String::new() } else { format!(" with {reqs}") },
+            )
+        }
         V::Syn(k) => format!("syn<{k}>"),
         V::Neu(n) => match &**n {
             Term::Var(_, name) => name.to_string(),
@@ -323,7 +321,7 @@ fn same(a: &V, b: &V) -> bool {
         // 起こす効果の少ない関数は、多い関数として使える
         (V::Pi(x), V::Pi(y)) => {
             let xe = flat(&x.effs);
-            x.doms == y.doms && x.cod == y.cod && flat(&y.effs).iter().all(|e| xe.contains(e))
+            x.doms == y.doms && x.cod == y.cod && x.reqs == y.reqs && flat(&y.effs).iter().all(|e| xe.contains(e))
         }
         (a, b) => a == b,
     }
@@ -407,7 +405,7 @@ pub(crate) fn walk(e: &Expr, f: &mut dyn FnMut(&Expr)) {
             }
             block(body, f);
         }
-        Expr::Pi(bs, r, _) => {
+        Expr::Pi(bs, r, ..) => {
             bs.iter().for_each(|(_, t)| walk(t, f));
             walk(r, f);
         }
@@ -856,7 +854,11 @@ impl Ck {
                         }
                     }
                 }
-                self.lam_check(params, ret, body, &p)
+                if p.reqs.is_empty() {
+                    self.lam_check(params, ret, body, &p)
+                } else {
+                    self.lam_with_reqs(params, ret, body, &p)
+                }
             }
             Expr::Call(n, args) if self.norm.ctors.contains_key(n) => {
                 let t = self.ctor_call(n, args, Some(expected))?;
@@ -1326,7 +1328,7 @@ impl Ck {
             Expr::Lam(params, ret, effs, body) => {
                 return self.lam_infer(params, ret, effs, body, None);
             }
-            Expr::Pi(binders, ret, effs) => return self.pi_type(binders, ret, effs),
+            Expr::Pi(binders, ret, effs, reqs) => return self.pi_type(binders, ret, effs, reqs),
             Expr::Match(s, arms) => return self.check_match(s, arms, None),
             // 書き換えられる参照。new_ref(x) で作り、read(r) で読み、write(r, x) で書く
             Expr::Call(name, args) if name == "Ref" => {
@@ -1644,6 +1646,7 @@ impl Ck {
                 let at = if let Expr::Lam(ps, ret, effs, body) = a.peel_mut()
                     && let V::Pi(p) = base(&t)
                     && !p.doms.iter().any(open)
+                    && p.reqs.is_empty()
                 {
                     // 引数の型が決まっていれば、無名関数の引数の型を省ける。戻り値の型と効果は本体から求める
                     let collect = effs.is_empty() && p.effs.iter().any(open);
@@ -1774,7 +1777,24 @@ impl Ck {
         }
         let ret = f.ret.clone().unwrap_or(Expr::Var("unit".into()));
         let mut env: Env = vec![HashMap::new()];
-        match self.norm.eval_pi(&f.params, &ret, &f.effects, &mut env) {
+        // with の要求を持つ関数は、要求を型に載せる。値として呼ぶ時は、呼ぶ側のスコープの値と実装を引数の後ろに受け取る
+        // ponytail: 要求の集合を型引数にする（with R で多相にする）は未対応。高階関数（map など）は要求を転送できず、要求の並びが完全に一致する関数だけ渡せる。転送するには要求の並びを型引数にし、呼び出しごとに値の並びを作る
+        let captured = &f.params[..f.implicit];
+        let (params, reqs) = if captured.iter().any(|(n, _)| n.capability_type_trait().is_some()) {
+            if !captured.iter().all(|(n, _)| n.capability_type_trait().is_some()) {
+                return Err(format!("総称関数 {} は値として使えない（with の要求だけなら使える）", f.name).into());
+            }
+            let body = &f.params[f.implicit..f.params.len() - f.insts];
+            let explicit: Vec<(Name, Expr)> = body.iter().filter(|(n, _)| n.capability_trait().is_none()).cloned().collect();
+            let reqs: Vec<Name> = body.iter().filter_map(|(n, _)| n.capability_trait().cloned()).collect();
+            if reqs.len() != f.insts {
+                return Err(format!("制約つきの関数 {} は値として使えない", f.name).into());
+            }
+            (explicit, reqs)
+        } else {
+            (f.params.clone(), Vec::new())
+        };
+        match self.norm.eval_pi(&params, &ret, &f.effects, &reqs, &mut env) {
             Ok(v) => Ok(v),
             Err(Halt::Stuck) => Ok(self.norm.opaque()),
             Err(Halt::Err(e)) => Err(e),
@@ -1783,7 +1803,7 @@ impl Ck {
 
     // 関数型 t の値を args で呼んだ時の型
     // e は呼び出しの式。Async の効果を持つ関数なら、JavaScript で待つ呼び出しとして記録する
-    fn apply_type(&mut self, t: &V, args: &mut [Expr], addr: NodeId) -> R<V> {
+    fn apply_type(&mut self, t: &V, args: &mut Vec<Expr>, addr: NodeId) -> R<V> {
         let V::Pi(p) = base(t) else {
             return Err(format!("関数でない値（{}）を呼んでいる", show(t)).into());
         };
@@ -1794,6 +1814,18 @@ impl Ck {
             self.check(a, &p.doms[i])
                 .ctx(|e| format!("{} 番目の引数: {e}", i + 1))?;
         }
+        // with の要求は、呼ぶ側のスコープの値と実装を引数の後ろに足す（関数の宣言と同じ並び）
+        let mut insts = Vec::new();
+        for tr in &p.reqs {
+            let cap = Name::capability(tr.clone(), false);
+            let Some(entry) = self.lookup(&cap) else {
+                return Err(format!("この関数の値を呼ぶには with {tr} が必要").into());
+            };
+            let ty = entry.ty.clone();
+            insts.push(self.resolve_inst(&V::DataT(Rc::new((tr.clone(), vec![ty]))), 0)?);
+            args.push(Expr::Var(cap));
+        }
+        args.extend(insts);
         for eff in &p.effs {
             for eff in flat(&[eff.clone()]) {
                 if eff_key(&eff) == "Async" {
@@ -1922,10 +1954,49 @@ impl Ck {
                 self.note_body(&e, body);
                 es.push(e);
             }
-            Ok(V::Pi(Rc::new(PiV { doms, cod, effs: es })))
+            Ok(V::Pi(Rc::new(PiV { doms, cod, effs: es, reqs: Vec::new() })))
         })();
         self.pop();
         r
+    }
+
+    // 要求を持つ期待する関数型で無名関数を検査する。要求の値と実装は、無名関数の引数の後ろに足す（本体では名前で使える）
+    fn lam_with_reqs(
+        &mut self,
+        params: &mut Vec<(Name, Option<Expr>)>,
+        ret: &Option<Box<Expr>>,
+        body: &mut Block,
+        p: &PiV,
+    ) -> R<()> {
+        self.push();
+        let hidden = self.bind_reqs(&p.reqs);
+        let r = match &hidden {
+            Ok(_) => self.lam_check(params, ret, body, p),
+            Err(_) => Ok(()),
+        };
+        self.pop();
+        let hidden = hidden?;
+        r?;
+        params.extend(hidden.iter().map(|(cap, _)| (cap.clone(), None)));
+        params.extend(hidden.iter().map(|(_, inst)| (inst.clone(), None)));
+        Ok(())
+    }
+
+    // 要求ごとに、値と実装の名前を今のスコープに束縛する。値の型は、呼ぶ側が決める未知の型（変数）
+    fn bind_reqs(&mut self, reqs: &[Name]) -> R<Vec<(Name, Name)>> {
+        let mut hidden = Vec::new();
+        for tr in reqs {
+            let id = self.norm.fresh();
+            let ty = neu(Term::Var(id, Name::capability(tr.clone(), true)));
+            let cap = Name::capability(tr.clone(), false);
+            let value = self.norm.fresh();
+            self.bind(&cap, ty.clone(), neu(Term::Var(value, cap.clone())), false)?;
+            let inst = Name::instance(self.norm.fresh());
+            let inst_value = self.norm.fresh();
+            self.bind(&inst, V::DataT(Rc::new((tr.clone(), vec![ty]))), neu(Term::Var(inst_value, inst.clone())), false)?;
+            hidden.push((cap, inst));
+        }
+        Ok(hidden)
     }
 
     // 無名関数を、期待する関数型 p で検査する。引数の型は省いてよい
@@ -1968,7 +2039,7 @@ impl Ck {
     }
 
     // 関数型 (x: A, ...) -> B の型を検査する
-    fn pi_type(&mut self, binders: &[(Name, Expr)], ret: &Expr, effs: &[Expr]) -> R<V> {
+    fn pi_type(&mut self, binders: &[(Name, Expr)], ret: &Expr, effs: &[Expr], _reqs: &[Name]) -> R<V> {
         self.push();
         let r = (|| {
             for (n, t) in binders {

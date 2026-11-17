@@ -53,8 +53,8 @@ pub enum Expr {
         Vec<Expr>,
         Block,
     ),
-    // 関数型 (x: A, ...) -> B ! 効果。名前の無い引数は "_"
-    Pi(Vec<(Name, Expr)>, Box<Expr>, Vec<Expr>),
+    // 関数型 (x: A, ...) -> B ! 効果 with 要求。名前の無い引数は "_"。要求はトレイトの名前
+    Pi(Vec<(Name, Expr)>, Box<Expr>, Vec<Expr>, Vec<Name>),
     // 式の値の関数を呼ぶ
     Apply(Box<Expr>, Vec<Expr>),
     // handle 式 { 操作(引数) => 式 ... }。腕の ctor は操作の名前、binds は引数
@@ -237,7 +237,7 @@ fn depends_on_value(ty: &Expr, names: &[Name]) -> bool {
         Expr::Unary(_, x) | Expr::Field(x, _) => depends_on_value(x, names),
         Expr::Binary(_, a, b) | Expr::Index(a, b) => depends_on_value(a, names) || depends_on_value(b, names),
         Expr::Refine(base, _, _) => depends_on_value(base, names),
-        Expr::Pi(params, ret, effects) => {
+        Expr::Pi(params, ret, effects, _) => {
             let mut local = names.to_vec();
             for (name, arg_ty) in params {
                 if depends_on_value(arg_ty, &local) { return true; }
@@ -1231,6 +1231,38 @@ impl Parser<'_> {
         })
     }
 
+    // 関数型の戻り値の後ろの ! 効果と with 要求
+    fn pi_rest(&mut self, binders: Vec<(Name, Expr)>, ret: Box<Expr>) -> R<Expr> {
+        let mut effects = self.effects()?;
+        let reqs = self.type_requirements(&mut effects)?;
+        Ok(Expr::Pi(binders, ret, effects, reqs))
+    }
+
+    // 関数型の with 要求。トレイトの名前は要求（値は呼ぶ側のスコープから渡される）、それ以外は効果（with Async）
+    // ponytail: 名前の無い引数の並びでは、次の型も要求か効果と読むので、関数型を括弧で囲む（effects と同じ）
+    fn type_requirements(&mut self, effects: &mut Vec<Expr>) -> R<Vec<Name>> {
+        let mut reqs: Vec<Name> = Vec::new();
+        if !matches!(self.peek(), Tok::Ident(n) if n == "with") {
+            return Ok(reqs);
+        }
+        self.pos += 1;
+        loop {
+            let name = self.ident()?;
+            match self.trait_name(&name) {
+                Some(tr) if reqs.contains(&tr) => return self.err("同じトレイトの要求は一度だけ書ける"),
+                Some(tr) => reqs.push(tr),
+                None => effects.push(Expr::Var(name)),
+            }
+            // 引数の並び（名前: 型）の , は、要求の続きにしない
+            let next_param = matches!(self.toks.get(self.pos + 1).map(|t| &t.tok), Some(Tok::Ident(_)))
+                && self.toks.get(self.pos + 2).map(|t| &t.tok) == Some(&Tok::Punct(":"));
+            if next_param || !self.eat(",") {
+                break;
+            }
+        }
+        Ok(reqs)
+    }
+
     // ! 効果, ... 。効果は型の式。引数の並びの中の関数型では、, の後が 名前: なら次の引数
     // ponytail: 名前の無い引数の並び (int, (int) -> int ! Log, str) では str も効果と読むので、関数型を括弧で囲む
     fn effects(&mut self) -> R<Vec<Expr>> {
@@ -1410,7 +1442,7 @@ impl Parser<'_> {
                 let b = self.block()?;
                 fns.push(mk(Name::default_method(name.clone(), m.clone()), b));
             }
-            fields.push((m.clone(), Expr::Pi(ps.clone(), Box::new(ret), effects)));
+            fields.push((m.clone(), Expr::Pi(ps.clone(), Box::new(ret), effects, Vec::new())));
             info.methods
                 .push((m, ps.into_iter().map(|p| p.0).collect(), has));
             self.eat(",");
@@ -2202,7 +2234,7 @@ impl Parser<'_> {
                         .map(|(n, t)| (n.unwrap_or("_".into()), t))
                         .collect();
                     let ret = Box::new(self.binary(5)?);
-                    Expr::Pi(binders, ret, self.effects()?)
+                    self.pi_rest(binders, ret)?
                 } else if let [(None, _)] = entries.as_slice() {
                     entries.pop().unwrap().1
                 } else {

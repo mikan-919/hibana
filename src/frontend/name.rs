@@ -179,6 +179,14 @@ impl Name {
         }
     }
 
+    // 型の引数に使う、要求（with の値の型）のトレイトの名前
+    pub fn capability_type_trait(&self) -> Option<&Name> {
+        match &self.kind {
+            NameKind::Capability(trait_name, true) => Some(trait_name),
+            _ => None,
+        }
+    }
+
     pub fn structure_owner(&self) -> Option<Name> {
         match &self.kind {
             NameKind::Qualified(module, local) => local

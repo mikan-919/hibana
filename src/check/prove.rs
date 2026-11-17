@@ -350,6 +350,7 @@ impl Eval {
         binders: &[(Name, Expr)],
         ret: &Expr,
         effs: &[Expr],
+        reqs: &[Name],
         env: &mut Env,
     ) -> H<V> {
         let mut doms = Vec::new();
@@ -368,6 +369,7 @@ impl Eval {
             doms,
             cod,
             effs: es,
+            reqs: reqs.to_vec(),
         })))
     }
 
@@ -476,7 +478,7 @@ impl Eval {
                     None => self.call(name, vs).map_err(Halt::Err)?,
                 }
             }
-            Expr::Pi(binders, ret, effs) => self.eval_pi(binders, ret, effs, env)?,
+            Expr::Pi(binders, ret, effs, reqs) => self.eval_pi(binders, ret, effs, reqs, env)?,
             Expr::Array(items) => {
                 let mut vs = Vec::new();
                 for a in items {
@@ -560,6 +562,7 @@ impl Eval {
                     .iter()
                     .map(|x| self.subst(x, id, by))
                     .collect::<R<_>>()?,
+                reqs: p.reqs.clone(),
             })),
             V::Neu(n) => match &**n {
                 Term::Var(i, _) if *i == id => by.clone(),

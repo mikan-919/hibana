@@ -123,7 +123,7 @@ impl Ck {
                 true
             }
             (V::VecT(x), V::VecT(y)) => self.unify(x, y, metas, sol)?,
-            (V::Pi(x), V::Pi(y)) if x.doms.len() == y.doms.len() => {
+            (V::Pi(x), V::Pi(y)) if x.doms.len() == y.doms.len() && x.reqs == y.reqs => {
                 for (p, q) in x.doms.iter().zip(&y.doms).chain([(&x.cod, &y.cod)]) {
                     if !self.unify(p, q, metas, sol)? {
                         return Ok(false);
