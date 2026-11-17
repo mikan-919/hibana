@@ -1,6 +1,6 @@
 # WebAssembly を Web から使う
 
-当面の WASM ターゲットは、型検査した関数を JavaScript から呼ぶためのライブラリです。`main` は不要です。既存のインタプリタ・JavaScript・C ターゲットも引き続き使えます。
+当面の WASM ターゲットは、型検査した関数を JavaScript から呼ぶためのライブラリです。`main` は不要です。既存のインタプリタ・JavaScript ターゲットも引き続き使えます。
 
 ## Rust API で生成する
 
@@ -39,15 +39,19 @@ console.log(api.greet("hibana"));
 ```
 
 - `int` の引数は安全な整数の `Number` または符号付き 64 ビット範囲の `BigInt`。戻り値は `BigInt` です。
-- `str` は JavaScript の文字列です。UTF-8 として WASM のメモリへ渡します。
+- `num` は有限な `Number` で渡します。WASM の境界では `f64` になり、`NaN` と無限大は拒否します。
+- `String` は JavaScript の文字列です。UTF-8 として WASM のメモリへ渡します。
+- `bool` は JavaScript の真偽値で渡し、整数の0・1は受け付けません。
 - 戻り値のない関数は `undefined` を返します。
-- `extern "browser" { fn show(message: str) }` などの外部関数は、`imports.hibana_host.show` に同期 JavaScript 関数を指定します。WASM では extern のモジュール文字列ではなく、関数名で接続します。
+- `extern "browser" { fn show(message: String) }` などの外部関数は、`imports.hibana_host.show` に同期 JavaScript 関数を指定します。WASM では extern のモジュール文字列ではなく、関数名で接続します。
 - ホスト関数も同じ型変換を使います。非同期関数や Promise は扱いません。
 - 接続コードは呼び出しごとに一時メモリをリセットします。ホスト関数から同じインスタンスの公開関数へ再入することはできません。
 
+`input()` は `imports.hibana.read(fd, target)` に同期の読み取り関数を渡して使えます。`fd` は標準入力の0、`target` は書き込み先の `Uint8Array` です。書き込んだバイト数を返し、入力終了は0、失敗は負の値にします。指定を省いた Node.js では標準入力を読みます。`put` の出力先は `imports.hibana.print`（省略時は `console.log`）です。
+
 ## 現在の対応範囲
 
-整数演算、不変な `let`、関数呼び出し、文字列リテラル・引数・戻り値、外部関数の呼び出しに対応します。文字列連結、可変変数、分岐、ループ、配列、構造体、GC、効果ハンドラーはこの WASM 経路では未対応です。言語全体の機能が WASM で動く段階ではありません。
+整数・`num` の演算、変数、分岐、ループ、文字列、配列、構造体、トレイト、`with`、標準入力、効果ハンドラーに対応し、`examples/first.hb` は4つの実行方式で出力を比較しています。`num` の指数は `int` の範囲内の整数に限り、小数の指数は未対応です。`resume` は効果の腕の末尾で使います。公開関数と外部関数の境界では `int`・`num`・`String`・`bool`・`unit` を渡せます。メモリの自動回収には未対応です。
 
 文字列の一時領域はバンプアロケータで確保します。呼び出し終了後は再利用されますが、増えた WASM メモリは縮みません。JS に返した文字列はコピーされ、次の呼び出し後も使えます。生の WASM 関数やポインタを直接呼ぶのではなく、生成された接続コードを使ってください。
 
@@ -55,4 +59,4 @@ console.log(api.greet("hibana"));
 
 `hibana::to_web(source, &exports)` は一度の型検査と IR 変換から `WebOutput { wasm, javascript }` を返します。ファイルの保存は呼び出し側で行います。
 
-WASM 単体は `hibana::to_wasm_library(source, &exports)`、接続コード単体は `hibana::to_js_glue(source, &exports)` で生成できます。`hibana run file.hb` の実行環境は`print` と `now_ms` を備えた CLI 用であり、ブラウザのホスト関数を提供するものではありません。
+WASM 単体は `hibana::to_wasm_library(source, &exports)`、接続コード単体は `hibana::to_js_glue(source, &exports)` で生成できます。

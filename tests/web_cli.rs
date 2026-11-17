@@ -7,7 +7,7 @@ fn web_api_emits_pair_and_runs_generated_module() {
     let source = dir.join("hello.web.hb");
     std::fs::write(
         &source,
-        "fn echo(s: str) -> str { s }\nfn answer(n: int) -> int { n + 1 }\n",
+        "fn echo(s: String) -> String { s }\nfn answer(n: int) -> int { n + 1 }\n",
     )
     .unwrap();
     let out = dir.join("artifacts");
@@ -36,10 +36,10 @@ if (api.echo('日本語🌸') !== '日本語🌸' || api.answer(41) !== 42n) thr
 fn removed_codegen_commands_are_rejected() {
     let dir = std::env::temp_dir().join(format!("hibana-removed-cli-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("input.hb"), "fn main() { print(42) }").unwrap();
-    for command in ["ir", "wasm", "glue", "web", "js", "c", "build"] {
+    std::fs::write(dir.join("input.hb"), "fn main() { put(42) }").unwrap();
+    for command in ["ir", "wasm", "glue", "web", "js", "c", "run"] {
         // A same-named file must not revive the removed command through implicit eval.
-        std::fs::write(dir.join(command), "fn main() { print(42) }").unwrap();
+        std::fs::write(dir.join(command), "fn main() { put(42) }").unwrap();
         for args in [
             vec![command],
             vec![command, "input.hb"],
@@ -61,5 +61,5 @@ fn removed_codegen_commands_are_rejected() {
 
 #[test]
 fn web_api_rejects_empty_exports() {
-    assert!(hibana::to_web("fn echo(s: str) -> str { s }", &[]).is_err());
+    assert!(hibana::to_web("fn echo(s: String) -> String { s }", &[]).is_err());
 }

@@ -1,203 +1,126 @@
-// 標準ライブラリ。use std.* で修飾なしに使う
+// 標準ライブラリ。use std -> * で修飾なしに使う
 
 // ---- Option と Result ----
 
 enum Option<A> { None, Some(value: A) }
 enum Result<A, E> { Ok(value: A), Err(error: E) }
 
+// 符号 - と10進数字を読み、文字列全体が整数かを検査する
+fn parse_int(s: String) -> Result<int, String> {
+    let parsed = parse_json_int(s, 0)
+    if parsed.ok && parsed.pos == len(s) {
+        match parsed.value {
+            JInt(n) -> Ok(n)
+            _ -> Err('整数として読めない')
+        }
+    } else {
+        Err('整数として読めない')
+    }
+}
+
 // ---- トレイト ----
 
 // 等しさ。実装がある型では == と != がこれを使う
-trait Eq<A> {
-    fn eq(a: A, b: A) -> bool
+trait Eq {
+    fn eq(self, other: Self) -> bool
 }
 
-// 順序。lt(a, b) は a が b より前
-trait Ord<A>: Eq<A> {
-    fn lt(a: A, b: A) -> bool
+// 順序。a.lt(b) は a が b より前
+trait Ord: Eq {
+    fn lt(self, other: Self) -> bool
 }
 
-// 文字列にする。実装がある型では to_str と print がこれを使う
-trait Show<A> {
-    fn show(x: A) -> str
+// 文字列にする。実装がある型では .to_string() と put がこれを使う
+trait Display {
+    fn to_string(self) -> String
 }
 
-impl Eq<int> {
-    fn eq(a: int, b: int) -> bool { a == b }
+impl Eq for int {
+    fn eq(self, other: int) -> bool { self == other }
 }
 
-impl Eq<str> {
-    fn eq(a: str, b: str) -> bool { a == b }
+impl Eq for String {
+    fn eq(self, other: String) -> bool { self == other }
 }
 
-impl Eq<bool> {
-    fn eq(a: bool, b: bool) -> bool { a == b }
+impl Eq for bool {
+    fn eq(self, other: bool) -> bool { self == other }
 }
 
-impl Ord<int> {
-    fn lt(a: int, b: int) -> bool { a < b }
+impl Ord for int {
+    fn lt(self, other: int) -> bool { self < other }
 }
 
-impl Show<int> {
-    fn show(x: int) -> str { to_str(x) }
+impl Display for int {
+    fn to_string(self) -> String { to_str(self) }
 }
 
-impl Show<str> {
-    fn show(x: str) -> str { x }
+impl Display for String {
+    fn to_string(self) -> String { self }
 }
 
-impl Show<bool> {
-    fn show(x: bool) -> str { to_str(x) }
+impl Display for bool {
+    fn to_string(self) -> String { to_str(self) }
 }
 
-impl<A: Eq> Eq<Vec<A>> {
-    fn eq(a: Vec<A>, b: Vec<A>) -> bool {
-        if len(a) != len(b) { return false }
-        for i in 0..len(a) {
-            if i < len(b) { if !eq(a[i], b[i]) { return false } }
+impl<A: Eq> Eq for Vec<A> {
+    fn eq(self, other: Vec<A>) -> bool {
+        if len(self) != len(other) { return false }
+        for i in 0..len(self) {
+            if i < len(other) { if !self[i].eq(other[i]) { return false } }
         }
         true
     }
 }
 
-impl<A: Show> Show<Vec<A>> {
-    fn show(xs: Vec<A>) -> str {
+impl<A: Display> Display for Vec<A> {
+    fn to_string(self) -> String {
         let mut s = '['
-        for i in 0..len(xs) {
+        for i in 0..len(self) {
             if i > 0 { s = s + ', ' }
-            s = s + show(xs[i])
+            s = s + self[i].to_string()
         }
         s + ']'
     }
 }
 
-impl<A: Eq> Eq<Option<A>> {
-    fn eq(a: Option<A>, b: Option<A>) -> bool {
-        match a {
-            None => match b {
-                None => true
-                Some(y) => false
+impl<A: Eq> Eq for Option<A> {
+    fn eq(self, other: Option<A>) -> bool {
+        match self {
+            None -> match other {
+                None -> true
+                Some(y) -> false
             }
-            Some(x) => match b {
-                None => false
-                Some(y) => eq(x, y)
+            Some(x) -> match other {
+                None -> false
+                Some(y) -> x.eq(y)
             }
         }
     }
 }
 
-impl<A: Show> Show<Option<A>> {
-    fn show(o: Option<A>) -> str {
-        match o {
-            None => 'None'
-            Some(x) => 'Some(' + show(x) + ')'
+impl<A: Display> Display for Option<A> {
+    fn to_string(self) -> String {
+        match self {
+            None -> 'None'
+            Some(x) -> 'Some(' + x.to_string() + ')'
         }
     }
 }
 
 fn max<A: Ord>(a: A, b: A) -> A {
-    if lt(a, b) { b } else { a }
+    if a.lt(b) { b } else { a }
 }
 
 fn min<A: Ord>(a: A, b: A) -> A {
-    if lt(b, a) { b } else { a }
+    if b.lt(a) { b } else { a }
 }
 
 fn contains<A: Eq>(xs: Vec<A>, x: A) -> bool {
     for y in xs {
-        if eq(x, y) { return true }
+        if x.eq(y) { return true }
     }
     false
-}
-
-// ---- derive ----
-
-// derive(Eq, Show) struct ...（か enum ...）は、型の宣言と、その型の Eq・Show の impl にする
-// == は各フィールドの ==、to_str は各フィールドの to_str を使う（フィールドの型に実装があればその実装）
-syntax DeriveField = name:Ident ':' ty:Type ','?
-syntax DeriveCtor = name:Ident ('(' fields:DeriveField* ')')? ','?
-syntax DeriveParams = '<' names:(Ident % ',') '>'
-syntax DeriveType =
-    | 'struct' name:Ident params:DeriveParams? '{' fields:DeriveField* '}'
-    | 'enum' name:Ident params:DeriveParams? '{' ctors:DeriveCtor* '}'
-
-macro derive ('derive' '(' traits:(Ident % ',') ')' t:DeriveType) -> Decl {
-    // 型引数があれば impl<A, B> ... Name<A, B>
-    let mut ty = quote { ${t.name} }
-    let mut gen = quote {}
-    if !is_null(t.params) {
-        ty = quote { ${t.name}<$( $t.params.names ),*> }
-        gen = quote { <$( $t.params.names ),*> }
-    }
-    let fs = t.fields
-    let cs = t.ctors
-    let mut eq = quote { true }
-    let mut show = quote { '' }
-    if !is_null(fs) {
-        // 構造体: a.x == b.x && ...、"Name { x: 1, y: 2 }"
-        show = quote { ${str_of(t.name) + ' {'} }
-        let mut k = 0
-        while k < len(fs) {
-            let f = at(fs, k)
-            eq = quote { $eq && a.${f.name} == b.${f.name} }
-            let sep = if k == 0 { ' ' } else { ', ' }
-            show = quote { $show + ${sep + str_of(f.name) + ': '} + to_str(a.${f.name}) }
-            k = k + 1
-        }
-        show = quote { $show + ' }' }
-    } else {
-        // 構築子ごとの腕。"Name(1, 2)"、引数の無い構築子は "Name"
-        let mut eq_arms = quote {}
-        let mut show_arms = quote {}
-        let mut k = 0
-        while k < len(cs) {
-            let c = at(cs, k)
-            if is_null(c.fields) {
-                eq_arms = quote { $eq_arms ${c.name} => match b { ${c.name} => true, _ => false }, }
-                show_arms = quote { $show_arms ${c.name} => ${str_of(c.name)}, }
-            } else {
-                let mut xs = quote {}
-                let mut ys = quote {}
-                let mut cond = quote { true }
-                let mut s = quote { ${str_of(c.name) + '('} }
-                let mut j = 0
-                while j < len(c.fields) {
-                    let x = ident('x' + to_str(j))
-                    let y = ident('y' + to_str(j))
-                    if j == 0 {
-                        xs = quote { $x }
-                        ys = quote { $y }
-                        s = quote { $s + to_str($x) }
-                    } else {
-                        xs = quote { $xs, $x }
-                        ys = quote { $ys, $y }
-                        s = quote { $s + ', ' + to_str($x) }
-                    }
-                    cond = quote { $cond && $x == $y }
-                    j = j + 1
-                }
-                eq_arms = quote { $eq_arms ${c.name}($xs) => match b { ${c.name}($ys) => $cond, _ => false }, }
-                show_arms = quote { $show_arms ${c.name}($xs) => $s + ')', }
-            }
-            k = k + 1
-        }
-        eq = quote { match a { $eq_arms } }
-        show = quote { match a { $show_arms } }
-    }
-    let mut out = quote { $t }
-    let mut i = 0
-    while i < len(traits) {
-        let tr = str_of(at(traits, i))
-        if tr == 'Eq' {
-            out = quote { $out impl $gen Eq<$ty> { fn eq(a: $ty, b: $ty) -> bool { $eq } } }
-        } else if tr == 'Show' {
-            out = quote { $out impl $gen Show<$ty> { fn show(a: $ty) -> str { $show } } }
-        } else {
-            error('derive できるのは Eq と Show（' + tr + ' は無い）')
-        }
-        i = i + 1
-    }
-    out
 }
 
 // ---- テスト ----
@@ -207,14 +130,22 @@ fn assert(ok: bool) {
     if !ok { panic('assert が失敗した') }
 }
 
-fn assert_eq<A: Eq + Show>(got: A, want: A) {
-    if got != want { panic('assert_eq が失敗した: ' + to_str(got) + ' と ' + to_str(want)) }
+fn assert_eq<A: Eq + Display>(got: A, want: A) {
+    if got != want { panic('assert_eq が失敗した: ' + got.to_string() + ' と ' + want.to_string()) }
+}
+
+// 中の値。None なら実行時エラーにする
+fn Option::unwrap<A>(o: Option<A>) -> A {
+    match o {
+        Some(x) -> x
+        None -> panic('None を unwrap した')
+    }
 }
 
 fn unwrap_or<A>(o: Option<A>, d: A) -> A {
     match o {
-        Some(x) => x
-        None => d
+        Some(x) -> x
+        None -> d
     }
 }
 
@@ -311,7 +242,7 @@ fn find<A, E: Effect>(xs: Vec<A>, f: (A) -> bool ! E) -> Option<A> ! E {
 
 // ---- 文字列 ----
 
-fn join(xs: Vec<str>, sep: str) -> str {
+fn join(xs: Vec<String>, sep: String) -> String {
     let mut s = ''
     for i in 0..len(xs) {
         if i > 0 { s = s + sep }
@@ -320,28 +251,28 @@ fn join(xs: Vec<str>, sep: str) -> str {
     s
 }
 
-fn repeat(s: str, n: int) -> str {
+fn repeat(s: String, n: int) -> String {
     let mut r = ''
     for i in 0..n { r = r + s }
     r
 }
 
-fn ends_with(s: str, w: str) -> bool {
+fn ends_with(s: String, w: String) -> bool {
     starts_at(s, len(s) - len(w), w)
 }
 
 // s の中に w があるか
-fn includes(s: str, w: str) -> bool {
+fn includes(s: String, w: String) -> bool {
     for i in 0..len(s) + 1 {
         if starts_at(s, i, w) { return true }
     }
     false
 }
 
-fn is_space(c: str) -> bool { c == ' ' || c == '\n' || c == '\t' || c == '\r' }
+fn is_space(c: String) -> bool { c == ' ' || c == '\n' || c == '\t' || c == '\r' }
 
 // 前後の空白を除く
-fn trim(s: str) -> str {
+fn trim(s: String) -> String {
     let mut a = 0
     let mut b = len(s)
     while a < b && is_space(char_at(s, a)) { a = a + 1 }
@@ -350,7 +281,7 @@ fn trim(s: str) -> str {
 }
 
 // from を to に置き換える（from が空なら変えない）
-fn replace(s: str, from: str, to: str) -> str {
+fn replace(s: String, from: String, to: String) -> String {
     if len(from) == 0 { return s }
     let mut out = ''
     let mut i = 0
@@ -366,12 +297,12 @@ fn replace(s: str, from: str, to: str) -> str {
     out
 }
 
-fn lines(s: str) -> Vec<str> { split(s, '\n') }
+fn lines(s: String) -> Vec<String> { split(s, '\n') }
 
 // ---- Map（文字列のキーから値へ） ----
 
 // ponytail: 線形探索。大きくなるならハッシュ表にする
-struct Entry<V> { key: str, value: V }
+struct Entry<V> { key: String, value: V }
 struct Map<V> { entries: Vec<Entry<V>> }
 
 fn empty<V>() -> Map<V> {
@@ -379,7 +310,7 @@ fn empty<V>() -> Map<V> {
     Map { entries: es }
 }
 
-fn get<V>(m: Map<V>, key: str) -> Option<V> {
+fn get<V>(m: Map<V>, key: String) -> Option<V> {
     let mut r: Option<V> = None
     for e in m.entries {
         if e.key == key { r = Some(e.value) }
@@ -388,7 +319,7 @@ fn get<V>(m: Map<V>, key: str) -> Option<V> {
 }
 
 // key の値を value にした新しい Map
-fn set<V>(m: Map<V>, key: str, value: V) -> Map<V> {
+fn set<V>(m: Map<V>, key: String, value: V) -> Map<V> {
     let mut es: Vec<Entry<V>> = []
     for e in m.entries {
         if e.key != key { es = push(es, e) }
@@ -396,19 +327,19 @@ fn set<V>(m: Map<V>, key: str, value: V) -> Map<V> {
     Map { entries: push(es, Entry { key: key, value: value }) }
 }
 
-fn keys<V>(m: Map<V>) -> Vec<str> {
-    let mut ks: Vec<str> = []
+fn keys<V>(m: Map<V>) -> Vec<String> {
+    let mut ks: Vec<String> = []
     for e in m.entries { ks = push(ks, e.key) }
     ks
 }
 
 // ---- JSON ----
 
-enum Json { JNull, JBool(b: bool), JInt(n: int), JStr(s: str), JArr(items: Vec<Json>), JObj(fields: Vec<Field>) }
-struct Field { key: str, value: Json }
+enum Json { JNull, JBool(b: bool), JInt(n: int), JStr(s: String), JArr(items: Vec<Json>), JObj(fields: Vec<Field>) }
+struct Field { key: String, value: Json }
 
 // JSON の文字列リテラル
-fn quote_str(s: str) -> str {
+fn quote_str(s: String) -> String {
     let mut out = '"'
     for i in 0..len(s) {
         let c = slice(s, i, i + 1)
@@ -432,14 +363,13 @@ fn quote_str(s: str) -> str {
     out + '"'
 }
 
-// ponytail: 要素ごとの再帰は停止性を示せないので partial fn。Vec の要素を部分項とみなせば fn にできる
-partial fn stringify(j: Json) -> str {
+fn stringify(j: Json) -> String {
     match j {
-        JNull => 'null'
-        JBool(b) => to_str(b)
-        JInt(n) => to_str(n)
-        JStr(s) => quote_str(s)
-        JArr(items) => {
+        JNull -> 'null'
+        JBool(b) -> b.to_string()
+        JInt(n) -> n.to_string()
+        JStr(s) -> quote_str(s)
+        JArr(items) -> {
             let mut out = '['
             let mut first = true
             for x in items {
@@ -449,7 +379,7 @@ partial fn stringify(j: Json) -> str {
             }
             out + ']'
         }
-        JObj(fields) => {
+        JObj(fields) -> {
             let mut out = '{'
             let mut first = true
             for f in fields {
@@ -472,11 +402,11 @@ fn no_parse() -> Parsed {
 }
 
 // i 文字目（範囲外なら ''）
-fn char_at(s: str, i: int) -> str {
+fn char_at(s: String, i: int) -> String {
     if 0 <= i && i < len(s) { slice(s, i, i + 1) } else { '' }
 }
 
-fn skip_ws(s: str, i: int) -> int {
+fn skip_ws(s: String, i: int) -> int {
     let mut j = i
     while char_at(s, j) == ' ' || char_at(s, j) == '\n' || char_at(s, j) == '\t' || char_at(s, j) == '\r' {
         j = j + 1
@@ -485,7 +415,7 @@ fn skip_ws(s: str, i: int) -> int {
 }
 
 // 数字なら 0 から 9、それ以外は -1
-fn digit(c: str) -> int {
+fn digit(c: String) -> int {
     let ds = '0123456789'
     let mut r = -1
     for k in 0..10 {
@@ -494,12 +424,12 @@ fn digit(c: str) -> int {
     r
 }
 
-fn starts_at(s: str, i: int, w: str) -> bool {
+fn starts_at(s: String, i: int, w: String) -> bool {
     0 <= i && i + len(w) <= len(s) && slice(s, i, i + len(w)) == w
 }
 
 // ponytail: 整数だけを読む（小数・指数は読めない）
-fn parse_int(s: str, i: int) -> Parsed {
+fn parse_json_int(s: String, i: int) -> Parsed {
     let mut j = i
     let neg = char_at(s, j) == '-'
     if neg { j = j + 1 }
@@ -534,7 +464,7 @@ fn parse_int(s: str, i: int) -> Parsed {
 }
 
 // JSON の Unicode エスケープを4桁読む。途中で切れているものも拒否する。
-fn json_hex4(s: str, i: int) -> int {
+fn json_hex4(s: String, i: int) -> int {
     let mut n = 0
     for k in 0..4 {
         let c = char_at(s, i + k)
@@ -550,7 +480,7 @@ fn json_hex4(s: str, i: int) -> int {
     n
 }
 
-fn parse_string(s: str, i: int) -> Parsed {
+fn parse_string(s: String, i: int) -> Parsed {
     let mut j = i + 1
     let mut out = ''
     let mut done = false
@@ -608,7 +538,7 @@ fn parse_string(s: str, i: int) -> Parsed {
     if bad { no_parse() } else { Parsed { ok: true, value: JStr(out), pos: j } }
 }
 
-partial fn parse_value(s: str, i0: int) -> Parsed {
+fn parse_value(s: String, i0: int) -> Parsed {
     let i = skip_ws(s, i0)
     let c = char_at(s, i)
     if starts_at(s, i, 'null') {
@@ -624,12 +554,12 @@ partial fn parse_value(s: str, i0: int) -> Parsed {
     } else if c == '{' {
         parse_object(s, i + 1)
     } else {
-        parse_int(s, i)
+        parse_json_int(s, i)
     }
 }
 
 // [ の後ろから読む
-partial fn parse_array(s: str, i: int) -> Parsed {
+fn parse_array(s: String, i: int) -> Parsed {
     let mut items: Vec<Json> = []
     let mut j = skip_ws(s, i)
     let mut done = char_at(s, j) == ']'
@@ -657,7 +587,7 @@ partial fn parse_array(s: str, i: int) -> Parsed {
 }
 
 // { の後ろから読む
-partial fn parse_object(s: str, i: int) -> Parsed {
+fn parse_object(s: String, i: int) -> Parsed {
     let mut fields: Vec<Field> = []
     let mut j = skip_ws(s, i)
     let mut done = char_at(s, j) == '}'
@@ -674,8 +604,8 @@ partial fn parse_object(s: str, i: int) -> Parsed {
                 bad = true
             } else {
                 match k.value {
-                    JStr(key) => { fields = push(fields, Field { key: key, value: v.value }) }
-                    _ => { bad = true }
+                    JStr(key) -> { fields = push(fields, Field { key: key, value: v.value }) }
+                    _ -> { bad = true }
                 }
                 j = skip_ws(s, v.pos)
                 let c = char_at(s, j)
@@ -694,43 +624,43 @@ partial fn parse_object(s: str, i: int) -> Parsed {
 }
 
 // 文字列全体を JSON として読む。読めなければ None
-fn parse_json(s: str) -> Option<Json> {
+fn parse_json(s: String) -> Option<Json> {
     let p = parse_value(s, 0)
     if p.ok && skip_ws(s, p.pos) == len(s) { Some(p.value) } else { None }
 }
 
 // オブジェクトのフィールド。無ければ None
-fn field(j: Json, key: str) -> Option<Json> {
+fn field(j: Json, key: String) -> Option<Json> {
     let mut r: Option<Json> = None
     match j {
-        JObj(fs) => {
+        JObj(fs) -> {
             for f in fs {
                 if f.key == key { r = Some(f.value) }
             }
         }
-        _ => {}
+        _ -> {}
     }
     r
 }
 
 // 文字列なら、その値。違えば d
-fn str_or(j: Option<Json>, d: str) -> str {
+fn str_or(j: Option<Json>, d: String) -> String {
     match j {
-        Some(v) => match v {
-            JStr(s) => s
-            _ => d
+        Some(v) -> match v {
+            JStr(s) -> s
+            _ -> d
         }
-        None => d
+        None -> d
     }
 }
 
 // 整数なら、その値。違えば d
 fn int_or(j: Option<Json>, d: int) -> int {
     match j {
-        Some(v) => match v {
-            JInt(n) => n
-            _ => d
+        Some(v) -> match v {
+            JInt(n) -> n
+            _ -> d
         }
-        None => d
+        None -> d
     }
 }

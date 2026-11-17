@@ -1,3 +1,4 @@
+use crate::parser::Name;
 use crate::error::Error;
 use crate::lexer::{Span, Tok, Token};
 use crate::meta::{self, Node, Syn};
@@ -9,6 +10,7 @@ use std::rc::Rc;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Int(i64),
+    Num(f64),
     Bool(bool),
     Unit,
     Str(Rc<str>),
@@ -18,7 +20,7 @@ pub enum Value {
     Ty(Rc<str>),
     Arr(Rc<Vec<Value>>),
     // data の値 (構築子, フィールド)
-    Data(Rc<(String, Vec<Value>)>),
+    Data(Rc<(Name, Vec<Value>)>),
     Fn(Rc<Callable>),
     // 書き換えられる参照。写し取った関数どうしでも同じものを指す
     Ref(Rc<std::cell::RefCell<Value>>),
@@ -29,12 +31,12 @@ pub enum Value {
 pub enum Callable {
     // ponytail: 作った時の変数を値で写し取る。後から代入しても関数の中には届かない
     Lam {
-        params: Vec<String>,
+        params: Vec<Name>,
         body: Block,
-        env: HashMap<String, Value>,
+        env: HashMap<Name, Value>,
     },
     // トップレベルの関数
-    Named(String),
+    Named(Name),
 }
 
 // 関数の値は同じものの時だけ等しい（型検査で比較を禁止していないので、ここで決める）
@@ -58,28 +60,24 @@ type R<T> = Result<T, Flow>;
 struct Interp<'a> {
     fns: HashMap<&'a str, &'a Fn>,
     // 構築子の名前からフィールド名の並び
-    ctors: HashMap<&'a str, Vec<&'a str>>,
+    ctors: HashMap<&'a str, (&'a Name, Vec<&'a Name>)>,
     out: &'a mut dyn Write,
     // 処理中の handle (番号, 操作の名前から腕の関数)。内側ほど後ろ
-    handlers: Vec<(usize, HashMap<String, Value>)>,
+    handlers: Vec<(usize, HashMap<Name, Value>)>,
     next_h: usize,
     // 実行時エラーが起きた一番内側の式の位置
     err_at: Option<Span>,
-    // ソースのこの位置より後（読み込んだライブラリ）で起きたエラーは、ここより前の、呼び出した側の位置にする
-    user_end: usize,
-    in_macro: bool,
 }
 
 // 型検査を通ったプログラムを前提とする
 pub fn run(prog: &Program, out: &mut dyn Write) -> Result<Value, Error> {
-    run_fn(prog, "main", usize::MAX, out)
+    run_fn(prog, "main", out)
 }
 
 // 引数の無い関数 entry を実行する（main と hibana test のテスト）
 pub fn run_fn(
     prog: &Program,
     entry: &str,
-    user_end: usize,
     out: &mut dyn Write,
 ) -> Result<Value, Error> {
     let mut it = Interp {
@@ -91,7 +89,7 @@ pub fn run_fn(
             .map(|c| {
                 (
                     c.name.as_str(),
-                    c.fields.iter().map(|f| f.0.as_str()).collect(),
+                    (&c.name, c.fields.iter().map(|field| &field.0).collect()),
                 )
             })
             .collect(),
@@ -99,8 +97,6 @@ pub fn run_fn(
         handlers: Vec::new(),
         next_h: 0,
         err_at: None,
-        user_end,
-        in_macro: false,
     };
     match it.call(entry, vec![]) {
         Ok(v) | Err(Flow::Return(v)) => Ok(v),
@@ -109,14 +105,14 @@ pub fn run_fn(
             Err(match it.err_at {
                 Some(s) => e.at(s),
                 None => e,
-            })
+            }.with_sources(prog.modules.iter().map(|module| &module.source)))
         }
         Err(Flow::Abort(..)) => unreachable!("handle の外には出ない"),
     }
 }
 
-// マクロ本体を実行する。print はコンパイル時の出力として標準エラーに書く
-pub fn run_macro(b: &Block, vars: Vec<(String, Value)>, prog: &Program) -> Result<Value, String> {
+// マクロ本体を実行する。put はコンパイル時の出力として標準エラーに書く
+pub fn run_macro(b: &Block, vars: Vec<(Name, Value)>, prog: &Program) -> Result<Value, String> {
     let mut err = std::io::stderr();
     let mut it = Interp {
         fns: prog.fns.iter().map(|f| (f.name.as_str(), f)).collect(),
@@ -127,7 +123,7 @@ pub fn run_macro(b: &Block, vars: Vec<(String, Value)>, prog: &Program) -> Resul
             .map(|c| {
                 (
                     c.name.as_str(),
-                    c.fields.iter().map(|f| f.0.as_str()).collect(),
+                    (&c.name, c.fields.iter().map(|field| &field.0).collect()),
                 )
             })
             .collect(),
@@ -135,8 +131,6 @@ pub fn run_macro(b: &Block, vars: Vec<(String, Value)>, prog: &Program) -> Resul
         handlers: Vec::new(),
         next_h: 0,
         err_at: None,
-        user_end: usize::MAX,
-        in_macro: true,
     };
     match it.block(b, &mut vec![vars.into_iter().collect()]) {
         Ok(v) | Err(Flow::Return(v)) => Ok(v),
@@ -149,6 +143,7 @@ fn show(v: &Value) -> String {
     match v {
         Value::Arr(xs) => format!("[{}]", xs.iter().map(show).collect::<Vec<_>>().join(", ")),
         Value::Int(n) => n.to_string(),
+        Value::Num(n) => n.to_string(),
         Value::Bool(b) => b.to_string(),
         Value::Str(s) => format!("{s:?}"),
         Value::Ty(t) => t.to_string(),
@@ -156,7 +151,7 @@ fn show(v: &Value) -> String {
         Value::Syn(s) => format!("{:?}", s.node.strip()),
         Value::Fn(_) => "<fn>".into(),
         Value::Ref(_) => "<ref>".into(),
-        Value::Data(d) if d.1.is_empty() => d.0.clone(),
+        Value::Data(d) if d.1.is_empty() => d.0.to_string(),
         Value::Data(d) => format!(
             "{}({})",
             d.0,
@@ -203,8 +198,25 @@ fn arith(op: &str, a: i64, b: i64) -> Option<i64> {
         "-" => a.checked_sub(b),
         "*" => a.checked_mul(b),
         "/" => a.checked_div(b),
+        // 指数が 64 を超えると、-1・0・1 以外は範囲外になる。-1・0・1 は偶奇だけで決まる
+        "**" if b > 64 && !(-1..=1).contains(&a) => None,
+        "**" => a.checked_pow(if b > 64 { 64 + b % 2 } else { b } as u32),
         _ => a.checked_rem(b),
     }
+}
+
+// 整数の指数は各出力先で乗算の順序もそろえる。
+pub(crate) fn num_pow(a: f64, b: f64) -> f64 {
+    if b.fract() != 0.0 || !(-9223372036854775808.0..9223372036854775808.0).contains(&b) { return a.powf(b); }
+    let mut n = b as i64;
+    let mut factor = if n < 0 { 1.0 / a } else { a };
+    let mut result = 1.0;
+    while n != 0 {
+        if n % 2 != 0 { result *= factor; }
+        n /= 2;
+        if n != 0 { factor *= factor; }
+    }
+    result
 }
 
 impl Interp<'_> {
@@ -281,7 +293,7 @@ impl Interp<'_> {
             }
             ("ident", Value::Str(s)) => {
                 let tok = Token {
-                    tok: Tok::Ident(s.to_string()),
+                    tok: Tok::Ident(s.to_string().into()),
                     span: Span::default(),
                     site: None,
                     gap_before: true,
@@ -311,6 +323,20 @@ impl Interp<'_> {
             ("str_of", Node::Str(x) | Node::Ident(x, _) | Node::Text(x, _) | Node::Token(x, _)) => {
                 Value::Str(x.as_str().into())
             }
+            ("str_of", Node::Record { .. } | Node::Type(_)) => {
+                let Node::At(range, _) = &s.node else { return error("構文の元のトークン列が無い".into()); };
+                let mut text = String::new();
+                for t in &s.toks[range.clone()] {
+                    if t.gap_before && !text.is_empty() { text.push(' '); }
+                    use crate::lexer::Tok;
+                    text.push_str(&match &t.tok {
+                        Tok::Ident(n) => n.to_string(), Tok::Punct(n) => n.to_string(),
+                        Tok::Str(n) => format!("{n:?}"), Tok::Int(n) => n.to_string(), Tok::Float(n) => n.to_string(),
+                        Tok::Raw(c) => c.to_string(), Tok::Template(n, _) => format!("`{n}`"), Tok::Eof => String::new(),
+                    });
+                }
+                Value::Str(text.into())
+            }
             _ => return error(format!("{name} を {n:?} に使えない")),
         }))
     }
@@ -325,11 +351,11 @@ impl Interp<'_> {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            Value::Data(d) if d.0.ends_with("{}") => {
-                let fs = &self.ctors[d.0.as_str()];
-                let name = &d.0[..d.0.len() - 2];
+            Value::Data(d) if d.0.structure_owner().is_some() => {
+                let fs = &self.ctors[d.0.as_str()].1;
+                let name = d.0.structure_owner().unwrap();
                 // struct Name(型, ...) は Name(1, 2)
-                if fs.first() == Some(&"0") {
+                if d.0.structure_style() == Some(crate::frontend::name::StructureStyle::Tuple) {
                     let body: Vec<String> = d.1.iter().map(|x| self.show(x)).collect();
                     return format!("{name}({})", body.join(", "));
                 }
@@ -376,11 +402,11 @@ impl Interp<'_> {
         let f = self.fns[name];
         if f.op.is_some() {
             let k = args.len() - (f.params.len() - f.implicit);
-            return self.perform(name, args[k..].to_vec());
+            return self.perform(&f.name, args[k..].to_vec());
         }
         if f.js.is_some() {
             return error(format!(
-                "extern の関数 {name} は JS ターゲット（hibana js）でだけ使える"
+                "extern の関数 {name} は JavaScript 出力（hibana::to_js）でだけ使える"
             ));
         }
         // 型検査で推論したジェネリック引数は実行時には消えている
@@ -400,7 +426,7 @@ impl Interp<'_> {
     }
 
     // 操作を、それを処理する一番内側の handle の腕で実行する。腕の中の操作は、その handle より外で処理する
-    fn perform(&mut self, op: &str, args: Vec<Value>) -> R<Value> {
+    fn perform(&mut self, op: &Name, args: Vec<Value>) -> R<Value> {
         let Some(i) = self.handlers.iter().rposition(|h| h.1.contains_key(op)) else {
             return error(format!("操作 {op} を処理する handle が無い"));
         };
@@ -414,14 +440,14 @@ impl Interp<'_> {
         }
     }
 
-    fn block(&mut self, b: &Block, env: &mut Vec<HashMap<String, Value>>) -> R<Value> {
+    fn block(&mut self, b: &Block, env: &mut Vec<HashMap<Name, Value>>) -> R<Value> {
         env.push(HashMap::new());
         let r = self.block_inner(b, env);
         env.pop();
         r
     }
 
-    fn block_inner(&mut self, b: &Block, env: &mut Vec<HashMap<String, Value>>) -> R<Value> {
+    fn block_inner(&mut self, b: &Block, env: &mut Vec<HashMap<Name, Value>>) -> R<Value> {
         for s in &b.stmts {
             match s {
                 Stmt::Let { name, init, .. } => {
@@ -439,19 +465,20 @@ impl Interp<'_> {
         }
     }
 
-    fn expr(&mut self, e: &Expr, env: &mut Vec<HashMap<String, Value>>) -> R<Value> {
+    fn expr(&mut self, e: &Expr, env: &mut Vec<HashMap<Name, Value>>) -> R<Value> {
+        let mut e = e;
+        while let Expr::Id(_, inner) = e { e = inner; }
         Ok(match e {
+            Expr::Id(..) => unreachable!(),
             Expr::At(sp, x) => {
                 let r = self.expr(x, env);
-                let lib = |s: &Span| s.start.offset >= self.user_end;
-                if matches!(r, Err(Flow::Error(_)))
-                    && (self.err_at.is_none() || self.err_at.as_ref().is_some_and(lib) && !lib(sp))
-                {
+                if matches!(r, Err(Flow::Error(_))) && self.err_at.is_none() {
                     self.err_at = Some(*sp);
                 }
                 r?
             }
             Expr::Int(n) => Value::Int(*n),
+            Expr::Num(n) => Value::Num(*n),
             Expr::Bool(b) => Value::Bool(*b),
             Expr::Str(s) => Value::Str(s.as_str().into()),
             Expr::Method(..) | Expr::Macro(..) => unreachable!("型検査で弾く"),
@@ -475,9 +502,9 @@ impl Interp<'_> {
             Expr::Field(x, name) => {
                 let v = self.expr(x, env)?;
                 if let Value::Data(d) = &v {
-                    let i = self.ctors[d.0.as_str()]
+                    let i = self.ctors[d.0.as_str()].1
                         .iter()
-                        .position(|f| f == name)
+                        .position(|field| *field == name)
                         .expect("型検査済み");
                     return Ok(d.1[i].clone());
                 }
@@ -488,12 +515,12 @@ impl Interp<'_> {
                 }
             }
             Expr::Quote(q) => {
-                let mut flat: Vec<(String, Value)> = env
+                let mut flat: Vec<(Name, Value)> = env
                     .iter()
                     .flat_map(|s| s.iter().map(|(k, v)| (k.clone(), v.clone())))
                     .collect();
                 let mut out = Vec::new();
-                let mut ev = |e: &Expr, vars: &[(String, Value)]| {
+                let mut ev = |e: &Expr, vars: &[(Name, Value)]| {
                     env.push(vars.iter().cloned().collect());
                     let r = self.expr(e, env);
                     env.pop();
@@ -523,13 +550,15 @@ impl Interp<'_> {
                     Value::Fn(Rc::new(Callable::Named(n.clone())))
                 }
                 None if self.ctors.contains_key(n.as_str()) => {
-                    Value::Data(Rc::new((n.clone(), vec![])))
+                    Value::Data(Rc::new((self.ctors[n.as_str()].0.clone(), vec![])))
                 }
                 // 型検査を通っているので、残りは int などの型名
                 None => Value::Ty(n.as_str().into()),
             },
             Expr::Unary("-", x) => {
-                let n = int(self.expr(x, env)?);
+                let value = self.expr(x, env)?;
+                if let Value::Num(n) = value { return Ok(Value::Num(-n)); }
+                let n = int(value);
                 Value::Int(
                     n.checked_neg()
                         .ok_or(Flow::Error("オーバーフロー".into()))?,
@@ -544,6 +573,18 @@ impl Interp<'_> {
             }
             Expr::Binary(op, l, r) => {
                 let (a, b) = (self.expr(l, env)?, self.expr(r, env)?);
+                if let (Value::Num(x), Value::Num(y)) = (&a, &b) {
+                    return match *op {
+                        "==" => Ok(Value::Bool(x == y)), "!=" => Ok(Value::Bool(x != y)),
+                        "<" => Ok(Value::Bool(x < y)), "<=" => Ok(Value::Bool(x <= y)), ">" => Ok(Value::Bool(x > y)), ">=" => Ok(Value::Bool(x >= y)),
+                        "/" | "%" if *y == 0.0 => error("0 で除算した".into()),
+                        op => {
+                            let n = match op { "+" => x + y, "-" => x - y, "*" => x * y, "/" => x / y, "%" => x % y, "**" => num_pow(*x, *y), _ => unreachable!("型検査済み") };
+                            if !n.is_finite() { return error("num の演算結果が有限でない".into()); }
+                            Ok(Value::Num(n))
+                        }
+                    };
+                }
                 match *op {
                     "+" if matches!(a, Value::Str(_)) => {
                         Value::Str(format!("{}{}", str_val(a), str_val(b)).into())
@@ -559,6 +600,9 @@ impl Interp<'_> {
                         if b == 0 && matches!(*op, "/" | "%") {
                             return Err(Flow::Error("0 で除算した".into()));
                         }
+                        if b < 0 && *op == "**" {
+                            return Err(Flow::Error("負の指数".into()));
+                        }
                         Value::Int(arith(op, a, b).ok_or(Flow::Error("オーバーフロー".into()))?)
                     }
                 }
@@ -568,7 +612,19 @@ impl Interp<'_> {
                 for a in args {
                     vs.push(self.expr(a, env)?);
                 }
-                if let Some(f) = env.iter().rev().find_map(|s| s.get(name)).cloned() {
+                if name == "#num" {
+                    match vs.remove(0) { Value::Int(n) => Value::Num(n as f64), v @ Value::Num(_) => v, _ => unreachable!("型検査済み") }
+                } else if name == "num_floor" || name == "num_sqrt" {
+                    let Value::Num(n) = vs[0] else { unreachable!("型検査済み") };
+                    if name == "num_floor" {
+                        let n = n.floor();
+                        if !(-9223372036854775808.0..9223372036854775808.0).contains(&n) { return error("floor の結果が int の範囲外".into()); }
+                        Value::Int(n as i64)
+                    } else {
+                        if n < 0.0 { return error("sqrt の引数が負".into()); }
+                        Value::Num(n.sqrt())
+                    }
+                } else if let Some(f) = env.iter().rev().find_map(|s| s.get(name)).cloned() {
                     self.apply(&f, vs)?
                 } else if name == "all" && !self.fns.contains_key(name.as_str()) {
                     // 並行の処理が無いので順に実行する
@@ -618,83 +674,28 @@ impl Interp<'_> {
                         vec![vs.pop().unwrap_or(Value::Unit)],
                     )))
                 } else if self.ctors.contains_key(name.as_str()) {
-                    Value::Data(Rc::new((name.clone(), vs)))
+                    Value::Data(Rc::new((self.ctors[name.as_str()].0.clone(), vs)))
                 } else if !self.fns.contains_key(name.as_str())
-                    && name != "print"
+                    && name != "put"
                     && name.starts_with(|c: char| c.is_ascii_uppercase())
                 {
                     // 型を作る呼び出し（Option(int) など）。実行時には名前だけを持つ
                     Value::Ty(name.as_str().into())
-                } else if matches!(
-                    name.as_str(),
-                    "artifact" | "compile" | "inspect_exports" | "utf8"
-                ) {
-                    if !self.in_macro {
-                        return Err(Flow::Error(format!("{name} はコンパイル時だけ使えます")));
+                } else if name == "input" {
+                    self.out.flush().map_err(|e| Flow::Error(e.to_string()))?;
+                    let mut line = String::new();
+                    std::io::stdin().read_line(&mut line).map_err(|e| Flow::Error(format!("標準入力を読めません: {e}")))?;
+                    if line.ends_with('\n') {
+                        line.pop();
+                        if line.ends_with('\r') { line.pop(); }
                     }
-                    let str_arg = |i: usize| -> R<String> {
-                        match vs.get(i) {
-                            Some(Value::Str(s)) => Ok(s.to_string()),
-                            _ => Err(Flow::Error(format!("{name} の引数は str"))),
-                        }
-                    };
-                    let bytes_value = |bytes: Vec<u8>| {
-                        Value::Arr(Rc::new(
-                            bytes.into_iter().map(|b| Value::Int(b as i64)).collect(),
-                        ))
-                    };
-                    match name.as_str() {
-                        "utf8" => bytes_value(str_arg(0)?.into_bytes()),
-                        "artifact" => {
-                            let path = str_arg(0)?;
-                            let Some(Value::Arr(values)) = vs.get(1) else {
-                                return Err(Flow::Error("artifact の内容は Vec<int>".into()));
-                            };
-                            let contents = values
-                                .iter()
-                                .map(|v| match v {
-                                    Value::Int(n) => u8::try_from(*n).map_err(|_| {
-                                        Flow::Error("artifact のバイトは0..255".into())
-                                    }),
-                                    _ => Err(Flow::Error("artifact の内容は Vec<int>".into())),
-                                })
-                                .collect::<R<Vec<u8>>>()?;
-                            crate::build::register(crate::build::Request { path, contents })
-                                .map_err(Flow::Error)?;
-                            Value::Unit
-                        }
-                        _ => {
-                            let source = str_arg(0)?;
-                            let index = if name == "compile" { 2 } else { 1 };
-                            let Some(Value::Arr(values)) = vs.get(index) else {
-                                return Err(Flow::Error(format!("{name} の公開名は Vec<str>")));
-                            };
-                            let exports = values
-                                .iter()
-                                .map(|v| match v {
-                                    Value::Str(s) => Ok(s.to_string()),
-                                    _ => Err(Flow::Error(format!("{name} の公開名は str"))),
-                                })
-                                .collect::<R<Vec<String>>>()?;
-                            if name == "compile" {
-                                bytes_value(
-                                    crate::pipeline::compile(&source, &str_arg(1)?, &exports)
-                                        .map_err(|e| Flow::Error(e.to_string()))?,
-                                )
-                            } else {
-                                Value::Str(
-                                    crate::pipeline::inspect_exports(&source, &exports)
-                                        .map_err(|e| Flow::Error(e.to_string()))?
-                                        .into(),
-                                )
-                            }
-                        }
-                    }
+                    Value::Str(line.into())
                 } else if let Some(v) = self.syn_fn(name, &mut vs)? {
                     v
-                } else if name == "print" {
+                } else if name == "put" {
                     let s = match &vs[0] {
                         Value::Int(n) => n.to_string(),
+                        Value::Num(n) => n.to_string(),
                         Value::Bool(b) => b.to_string(),
                         Value::Unit => "()".into(),
                         Value::Str(s) => s.to_string(),
@@ -722,14 +723,14 @@ impl Interp<'_> {
             Expr::Handle(body, arms) => {
                 self.next_h += 1;
                 let id = self.next_h;
-                let captured: HashMap<String, Value> = env
+                let captured: HashMap<Name, Value> = env
                     .iter()
                     .flat_map(|s| s.iter().map(|(k, v)| (k.clone(), v.clone())))
                     .collect();
                 let arms = arms
                     .iter()
                     .map(|a| {
-                        let body = Block {
+                        let body = Block { id: Default::default(),
                             stmts: vec![],
                             tail: Some(Box::new(a.body.clone())),
                         };

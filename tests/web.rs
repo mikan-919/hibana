@@ -14,29 +14,44 @@ fn reserved_wasm_exports_are_rejected() {
 }
 
 #[test]
+fn references_cannot_cross_the_wasm_boundary() {
+    for source in [
+        "fn expose(r: Ref<int>) -> int { read(r) }",
+        "fn expose() -> Ref<int> { new_ref(1) }",
+        "extern 'host' { fn consume(r: Ref<int>) -> int } fn expose() -> int { consume(new_ref(1)) }",
+        "extern 'host' { fn produce() -> Ref<int> } fn expose() -> int { read(produce()) }",
+    ] {
+        assert!(hibana::to_web(source, &["expose".into()]).is_err());
+    }
+}
+
+#[test]
 fn web_strings_and_host_functions() {
     let source = r#"
 extern 'browser' {
-    fn decorate(s: str) -> str
-    fn show(s: str)
+    fn decorate(s: String) -> String
+    fn show(s: String)
     fn increment(n: int) -> int
+    fn invert(value: bool) -> bool
     fn unused_host(n: int) -> int
-    fn __EXPORTS__(s: str) -> str
+    fn __EXPORTS__(s: String) -> String
 }
-fn echo(s: str) -> str { __EXPORTS__(s) }
-fn literal() -> str { 'こんにちは🌸' }
-fn run(s: str) -> str {
+fn echo(s: String) -> String { __EXPORTS__(s) }
+fn literal() -> String { 'こんにちは🌸' }
+fn run(s: String) -> String {
     let result = decorate(s)
     show(result)
     result
 }
 fn add(n: int) -> int { increment(n) }
-fn notify(s: str) { show(s) }
-fn unused(s: str) -> str { s }
+fn notify(s: String) { show(s) }
+fn negate(value: bool) -> bool { invert(value) }
+fn dispose() -> int { 7 }
+fn unused(s: String) -> String { s }
 "#;
     let checked = pipeline::check(pipeline::parse(source).unwrap(), Kind::Library).unwrap();
     let all = pipeline::lower(&checked, None).unwrap();
-    let exports = ["echo", "literal", "run", "add", "notify"].map(String::from);
+    let exports = ["echo", "literal", "run", "add", "notify", "negate", "dispose"].map(String::from);
     let linked = pipeline::link(&all, &exports).unwrap();
     assert!(!linked.functions().iter().any(|f| f.name() == "unused"));
     let wasm = pipeline::emit_wasm(&linked, Some(&exports)).unwrap();
@@ -67,9 +82,14 @@ api = await instantiate(bytes, { hibana_host: {
   },
   show: s => { messages.push(s); },
   increment: n => n + 1n,
+  invert: value => { assert.equal(typeof value, 'boolean'); return !value; },
   __EXPORTS__: s => s,
 }});
-assert.deepEqual(Object.keys(api), ['echo', 'literal', 'run', 'add', 'notify']);
+assert.deepEqual(Object.keys(api), ['echo', 'literal', 'run', 'add', 'notify', 'negate', 'dispose']);
+assert.equal(api.dispose(), 7n);
+assert.equal(api.negate(true), false);
+assert.equal(api.negate(false), true);
+assert.throws(() => api.negate(1), TypeError);
 for (const text of ['', '日本語🌸', 'a\0b', 'x'.repeat(200000)]) {
   assert.equal(api.echo(text), text);
   assert.equal(api.run(text), '[' + text + ']');

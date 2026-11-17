@@ -1,5 +1,6 @@
 // 型検査の証明器で示せなかった条件を、Z3 に問い合わせる（z3 クレートで Z3 のライブラリを直接呼ぶ）
-use crate::typeck::{Neu, V};
+use super::prove::Term;
+use crate::typeck::V;
 use std::collections::HashMap;
 use z3::ast::{Bool, Int};
 use z3::{SatResult, Solver};
@@ -65,8 +66,8 @@ fn sort_of(v: &V) -> Option<bool> {
         V::Int(_) => Some(true),
         V::Bool(_) => Some(false),
         V::Neu(n) => match &**n {
-            Neu::Un("-", _) | Neu::Bin("+" | "-" | "*", ..) => Some(true),
-            Neu::Un("!", _) | Neu::Bin("<" | "<=" | "==" | "!=" | "&&" | "||", ..) => Some(false),
+            Term::Un("-", _) | Term::Bin("+" | "-" | "*", ..) => Some(true),
+            Term::Un("!", _) | Term::Bin("<" | "<=" | "==" | "!=" | "&&" | "||", ..) => Some(false),
             _ => None,
         },
         _ => None,
@@ -95,9 +96,9 @@ impl Tr {
             (V::Bool(b), false) => return T::B(Bool::from_bool(*b)),
             (V::Neu(n), _) => {
                 let r = match (&**n, int) {
-                    (Neu::Un("-", x), true) => Some(T::I(-self.int(x))),
-                    (Neu::Un("!", x), false) => Some(T::B(self.bool(x).not())),
-                    (Neu::Bin(op @ ("+" | "-" | "*"), a, b), true) => {
+                    (Term::Un("-", x), true) => Some(T::I(-self.int(x))),
+                    (Term::Un("!", x), false) => Some(T::B(self.bool(x).not())),
+                    (Term::Bin(op @ ("+" | "-" | "*"), a, b), true) => {
                         let xs = [self.int(a), self.int(b)];
                         Some(T::I(match *op {
                             "+" => Int::add(&xs),
@@ -105,11 +106,11 @@ impl Tr {
                             _ => Int::mul(&xs),
                         }))
                     }
-                    (Neu::Bin(op @ ("<" | "<="), a, b), false) => {
+                    (Term::Bin(op @ ("<" | "<="), a, b), false) => {
                         let (a, b) = (self.int(a), self.int(b));
                         Some(T::B(if *op == "<" { a.lt(&b) } else { a.le(&b) }))
                     }
-                    (Neu::Bin(op @ ("&&" | "||"), a, b), false) => {
+                    (Term::Bin(op @ ("&&" | "||"), a, b), false) => {
                         let xs = [self.bool(a), self.bool(b)];
                         Some(T::B(if *op == "&&" {
                             Bool::and(&xs)
@@ -117,7 +118,7 @@ impl Tr {
                             Bool::or(&xs)
                         }))
                     }
-                    (Neu::Bin(op @ ("==" | "!="), a, b), false) => {
+                    (Term::Bin(op @ ("==" | "!="), a, b), false) => {
                         let eq = match sort_of(a).or(sort_of(b)).unwrap_or(true) {
                             true => self.int(a).eq(self.int(b)),
                             false => self.bool(a).eq(self.bool(b)),

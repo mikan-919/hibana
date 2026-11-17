@@ -5,36 +5,33 @@ pub mod cli;
 pub mod error;
 pub mod frontend;
 pub mod pipeline;
-pub mod project;
 pub mod tooling;
 
 // 既存の利用側は、機能別ディレクトリへの移動後も同じパスで参照できる。
-pub use backend::{c, eval, ir, js, native, wasm};
+pub use backend::{eval, ir, js, native, wasm};
 pub use check::{smt, typeck};
 pub use frontend::{lexer, meta, parser};
-pub use project::{build, pkg};
-pub use tooling::{fmt, index, lsp};
+pub use tooling::fmt;
 
 pub(crate) use frontend::{resolve, ts};
-pub(crate) use project::{scripts, tools};
 
 use std::io::Write;
 
 fn checked(src: &str, kind: pipeline::Kind) -> error::R<pipeline::Checked> {
-    let expanded = parser::with_uses(src)?;
-    pipeline::check(pipeline::parse(&expanded)?, kind)
+    let modules = pipeline::load(src, &parser::base_dir())?;
+    pipeline::check(pipeline::parse(modules)?, kind)
 }
 
 pub fn run(src: &str, out: &mut dyn Write) -> error::R<eval::Value> {
     let checked = checked(src, pipeline::Kind::Executable)?;
-    eval::run(&checked.program, out)
+    eval::run_fn(&checked.program, "main", out)
 }
 
 pub fn to_js(src: &str) -> error::R<String> {
-    Ok(pipeline::emit_js(&checked(
+    pipeline::emit_js(&checked(
         src,
         pipeline::Kind::Executable,
-    )?))
+    )?)
 }
 
 pub fn to_ir(src: &str) -> error::R<String> {
@@ -73,10 +70,6 @@ pub fn to_web(src: &str, exports: &[String]) -> error::R<WebOutput> {
         wasm: pipeline::emit_wasm(&ir, Some(exports))?,
         javascript: pipeline::emit_js_glue(&ir, exports)?,
     })
-}
-
-pub fn to_c(src: &str) -> error::R<String> {
-    pipeline::emit_c(&checked(src, pipeline::Kind::Executable)?)
 }
 
 /// libc を使わない静的な ELF の実行ファイルを作る。main から辿れる関数だけを含める。

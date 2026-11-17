@@ -4,6 +4,5 @@
 # Added by cargo
 
 /target
-/selfhost/*.mjs
 /apps/cms/dist/
 /apps/cms/data/

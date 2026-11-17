@@ -1,3 +1,4 @@
+use crate::parser::Name;
 // syntax / macro 宣言の解析、パターン照合、マクロ展開
 use crate::error::{Ctx, Error};
 use crate::eval::{self, Value};
@@ -140,10 +141,11 @@ struct Macro {
     fields: Vec<(String, bool)>,
     // -> Stmt なら文の位置、-> Expr なら式の位置で試す
     stmt: bool,
-    // -> Decl なら宣言の位置で試す。展開結果は宣言の並びとして読み直す
     decl: bool,
     // 本体のトークン列（コンパイル時に実行するコード）。空なら照合結果を Expr::Macro として残す
     body: Option<Vec<Token>>,
+    // 本体で x.do() を使うマクロ。本体は呼び出し位置で実行するコードの雛形（template_body で quote に直してある）
+    template: bool,
     compiled: OnceCell<Block>,
     first: Firsts,
     // 定義したモジュール。quote の中のそのモジュールの名前は、修飾した名前にする
@@ -175,6 +177,135 @@ pub enum Q {
 }
 // 束縛名ごとの種類（マクロ本体での型 syn<種類> に使う）。規則名・Ident・Expr などで、配列は [種類]、分からなければ ""
 pub type Kinds = Vec<(String, String)>;
+
+// 本体に 照合した名前.do() があれば、雛形として quote { { 本体 } } に直す。x.do() は $x、本体の return は macro_return にする
+fn template_body(raw: &[Token], fields: &[(String, bool)]) -> Option<Vec<Token>> {
+    let is_do = |i: usize| match &raw[i..] {
+        [x, dot, name, open, close, ..] => {
+            matches!(&x.tok, Tok::Ident(c) if fields.iter().any(|f| &f.0 == c))
+                && dot.tok == Tok::Punct(".")
+                && name.tok == Tok::Ident("do".into())
+                && open.tok == Tok::Punct("(")
+                && close.tok == Tok::Punct(")")
+        }
+        _ => false,
+    };
+    if !(0..raw.len()).any(is_do) {
+        return None;
+    }
+    let tok = |t: &Token, k: Tok| Token { tok: k, ..t.clone() };
+    let (first, last) = (&raw[0], &raw[raw.len() - 1]);
+    let mut out = vec![
+        tok(first, Tok::Punct("quote")),
+        tok(first, Tok::Punct("{")),
+        tok(first, Tok::Punct("{")),
+    ];
+    let mut i = 0;
+    while i < raw.len() {
+        if is_do(i) {
+            out.push(tok(&raw[i], Tok::Punct("$")));
+            out.push(Token {
+                gap_before: false,
+                nl_before: false,
+                ..raw[i].clone()
+            });
+            i += 5;
+            continue;
+        }
+        out.push(match raw[i].tok {
+            Tok::Punct("return") => tok(&raw[i], Tok::Punct("macro_return")),
+            _ => raw[i].clone(),
+        });
+        i += 1;
+    }
+    out.extend([tok(last, Tok::Punct("}")), tok(last, Tok::Punct("}"))]);
+    Some(out)
+}
+
+// 雛形の本体の return（構文解析で #return の呼び出しにしてある）を、展開した式の値に直す
+const RET_ERR: &str =
+    "マクロ本体の return は、本体の文か if・ブロックの中に書く（while・for・無名関数・let の右辺の中には書けない）";
+
+fn is_ret(e: &Expr) -> bool {
+    matches!(e.peel(), Expr::Call(n, _) if n == "#return")
+}
+
+fn has_ret(e: &Expr) -> bool {
+    let mut found = false;
+    typeck::walk(e, &mut |x| found |= is_ret(x));
+    found
+}
+
+// 値になる位置の式
+fn ret_tail(e: Expr) -> R<Expr> {
+    if !has_ret(&e) {
+        return Ok(e);
+    }
+    Ok(match e {
+        Expr::At(s, x) => Expr::At(s, Box::new(ret_tail(*x)?)),
+        Expr::Call(n, mut a) if n == "#return" => a.pop().unwrap(),
+        Expr::If(c, t, f) if !has_ret(&c) => {
+            Expr::If(c, ret_block(t)?, f.map(|f| ret_tail(*f).map(Box::new)).transpose()?)
+        }
+        Expr::Block(b) => Expr::Block(ret_block(b)?),
+        _ => return Err(RET_ERR.into()),
+    })
+}
+
+// 文の位置の式。return しなかった分岐には、後に続く文 rest を移す
+// ponytail: rest は分岐ごとに複製する。return が多いと展開が大きくなる。大きければ、抜け出す印の付いたブロックを IR に足す
+fn ret_stmt(e: Expr, rest: Block) -> R<Expr> {
+    Ok(match e {
+        Expr::At(s, x) => Expr::At(s, Box::new(ret_stmt(*x, rest)?)),
+        Expr::Call(n, mut a) if n == "#return" => a.pop().unwrap(),
+        Expr::If(c, t, f) if !has_ret(&c) => {
+            let t = ret_block(join(t, rest.clone()))?;
+            let f = match f {
+                Some(f) => join(Block { id: Default::default(), stmts: vec![Stmt::Expr(*f)], tail: None }, rest),
+                None => rest,
+            };
+            Expr::If(c, t, Some(Box::new(Expr::Block(ret_block(f)?))))
+        }
+        // ponytail: ブロックの let が rest からも見える。名前が重なれば外側の変数を隠す
+        Expr::Block(b) => Expr::Block(ret_block(join(b, rest))?),
+        _ => return Err(RET_ERR.into()),
+    })
+}
+
+// return を含む最初の文で、残りの文をその文の分岐に移す
+fn ret_block(b: Block) -> R<Block> {
+    let mut stmts = Vec::new();
+    let mut it = b.stmts.into_iter();
+    while let Some(s) = it.next() {
+        match s {
+            Stmt::Expr(e) if has_ret(&e) => {
+                let rest = Block { id: Default::default(),
+                    stmts: it.collect(),
+                    tail: b.tail,
+                };
+                return Ok(Block { id: Default::default(),
+                    stmts,
+                    tail: Some(Box::new(ret_stmt(e, rest)?)),
+                });
+            }
+            Stmt::Let { init, .. } if has_ret(&init) => return Err(RET_ERR.into()),
+            s => stmts.push(s),
+        }
+    }
+    let tail = b.tail.map(|t| ret_tail(*t).map(Box::new)).transpose()?;
+    Ok(Block { id: Default::default(), stmts, tail })
+}
+
+// a の後に b を続けたブロック。a の最後の式の値は捨てる
+fn join(a: Block, b: Block) -> Block {
+    let mut stmts = a.stmts;
+    stmts.extend(a.tail.map(|t| Stmt::Expr(*t)));
+    stmts.extend(b.stmts);
+    Block { id: Default::default(),
+        stmts,
+        tail: b.tail,
+    }
+}
 
 fn field_kinds(p: &Pattern) -> Kinds {
     let mut out: Kinds = Vec::new();
@@ -290,7 +421,7 @@ fn record(rule: Option<&str>, span: Span, fields: &[(String, bool)], binds: Bind
 }
 
 // 展開中のマクロの (番号, 大域の名前, マクロのモジュール, そのモジュールから見える名前と修飾した名前)。quote の中の名前の付け替えに使う
-type Hygiene = (usize, Rc<HashSet<String>>, String, HashMap<String, String>);
+type Hygiene = (usize, Rc<HashSet<Name>>, String, HashMap<Name, Name>);
 thread_local! {
     static HYGIENE: RefCell<Option<Hygiene>> = const { RefCell::new(None) };
 }
@@ -299,7 +430,7 @@ static NEXT_EXPANSION: AtomicUsize = AtomicUsize::new(1);
 // quote の中で束縛される名前。let と for の変数、fn の引数、match と handle の腕の束縛。
 // 大域の名前と同じでも、束縛された名前は改名する（呼び出し側の同じ名前を隠さないため）
 // ponytail: 同じ quote で、束縛した名前と同じ名前の大域の関数や構築子を呼ぶと、その呼び出しも改名される。呼び出しの位置で大域かどうかを見分けるなら、束縛の範囲を追う必要がある
-fn bound_names(q: &[Q]) -> HashSet<String> {
+fn bound_names(q: &[Q]) -> HashSet<Name> {
     // $ の差し込みは None にして、並びを切る
     fn flat(q: &[Q], out: &mut Vec<Option<Tok>>) {
         for x in q {
@@ -325,7 +456,7 @@ fn bound_names(q: &[Q]) -> HashSet<String> {
             let j = if is(i + 1, &p("mut")) { i + 2 } else { i + 1 };
             out.extend(ident(j));
         }
-        // fn 名(引数) と fn(引数)、構築子(束縛) => の束縛。( の位置で、閉じ ) までを見る
+        // fn 名(引数) と fn(引数)、構築子(束縛) -> の束縛。( の位置で、閉じ ) までを見る
         let fn_params =
             is(i, &p("(")) && (is(i.wrapping_sub(1), &p("fn")) || is(i.wrapping_sub(2), &p("fn")));
         let arm = is(i, &p("(")) && ident(i.wrapping_sub(1)).is_some() && {
@@ -335,7 +466,7 @@ fn bound_names(q: &[Q]) -> HashSet<String> {
                 d += is(k, &p("(")) as i32 - is(k, &p(")")) as i32;
                 k += 1;
             }
-            is(k + 1, &p("=>"))
+            is(k + 1, &p("->"))
         };
         if fn_params || arm {
             // 中の名前で、直前が ( か , で、入れ子の括弧の外にあるもの
@@ -360,7 +491,7 @@ fn bound_names(q: &[Q]) -> HashSet<String> {
 // quote に直接書いた名前を、展開ごとに固有の名前 名前#番号 にする（利用者は # を書けないので衝突しない）。
 // 大域の名前と、. の後のフィールド名はそのまま。ただし束縛された名前（bound_names）は大域の名前でも改名する。
 // $x で差し込んだ呼び出し側のトークンはここを通らない
-fn hygienic(t: &Token, prev: Option<&Token>, bound: &HashSet<String>) -> Token {
+fn hygienic(t: &Token, prev: Option<&Token>, bound: &HashSet<Name>) -> Token {
     HYGIENE.with(|h| match (&*h.borrow(), &t.tok) {
         _ if matches!(prev.map(|p| &p.tok), Some(Tok::Punct(".")))
             || t.tok == Tok::Ident("_".into()) =>
@@ -372,13 +503,13 @@ fn hygienic(t: &Token, prev: Option<&Token>, bound: &HashSet<String>) -> Token {
             if !m.is_empty() && names.contains_key(n) && !bound.contains(n) =>
         {
             Token {
-                tok: Tok::Ident(names[n].clone()),
+                tok: Tok::Ident(names[n].clone().into()),
                 ..t.clone()
             }
         }
         (Some((id, globals, _, _)), Tok::Ident(n)) if !globals.contains(n) || bound.contains(n) => {
             Token {
-                tok: Tok::Ident(format!("{n}#{id}")),
+                tok: Tok::Ident(Name::hygienic(n, *id)),
                 ..t.clone()
             }
         }
@@ -452,7 +583,7 @@ impl PartialEq for Syn {
 }
 
 // path を env の最長一致から辿り、(値, 辿った段数) を返す。stop_at_list なら配列で止まる
-fn walk(env: &[(String, Value)], path: &[String], stop_at_list: bool) -> R<(Value, usize)> {
+fn walk(env: &[(Name, Value)], path: &[String], stop_at_list: bool) -> R<(Value, usize)> {
     let mut best: Option<(&Value, usize)> = None;
     for (k, v) in env {
         let ks: Vec<&str> = k.split('.').collect();
@@ -486,12 +617,12 @@ fn q_paths<'a>(q: &'a [Q], out: &mut Vec<&'a [String]>) {
     }
 }
 
-type Eval<'a> = dyn FnMut(&Expr, &[(String, Value)]) -> R<Value> + 'a;
+type Eval<'a> = dyn FnMut(&Expr, &[(Name, Value)]) -> R<Value> + 'a;
 
 // quote の中身を、env の値を差し込みながらトークン列にする。${ } は ev で評価する
 pub fn splice(
     q: &[Q],
-    env: &mut Vec<(String, Value)>,
+    env: &mut Vec<(Name, Value)>,
     out: &mut Vec<Token>,
     ev: &mut Eval,
 ) -> R<()> {
@@ -501,10 +632,10 @@ pub fn splice(
 
 fn splice_in(
     q: &[Q],
-    env: &mut Vec<(String, Value)>,
+    env: &mut Vec<(Name, Value)>,
     out: &mut Vec<Token>,
     ev: &mut Eval,
-    bound: &HashSet<String>,
+    bound: &HashSet<Name>,
 ) -> R<()> {
     for x in q {
         match x {
@@ -558,7 +689,7 @@ fn splice_in(
                         let Node::List(v) = s.node.strip() else {
                             unreachable!()
                         };
-                        env.push((key.clone(), Value::Syn(Rc::new(s.child(v[k].clone())))));
+                        env.push((Name::from(key.as_str()), Value::Syn(Rc::new(s.child(v[k].clone())))));
                     }
                     let r = splice_in(inner, env, out, ev, bound);
                     env.truncate(base);
@@ -594,9 +725,10 @@ fn emit(v: &Value, dollar: &Token, out: &mut Vec<Token>) -> R<()> {
             return Ok(());
         }
         Value::Int(n) => Tok::Int(*n),
+        Value::Num(n) => Tok::Float(*n),
         Value::Bool(b) => Tok::Punct(if *b { "true" } else { "false" }),
         Value::Str(s) => Tok::Str(s.to_string()),
-        Value::Ty(t) => Tok::Ident(t.to_string()),
+        Value::Ty(t) => Tok::Ident(t.to_string().into()),
         Value::Arr(_) | Value::Data(_) | Value::Fn(_) => {
             return Err("配列・data・関数の値は差し込めない".into());
         }
@@ -813,7 +945,7 @@ type Binds = Vec<(String, Node)>;
 impl Parser<'_> {
     pub fn syntax_decl(&mut self, g: &mut Grammar) -> R<()> {
         self.expect("syntax")?;
-        let name = self.ident()?;
+        let name = self.ident()?.to_string();
         if builtin(&name).is_some() || name == "Text" || g.rules.contains_key(&name) {
             return self.err_at(format!("規則 {name} が重複している"));
         }
@@ -828,22 +960,23 @@ impl Parser<'_> {
 
     pub fn macro_decl(&mut self, g: &mut Grammar) -> R<()> {
         self.expect("macro")?;
-        let name = self.ident()?;
+        let name = self.ident()?.to_string();
         if g.macros.iter().any(|m| m.name == name) {
             return self.err_at(format!("マクロ {name} が重複している"));
         }
         self.expect("(")?;
         let pat = self.pattern()?;
         self.expect(")")?;
-        let (stmt, decl) = if self.eat("->") {
+        let mut decl = false;
+        let stmt = if self.eat("->") {
             match self.ident()?.as_str() {
-                "Expr" => (false, false),
-                "Stmt" => (true, false),
-                "Decl" => (false, true),
-                _ => return self.err_at("マクロの戻り値は Expr か Stmt か Decl".into()),
+                "Expr" => false,
+                "Stmt" => true,
+                "Decl" => { decl = true; false },
+                _ => return self.err_at("マクロの戻り値は Expr・Stmt・Decl".into()),
             }
         } else {
-            (false, false)
+            false
         };
         self.expect("{")?;
         let start = self.pos;
@@ -858,10 +991,11 @@ impl Parser<'_> {
         }
         let fields = fields(&pat).ctx(|e| format!("マクロ {name}: {e}"))?;
         let raw = &self.toks[start..self.pos - 1];
+        let template = template_body(raw, &fields);
         let body = if raw.is_empty() {
             None
         } else {
-            Some(raw.to_vec())
+            Some(template.clone().unwrap_or_else(|| raw.to_vec()))
         };
         g.macros.push(Macro {
             name,
@@ -870,6 +1004,7 @@ impl Parser<'_> {
             stmt,
             decl,
             body,
+            template: template.is_some(),
             first: (vec![], true),
             compiled: OnceCell::new(),
             module: self.cur_module(),
@@ -910,7 +1045,7 @@ impl Parser<'_> {
             )
         {
             self.pos += 2;
-            name = Some(n);
+            name = Some(n.to_string());
         }
         let atom = self.atom()?;
         let op = if self.eat("*") {
@@ -936,14 +1071,14 @@ impl Parser<'_> {
         let a = match self.peek().clone() {
             Tok::Str(s) => {
                 let ts = lex(&s)?;
-                // Response::json は1つの名前 Response__json として照合する
+                // 修飾名のリテラルは、区切りを含む綴りで照合する。
                 match (ts.len(), ts[0].tok.text()) {
                     (2, Some(t)) if !t.is_empty() => Atom::Lit(t.to_string()),
                     _ => return self.err_at(format!("リテラル {s:?} は1個のトークンでない")),
                 }
             }
             Tok::Ident(n) if n == "Text" => Atom::Text(vec![]),
-            Tok::Ident(n) => builtin(&n).map(Atom::Builtin).unwrap_or(Atom::Rule(n)),
+            Tok::Ident(n) => builtin(&n).map(Atom::Builtin).unwrap_or(Atom::Rule(n.to_string())),
             Tok::Punct("(") => {
                 self.pos += 1;
                 let p = self.pattern()?;
@@ -960,7 +1095,7 @@ impl Parser<'_> {
     pub fn try_macros(&mut self, stmt: bool) -> R<Option<Expr>> {
         let g = self.g.clone();
         let start = self.pos;
-        let Some((k, rec)) = self.find_macro(|m| m.stmt == stmt && !m.decl)? else {
+        let Some((k, rec)) = self.find_macro(|m| !m.decl && m.stmt == stmt)? else {
             return Ok(None);
         };
         let m = &g.macros[k];
@@ -973,18 +1108,10 @@ impl Parser<'_> {
         }
     }
 
-    // 宣言の位置で、宣言のマクロを照合する。(マクロの番号, 照合結果)。展開は名前がそろってから expand_decl でする
-    pub fn match_decl(&mut self) -> R<Option<(usize, Node)>> {
-        self.find_macro(|m| m.decl)
-    }
-
-    // 宣言のマクロを展開したトークン列。self.pos は呼び出しの直後
-    pub fn expand_decl(&self, k: usize, rec: Node, site: Span) -> R<Vec<Token>> {
-        let g = self.g.clone();
-        let m = &g.macros[k];
-        if m.body.is_none() {
-            return Err(format!("マクロ {} の展開コードが無い", m.name).into());
-        }
+    pub fn declaration_macro(&mut self) -> R<Option<(usize, Node)>> { self.find_macro(|m| m.decl) }
+    pub fn expand_declaration(&self, k: usize, rec: Node, site: Span) -> R<Vec<Token>> {
+        let m = &self.g.macros[k];
+        if m.body.is_none() { return Err("宣言マクロに展開コードが無い".into()); }
         self.expand_toks(m, rec, site)
     }
 
@@ -1054,7 +1181,7 @@ impl Parser<'_> {
             globals: self.globals.clone(),
             structs: self.structs.clone(),
             no_struct: false,
-            module_at: Rc::new(vec![(0, m.module.clone())]),
+            module: m.module.clone(),
             mod_names: self.mod_names.clone(),
             uses: self.uses.clone(),
             modules: self.modules.clone(),
@@ -1066,7 +1193,7 @@ impl Parser<'_> {
         crate::resolve::resolve_macro(
             &mut b,
             &m.module,
-            field_kinds(&m.pat).into_iter().map(|(n, _)| n).collect(),
+            field_kinds(&m.pat).into_iter().map(|(n, _)| Name::from(n)).collect(),
             &self.uses,
             &self.known,
         );
@@ -1076,7 +1203,7 @@ impl Parser<'_> {
             .iter()
             .map(|(n, r)| (n.clone(), field_kinds(&r.pat)))
             .collect();
-        typeck::check_macro(&b, &field_kinds(&m.pat), &rules, &self.helpers).ctx(wrap)?;
+        typeck::check_macro(&mut b, &field_kinds(&m.pat), &rules, &self.helpers).ctx(wrap)?;
         let _ = m.compiled.set(b.clone());
         Ok(b)
     }
@@ -1111,31 +1238,20 @@ impl Parser<'_> {
             globals: self.globals.clone(),
             structs: self.structs.clone(),
             no_struct: false,
-            module_at: Rc::new(vec![(0, self.cur_module())]),
+            module: self.cur_module(),
             mod_names: self.mod_names.clone(),
             uses: self.uses.clone(),
             modules: self.modules.clone(),
             known: self.known.clone(),
             traits: self.traits.clone(),
         };
-        if m.stmt {
-            // 文の並びとして読み、ブロックにする
-            p.toks.extend([
-                Token {
-                    tok: Tok::Punct("}"),
-                    nl_before: true,
-                    ..end
-                },
-                eof,
-            ]);
-            return p.block().map(Expr::Block).ctx(wrap);
-        }
-        p.toks.push(eof);
-        let e = p.expr().ctx(wrap)?;
-        if p.peek() != &Tok::Eof {
-            return p.err("1個の式でない").ctx(wrap);
-        }
-        Ok(e)
+        // 一度だけ読み、式が1つならその式、文の並びならブロックにする。
+        p.toks.extend([Token { tok: Tok::Punct("}"), nl_before: true, ..end }, eof]);
+        let e = match p.block().ctx(wrap)? {
+            Block { stmts, tail: Some(e), .. } if !m.stmt && stmts.is_empty() => *e,
+            block => Expr::Block(block),
+        };
+        if m.template { ret_tail(e).ctx(wrap) } else { Ok(e) }
     }
 
     // マクロ本体を実行し、展開結果をトークン列にする
@@ -1152,7 +1268,7 @@ impl Parser<'_> {
             .into_iter()
             .map(|(n, node)| {
                 (
-                    n,
+                    Name::from(n),
                     Value::Syn(Rc::new(Syn {
                         node,
                         toks: src_toks.clone(),
@@ -1164,16 +1280,16 @@ impl Parser<'_> {
         // 展開ごとに番号を振り、quote に書いた名前をその番号で付け替える
         let id = NEXT_EXPANSION.fetch_add(1, Ordering::Relaxed);
         // 自分のモジュールの名前と、そのモジュールが use で修飾なしに取り込んだ名前（use './lib' -> * など）
-        let mut names: HashMap<String, String> = HashMap::new();
+        let mut names: HashMap<Name, Name> = HashMap::new();
         for u in self.uses.get(&m.module).into_iter().flatten() {
             for n in self.mod_names.get(&u.module).into_iter().flatten() {
                 if u.names.takes(n) {
-                    names.insert(n.clone(), format!("{}.{n}", u.module));
+                    names.insert(n.clone(), Name::qualified(&u.module, n.clone()));
                 }
             }
         }
         for n in self.mod_names.get(&m.module).into_iter().flatten() {
-            names.insert(n.clone(), format!("{}.{n}", m.module));
+            names.insert(n.clone(), Name::qualified(&m.module, n.clone()));
         }
         let prev =
             HYGIENE.with(|h| h.replace(Some((id, self.globals.clone(), m.module.clone(), names))));
@@ -1217,7 +1333,7 @@ impl Parser<'_> {
         } else {
             s
         };
-        Span { start: s, end }
+        Span { source: self.toks[start].span.source, start: s, end }
     }
 
     // start から今までの位置。マクロの展開で作ったトークンが端にあれば、その呼び出し位置を使う
@@ -1404,7 +1520,7 @@ impl Parser<'_> {
         let t = self.toks[self.pos].clone();
         let fail = |_| Miss::Fail;
         let n = match (k, t.tok) {
-            (Builtin::Ident, Tok::Ident(s)) => Node::Ident(s, t.span),
+            (Builtin::Ident, Tok::Ident(s)) => Node::Ident(s.to_string(), t.span),
             (Builtin::Int, Tok::Int(n)) => Node::Int(n),
             (Builtin::Float, Tok::Float(n)) => Node::Float(n),
             (Builtin::Str, Tok::Str(s)) => Node::Str(s),
@@ -1578,7 +1694,7 @@ fn main() {
             ("macro m ('m') { quote { $x } }", "未定義の変数 x"),
             ("macro m ('m') { 1 }", "マクロ本体の値"),
             (
-                "syntax P = k:Ident '=' v:Expr\nmacro m ('m' p:P) -> Stmt { quote { print($p.vv) } }",
+                "syntax P = k:Ident '=' v:Expr\nmacro m ('m' p:P) -> Stmt { quote { put($p.vv) } }",
                 "フィールド vv は無い",
             ),
             (

@@ -1,5 +1,5 @@
 //! ビルドの段階。ファイルの書き込みや外部ツールの起動は呼び出し側が行う。
-use crate::{build, c, error::R, ir, js, parser, typeck, wasm};
+use crate::{error::R, ir, js, parser, typeck, wasm};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -23,111 +23,22 @@ impl Checked {
     }
 }
 
-/// use したファイルを `base_dir` から読み、構文解析に渡すソースを作る。
-/// パッケージ依存は事前に hibana fetch などで取得する。
-pub fn load(source: &str, base_dir: &Path) -> R<String> {
-    parser::with_base_dir(base_dir, || parser::with_uses(source))
+/// use したファイルを `base_dir` から読み、構文解析に渡すモジュール表を作る。
+/// 組み込みのライブラリと、指定ディレクトリからのファイルを読み込む。
+pub fn load(source: &str, base_dir: &Path) -> R<parser::ModuleSet> {
+    parser::load_modules(source, base_dir)
 }
 
 /// 読み込み済みソースを構文解析し、マクロを展開して名前を解決する。
-pub fn parse(source: &str) -> R<parser::Program> {
-    parser::parse(source)
-}
-
-/// マクロが登録した成果物を作る。main は不要で、ファイルには書き込まない。
-/// 生成はマクロ評価中に行い、すべての宣言の型検査が通った場合だけ結果を返す。
-pub fn build_artifacts(source: &str) -> R<Vec<build::Artifact>> {
-    let source = parser::with_uses(source)?;
-    let (program, requests) = build::capture(|| parse(&source));
-    let _checked = check(program?, Kind::Library)?;
-    let mut names = Vec::new();
-    for request in &requests {
-        let path = &request.path;
-        // 区切りを / に限定し、別 OS でも同じ出力先になるようにする。
-        if path.is_empty()
-            || path.contains(['\\', ':', '\0'])
-            || path
-                .split('/')
-                .any(|p| p.is_empty() || p == "." || p == "..")
-        {
-            return Err(format!("成果物のパスは相対パスが必要: {path}").into());
-        }
-        if names.iter().any(|name: &&str| {
-            *name == path
-                || name.starts_with(&format!("{path}/"))
-                || path.starts_with(&format!("{name}/"))
-        }) {
-            return Err(format!("成果物のパスが衝突している: {path}").into());
-        }
-        names.push(path.as_str());
-    }
-    Ok(requests
-        .into_iter()
-        .map(|request| build::Artifact {
-            name: request.path,
-            contents: request.contents,
-        })
-        .collect())
-}
-
-/// 明示したソースをコンパイルする。ビルド成果物を登録するソースは受け付けない。
-pub fn compile(source: &str, target: &str, exports: &[String]) -> R<Vec<u8>> {
-    match target {
-        "wasm" => {
-            let program = compiler_input(source, Kind::Library)?;
-            let ir = exported_ir(&program, exports)?;
-            emit_wasm(&ir, Some(exports))
-        }
-        "js" | "c" => {
-            if !exports.is_empty() {
-                return Err("js/c の compile は公開関数の指定に未対応。main と空の公開関数一覧を使ってください".into());
-            }
-            let program = compiler_input(source, Kind::Executable)?;
-            let text = if target == "js" {
-                emit_js(&program)
-            } else {
-                emit_c(&program)?
-            };
-            Ok(text.into_bytes())
-        }
-        _ => Err(format!("未対応のコンパイル先: {target}").into()),
-    }
-}
-
-/// WASM 境界で扱える公開関数と外部関数の型を JSON で返す。
-/// 現在の境界型は int/str/unit。プログラム全体の型リフレクションではない。
-pub fn inspect_exports(source: &str, exports: &[String]) -> R<String> {
-    let program = compiler_input(source, Kind::Library)?;
-    let ir = exported_ir(&program, exports)?;
-    let signatures = boundary_signatures(&ir, exports)?;
-    Ok(
-        serde_json::json!({"exports": signatures.exports, "imports": signatures.imports})
-            .to_string(),
-    )
-}
-
-fn compiler_input(source: &str, kind: Kind) -> R<Checked> {
-    let source = parser::with_uses(source)?;
-    let (program, requests) = build::capture(|| parse(&source));
-    let program = program?;
-    if !requests.is_empty() {
-        return Err("コンパイラに渡すソースでは成果物を登録できない".into());
-    }
-    check(program, kind)
-}
-
-fn exported_ir(checked: &Checked, exports: &[String]) -> R<ir::Program> {
-    if exports.is_empty() {
-        return Err("WASM の公開関数が必要".into());
-    }
-    link(&lower(checked, Some(exports))?, exports)
+pub fn parse(source: impl Into<parser::ModuleSet>) -> R<parser::Program> {
+    parser::parse_modules(source.into())
 }
 
 /// 構文木を型検査し、必要な引数を補う。
 pub fn check(mut program: parser::Program, kind: Kind) -> R<Checked> {
     let info = match kind {
-        Kind::Executable => typeck::elaborate(&mut program)?,
-        Kind::Library => typeck::elaborate_library(&mut program)?,
+        Kind::Executable => typeck::check(&mut program)?,
+        Kind::Library => typeck::check_library(&mut program)?,
     };
     Ok(Checked { program, info })
 }
@@ -147,7 +58,7 @@ pub fn link(program: &ir::Program, exports: &[String]) -> R<ir::Program> {
     let selected = select_exports(program, exports)?;
     let mut pending: Vec<&str> = selected.iter().map(|f| f.name.as_str()).collect();
     let has_str = |ts: &[ir::ValueType], r: ir::ValueType| {
-        ts.contains(&ir::ValueType::Str) || r == ir::ValueType::Str
+        ts.iter().chain([&r]).any(|t| matches!(t, ir::ValueType::Str))
     };
     let mut visited = HashSet::new();
     let mut strings = selected
@@ -164,6 +75,7 @@ pub fn link(program: &ir::Program, exports: &[String]) -> R<ir::Program> {
             }
             if let Some(f) = program.imports.iter().find(|f| f.name() == name) {
                 strings |= has_str(f.param_types(), f.result_type());
+                if f.param_types().contains(&ir::ValueType::Num) || f.result_type() == ir::ValueType::Num { pending.push("__num_checked"); }
                 continue;
             }
             let function = functions
@@ -200,29 +112,36 @@ pub fn emit_wasm(program: &ir::Program, exports: Option<&[String]>) -> R<Vec<u8>
 }
 
 /// 公開関数を JavaScript から呼ぶための ES モジュールを作る。
-/// int は BigInt、str は文字列、unit は undefined として渡す。
+/// int は BigInt、num は Number、str は文字列、unit は undefined として渡す。
 pub fn emit_js_glue(program: &ir::Program, exports: &[String]) -> R<String> {
     let signatures = boundary_signatures(program, exports)?;
-    let names = serde_json::to_string(&signatures.exports).expect("関数の型を JSON に変換できる");
-    let hosts =
-        serde_json::to_string(&signatures.imports).expect("外部関数の型を JSON に変換できる");
+    let hosts = serde_json::to_string(&signatures.imports).unwrap();
+    let names = serde_json::to_string(&signatures.exports).unwrap();
     let template = r#"// hibana が生成した JavaScript 接続コード
 export async function instantiate(bytes, imports = {}) {
   let instance;
   let active = false;
   const encoder = new TextEncoder();
-  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
   function encode(value, type) {
+    if (type === 'bool') {
+      if (typeof value !== 'boolean') throw new TypeError('真偽値が必要');
+      return value ? 1n : 0n;
+    }
     if (type === "unit") {
       if (value !== undefined) throw new TypeError("unit の戻り値は undefined が必要");
       return undefined;
     }
-    if (type === "str") {
+    if (type === "String") {
       if (typeof value !== "string") throw new TypeError("文字列が必要");
       const data = encoder.encode(value);
       const ptr = instance.exports.__hibana_alloc(data.length) >>> 0;
       new Uint8Array(instance.exports.memory.buffer, ptr, data.length).set(data);
       return BigInt.asIntN(64, (BigInt(data.length) << 32n) | BigInt(ptr));
+    }
+    if (type === "num") {
+      if (typeof value !== "number" || !Number.isFinite(value)) throw new TypeError("有限な num が必要");
+      return value;
     }
     if (typeof value !== "number" && typeof value !== "bigint") throw new TypeError("整数が必要");
     if (typeof value === "number" && !Number.isSafeInteger(value)) throw new RangeError("安全な整数が必要");
@@ -231,29 +150,42 @@ export async function instantiate(bytes, imports = {}) {
     return n;
   }
   function decode(value, type) {
+    if (type === 'bool') return value !== 0n;
     if (type === "unit") return undefined;
     if (type === "int") return value;
+    if (type === "num") {
+      if (!Number.isFinite(value)) throw new RangeError("num の演算結果が有限でない");
+      return value;
+    }
     const packed = BigInt.asUintN(64, value);
     const ptr = Number(packed & 0xffffffffn);
     const len = Number(packed >> 32n);
     return decoder.decode(new Uint8Array(instance.exports.memory.buffer, ptr, len));
   }
   const host = Object.create(null);
-  for (const [name, params, result] of __HOSTS__) {
+  const hostSignatures = __HOSTS__;
+  for (const [name, params, result] of hostSignatures) {
     const callback = imports.hibana_host?.[name];
     if (typeof callback !== "function") throw new TypeError("外部関数が必要: " + name);
     host[name] = (...args) => encode(callback(...args.map((value, i) => decode(value, params[i]))), result);
   }
-  // print の 1 行と現在時刻。print は imports.hibana.print（無ければ console.log）に渡す
+  // put の 1 行と現在時刻。1 行は imports.hibana.print（無ければ console.log）に渡す
   const print = imports.hibana?.print ?? console.log;
   const hibana = {
     write: (fd, ptr, len) => print(decoder.decode(new Uint8Array(instance.exports.memory.buffer, Number(ptr), Number(len))).replace(/\n$/, "")),
     now_ms: () => BigInt(Date.now()),
+    read: (fd, ptr, len) => {
+      const target = new Uint8Array(instance.exports.memory.buffer, Number(ptr), Number(len));
+      if (imports.hibana?.read) return BigInt(imports.hibana.read(Number(fd), target));
+      if (typeof process !== "undefined" && process.getBuiltinModule) return BigInt(process.getBuiltinModule("node:fs").readSync(Number(fd), target, 0, target.length, null));
+      throw new Error("標準入力には imports.hibana.read が必要です");
+    },
   };
   const instantiated = await WebAssembly.instantiate(bytes, { ...imports, hibana_host: host, hibana });
   instance = instantiated instanceof WebAssembly.Instance ? instantiated : instantiated.instance;
   const functions = Object.create(null);
-  for (const [name, params, result] of __EXPORTS__) {
+  const exportSignatures = __EXPORTS__;
+  for (const [name, params, result] of exportSignatures) {
     functions[name] = (...args) => {
       if (active) throw new Error("同じ WASM インスタンスへ再入できない");
       if (args.length !== params.length) throw new TypeError("引数の数が違う");
@@ -277,8 +209,8 @@ export async function instantiate(bytes, imports = {}) {
     Ok(format!("{before}{hosts}{middle}{names}{after}"))
 }
 
-// JSON と JS 接続コードで、境界の型名とシグネチャの並びを共有する。
-type BoundarySignature<'a> = (&'a str, Vec<&'static str>, &'static str);
+// JS 接続コードに渡す境界の型名とシグネチャ。
+type BoundarySignature<'a> = (&'a str, Vec<String>, String);
 
 struct BoundarySignatures<'a> {
     exports: Vec<BoundarySignature<'a>>,
@@ -290,15 +222,7 @@ fn boundary_signature<'a>(
     params: &[ir::ValueType],
     result: &ir::ValueType,
 ) -> BoundarySignature<'a> {
-    fn ty(t: &ir::ValueType) -> &'static str {
-        match t {
-            ir::ValueType::Int => "int",
-            ir::ValueType::Str => "str",
-            ir::ValueType::Unit => "unit",
-            ir::ValueType::Bool => "bool",
-            ir::ValueType::Other => "other",
-        }
-    }
+    fn ty(t: &ir::ValueType) -> String { t.to_string() }
     (name, params.iter().map(ty).collect(), ty(result))
 }
 
@@ -343,23 +267,6 @@ fn select_exports<'a>(program: &'a ir::Program, names: &[String]) -> R<Vec<&'a i
 }
 
 /// 型検査済みプログラムから JavaScript を作る。
-pub fn emit_js(checked: &Checked) -> String {
-    js::emit(&checked.program, &checked.info)
-}
-
-/// 型検査済みプログラムから C を作る。
-pub fn emit_c(checked: &Checked) -> R<String> {
-    if let Some(f) = checked
-        .program
-        .fns
-        .iter()
-        .find(|f| f.js.as_ref().is_some_and(|m| !m.is_empty()))
-    {
-        return Err(format!(
-            "extern の関数 {} は JS ターゲット（hibana js）でだけ使える",
-            f.name
-        )
-        .into());
-    }
-    Ok(c::emit(&checked.program))
+pub fn emit_js(checked: &Checked) -> R<String> {
+    Ok(js::emit(&checked.program, &checked.info))
 }

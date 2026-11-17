@@ -10,7 +10,7 @@ const CLOSE: &[&str] = &[")", "]", "}"];
 const BIN: &[&str] = &["=", "==", "!=", "<=", ">=", "&&", "||", "=>", "->"];
 // 新しい宣言や文を始めるキーワード（続きの行にしない）
 const STARTS: &[&str] = &[
-    "fn", "let", "type", "syntax", "macro", "effect", "use", "module", "extern", "partial", "return",
+    "fn", "let", "type", "syntax", "macro", "effect", "use", "module", "extern", "return",
     "trait", "impl", "struct", "enum",
 ];
 
@@ -45,6 +45,9 @@ fn jsx_end(toks: &[Token], i: usize) -> Option<usize> {
     while k < toks.len() {
         if starts(k) {
             depth += 1;
+        } else if punct(&toks[k]) == "/>" {
+            depth -= 1;
+            if depth == 0 { return Some(k); }
         } else if punct(&toks[k]) == "</" {
             depth -= 1;
             if depth == 0 {
@@ -197,7 +200,10 @@ pub fn format(src: &str) -> R<String> {
                 stack.pop();
                 line_base = line_base.min(stack.len());
             }
-            if space {
+            // 腕の -> の前に空白を2つ以上置いて揃えてあれば、そのまま残す
+            if c == "->" && gap.len() > 1 && gap.bytes().all(|b| b == b' ') {
+                out.push_str(gap);
+            } else if space {
                 out.push(' ');
             }
         }
@@ -265,8 +271,8 @@ mod tests {
 
     #[test]
     fn layout() {
-        let src = "fn add(a:int,b :int)->int{   a+b }  // 足す\n\n\n\nfn main(){\nlet x=add( 1,2 )\n      if x==3 {print( 'ok' )}else{\n  print('ng')\n}\n    /* c */\n  let ok = x == 3 ||\n  x == 4\n  print(<p>a   b {x}</p>)\n  print(web.json(f([\n    1\n    ])))\n\n}\n";
-        let want = "fn add(a:int, b:int) -> int { a+b } // 足す\n\nfn main() {\n    let x = add(1, 2)\n    if x == 3 { print('ok') } else {\n        print('ng')\n    }\n    /* c */\n    let ok = x == 3 ||\n        x == 4\n    print(<p>a   b {x}</p>)\n    print(web.json(f([\n        1\n    ])))\n}\n";
+        let src = "fn add(a:int,b :int)->int{   a+b }  // 足す\n\n\n\nfn main(){\nlet x=add( 1,2 )\n      if x==3 {put( 'ok' )}else{\n  put('ng')\n}\n    /* c */\n  let ok = x == 3 ||\n  x == 4\n  put(<p>a   b {x}</p>)\n  put(web.json(f([\n    1\n    ])))\n\n}\n";
+        let want = "fn add(a:int, b:int) -> int { a+b } // 足す\n\nfn main() {\n    let x = add(1, 2)\n    if x == 3 { put('ok') } else {\n        put('ng')\n    }\n    /* c */\n    let ok = x == 3 ||\n        x == 4\n    put(<p>a   b {x}</p>)\n    put(web.json(f([\n        1\n    ])))\n}\n";
         assert_eq!(format(src).unwrap(), want);
     }
 

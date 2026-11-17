@@ -1,3 +1,4 @@
+use crate::parser::Name;
 // 型検査後の構文木から、WASM とネイティブの両方へ出す構造化した中間表現を作る。
 // 制御フローは WASM と同じ入れ子の形（if・while・return）で持ち、goto を持たない。
 // 値はすべて V（型の番号 tag と中身 payload の 2 つの 64 ビット整数）で表す。番号は runtime.hb の先頭を参照。
@@ -17,6 +18,7 @@ pub const ARR: i64 = 4;
 pub const DATA: i64 = 5;
 pub const FN: i64 = 6;
 pub const TY: i64 = 7;
+pub const NUM: i64 = 9;
 
 const RUNTIME: &str = include_str!("runtime.hb");
 
@@ -30,6 +32,7 @@ pub struct Program {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueType {
     Int,
+    Num,
     Bool,
     Str,
     Unit,
@@ -96,6 +99,9 @@ pub enum Prim {
     Fail,
     // 1970 年からのミリ秒
     Now,
+    Read,
+    FFromInt, FToInt, FAdd, FSub, FMul, FDiv, FNeg, FFloor, FSqrt,
+    FEq, FLt, FLe,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -136,8 +142,9 @@ impl fmt::Display for ValueType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Int => "int",
+            Self::Num => "num",
             Self::Bool => "bool",
-            Self::Str => "str",
+            Self::Str => "String",
             Self::Unit => "unit",
             Self::Other => "other",
         })
@@ -166,7 +173,12 @@ impl Import {
 }
 
 fn boundary(t: ValueType) -> bool {
-    matches!(t, ValueType::Int | ValueType::Str | ValueType::Unit)
+    matches!(t, ValueType::Int | ValueType::Num | ValueType::Bool | ValueType::Str | ValueType::Unit)
+}
+
+// 型検査は num の演算の引数を #num で包む。リテラルはそのまま残る。
+fn numeric(e: &Ast) -> bool {
+    matches!(e.peel(), Ast::Num(_)) || matches!(e.peel(), Ast::Call(n, _) if n == "#num")
 }
 
 impl Function {
@@ -199,6 +211,7 @@ impl Function {
     /// 呼ぶ関数の名前。算術の範囲外などで呼ぶランタイムの関数も含む
     pub fn calls(&self) -> Vec<&str> {
         let mut names = Vec::new();
+        if self.result_type == ValueType::Num || self.param_types.contains(&ValueType::Num) { names.push("__num_checked"); }
         self.each(&mut |n| match n {
             Node::Expr(Expr::Call(n, _) | Expr::Func(n)) => names.push(n.as_str()),
             Node::Expr(Expr::Prim(Prim::Add | Prim::Sub | Prim::Mul, _)) => {
@@ -260,8 +273,9 @@ fn each_block<'a>(b: &'a Block, f: &mut impl FnMut(Node<'a>)) {
 fn value_type(e: &Ast) -> ValueType {
     match e.peel() {
         Ast::Var(n) if n == "int" => ValueType::Int,
+        Ast::Var(n) if n == "num" || n == "number" => ValueType::Num,
         Ast::Var(n) if n == "bool" => ValueType::Bool,
-        Ast::Var(n) if n == "str" => ValueType::Str,
+        Ast::Var(n) if n == "String" => ValueType::Str,
         Ast::Var(n) if n == "unit" => ValueType::Unit,
         Ast::Refine(base, _, _) => value_type(base),
         _ => ValueType::Other,
@@ -333,7 +347,7 @@ struct Ctx<'a> {
     sources: HashMap<&'a str, Source<'a>>,
     // 構築子の名前から (番号, フィールド名)
     ctors: HashMap<&'a str, (i64, Vec<&'a str>)>,
-    ctor_list: Vec<(&'a str, Vec<&'a str>)>,
+    ctor_list: Vec<(&'a Name, Vec<&'a str>)>,
     types: HashSet<&'a str>,
     // 変換の途中で作った関数（無名関数）
     made: Vec<Function>,
@@ -354,13 +368,13 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>) -> R<Prog
     for f in &p.fns {
         sources.insert(f.name.as_str(), Source { f, runtime: false });
     }
-    let ctor_list: Vec<(&str, Vec<&str>)> = p
+    let ctor_list: Vec<(&Name, Vec<&str>)> = p
         .datas
         .iter()
         .flat_map(|d| &d.ctors)
         .map(|c| {
             (
-                c.name.as_str(),
+                &c.name,
                 c.fields.iter().map(|f| f.0.as_str()).collect(),
             )
         })
@@ -369,7 +383,7 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>) -> R<Prog
         ctors: ctor_list
             .iter()
             .enumerate()
-            .map(|(i, (n, fs))| (*n, (i as i64, fs.clone())))
+            .map(|(i, (n, fs))| (n.as_str(), (i as i64, fs.clone())))
             .collect(),
         ctor_list,
         types: p.datas.iter().map(|d| d.name.as_str()).collect(),
@@ -399,7 +413,7 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>) -> R<Prog
             }
             names.to_vec()
         }
-        None => p.fns.iter().map(|f| f.name.clone()).collect(),
+        None => p.fns.iter().map(|f| f.name.to_string()).collect(),
     };
     let exported = |name: &str| exports.is_some_and(|names| names.iter().any(|n| n == name));
     let mut visited = HashSet::new();
@@ -418,10 +432,13 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>) -> R<Prog
             Some(f) => {
                 let param_types: Vec<_> = f.params.iter().map(|(_, t)| value_type(t)).collect();
                 let result_type = ret_type(f);
+                if param_types.contains(&ValueType::Num) || result_type == ValueType::Num {
+                    pending.push("__num_checked".into());
+                }
                 if exported(&name) {
                     return Err("外部関数を直接公開できない".into());
                 }
-                // ponytail: WASM の境界（公開関数と外部関数）は int・str・unit だけ。ほかの型は接続コードに変換を足す
+                // ponytail: WASM の境界は int・num・str・unit。ほかの型は接続コードに変換を足す
                 if !param_types
                     .iter()
                     .chain([&result_type])
@@ -429,11 +446,11 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>) -> R<Prog
                 {
                     return Err(format!("IR は関数 {} の境界の型に未対応", f.name).into());
                 }
-                if param_types.contains(&ValueType::Str) || result_type == ValueType::Str {
+                if param_types.iter().chain([&result_type]).any(|t| matches!(t, ValueType::Str)) {
                     pending.extend(["__str_in".to_string(), "__str_out".to_string()]);
                 }
                 imports.push(Import {
-                    name: f.name.clone(),
+                    name: f.name.to_string(),
                     param_types,
                     result_type,
                 });
@@ -446,8 +463,7 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>) -> R<Prog
             if !function.boundary() {
                 return Err(format!("IR は関数 {} の境界の型に未対応", function.name).into());
             }
-            if function.param_types.contains(&ValueType::Str)
-                || function.result_type == ValueType::Str
+            if function.param_types.iter().chain([&function.result_type]).any(|t| matches!(t, ValueType::Str))
             {
                 pending.extend(["__str_in".to_string(), "__str_out".to_string()]);
             }
@@ -504,7 +520,7 @@ impl<'a> Ctx<'a> {
         let mut body = b.stmts;
         body.push(Stmt::Return(b.value));
         Ok(Function {
-            name: f.name.clone(),
+            name: f.name.to_string(),
             params: f.params.len() as u32,
             param_types: f.params.iter().map(|(_, t)| value_type(t)).collect(),
             result_type: ret_type(f),
@@ -525,13 +541,18 @@ impl<'a> Ctx<'a> {
         };
         let eq = |a: Expr, n: i64| prim(Prim::Eq, vec![a, int(n)]);
         // 構築子の番号から名前、(番号, 位置) からフィールド名
-        if name == "__ctor_name" || name == "__ctor_field" {
-            let mut f = other(if name == "__ctor_name" { 1 } else { 2 });
+        if matches!(name, "__ctor_name" | "__ctor_field" | "__ctor_kind") {
+            let mut f = other(if name == "__ctor_field" { 2 } else { 1 });
             for (i, (cn, fields)) in self.ctor_list.iter().enumerate() {
+                if name == "__ctor_kind" {
+                    let kind = match cn.structure_style() { Some(crate::frontend::name::StructureStyle::Record) => 1, Some(crate::frontend::name::StructureStyle::Tuple) => 2, None => 0 };
+                    f.body.push(if_return(eq(Expr::Local(0), i as i64), int(kind)));
+                    continue;
+                }
                 if name == "__ctor_name" {
                     f.body.push(if_return(
                         eq(Expr::Local(0), i as i64),
-                        Expr::Str(cn.to_string()),
+                        Expr::Str(cn.structure_owner().unwrap_or_else(|| (*cn).clone()).to_string()),
                     ));
                     continue;
                 }
@@ -544,7 +565,7 @@ impl<'a> Ctx<'a> {
                     f.body.push(if_return(cond, Expr::Str(field.to_string())));
                 }
             }
-            f.body.push(Stmt::Return(Expr::Str(String::new())));
+            f.body.push(Stmt::Return(if name == "__ctor_kind" { int(0) } else { Expr::Str(String::new()) }));
             return Ok(f);
         }
         // 名前でフィールドを読む。構築子ごとに位置が違うので番号で振り分ける
@@ -597,7 +618,7 @@ fn if_return(cond: Expr, v: Expr) -> Stmt {
 
 struct Lower<'c, 'a> {
     cx: &'c mut Ctx<'a>,
-    vars: HashMap<String, u32>,
+    vars: HashMap<Name, u32>,
     locals: u32,
     // ランタイムの関数。演算子は中身の演算になる
     raw: bool,
@@ -768,6 +789,7 @@ impl Lower<'_, '_> {
     fn expr(&mut self, e: &Ast) -> R<Expr> {
         Ok(match e.peel() {
             Ast::Int(n) => int(*n),
+            Ast::Num(n) => Expr::Const(NUM, n.to_bits() as i64),
             Ast::Bool(b) => Expr::Const(BOOL, *b as i64),
             Ast::Str(s) => Expr::Str(s.clone()),
             Ast::Var(n) => {
@@ -784,9 +806,14 @@ impl Lower<'_, '_> {
                         call("__fn_new", vec![Expr::Func(format!("__w_{n}")), int(0)]),
                     ),
                     // 型は名前だけ
-                    None => mkv(TY, Expr::Str(n.clone())),
+                    None => mkv(TY, Expr::Str(n.to_string())),
                 }
             }
+            Ast::Unary("-", a) if matches!(a.peel(), Ast::Num(_)) => {
+                let Ast::Num(n) = a.peel() else { unreachable!() };
+                Expr::Const(NUM, (-n).to_bits() as i64)
+            }
+            Ast::Unary("-", a) if !self.raw && numeric(a) => call("__neg", vec![self.expr(a)?]),
             Ast::Unary("-", a) => prim(Prim::Sub, vec![int(0), self.expr(a)?]),
             Ast::Unary(_, a) => prim(Prim::Not, vec![self.expr(a)?]),
             Ast::Binary(op @ ("&&" | "||"), a, b) => {
@@ -799,7 +826,15 @@ impl Lower<'_, '_> {
                 Expr::If(Box::new(a), t, f)
             }
             Ast::Binary(op, a, b) => {
+                let number = !self.raw && numeric(a);
                 let (a, b) = (self.expr(a)?, self.expr(b)?);
+                if *op == "**" {
+                    return Ok(call(if number { "__value_pow" } else { "__pow" }, vec![a, b]));
+                }
+                if number && matches!(*op, "-" | "*" | "/" | "%" | "<" | "<=" | ">" | ">=") {
+                    let name = match *op { "-" => "__sub", "*" => "__mul", "/" => "__div", "%" => "__rem", "<" => "__lt", "<=" => "__le", ">" => "__gt", _ => "__ge" };
+                    return Ok(call(name, vec![a, b]));
+                }
                 let p = match *op {
                     "+" => Prim::Add,
                     "-" => Prim::Sub,
@@ -912,7 +947,7 @@ impl Lower<'_, '_> {
                 block(stmts, rest)
             }
             Ast::Lam(params, _, _, body) => {
-                let params: Vec<String> = params.iter().map(|(p, _)| p.clone()).collect();
+                let params: Vec<Name> = params.iter().map(|(p, _)| p.clone()).collect();
                 self.lambda(&params, &[], body)?
             }
             Ast::Pi(..) => mkv(TY, Expr::Str("fn".into())),
@@ -927,15 +962,16 @@ impl Lower<'_, '_> {
         })
     }
 
-    fn call(&mut self, n: &str, args: &[Ast]) -> R<Expr> {
+    fn call(&mut self, n: &Name, args: &[Ast]) -> R<Expr> {
         if let Some(i) = self.vars.get(n) {
             let i = *i;
             let args = self.args(args)?;
             return Ok(self.checked(Expr::CallIndirect(Box::new(Expr::Local(i)), args)));
         }
         let mut args = self.args(args)?;
+        if n == "#num" { return Ok(call("__num", args)); }
         if let Some(p) = intrinsic(n) {
-            return Ok(match n {
+            return Ok(match n.as_str() {
                 "__getv" => {
                     let mut stmts = Vec::new();
                     let a = self.temp(args.remove(0), &mut stmts);
@@ -953,12 +989,12 @@ impl Lower<'_, '_> {
                 _ => prim(p.unwrap(), args),
             });
         }
-        if let Some((i, fields)) = self.cx.ctors.get(n) {
+        if let Some((i, fields)) = self.cx.ctors.get(n.as_str()) {
             let (i, nf) = (*i, fields.len() as i64);
             let new = call("__data_new", vec![int(i), int(nf)]);
             return Ok(self.object(DATA, new, 16, args));
         }
-        if let Some(src) = self.cx.sources.get(n) {
+        if let Some(src) = self.cx.sources.get(n.as_str()) {
             let f = src.f;
             // 操作は、引数を Vec にして内側の handle から腕を探す。推論した型の引数は渡さない
             if f.op.is_some() {
@@ -979,7 +1015,7 @@ impl Lower<'_, '_> {
             let c = call(n, args);
             return Ok(if effects { self.checked(c) } else { c });
         }
-        if matches!(n, "Vec" | "Type" | "Ref" | "Async") || self.cx.types.contains(n) {
+        if matches!(n.as_str(), "Vec" | "Type" | "Ref" | "Async") || self.cx.types.contains(n.as_str()) {
             return Ok(mkv(TY, Expr::Str(n.to_string())));
         }
         let rt = format!("__{n}");
@@ -1000,8 +1036,8 @@ impl Lower<'_, '_> {
 
     // 無名関数。見えている局所変数をすべて写し取り、別の関数にする
     // unpack は handle の腕の束縛。腕は引数の Vec を 1 つ受け取り、そこから取り出す
-    fn lambda(&mut self, params: &[String], unpack: &[String], body: &parser::Block) -> R<Expr> {
-        let mut caps: Vec<(String, u32)> = self.vars.iter().map(|(n, i)| (n.clone(), *i)).collect();
+    fn lambda(&mut self, params: &[Name], unpack: &[Name], body: &parser::Block) -> R<Expr> {
+        let mut caps: Vec<(Name, u32)> = self.vars.iter().map(|(n, i)| (n.clone(), *i)).collect();
         caps.sort();
         self.cx.lambdas += 1;
         let name = format!("__lam{}", self.cx.lambdas);
@@ -1058,12 +1094,12 @@ impl Lower<'_, '_> {
         let mut ops = Vec::new();
         let mut fns = Vec::new();
         for a in arms {
-            ops.push(Expr::Str(a.ctor.clone()));
-            let b = parser::Block {
+            ops.push(Expr::Str(a.ctor.to_string()));
+            let b = parser::Block { id: Default::default(),
                 stmts: vec![],
                 tail: Some(Box::new(a.body.clone())),
             };
-            fns.push(self.lambda(&["#args".to_string()], &a.binds, &b)?);
+            fns.push(self.lambda(&[Name::from("#args")], &a.binds, &b)?);
         }
         let n = int(ops.len() as i64);
         let ops = self.object(ARR, call("__arr_new", vec![n.clone()]), 8, ops);
@@ -1096,6 +1132,19 @@ fn intrinsic(n: &str) -> Option<Option<Prim>> {
         "__sys_write" => Prim::Write,
         "__fail" => Prim::Fail,
         "__now" => Prim::Now,
+        "__sys_read" => Prim::Read,
+        "__f_from_int" => Prim::FFromInt,
+        "__f_to_int" => Prim::FToInt,
+        "__f_add" => Prim::FAdd,
+        "__f_sub" => Prim::FSub,
+        "__f_mul" => Prim::FMul,
+        "__f_div" => Prim::FDiv,
+        "__f_neg" => Prim::FNeg,
+        "__f_floor" => Prim::FFloor,
+        "__f_sqrt" => Prim::FSqrt,
+        "__f_eq" => Prim::FEq,
+        "__f_lt" => Prim::FLt,
+        "__f_le" => Prim::FLe,
         "__and" => Prim::And,
         "__or" => Prim::Or,
         "__shl" => Prim::Shl,
@@ -1194,11 +1243,11 @@ mod tests {
 
     #[test]
     fn lowers_control_flow() {
-        let src = "fn f(n: int) -> bool {\n let mut i = 0\n while i < n { if i > 3 { return true }\n i = i - 1 }\n false\n}\nfn main() { print(f(5)) }";
+        let src = "fn f(n: int) -> bool {\n let mut i = 0\n while i < n { if i > 3 { return true }\n i = i - 1 }\n false\n}\nfn main() { put(f(5)) }";
         let ir = crate::to_ir(src).unwrap();
         assert!(ir.contains("while (Lt %1 %0) {"), "{ir}");
         assert!(ir.contains("(if (Gt %1 3) {"), "{ir}");
-        assert!(ir.contains("(call __print (call f 5))"), "{ir}");
+        assert!(ir.contains("(call __put (call f 5))"), "{ir}");
     }
 
     #[test]

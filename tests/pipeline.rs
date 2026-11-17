@@ -4,9 +4,9 @@ use std::process::Command;
 
 #[test]
 fn builds_and_links_as_independent_steps() {
-    let src = "fn add(a: int, b: int) -> int { a + b }\nfn twice(n: int) -> int { add(n, n) }\nfn log(n: int) { print(n) }\nfn unused(n: int) -> int { n + 999 }";
+    let src = "fn add(a: int, b: int) -> int { a + b }\nfn twice(n: int) -> int { add(n, n) }\nfn log(n: int) { put(n) }\nfn unused(n: int) -> int { n + 999 }";
     let expanded = pipeline::load(src, Path::new(".")).unwrap();
-    let parsed = pipeline::parse(&expanded).unwrap();
+    let parsed = pipeline::parse(expanded).unwrap();
     let checked = pipeline::check(parsed, Kind::Library).unwrap();
     assert_eq!(checked.program().fns.len(), 4);
     let all = pipeline::lower(&checked, None).unwrap();
@@ -22,7 +22,11 @@ fn builds_and_links_as_independent_steps() {
     let exports = vec!["twice".to_string(), "log".to_string()];
     let linked = pipeline::link(&all, &exports).unwrap();
     assert_eq!(user(&linked), ["add", "twice", "log"]);
-    let twice = linked.functions().iter().find(|f| f.name() == "twice").unwrap();
+    let twice = linked
+        .functions()
+        .iter()
+        .find(|f| f.name() == "twice")
+        .unwrap();
     assert_eq!(twice.param_types().len(), 1);
     assert!(!twice.body().is_empty());
     assert!(pipeline::link(&all, &["missing".into()]).is_err());
@@ -66,38 +70,21 @@ try { x.twice(); throw Error('accepted missing argument'); } catch (e) { if (!(e
 }
 
 #[test]
-fn inspection_and_glue_preserve_boundary_signatures_and_order() {
+fn glue_preserves_boundary_signatures_and_order() {
     let source = r#"
 extern 'host' {
-    fn show(message: str)
-    fn decorate(message: str, n: int) -> str
+    fn show(message: String)
+    fn decorate(message: String, n: int) -> String
     fn count() -> int
     fn unused_host() -> int
 }
-fn greet(message: str, n: int) -> str { decorate(message, n) }
-fn log(message: str) { show(message) }
+fn greet(message: String, n: int) -> String { decorate(message, n) }
+fn log(message: String) { show(message) }
 fn answer() -> int { count() }
 fn unused() -> int { unused_host() }
 "#;
     // 宣言順とは違う順序で公開し、外部関数は宣言順のままであることを確かめる。
     let exports = vec!["answer".into(), "log".into(), "greet".into()];
-    let inspected: serde_json::Value =
-        serde_json::from_str(&pipeline::inspect_exports(source, &exports).unwrap()).unwrap();
-    assert_eq!(
-        inspected,
-        serde_json::json!({
-            "exports": [
-                ["answer", [], "int"],
-                ["log", ["str"], "unit"],
-                ["greet", ["str", "int"], "str"]
-            ],
-            "imports": [
-                ["show", ["str"], "unit"],
-                ["decorate", ["str", "int"], "str"],
-                ["count", [], "int"]
-            ]
-        })
-    );
     let checked = pipeline::check(pipeline::parse(source).unwrap(), Kind::Library).unwrap();
     let ir = pipeline::link(
         &pipeline::lower(&checked, Some(&exports)).unwrap(),
@@ -105,14 +92,7 @@ fn unused() -> int { unused_host() }
     )
     .unwrap();
     let glue = pipeline::emit_js_glue(&ir, &exports).unwrap();
-    assert!(glue.contains(&format!(
-        "for (const [name, params, result] of {})",
-        inspected["exports"]
-    )));
-    assert!(glue.contains(&format!(
-        "for (const [name, params, result] of {})",
-        inspected["imports"]
-    )));
+    // 生成した接続コードの順序と変換は、下で WASM を実行して確かめる。
 
     let dir = std::env::temp_dir().join(format!("hibana-signatures-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -163,7 +143,9 @@ fn load_uses_explicit_base_directory_without_changing_caller() {
     std::fs::write(b.join("util.hb"), "fn value() -> int { 2 }").unwrap();
     let source = "use 'util.hb'\n";
     hibana::parser::set_base_dir(&a);
-    assert!(pipeline::load(source, &b).unwrap().contains("{ 2 }"));
-    assert!(hibana::parser::with_uses(source).unwrap().contains("{ 1 }"));
+    let loaded = pipeline::load(source, &b).unwrap();
+    assert!(loaded.modules.iter().any(|module| module.source.text.contains("{ 2 }")));
+    let loaded = hibana::parser::load_modules(source, &a).unwrap();
+    assert!(loaded.modules.iter().any(|module| module.source.text.contains("{ 1 }")));
     std::fs::remove_dir_all(dir).unwrap();
 }

@@ -1,10 +1,9 @@
 // 構造化 IR を WebAssembly に変換する。
 // IR の値（型の番号と中身）は 2 つの i64 で表し、関数は 2 つの i64 を返す。
-// 公開関数と外部関数の境界では、int は i64、str は (長さ << 32) | 位置 の i64 に変換する。
+// 公開関数と外部関数の境界では、int は i64、num は f64、str は (長さ << 32) | 位置 の i64 に変換する。
 // メモリ: [0, 8) は使わない、[8, 72) はランタイムの状態（runtime.hb の __static）、その後に文字列のリテラル、ヒープ。
 use crate::ir::{self, Block, Expr, Node, Prim, Program, Stmt, ValueType};
 use std::collections::HashMap;
-use std::io::Write;
 use wasm_encoder::{
     BlockType, CodeSection, ConstExpr, DataSection, ElementSection, Elements, EntityType,
     ExportKind, ExportSection, Function, FunctionSection, ImportSection, Instruction as I, MemArg,
@@ -14,79 +13,6 @@ use wasm_encoder::{
 const STATIC: i64 = 8;
 const FAIL_AT: i64 = 24;
 const LITERALS: u32 = 72;
-
-struct Host<W> {
-    out: W,
-}
-
-// WASM の取り込みに出力を渡して main を呼ぶ。
-pub fn run<W: Write + 'static>(bytes: &[u8], out: W) -> crate::error::R<W> {
-    let engine = wasmtime::Engine::default();
-    let module = wasmtime::Module::new(&engine, bytes)
-        .map_err(|e| format!("WASM の読み込みに失敗した: {e}"))?;
-    let mut store = wasmtime::Store::new(&engine, Host { out });
-    let mut linker = wasmtime::Linker::new(&engine);
-    linker
-        .func_wrap(
-            "hibana",
-            "write",
-            |mut caller: wasmtime::Caller<'_, Host<W>>,
-             fd: i64,
-             ptr: i64,
-             len: i64|
-             -> wasmtime::Result<()> {
-                let memory = caller
-                    .get_export("memory")
-                    .and_then(|e| e.into_memory())
-                    .ok_or_else(|| wasmtime::Error::msg("WASM に memory が無い"))?;
-                let (ptr, len) = (ptr as usize, len as usize);
-                let bytes = memory
-                    .data(&caller)
-                    .get(ptr..ptr + len)
-                    .ok_or_else(|| wasmtime::Error::msg("文字列が memory の範囲外"))?
-                    .to_vec();
-                if fd == 1 {
-                    caller.data_mut().out.write_all(&bytes)?;
-                } else {
-                    std::io::stderr().write_all(&bytes)?;
-                }
-                Ok(())
-            },
-        )
-        .and_then(|l| {
-            l.func_wrap("hibana", "now_ms", || -> i64 {
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_millis() as i64)
-            })
-        })
-        .map_err(|e| format!("WASM の出力関数を登録できない: {e}"))?;
-    let instance = linker
-        .instantiate(&mut store, &module)
-        .map_err(|e| format!("WASM の初期化に失敗した: {e}"))?;
-    let main = instance
-        .get_typed_func::<(), ()>(&mut store, "main")
-        .map_err(|e| format!("WASM の main を呼べない: {e}"))?;
-    if let Err(e) = main.call(&mut store, ()) {
-        if let Some(error) = e.downcast_ref::<std::io::Error>() {
-            return Err(format!("出力に失敗した: {error}").into());
-        }
-        // ランタイムの __fail が書いた文字列があれば、それを実行時エラーにする
-        let message = instance.get_memory(&mut store, "memory").and_then(|m| {
-            let data = m.data(&store);
-            let word = |at: usize| {
-                Some(u64::from_le_bytes(data.get(at..at + 8)?.try_into().ok()?) as usize)
-            };
-            let p = word(FAIL_AT as usize).filter(|p| *p != 0)?;
-            let len = word(p)?;
-            String::from_utf8(data.get(p + 8..p + 8 + len)?.to_vec()).ok()
-        });
-        return Err(message
-            .unwrap_or_else(|| format!("WASM の実行に失敗した: {e}"))
-            .into());
-    }
-    Ok(store.into_data().out)
-}
 
 pub fn emit(program: &Program) -> Vec<u8> {
     emit_selected(program, None)
@@ -104,24 +30,24 @@ fn mem(offset: u64, align: u32) -> MemArg {
 #[derive(Default)]
 struct Types {
     section: TypeSection,
-    seen: HashMap<(u32, u32), u32>,
+    seen: HashMap<(Vec<ValType>, Vec<ValType>), u32>,
 }
 
 impl Types {
     fn get(&mut self, params: u32, results: u32) -> u32 {
+        self.signature(vec![ValType::I64; params as usize], vec![ValType::I64; results as usize])
+    }
+    fn signature(&mut self, params: Vec<ValType>, results: Vec<ValType>) -> u32 {
         let n = self.seen.len() as u32;
-        *self.seen.entry((params, results)).or_insert_with(|| {
-            self.section.ty().function(
-                vec![ValType::I64; params as usize],
-                vec![ValType::I64; results as usize],
-            );
+        *self.seen.entry((params.clone(), results.clone())).or_insert_with(|| {
+            self.section.ty().function(params, results);
             n
         })
     }
-}
-
-fn raw_results(t: ValueType) -> u32 {
-    u32::from(t != ValueType::Unit)
+    fn boundary(&mut self, params: &[ValueType], result: ValueType) -> u32 {
+        let ty = |t: ValueType| if t == ValueType::Num { ValType::F64 } else { ValType::I64 };
+        self.signature(params.iter().copied().map(ty).collect(), if result == ValueType::Unit { vec![] } else { vec![ty(result)] })
+    }
 }
 
 // 公開する関数は selected、None なら境界で渡せる利用者の関数すべて
@@ -131,6 +57,7 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
     let mut data = Vec::new();
     let mut writes = false;
     let mut now = false;
+    let mut reads = false;
     let mut table: Vec<&str> = Vec::new();
     for f in &program.functions {
         f.each(&mut |n| match n {
@@ -144,6 +71,7 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
             }
             Node::Expr(Expr::Prim(Prim::Write, _)) => writes = true,
             Node::Expr(Expr::Prim(Prim::Now, _)) => now = true,
+            Node::Expr(Expr::Prim(Prim::Read, _)) => reads = true,
             Node::Expr(Expr::Func(name)) if !table.contains(&name.as_str()) => table.push(name),
             _ => {}
         });
@@ -168,7 +96,7 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
         })
         .collect();
     let has_str =
-        |ts: &[ValueType], r: ValueType| ts.contains(&ValueType::Str) || r == ValueType::Str;
+        |ts: &[ValueType], r: ValueType| ts.iter().chain([&r]).any(|t| matches!(t, ValueType::Str));
     let strings = exported
         .iter()
         .any(|f| has_str(&f.param_types, f.result_type))
@@ -191,19 +119,13 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
     };
     let write = writes.then(|| import(&mut types, "hibana", "write", 3, 0));
     let now = now.then(|| import(&mut types, "hibana", "now_ms", 0, 1));
-    let hosts: Vec<u32> = program
-        .imports
-        .iter()
-        .map(|f| {
-            import(
-                &mut types,
-                "hibana_host",
-                &f.name,
-                f.param_types.len() as u32,
-                raw_results(f.result_type),
-            )
-        })
-        .collect();
+    let read = reads.then(|| import(&mut types, "hibana", "read", 3, 1));
+    let mut hosts = Vec::new();
+    for f in &program.imports {
+        imports.import("hibana_host", &f.name, EntityType::Function(types.boundary(&f.param_types, f.result_type)));
+        hosts.push(count);
+        count += 1;
+    }
     let imported = count;
     // 定義する関数の番号: IR の関数、外部関数の受け口、公開関数の入口、確保と初期化
     let mut indices: HashMap<&str, u32> = HashMap::new();
@@ -228,6 +150,7 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
         table: &table,
         write,
         now,
+        read,
         block_type,
     };
     for f in &program.functions {
@@ -261,6 +184,7 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
                     I::Drop,
                     I::LocalGet(t),
                 ]),
+                ValueType::Num => out.extend([I::LocalGet(i + 1), I::F64ReinterpretI64]),
                 _ => out.push(I::LocalGet(i + 1)),
             }
         }
@@ -273,11 +197,13 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
     let mut exports = ExportSection::new();
     for (k, f) in exported.iter().enumerate() {
         let n = f.param_types.len() as u32;
-        functions.function(types.get(n, raw_results(f.result_type)));
+        functions.function(types.boundary(&f.param_types, f.result_type));
         exports.export(&f.name, ExportKind::Func, wrappers + k as u32);
         let mut out = Vec::new();
         for (i, p) in f.param_types.iter().enumerate() {
-            out.extend(from_raw(*p, i as u32, &indices).into_iter().skip(1));
+            if *p == ValueType::Num {
+                out.extend([I::I64Const(ir::NUM), I::LocalGet(i as u32), I::I64ReinterpretF64, I::Call(indices["__num_checked"])]);
+            } else { out.extend(from_raw(*p, i as u32, &indices).into_iter().skip(1)); }
         }
         out.push(I::Call(indices[f.name.as_str()]));
         match f.result_type {
@@ -288,6 +214,7 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
                 I::Drop,
                 I::LocalGet(n),
             ]),
+            ValueType::Num => out.extend([I::LocalSet(n), I::Drop, I::LocalGet(n), I::F64ReinterpretI64]),
             _ => out.extend([I::LocalSet(n), I::Drop, I::LocalGet(n)]),
         }
         out.push(I::End);
@@ -327,7 +254,7 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
         exports.export("__hibana_alloc", ExportKind::Func, alloc);
         exports.export("__hibana_reset", ExportKind::Func, alloc + 1);
     }
-    if strings || writes || selected.is_none() {
+    if strings || writes || reads || selected.is_none() {
         exports.export("memory", ExportKind::Memory, 0);
     }
     let mut memory = MemorySection::new();
@@ -383,11 +310,7 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
 }
 
 fn types_i32(types: &mut Types) -> u32 {
-    // (i32) -> i32 は境界の確保だけで使う。i64 の型と番号が重ならないよう最後に足す
-    let n = types.seen.len() as u32;
-    types.section.ty().function([ValType::I32], [ValType::I32]);
-    types.seen.insert((u32::MAX, u32::MAX), n);
-    n
+    types.signature(vec![ValType::I32], vec![ValType::I32])
 }
 
 // 境界の形の値（局所変数 at）を IR の値にする。先頭は捨ててよい LocalGet ではなく型の番号
@@ -400,6 +323,8 @@ fn from_raw(t: ValueType, at: u32, indices: &HashMap<&str, u32>) -> Vec<I<'stati
             I::LocalGet(at),
             I::Call(indices["__str_in"]),
         ],
+        ValueType::Num => vec![I::I64ReinterpretF64, I::LocalSet(at), I::I64Const(ir::NUM), I::LocalGet(at), I::Call(indices["__num_checked"])],
+        ValueType::Bool => vec![I::LocalSet(at), I::I64Const(ir::BOOL), I::LocalGet(at)],
         _ => vec![I::LocalSet(at), I::I64Const(ir::INT), I::LocalGet(at)],
     }
 }
@@ -417,6 +342,7 @@ struct Cx<'a> {
     literals: &'a HashMap<String, i64>,
     table: &'a [&'a str],
     write: Option<u32>,
+    read: Option<u32>,
     now: Option<u32>,
     block_type: u32,
 }
@@ -623,7 +549,7 @@ impl Emit<'_, '_> {
                 return;
             }
             Store | Store8 | Write => ir::UNIT,
-            Eq | Ne | Lt | Le | Gt | Ge | Not => ir::BOOL,
+            Eq | Ne | Lt | Le | Gt | Ge | Not | FEq | FLt | FLe => ir::BOOL,
             _ => ir::INT,
         };
         match p {
@@ -712,6 +638,18 @@ impl Emit<'_, '_> {
             }
             Static => self.out.push(I::I64Const(STATIC)),
             Now => self.out.push(I::Call(self.cx.now.unwrap())),
+            Read => self.out.extend([get(0), get(1), get(2), I::Call(self.cx.read.unwrap())]),
+            FFromInt => self.out.extend([get(0), I::F64ConvertI64S, I::I64ReinterpretF64]),
+            FToInt | FAdd | FSub | FMul | FDiv | FNeg | FFloor | FSqrt | FEq | FLt | FLe => {
+                self.out.extend([get(0), I::F64ReinterpretI64]);
+                if matches!(p, FAdd | FSub | FMul | FDiv | FEq | FLt | FLe) { self.out.extend([get(1), I::F64ReinterpretI64]); }
+                self.out.push(match p {
+                    FToInt => I::I64TruncSatF64S, FAdd => I::F64Add, FSub => I::F64Sub, FMul => I::F64Mul, FDiv => I::F64Div,
+                    FNeg => I::F64Neg, FFloor => I::F64Floor, FSqrt => I::F64Sqrt, FEq => I::F64Eq, FLt => I::F64Lt, FLe => I::F64Le, _ => unreachable!(),
+                });
+                if matches!(p, FEq | FLt | FLe) { self.out.push(I::I64ExtendI32U); }
+                else if p != FToInt { self.out.push(I::I64ReinterpretF64); }
+            }
             _ => unreachable!(),
         }
     }
@@ -801,42 +739,32 @@ mod tests {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
+    fn node(bytes: &[u8], script: &str) -> std::process::Output {
+        let mut child = Command::new("node").args(["-e", script]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        child.stdin.take().unwrap().write_all(bytes).unwrap();
+        child.wait_with_output().unwrap()
+    }
+
     #[test]
     fn string_memory_grows_resets_and_preserves_literals() {
-        let bytes = crate::to_wasm_library("fn literal() -> str { '日本語' }", &["literal".into()])
+        let bytes = crate::to_wasm_library("fn literal() -> String { '日本語' }", &["literal".into()])
             .unwrap();
-        let engine = wasmtime::Engine::default();
-        let module = wasmtime::Module::new(&engine, bytes).unwrap();
-        let mut store = wasmtime::Store::new(&engine, ());
-        let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
-        let literal = instance
-            .get_typed_func::<(), i64>(&mut store, "literal")
-            .unwrap();
-        let alloc = instance
-            .get_typed_func::<i32, i32>(&mut store, "__hibana_alloc")
-            .unwrap();
-        let reset = instance
-            .get_typed_func::<(), ()>(&mut store, "__hibana_reset")
-            .unwrap();
-        let memory = instance.get_memory(&mut store, "memory").unwrap();
-        let packed = literal.call(&mut store, ()).unwrap() as u64;
-        let ptr = packed as u32 as usize;
-        let len = (packed >> 32) as usize;
-        assert_eq!(&memory.data(&store)[ptr..ptr + len], "日本語".as_bytes());
-        let first = alloc.call(&mut store, 200_000).unwrap();
-        assert!(memory.data_size(&store) >= first as usize + 200_000);
-        assert!(alloc.call(&mut store, -1).is_err());
-        reset.call(&mut store, ()).unwrap();
-        assert_eq!(alloc.call(&mut store, 1).unwrap(), first);
-        assert_eq!(literal.call(&mut store, ()).unwrap() as u64, packed);
-        assert_eq!(&memory.data(&store)[ptr..ptr + len], "日本語".as_bytes());
+        let script = r#"const x = new WebAssembly.Instance(new WebAssembly.Module(require('fs').readFileSync(0)), {}).exports;
+const packed = x.literal(); const ptr = Number(packed & 0xffffffffn), len = Number(packed >> 32n);
+const read = () => Buffer.from(x.memory.buffer, ptr, len).toString();
+if (read() !== '日本語') throw Error('literal');
+const first = x.__hibana_alloc(200000); if (x.memory.buffer.byteLength < first + 200000) throw Error('grow');
+let trapped = false; try { x.__hibana_alloc(-1); } catch { trapped = true; } if (!trapped) throw Error('allocation');
+x.__hibana_reset(); if (x.__hibana_alloc(1) !== first || x.literal() !== packed || read() !== '日本語') throw Error('reset');"#;
+        let result = node(&bytes, script);
+        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     }
 
     #[test]
     fn library_exports_only_requested_reachable_functions() {
         let used = "fn plus(a: int, b: int) -> int { a + b }\nfn twice(n: int) -> int { plus(n, n) }\nfn result(n: int) -> int { twice(n) + 1 }\n";
         let with_unused = format!(
-            "{used}fn unused() -> str {{ 'unused' }}\nfn unused_print() {{ print(999) }}\n"
+            "{used}fn unused() -> String {{ 'unused' }}\nfn unused_print() {{ put(999) }}\n"
         );
         let names = vec!["result".to_string()];
         let bytes = crate::to_wasm_library(&with_unused, &names).unwrap();
@@ -862,23 +790,10 @@ if (Object.keys(x).join(',') !== 'result' || x.result(20n) !== 41n) throw Error(
         );
 
         let bytes = crate::to_wasm_library(used, &["result".into(), "plus".into()]).unwrap();
-        let engine = wasmtime::Engine::default();
-        let module = wasmtime::Module::new(&engine, bytes).unwrap();
-        let names: Vec<_> = module
-            .exports()
-            .map(|export| export.name().to_string())
-            .collect();
-        assert_eq!(names, ["plus", "result"]);
-        let mut store = wasmtime::Store::new(&engine, ());
-        let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
-        assert_eq!(
-            instance
-                .get_typed_func::<(i64, i64), i64>(&mut store, "plus")
-                .unwrap()
-                .call(&mut store, (20, 22))
-                .unwrap(),
-            42
-        );
+        let result = node(&bytes, r#"const m = new WebAssembly.Module(require('fs').readFileSync(0));
+const x = new WebAssembly.Instance(m, {}).exports;
+if (Object.keys(x).join(',') !== 'plus,result' || x.plus(20n, 22n) !== 42n) throw Error('exports');"#);
+        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
 
         assert!(
             crate::to_wasm_library(used, &["missing".into()])
@@ -891,7 +806,7 @@ if (Object.keys(x).join(',') !== 'result' || x.result(20n) !== 41n) throw Error(
                 .contains("重複")
         );
         let strings = crate::to_wasm_library(&with_unused, &["unused".into()]).unwrap();
-        assert!(wasmtime::Module::new(&engine, strings).is_ok());
+        assert!(node(&strings, "new WebAssembly.Module(require('fs').readFileSync(0))").status.success());
         assert!(
             crate::to_wasm_library(&format!("{used}fn bad() -> int {{ true }}"), &names).is_err()
         );
@@ -899,42 +814,29 @@ if (Object.keys(x).join(',') !== 'result' || x.result(20n) !== 41n) throw Error(
     }
 
     #[test]
-    fn embedded_runtime_matches_interpreter_and_reports_errors() {
-        let src = "fn add(a: int, b: int) -> int { a + b }\nfn main() { print(add(19, 23)) }";
-        let mut expected = Vec::new();
-        crate::run(src, &mut expected).unwrap();
-        let output = super::run(&crate::to_wasm(src).unwrap(), Vec::new()).unwrap();
-        assert_eq!(output, expected);
-
-        let src = "fn div(a: int, b: int) -> int { a / b }\nfn main() { print(div(1, 0)) }";
-        let err = super::run(&crate::to_wasm(src).unwrap(), Vec::new()).unwrap_err();
-        assert!(err.contains("0 で除算した"), "{err}");
-
-        let src = "fn add(a: int, b: int) -> int { a + b }\nfn main() { print(add(9223372036854775807, 1)) }";
-        let err = super::run(&crate::to_wasm(src).unwrap(), Vec::new()).unwrap_err();
-        assert!(err.contains("オーバーフロー"), "{err}");
-
-        struct Fails;
-        impl Write for Fails {
-            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
-                Err(std::io::Error::other("出力失敗"))
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
+    fn runtime_reports_errors() {
+        let script = r#"
+let x; x = new WebAssembly.Instance(new WebAssembly.Module(require('fs').readFileSync(0)),
+ { hibana: { write() {}, now_ms: () => 0n } }).exports;
+try { x.main(); throw Error('trap expected'); } catch (e) { if (!(e instanceof WebAssembly.RuntimeError)) throw e; }
+const v = new DataView(x.memory.buffer), p = Number(v.getBigUint64(24, true)), n = Number(v.getBigUint64(p, true));
+process.stdout.write(Buffer.from(x.memory.buffer, p + 8, n));
+"#;
+        for (src, expected) in [
+            ("fn f(a: int, b: int) -> int { a / b } fn main() { put(f(1, 0)) }", "0 で除算した"),
+            ("fn f(a: int, b: int) -> int { a + b } fn main() { put(f(9223372036854775807, 1)) }", "オーバーフロー"),
+            ("fn f(a: int, b: int) -> int { a ** b } fn main() { put(f(2, -1)) }", "負の指数"),
+            ("fn f(a: int, b: int) -> int { a ** b } fn main() { put(f(2, 63)) }", "オーバーフロー"),
+        ] {
+            let result = node(&crate::to_wasm(src).unwrap(), script);
+            assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+            assert!(String::from_utf8_lossy(&result.stdout).contains(expected));
         }
-        let src = "fn main() { print(1) }";
-        assert!(
-            super::run(&crate::to_wasm(src).unwrap(), Fails)
-                .err()
-                .unwrap()
-                .contains("出力失敗")
-        );
     }
 
     #[test]
     fn executes_and_checks_integer_errors() {
-        let src = "fn add(a: int, b: int) -> int { a + b }\nfn sub(a: int, b: int) -> int { a - b }\nfn mul(a: int, b: int) -> int { a * b }\nfn div(a: int, b: int) -> int { a / b }\nfn rem(a: int, b: int) -> int { a % b }\nfn main() { print(add(2, 3))\n print(mul(7, 6))\n print(sub(1, 2))\n print(div(7, 2))\n print(rem(7, 2)) }";
+        let src = "fn add(a: int, b: int) -> int { a + b }\nfn sub(a: int, b: int) -> int { a - b }\nfn mul(a: int, b: int) -> int { a * b }\nfn div(a: int, b: int) -> int { a / b }\nfn rem(a: int, b: int) -> int { a % b }\nfn main() { put(add(2, 3))\n put(mul(7, 6))\n put(sub(1, 2))\n put(div(7, 2))\n put(rem(7, 2)) }";
         let bytes = crate::to_wasm(src).unwrap();
         let mut expected = Vec::new();
         crate::run(src, &mut expected).unwrap();

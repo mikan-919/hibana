@@ -1,56 +1,56 @@
 // トレイト: 型ごとに実装を書ける関数の組
-use std.*
+use std -> *
 
 struct Point { x: int, y: int }
 
-trait Describe<A> {
-    fn describe(x: A) -> str
+trait Describe {
+    fn describe(self) -> String
     // 既定の実装。impl で省ける
-    fn shout(x: A) -> str { describe(x) + '!' }
+    fn shout(self) -> String { self.describe() + '!' }
 }
 
-impl Describe<int> {
-    fn describe(x: int) -> str { 'int ' + to_str(x) }
+impl Describe for int {
+    fn describe(self) -> String { 'int ' + self.to_string() }
 }
 
-impl Describe<Point> {
-    fn describe(p: Point) -> str { '(' + to_str(p.x) + ', ' + to_str(p.y) + ')' }
-    fn shout(p: Point) -> str { 'POINT' }
+impl Describe for Point {
+    fn describe(self) -> String { '(' + self.x.to_string() + ', ' + self.y.to_string() + ')' }
+    fn shout(self) -> String { 'POINT' }
 }
 
 // 条件付きの実装: 要素が Describe なら Vec も Describe
-impl<A: Describe> Describe<Vec<A>> {
-    fn describe(xs: Vec<A>) -> str {
+impl<A: Describe> Describe for Vec<A> {
+    fn describe(self) -> String {
         let mut s = '['
-        for x in xs { s = s + describe(x) + ';' }
+        for x in self { s = s + x.describe() + ';' }
         s + ']'
     }
 }
 
 // 制約: 実装は呼び出す側で探して渡す
-fn twice<A: Describe>(x: A) -> str { describe(x) + ' ' + describe(x) }
+fn twice<A: Describe>(x: A) -> String { x.describe() + ' ' + x.describe() }
 
 fn main() {
-    print(describe(1))
-    print(shout(2))
-    print(describe(Point { x: 1, y: 2 }))
-    print(shout(Point { x: 1, y: 2 }))
-    print(describe([1, 2]))
-    print(twice([Point { x: 3, y: 4 }]))
+    put(1.describe())
+    put(2.shout())
+    put(Point { x: 1, y: 2 }.describe())
+    put(Point { x: 1, y: 2 }.shout())
+    put([1, 2].describe())
+    put(twice([Point { x: 3, y: 4 }]))
     report()
 }
 
 // 親のトレイト: Ord の実装には Eq の実装が要る。Ord の制約から Eq も使える
-impl Eq<Point> {
-    fn eq(a: Point, b: Point) -> bool { a.x == b.x && a.y == b.y }
+impl Eq for Point {
+    fn eq(self, other: Point) -> bool { self.x == other.x && self.y == other.y }
 }
 
-impl Ord<Point> {
-    fn lt(a: Point, b: Point) -> bool { a.x + a.y < b.x + b.y }
+impl Ord for Point {
+    fn lt(self, other: Point) -> bool { self.x + self.y < other.x + other.y }
 }
 
-impl Show<Point> {
-    fn show(p: Point) -> str { 'P' + to_str(p.x) + ',' + to_str(p.y) }
+impl Display for Point {
+    fn to_string(self) -> String { 'P' + self.x.to_string() + ',' + self.y.to_string() }
 }
 
 fn same_or_max<A: Ord>(a: A, b: A) -> A {
@@ -60,10 +60,10 @@ fn same_or_max<A: Ord>(a: A, b: A) -> A {
 fn report() {
     let p = Point { x: 1, y: 2 }
     let q = Point { x: 5, y: 0 }
-    print(p == Point { x: 1, y: 2 })
-    print(p != q)
-    print(max(p, q))
-    print(same_or_max(3, 7))
-    print('to_str: ' + to_str(min(p, q)))
-    print(contains([p, q], Point { x: 5, y: 0 }))
+    put(p == Point { x: 1, y: 2 })
+    put(p != q)
+    put(max(p, q))
+    put(same_or_max(3, 7))
+    put('to_string: ' + min(p, q).to_string())
+    put(contains([p, q], Point { x: 5, y: 0 }))
 }

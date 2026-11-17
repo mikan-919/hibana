@@ -264,7 +264,7 @@ impl P {
     fn hib(&mut self, t: &Ty) -> String {
         match t {
             Ty::Int => "int".into(),
-            Ty::Str => "str".into(),
+            Ty::Str => "String".into(),
             Ty::Bool => "bool".into(),
             Ty::Unit => "unit".into(),
             Ty::Js => "js".into(),

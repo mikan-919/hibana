@@ -8,13 +8,24 @@ use std::collections::HashMap;
 
 const PRELUDE: &str = r#""use strict";
 const $MIN = -(2n ** 63n), $MAX = 2n ** 63n - 1n;
-function $chk(x) { if (x < $MIN || x > $MAX) throw new Error("オーバーフロー"); return x; }
+function $chk(x) { if (typeof x === "number") { if (!Number.isFinite(x)) throw new Error("num の演算結果が有限でない"); return x; } if (x < $MIN || x > $MAX) throw new Error("オーバーフロー"); return x; }
 function $add(a, b) { return typeof a === "string" ? a + b : $chk(a + b); }
 function $sub(a, b) { return $chk(a - b); }
 function $mul(a, b) { return $chk(a * b); }
-function $div(a, b) { if (b === 0n) throw new Error("0 で除算した"); return $chk(a / b); }
-function $rem(a, b) { if (b === 0n) throw new Error("0 で除算した"); if (a === $MIN && b === -1n) throw new Error("オーバーフロー"); return a % b; }
+function $div(a, b) { if (b === 0n || b === 0) throw new Error("0 で除算した"); return $chk(a / b); }
+function $rem(a, b) { if (b === 0n || b === 0) throw new Error("0 で除算した"); if (a === $MIN && b === -1n) throw new Error("オーバーフロー"); return $chk(a % b); }
+function $pow(a, b) {
+  if (typeof a === "number") {
+    if (!Number.isInteger(b) || b < -(2 ** 63) || b >= 2 ** 63) return $chk(a ** b);
+    let n = BigInt(b), factor = n < 0n ? $chk(1 / a) : a, result = 1;
+    while (n !== 0n) { if (n % 2n !== 0n) result = $chk(result * factor); n /= 2n; if (n !== 0n) factor = $chk(factor * factor); }
+    return result;
+  }
+  if (b < 0n) throw new Error("負の指数"); if (b > 64n) { if (a > 1n || a < -1n) throw new Error("オーバーフロー"); b = 64n + b % 2n; } return $chk(a ** b);
+}
 function $neg(a) { return $chk(-a); }
+function $num_floor(n) { const x = Math.floor(n); if (!(x >= -(2 ** 63) && x < 2 ** 63)) throw new Error("floor の結果が int の範囲外"); return BigInt(x); }
+function $num_sqrt(n) { if (n < 0) throw new Error("sqrt の引数が負"); return Math.sqrt(n); }
 let $w;
 // 最後に通った、失敗しうる式の位置
 let $at;
@@ -29,70 +40,29 @@ function $eq(a, b) {
   if (a && b && typeof a === "object" && typeof b === "object") return a.$c === b.$c && $eq(a.$f, b.$f);
   return false;
 }
+function $numstr(v) {
+  if (Object.is(v, -0)) return "-0";
+  const s = String(v);
+  if (!s.includes("e")) return s;
+  const [mantissa, exponent] = s.split("e"), sign = v < 0 ? "-" : "", m = mantissa.replace("-", "");
+  const digits = m.replace(".", ""), point = (m.includes(".") ? m.indexOf(".") : m.length) + Number(exponent);
+  if (point <= 0) return sign + "0." + "0".repeat(-point) + digits;
+  if (point >= digits.length) return sign + digits + "0".repeat(point - digits.length);
+  return sign + digits.slice(0, point) + "." + digits.slice(point);
+}
 function $show(v) {
+  if (typeof v === "number") return $numstr(v);
   if (typeof v === "bigint" || typeof v === "boolean") return String(v);
   if (typeof v === "string") return JSON.stringify(v);
   if (v === undefined) return "()";
   if (typeof v === "function") return "<fn>";
   if (v instanceof $Ref) return "<ref>";
   if (Array.isArray(v)) return "[" + v.map($show).join(", ") + "]";
-  if (v.$c.endsWith("{}") && $fields[v.$c][0] === "0") return v.$c.slice(0, -2) + "(" + v.$f.map($show).join(", ") + ")";
-  if (v.$c.endsWith("{}")) return v.$c.slice(0, -2) + " { " + $fields[v.$c].map((f, i) => f + ": " + $show(v.$f[i])).join(", ") + " }";
-  return v.$f.length === 0 ? v.$c : v.$c + "(" + v.$f.map($show).join(", ") + ")";
+  const [name, style] = $constructors[v.$c] ?? [v.$c, 0];
+  if (style === 2) return name + "(" + v.$f.map($show).join(", ") + ")";
+  if (style === 1) return name + " { " + $fields[v.$c].map((f, i) => f + ": " + $show(v.$f[i])).join(", ") + " }";
+  return v.$f.length === 0 ? name : name + "(" + v.$f.map($show).join(", ") + ")";
 }
-// web ライブラリの serve と worker。app は JS の関数（$to で変換済み）で、{ method, path, body } を受け取る
-globalThis.hibana_serve = async (port, app) => {
-  const http = await import("node:http");
-  const server = http.createServer(async (req, res) => {
-    try {
-      let body = "";
-      for await (const c of req) body += c;
-      const u = new URL(req.url, "http://localhost");
-      const headers = Object.entries(req.headers).map(([name, value]) => ({ name, value: String(value) }));
-      const r = await app({ method: req.method, path: u.pathname, query: u.search.slice(1), headers, body });
-      const hs = Object.create(null);
-      hs["content-type"] = r.content_type;
-      for (const { name, value } of r.headers ?? []) {
-        const key = name.toLowerCase();
-        if (key === "content-type" || !Object.hasOwn(hs, key)) hs[key] = value;
-        else hs[key] = [...(Array.isArray(hs[key]) ? hs[key] : [hs[key]]), value];
-      }
-      // writeHead が途中まで設定して失敗しないよう、先に全ヘッダーを検査する
-      for (const [name, values] of Object.entries(hs)) {
-        http.validateHeaderName(name);
-        for (const value of Array.isArray(values) ? values : [values]) http.validateHeaderValue(name, value);
-      }
-      res.writeHead(r.status, hs);
-      res.end(r.body);
-    } catch (e) {
-      console.error("実行時エラー: " + e.message + ($at ? "（" + $at + "）" : ""));
-      if (res.headersSent) { res.destroy(); return; }
-      for (const name of res.getHeaderNames()) res.removeHeader(name);
-      res.writeHead(500, { "content-type": "text/plain" });
-      res.end("Internal Server Error");
-    }
-  });
-  await new Promise((ok) => server.listen(port, ok));
-  console.log("http://localhost:" + server.address().port);
-};
-let $worker;
-globalThis.hibana_worker = (app) => { $worker = app; };
-const $fetch = async (req) => {
-  try {
-    const u = new URL(req.url);
-    const headers = [...req.headers].map(([name, value]) => ({ name, value }));
-    const r = await $worker({ method: req.method, path: u.pathname, query: u.search.slice(1), headers, body: await req.text() });
-    const hs = new Headers({ "content-type": r.content_type });
-    for (const { name, value } of r.headers ?? []) {
-      if (name.toLowerCase() === "content-type") hs.set(name, value);
-      else hs.append(name, value);
-    }
-    return new Response(r.body, { status: r.status, headers: hs });
-  } catch (e) {
-    console.error("実行時エラー: " + e.message + ($at ? "（" + $at + "）" : ""));
-    return new Response("Internal Server Error", { status: 500, headers: { "content-type": "text/plain" } });
-  }
-};
 // 処理中の handle。内側ほど後ろ。腕の中の操作は、その handle より外で処理する
 // 並べ替えずに作り直す（並行に動く処理と共有するため）。await の後は $k で、待つ前の並びに戻す
 let $h = [];
@@ -123,6 +93,19 @@ function $op(op, args) {
 }
 function $str(v) { return typeof v === "string" ? v : $show(v); }
 function $print(v) { console.log($str(v)); }
+function $input() {
+  if (typeof process === "undefined" || !process.getBuiltinModule) throw new Error("input には Node.js の標準入力が必要です");
+  const fs = process.getBuiltinModule("node:fs"), byte = new Uint8Array(1), bytes = [];
+  // ponytail: 1 バイトずつ読む。行の読み込みが律速になったら、呼び出し間で共有するバッファを使う
+  while (fs.readSync(0, byte, 0, 1, null) !== 0) {
+    if (byte[0] === 10) {
+      if (bytes.at(-1) === 13) bytes.pop();
+      break;
+    }
+    bytes.push(byte[0]);
+  }
+  return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(new Uint8Array(bytes));
+}
 function $len(v) { return BigInt(typeof v === "string" ? [...v].length : v.length); }
 function $split(s, sep) { return sep === "" ? ["", ...s, ""] : s.split(sep); }
 function $starts_with(s, p) { return s.startsWith(p); }
@@ -149,6 +132,7 @@ function $slice(s, i, j) {
 }
 // extern の関数の境界で、宣言した型 d に従って値を変換する。$to は hibana から JS へ、$from は JS から hibana へ
 function $to(d, v) {
+  if (d === "num") return $chk(v);
   if (d === "int") return Number(v);
   if (d.vec) return v.map((x) => $to(d.vec, x));
   if (d.fn && d.async) return (...a) => Promise.resolve(v(...a.map((x, i) => $from(d.fn[i], x)))).then((r) => $to(d.ret, r));
@@ -157,6 +141,10 @@ function $to(d, v) {
   return v;
 }
 function $from(d, v) {
+  if (d === "num") {
+    if (typeof v !== "number") throw new Error("JavaScript の値 " + v + " は num でない");
+    return $chk(v);
+  }
   if (d === "int") {
     if (typeof v === "bigint") return $chk(v);
     if (!Number.isInteger(v)) throw new Error("JavaScript の値 " + v + " は int でない");
@@ -217,6 +205,15 @@ pub fn emit(prog: &Program, info: &crate::typeck::Info) -> String {
         })
         .collect();
     out += &format!("const $fields = {{ {} }};\n", fields.join(", "));
+    let constructors: Vec<_> = prog.datas.iter().flat_map(|data| &data.ctors).map(|ctor| {
+        let kind = match ctor.name.structure_style() {
+            Some(crate::frontend::name::StructureStyle::Record) => 1,
+            Some(crate::frontend::name::StructureStyle::Tuple) => 2,
+            None => 0,
+        };
+        format!("{}: [{}, {kind}]", lit(&ctor.name), lit(&ctor.name.structure_owner().unwrap_or_else(|| ctor.name.clone())))
+    }).collect();
+    out += &format!("const $constructors = {{ {} }};\n", constructors.join(", "));
     // 構築子ごとの、フィールドの名前から位置への表
     out += "const $fi = Object.fromEntries(Object.entries($fields).map(([c, fs]) => [c, Object.fromEntries(fs.map((f, i) => [f, i]))]));\n";
     let mut imports = String::new();
@@ -232,11 +229,7 @@ pub fn emit(prog: &Program, info: &crate::typeck::Info) -> String {
     }
     // import は ES モジュールの先頭に置く
     let mut out = imports + &out;
-    // web を使うプログラムは Cloudflare Workers の ES モジュールとしても使える
-    if g.fns.contains_key("web.worker") {
-        out += "export default { fetch: $fetch };\n";
-    }
-    out += "(async () => { try { await f_main(); } catch (e) { console.error(\"実行時エラー: \" + e.message + ($at ? \"（\" + $at + \"）\" : \"\")); if (globalThis.process) process.exitCode = 1; } })();\n";
+    out += &format!("(async () => {{ try {{ await {}(); }} catch (e) {{ console.error(\"実行時エラー: \" + e.message + ($at ? \"（\" + $at + \"）\" : \"\")); if (globalThis.process) process.exitCode = 1; }} }})();\n", ident("f_", "main"));
     out
 }
 
@@ -246,12 +239,13 @@ fn desc(prog: &Program, t: &Expr, depth: usize) -> String {
         return "\"any\"".into();
     }
     match t.peel() {
+        Expr::Var(n) if n == "num" || n == "number" => "\"num\"".into(),
         Expr::Var(n) if n == "int" || n == "unit" => lit(n),
         Expr::Refine(b, ..) => desc(prog, b, depth + 1),
         Expr::Call(n, args) if n == "Vec" && args.len() == 1 => {
             format!("{{ vec: {} }}", desc(prog, &args[0], depth + 1))
         }
-        Expr::Pi(bs, r, effs) => {
+        Expr::Pi(bs, r, effs, _) => {
             let ps: Vec<String> = bs.iter().map(|(_, t)| desc(prog, t, depth + 1)).collect();
             format!(
                 "{{ fn: [{}], ret: {}, async: {} }}",
@@ -265,7 +259,7 @@ fn desc(prog: &Program, t: &Expr, depth: usize) -> String {
             if let Some(d) = prog
                 .datas
                 .iter()
-                .find(|d| &d.name == n && d.ctors.len() == 1 && d.ctors[0].name.ends_with("{}"))
+                .find(|d| &d.name == n && d.ctors.len() == 1 && d.ctors[0].name.structure_owner().is_some())
             {
                 let c = &d.ctors[0];
                 let fs: Vec<String> = c
@@ -335,9 +329,12 @@ fn lit(s: &str) -> String {
     o + "\""
 }
 
-// 衛生性で付けた # などを JavaScript の名前に使える形にする
+// 出力先の識別子へ変換する。異なる綴りが同じ名前にならないよう全バイトを符号化する。
 fn ident(prefix: &str, n: &str) -> String {
-    format!("{prefix}{}", n.replace('#', "$").replace('.', "$_"))
+    use std::fmt::Write;
+    let mut result = prefix.to_string();
+    for byte in n.bytes() { write!(&mut result, "{byte:02x}").unwrap(); }
+    result
 }
 
 struct Gen<'a> {
@@ -352,12 +349,12 @@ struct Gen<'a> {
     next: usize,
     // async 関数にする関数。呼び出しを await する
     async_fns: std::collections::HashSet<&'a str>,
-    // 型検査が記録した、待つ呼び出しと async にする無名関数の本体（アドレス）
-    awaits: &'a std::collections::HashSet<usize>,
+    // 型検査が記録した、待つ呼び出しと async にする無名関数の本体（節点の識別子）
+    awaits: &'a std::collections::HashSet<crate::parser::NodeId>,
     // 効果の変数を通して効果を起こす呼び出しと本体。async 版の中でだけ待つ
-    var_awaits: &'a std::collections::HashSet<usize>,
+    var_awaits: &'a std::collections::HashSet<crate::parser::NodeId>,
     // 多相な関数の async 版を呼ぶ呼び出し
-    async_inst: &'a std::collections::HashSet<usize>,
+    async_inst: &'a std::collections::HashSet<crate::parser::NodeId>,
     // 多相な関数の async 版を出力している
     variant: bool,
 }
@@ -369,18 +366,18 @@ impl Gen<'_> {
     }
 
     // 型検査が待つと記録した呼び出しなら待つ
-    fn await_(&self, e: &Expr, call: String) -> String {
-        wait(self.waits(e as *const Expr as usize), call)
+    fn await_(&self, id: Option<crate::parser::NodeId>, call: String) -> String {
+        wait(id.is_some_and(|id| self.waits(id)), call)
     }
 
-    fn waits(&self, addr: usize) -> bool {
+    fn waits(&self, addr: crate::parser::NodeId) -> bool {
         self.awaits.contains(&addr) || (self.variant && self.var_awaits.contains(&addr))
     }
 
     // 失敗しうる式か（算術・slice・操作・JavaScript の関数の呼び出し）。実行時エラーの位置を記録する所
     fn risky(&self, e: &Expr) -> bool {
-        match e {
-            Expr::Binary(op, ..) => matches!(*op, "+" | "-" | "*" | "/" | "%"),
+        match e.peel() {
+            Expr::Binary(op, ..) => matches!(*op, "+" | "-" | "*" | "**" | "/" | "%"),
             Expr::Unary(op, _) => *op == "-",
             Expr::Call(n, _) => {
                 n == "slice"
@@ -468,7 +465,7 @@ impl Gen<'_> {
     }
 
     fn func(&mut self, f: &Fn) -> String {
-        let params: Vec<String> = f.params.iter().map(|p| p.0.clone()).collect();
+        let params: Vec<String> = f.params.iter().map(|p| p.0.to_string()).collect();
         let mut s = format!(
             "const {} = {};\n",
             ident("f_", &f.name),
@@ -543,17 +540,22 @@ impl Gen<'_> {
 
     // 位置の包みと算術・比較は、深く入れ子になるので大きな expr_inner のフレームを通らずに生成する
     fn expr(&mut self, e: &Expr) -> String {
+        self.expr_with_id(e, None)
+    }
+
+    fn expr_with_id(&mut self, e: &Expr, id: Option<crate::parser::NodeId>) -> String {
         match e {
             Expr::At(sp, x) => {
                 if self.risky(x) {
                     let p = sp.start;
                     self.push(format!("$at = \"{} 行 {} 列\";", p.line, p.column));
                 }
-                self.expr(x)
+                self.expr_with_id(x, id)
             }
             // && と || は右辺を条件付きで生成するので expr_inner で扱う
             Expr::Binary(op, l, r) if !matches!(*op, "&&" | "||") => self.binary(op, l, r),
-            _ => self.expr_inner(e),
+            Expr::Id(id, inner) => self.expr_with_id(inner, Some(*id)),
+            _ => self.expr_inner(e, id),
         }
     }
 
@@ -566,6 +568,7 @@ impl Gen<'_> {
             "*" => format!("$mul({a}, {b})"),
             "/" => format!("$div({a}, {b})"),
             "%" => format!("$rem({a}, {b})"),
+            "**" => format!("$pow({a}, {b})"),
             "==" => format!("$eq({a}, {b})"),
             "!=" => format!("!$eq({a}, {b})"),
             op => format!("({a} {op} {b})"),
@@ -574,10 +577,11 @@ impl Gen<'_> {
     }
 
     #[inline(never)]
-    fn expr_inner(&mut self, e: &Expr) -> String {
+    fn expr_inner(&mut self, e: &Expr, id: Option<crate::parser::NodeId>) -> String {
         match e {
-            Expr::At(..) => unreachable!("expr で外している"),
+            Expr::At(..) | Expr::Id(..) => unreachable!("expr で外している"),
             Expr::Int(n) => format!("{n}n"),
+            Expr::Num(n) => format!("{n:?}"),
             Expr::Bool(b) => b.to_string(),
             Expr::Str(s) => lit(s),
             Expr::Var(n) => match self.lookup(n) {
@@ -587,6 +591,10 @@ impl Gen<'_> {
                 None => match self.fns.get(n.as_str()) {
                     Some(f) if f.alias && f.params.is_empty() => {
                         self.let_(format!("{}()", ident("f_", n)))
+                    }
+                    // 要求を持つ関数の値は、呼ぶ側が要求の値と実装を後ろに足すので、型引数の位置を undefined で埋めて並びを合わせる
+                    Some(f) if f.params[..f.implicit].iter().any(|(n, _)| n.capability_type_trait().is_some()) => {
+                        format!("((...a) => {}({}...a))", ident("f_", n), "undefined, ".repeat(f.implicit))
                     }
                     Some(_) => ident("f_", n),
                     // 型は名前の文字列
@@ -613,11 +621,13 @@ impl Gen<'_> {
             Expr::Call(name, args) => {
                 if let Some((js, _)) = self.lookup(name).cloned() {
                     let vs = self.args(args);
-                    let v = self.await_(e, format!("{js}({})", vs.join(", ")));
+                    let v = self.await_(id, format!("{js}({})", vs.join(", ")));
                     return self.let_(v);
                 }
                 let mut vs = if name == "len" { vec![self.look(&args[0])] } else { self.args(args) };
                 let v = match name.as_str() {
+                    "#num" => format!("Number({})", vs[0]),
+                    "num_floor" | "num_sqrt" => format!("${name}({})", vs[0]),
                     // 腕の値として返し、$op が操作の戻り値にする
                     "resume" => format!(
                         "$d(\"$resume\", [{}])",
@@ -634,7 +644,8 @@ impl Gen<'_> {
                     "push" => format!("[...{}, {}]", vs[0], vs[1]),
                     "set_at" => format!("$set({}, {}, {})", vs[0], vs[1], vs[2]),
                     "all" => wait(true, format!("$all({})", vs[0])),
-                    "print" => format!("$print({})", vs[0]),
+                    "put" => format!("$print({})", vs[0]),
+                    "input" => "$input()".into(),
                     "to_str" => format!("$str({})", vs[0]),
                     "len" | "split" | "starts_with" | "slice" | "chars" | "code" | "char_from_codepoint" | "panic" | "now_ms" => {
                         format!("${name}({})", vs.join(", "))
@@ -648,9 +659,8 @@ impl Gen<'_> {
                                 full.append(&mut vs);
                                 vs = full;
                             }
-                            let addr = e as *const Expr as usize;
-                            if self.async_inst.contains(&addr)
-                                || (self.variant && is_poly(f) && self.var_awaits.contains(&addr))
+                            if id.is_some_and(|id| self.async_inst.contains(&id)
+                                || (self.variant && is_poly(f) && self.var_awaits.contains(&id)))
                             {
                                 wait(true, format!("{}$a({})", ident("f_", n), vs.join(", ")))
                             } else {
@@ -669,7 +679,7 @@ impl Gen<'_> {
             Expr::Apply(f, args) => {
                 let f = self.expr(f);
                 let vs = self.args(args);
-                let v = self.await_(e, format!("{f}({})", vs.join(", ")));
+                let v = self.await_(id, format!("{f}({})", vs.join(", ")));
                 self.let_(v)
             }
             Expr::Field(x, f) => {
@@ -766,8 +776,8 @@ impl Gen<'_> {
                     .filter(|(_, m)| *m)
                     .map(|(js, _)| js.clone())
                     .collect();
-                let params: Vec<String> = params.iter().map(|p| p.0.clone()).collect();
-                let a = self.waits(body as *const Block as usize);
+                let params: Vec<String> = params.iter().map(|p| p.0.to_string()).collect();
+                let a = self.waits(body.id);
                 let f = self.function(&params, body, a);
                 let shared: Vec<String> = muts.iter().map(|m| format!("$sh({m})")).collect();
                 self.let_(format!("(({}) => {f})({})", muts.join(", "), shared.join(", ")))
@@ -778,7 +788,7 @@ impl Gen<'_> {
                     .iter()
                     .map(|a| {
                         let params = a.binds.iter().map(|b| (b.clone(), None)).collect();
-                        let body = Block {
+                        let body = Block { id: Default::default(),
                             stmts: vec![],
                             tail: Some(Box::new(a.body.clone())),
                         };
