@@ -27,8 +27,10 @@ function $neg(a) { return $chk(-a); }
 function $num_floor(n) { const x = Math.floor(n); if (!(x >= -(2 ** 63) && x < 2 ** 63)) throw new Error("floor の結果が int の範囲外"); return BigInt(x); }
 function $num_sqrt(n) { if (n < 0) throw new Error("sqrt の引数が負"); return Math.sqrt(n); }
 let $w;
-// 最後に通った、失敗しうる式の位置
-let $at;
+// 失敗した式の位置を例外に保持する。内側で付いた位置と、with を抜ける制御はそのまま通す
+class $Located extends Error { constructor(e, at) { super(e?.message ?? String(e), { cause: e }); this.at = at; } }
+function $at(e, at) { return e instanceof $Located || e instanceof $Abort ? e : new $Located(e, at); }
+function $report(e) { console.error("実行時エラー: " + (e?.message ?? String(e)) + (e instanceof $Located ? "（" + e.at + "）" : "")); }
 // 書き換えられる参照
 class $Ref { constructor(v) { this.v = v; } }
 function $d(c, f) { return { $c: c, $f: f }; }
@@ -77,7 +79,7 @@ async function $all(fs) {
 function $spawn(f) {
   const h = $h;
   const t = { s: 0, v: undefined, p: null };
-  t.p = f().then((v) => { t.s = 1; t.v = v; }, (e) => { t.s = 2; console.error("実行時エラー: " + (e && e.message)); });
+  t.p = f().then((v) => { t.s = 1; t.v = v; }, (e) => { t.s = 2; $report(e); });
   $h = h;
   return t;
 }
@@ -202,6 +204,7 @@ pub fn emit(prog: &Program, info: &crate::typeck::Info) -> String {
             m
         },
         lines: Vec::new(),
+        position: None,
         scopes: Vec::new(),
         next: 0,
         async_fns: prog
@@ -246,7 +249,7 @@ pub fn emit(prog: &Program, info: &crate::typeck::Info) -> String {
     }
     // import は ES モジュールの先頭に置く
     let mut out = imports + &out;
-    out += &format!("(async () => {{ try {{ await {}(); }} catch (e) {{ console.error(\"実行時エラー: \" + e.message + ($at ? \"（\" + $at + \"）\" : \"\")); if (globalThis.process) process.exitCode = 1; }} }})();\n", ident("f_", "main"));
+    out += &format!("(async () => {{ try {{ await {}(); }} catch (e) {{ $report(e); if (globalThis.process) process.exitCode = 1; }} }})();\n", ident("f_", "main"));
     out
 }
 
@@ -361,6 +364,8 @@ struct Gen<'a> {
     slots: HashMap<&'a str, Option<usize>>,
     // 今の関数の文
     lines: Vec<String>,
+    // 位置を持たない生成式（非同期呼び出しの無名関数など）は、元の式の位置を引き継ぐ
+    position: Option<crate::lexer::Pos>,
     // hibana の変数名から (JavaScript の名前, 可変か)
     scopes: Vec<HashMap<String, (String, bool)>>,
     next: usize,
@@ -393,7 +398,7 @@ impl Gen<'_> {
         self.awaits.contains(&addr) || (self.variant && self.var_awaits.contains(&addr))
     }
 
-    // 失敗しうる式か（算術・slice・操作・JavaScript の関数の呼び出し）。実行時エラーの位置を記録する所
+    // 失敗しうる式か（算術・slice・操作・JavaScript の関数の呼び出し）。例外に位置を付ける所
     fn risky(&self, e: &Expr) -> bool {
         match e.peel() {
             Expr::Binary(op, ..) => matches!(*op, "+" | "-" | "*" | "**" | "/" | "%"),
@@ -565,15 +570,32 @@ impl Gen<'_> {
     fn expr_with_id(&mut self, e: &Expr, id: Option<crate::parser::NodeId>) -> String {
         match e {
             Expr::At(sp, x) => {
-                if self.risky(x) {
-                    let p = sp.start;
-                    self.push(format!("$at = \"{} 行 {} 列\";", p.line, p.column));
-                }
-                self.expr_with_id(x, id)
+                let saved = self.position.replace(sp.start);
+                let v = self.expr_with_id(x, id);
+                self.position = saved;
+                v
             }
+            Expr::Id(id, inner) => self.expr_with_id(inner, Some(*id)),
+            _ => {
+                if let Some(p) = self.position.filter(|_| self.risky(e)) {
+                    let t = self.tmp();
+                    self.push(format!("let {t};"));
+                    self.push("try {".into());
+                    let v = self.expr_unlocated(e, id);
+                    self.push(format!("{t} = {v};"));
+                    self.push(format!("}} catch (e) {{ throw $at(e, \"{} 行 {} 列\"); }}", p.line, p.column));
+                    t
+                } else {
+                    self.expr_unlocated(e, id)
+                }
+            }
+        }
+    }
+
+    fn expr_unlocated(&mut self, e: &Expr, id: Option<crate::parser::NodeId>) -> String {
+        match e {
             // && と || は右辺を条件付きで生成するので expr_inner で扱う
             Expr::Binary(op, l, r) if !matches!(*op, "&&" | "||") => self.binary(op, l, r),
-            Expr::Id(id, inner) => self.expr_with_id(inner, Some(*id)),
             _ => self.expr_inner(e, id),
         }
     }

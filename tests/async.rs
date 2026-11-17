@@ -61,3 +61,66 @@ fn main() with Async {
     assert_eq!(String::from_utf8_lossy(&output.stdout), "None\nthen 1\n30\nSome(1)\n");
     assert!(String::from_utf8_lossy(&output.stderr).contains("実行時エラー: boom"));
 }
+
+fn javascript_error(source: &str, host: &str) -> std::process::Output {
+    let javascript = hibana::to_js(source).unwrap();
+    Command::new("node")
+        .args(["-e", &format!("{host}\n{javascript}")])
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn concurrent_await_errors_keep_the_failing_expression_position() {
+    let source = "extern '' { fn boom() -> int with Async }\n\
+extern '' { fn pause() -> int with Async }\n\
+fn noise() -> int with Async {\n    pause().await\n    1 + 1\n}\n\
+fn main() with Async {\n    put(all([boom(), noise()]).await)\n}\n";
+    let output = javascript_error(
+        source,
+        "globalThis.boom = async () => { throw new Error('boom'); };\n\
+globalThis.pause = async () => 0;",
+    );
+    assert!(!output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "実行時エラー: boom（8 行 14 列）\n"
+    );
+}
+
+#[test]
+fn spawned_errors_keep_the_failing_expression_position() {
+    let source = "extern '' { fn boom() -> int with Async }\n\
+extern '' { fn pause() -> int with Async }\n\
+fn main() with Async {\n    spawn(boom())\n    put(pause().await + 1)\n}\n";
+    for boom in [
+        "() => { throw new Error('boom'); }",
+        "async () => { throw new Error('boom'); }",
+    ] {
+        let output = javascript_error(
+            source,
+            &format!("globalThis.boom = {boom}; globalThis.pause = async () => 0;"),
+        );
+        assert!(output.status.success(), "{:?}", output);
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            "実行時エラー: boom（4 行 11 列）\n"
+        );
+    }
+}
+
+#[test]
+fn arithmetic_errors_keep_the_operator_position_after_evaluating_operands() {
+    for operand in ["(1 - 1)", "pause().await"] {
+        let source = format!(
+            "extern '' {{ fn pause() -> int with Async }}\n\
+fn main() with Async {{\n    put(1 / {operand})\n}}\n"
+        );
+        let output = javascript_error(&source, "globalThis.pause = async () => 0;");
+        assert!(!output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            "実行時エラー: 0 で除算した（3 行 9 列）\n"
+        );
+    }
+}
