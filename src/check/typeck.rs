@@ -101,6 +101,12 @@ const BUILTINS: &[&str] = &[
     "read",
     "write",
     "Async",
+    "Task",
+    "spawn",
+    "task_then",
+    "task_done",
+    "task_value",
+    "task_wait",
 ];
 
 // 文字列の組み込み関数 (名前, 引数, 戻り値)。split の戻り値は Vec<String>
@@ -1063,6 +1069,15 @@ impl Ck {
             });
             return Ok(r);
         }
+        // t.wait() はブロックして待つ。ネイティブでだけ使えるので、JavaScript と WASM の出力が位置を付けて拒む
+        if let V::DataT(d) = base(&t)
+            && d.0 == "Task"
+            && f == "wait"
+            && xs.is_empty()
+        {
+            *e = Expr::Call("task_wait".into(), vec![*x]);
+            return Ok(d.1[0].clone());
+        }
         let ty = match base(&t) {
             V::DataT(d) => Some(d.0.clone()),
             V::Prim(p) => Some(Name::from(p)),
@@ -1266,12 +1281,57 @@ impl Ck {
             Expr::Binary(..) => unreachable!("expr で分けている"),
             Expr::Handle(body, arms) => return self.handle(body, arms),
             Expr::Await(_) => return self.await_(e, addr),
-            Expr::Call(name, args) if name == "Async" && self.lookup(name).is_none() => {
+            Expr::Call(name, args) if (name == "Async" || name == "Task") && self.lookup(name).is_none() => {
                 let [a] = args.as_mut_slice() else {
-                    return Err("Async の引数は1個".into());
+                    return Err(format!("{name} の引数は1個").into());
                 };
-                self.type_level(a).ctx(|e| format!("Async の引数: {e}"))?;
+                self.type_level(a).ctx(|e| format!("{name} の引数: {e}"))?;
                 V::Type
+            }
+            // spawn(x) は Async<T> の値を走らせ始め、効果を持たない Task<T> を返す。spawn 自体は効果を起こさない
+            Expr::Call(name, args) if name == "spawn" && self.lookup(name).is_none() => {
+                let [a] = args.as_mut_slice() else {
+                    return Err("spawn の引数は1個".into());
+                };
+                let at = self.expr(a)?;
+                let Some((t, rest)) = async_of(&at) else {
+                    return Err(format!("spawn には Async<T> の値を渡す（実際は {}）", show(&at)).into());
+                };
+                if !rest.is_empty() {
+                    return Err(format!(
+                        "spawn に渡す値は Async のほかの効果を起こせない（{} を起こす）。失敗は本体の中で handle して Result にしてから渡す",
+                        flat(&rest).iter().map(show).collect::<Vec<_>>().join(", ")
+                    )
+                    .into());
+                }
+                V::DataT(Rc::new(("Task".into(), vec![t])))
+            }
+            // std の Task のメソッドの実装に使う組み込み
+            Expr::Call(name, args)
+                if matches!(name.as_str(), "task_then" | "task_done" | "task_value" | "task_wait")
+                    && self.lookup(name).is_none() =>
+            {
+                let n = if name == "task_then" { 2 } else { 1 };
+                if args.len() != n {
+                    return Err(format!("{name} の引数は{n}個").into());
+                }
+                let t = self.expr(&mut args[0])?;
+                let V::DataT(d) = base(&t).clone() else {
+                    return Err(format!("{name} は Task に使う（実際は {}）", show(&t)).into());
+                };
+                if d.0 != "Task" {
+                    return Err(format!("{name} は Task に使う（実際は {}）", show(&t)).into());
+                }
+                match name.as_str() {
+                    // 終わった時に呼ぶ関数は効果を持たない
+                    "task_then" => {
+                        let f = V::Pi(Rc::new(PiV { doms: vec![d.1[0].clone()], cod: prim("unit"), effs: vec![], reqs: vec![] }));
+                        self.check(&mut args[1], &f)?;
+                        prim("unit")
+                    }
+                    "task_done" => boolean,
+                    _ => d.1[0].clone(),
+                }
             }
             // push(v, x) は v の後ろに x を足した新しい Vec
             Expr::Call(name, args) if name == "push" && self.lookup(name).is_none() => {

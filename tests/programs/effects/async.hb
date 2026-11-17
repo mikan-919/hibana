@@ -60,4 +60,7 @@ fn main() ! Async {
         fail(m) -> m
     }
     put(r)
+    // spawn は Async<T> を走らせ始め、効果を持たない Task<T> を返す。then は終わった時に呼ぶ
+    // JavaScript では main が戻った後に終わるので、出力が実行方式で揃うよう最後に置く
+    spawn(name(6)).then(fn(s) { put('then ' + s) })
 }

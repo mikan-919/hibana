@@ -73,6 +73,15 @@ async function $all(fs) {
   const h = $h;
   try { return await Promise.all(fs.map((f) => { $h = h; return f(); })); } finally { $h = h; }
 }
+// spawn。Async<T> の値を走らせ始め、状態（s: 0 未完了・1 値・2 失敗）を持つ Task を返す。失敗は console.error に出す
+function $spawn(f) {
+  const h = $h;
+  const t = { s: 0, v: undefined, p: null };
+  t.p = f().then((v) => { t.s = 1; t.v = v; }, (e) => { t.s = 2; console.error("実行時エラー: " + (e && e.message)); });
+  $h = h;
+  return t;
+}
+function $then(t, g) { t.p.then(() => { if (t.s === 1) g(t.v); }); }
 class $Abort { constructor(h, v) { this.h = h; this.v = v; } }
 function $op(op, args) {
   for (let i = $h.length - 1; i >= 0; i--) {
@@ -640,6 +649,10 @@ impl Gen<'_> {
                     "push" => format!("[...{}, {}]", vs[0], vs[1]),
                     "set_at" => format!("$set({}, {}, {})", vs[0], vs[1], vs[2]),
                     "all" => wait(true, format!("$all({})", vs[0])),
+                    "spawn" => format!("$spawn({})", vs[0]),
+                    "task_then" => format!("$then({}, {})", vs[0], vs[1]),
+                    "task_done" => format!("({}.s === 1)", vs[0]),
+                    "task_value" | "task_wait" => format!("{}.v", vs[0]),
                     "put" => format!("$print({})", vs[0]),
                     "input" => "$input()".into(),
                     "to_str" => format!("$str({})", vs[0]),

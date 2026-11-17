@@ -312,6 +312,31 @@ mod tests {
         assert!(e.contains("! Async"), "{e}");
         // Async<T> の値は表示できない
         assert!(err("fn main() ! Async { put(work(1)) }").contains(".await"));
+        // spawn に渡せるのは Async だけを起こす値。then の関数は効果を持たない
+        let e = err("effect Fail { fn fail() -> never }\nfn bad() -> int ! Async, Fail { fail() }\nfn main() { spawn(bad()) }");
+        assert!(e.contains("Result にしてから渡す"), "{e}");
+        let e = err("effect Log { fn log() }\nfn main() { spawn(work(1)).then(fn(x) { log() }) }");
+        assert!(e.contains("効果 Log"), "{e}");
+    }
+
+    // wait() はネイティブでだけ使える。JavaScript と WASM は呼び出しの位置を付けて拒む
+    #[test]
+    fn task_wait_is_native_only() {
+        let src = "fn work(n: int) -> int ! Async { n + 1 }\nfn main() {\n    let t = spawn(work(1))\n    put(t.wait())\n}";
+        assert_eq!(out(src).unwrap(), "2\n");
+        for e in [super::to_js(src).unwrap_err(), crate::to_wasm(src).unwrap_err()] {
+            let e = e.to_string();
+            assert!(e.contains("ネイティブでだけ使える") && e.contains("行 4"), "{e}");
+        }
+        #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let exe = std::env::temp_dir().join(format!("hibana-wait-{}", std::process::id()));
+            std::fs::write(&exe, crate::to_native(src).unwrap()).unwrap();
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(native_output(&exe).unwrap().stdout, b"2\n");
+            std::fs::remove_file(exe).unwrap();
+        }
     }
 
     #[test]

@@ -22,6 +22,13 @@ fn checked(src: &str, kind: pipeline::Kind) -> error::R<pipeline::Checked> {
     pipeline::check(pipeline::parse(modules)?, kind)
 }
 
+// WASM 向けの型検査。ネイティブでだけ使える Task の wait() を拒む
+fn web_checked(src: &str, kind: pipeline::Kind) -> error::R<pipeline::Checked> {
+    let checked = checked(src, kind)?;
+    pipeline::reject_wait(&checked)?;
+    Ok(checked)
+}
+
 pub fn run(src: &str, out: &mut dyn Write) -> error::R<eval::Value> {
     let checked = checked(src, pipeline::Kind::Executable)?;
     eval::run_fn(&checked.program, "main", out)
@@ -40,17 +47,17 @@ pub fn to_ir(src: &str) -> error::R<String> {
 
 pub fn to_wasm(src: &str) -> error::R<Vec<u8>> {
     let main = ["main".to_string()];
-    let ir = pipeline::lower(&checked(src, pipeline::Kind::Executable)?, Some(&main))?;
+    let ir = pipeline::lower(&web_checked(src, pipeline::Kind::Executable)?, Some(&main))?;
     pipeline::emit_wasm(&ir, None)
 }
 
 pub fn to_wasm_library(src: &str, exports: &[String]) -> error::R<Vec<u8>> {
-    let ir = pipeline::lower(&checked(src, pipeline::Kind::Library)?, Some(exports))?;
+    let ir = pipeline::lower(&web_checked(src, pipeline::Kind::Library)?, Some(exports))?;
     pipeline::emit_wasm(&ir, Some(exports))
 }
 
 pub fn to_js_glue(src: &str, exports: &[String]) -> error::R<String> {
-    let ir = pipeline::lower(&checked(src, pipeline::Kind::Library)?, Some(exports))?;
+    let ir = pipeline::lower(&web_checked(src, pipeline::Kind::Library)?, Some(exports))?;
     pipeline::emit_js_glue(&ir, exports)
 }
 
@@ -65,7 +72,7 @@ pub fn to_web(src: &str, exports: &[String]) -> error::R<WebOutput> {
     if exports.is_empty() {
         return Err("Web の公開関数を指定してください".into());
     }
-    let ir = pipeline::lower(&checked(src, pipeline::Kind::Library)?, Some(exports))?;
+    let ir = pipeline::lower(&web_checked(src, pipeline::Kind::Library)?, Some(exports))?;
     Ok(WebOutput {
         wasm: pipeline::emit_wasm(&ir, Some(exports))?,
         javascript: pipeline::emit_js_glue(&ir, exports)?,

@@ -31,3 +31,33 @@ fn main() ! Async {
     );
     assert_eq!(output.stdout, b"7\n[2, 3]\n");
 }
+
+// JavaScript の spawn は Promise を走らせ始める。peek は終わるまで None、then は終わった時に呼ぶ。失敗は console.error に出す
+#[test]
+fn spawned_tasks_run_concurrently_in_javascript() {
+    let source = r#"
+extern '' { fn delay(n: int) -> int ! Async }
+extern '' { fn boom() -> int ! Async }
+fn main() ! Async {
+    let t = spawn(delay(1))
+    put(t.peek())
+    t.then(fn(v) { put('then ' + v.to_string()) })
+    spawn(boom())
+    put(delay(30).await)
+    put(t.peek())
+}
+"#;
+    let javascript = hibana::to_js(source).unwrap();
+    let output = Command::new("node")
+        .args([
+            "-e",
+            &format!(
+                "globalThis.delay = n => new Promise((r) => setTimeout(() => r(n), n));\nglobalThis.boom = async () => {{ throw new Error('boom'); }};\n{javascript}"
+            ),
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "None\nthen 1\n30\nSome(1)\n");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("実行時エラー: boom"));
+}

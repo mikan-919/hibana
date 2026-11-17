@@ -636,6 +636,20 @@ impl Interp<'_> {
                         out.push(self.apply(f, vec![])?);
                     }
                     Value::Arr(Rc::new(out))
+                } else if matches!(name.as_str(), "spawn" | "task_then" | "task_done" | "task_value" | "task_wait")
+                    && !self.fns.contains_key(name.as_str())
+                {
+                    // spawn の時点で最後まで実行し、Task<T> は結果の値そのものにする
+                    // ponytail: 実行の待ち行列を持たないので、spawn した処理が JavaScript より先に走る。待ち行列を持てば同じ順序にできる
+                    match name.as_str() {
+                        "spawn" => self.apply(&vs[0], vec![])?,
+                        "task_then" => {
+                            let t = vs.remove(0);
+                            self.apply(&vs[0], vec![t])?
+                        }
+                        "task_done" => Value::Bool(true),
+                        _ => vs.remove(0),
+                    }
                 } else if name == "new_ref" && !self.fns.contains_key(name.as_str()) {
                     Value::Ref(Rc::new(std::cell::RefCell::new(vs.pop().unwrap())))
                 } else if name == "read" && !self.fns.contains_key(name.as_str()) {

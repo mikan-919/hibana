@@ -181,6 +181,31 @@ fn main() ! Async {
 - 効果の変数（`<E: Effect>`）を通した呼び出しには `.await` を書きません。`E` に `Async` が入るかは本体から分からないため、`E` に `Async` が入った呼び出しは、その場で待ちます（`map(xs, fn(x) { fetch(x).await })` の `map` の呼び出しも同じです）。書くと型エラーです。
 - `T` の位置に `Async<T>` の値を使うと型エラーで、`.await` を付けるか `Async<T>` のまま受け取るよう伝えます。`Async<T>` の値を捨てる文（`fetch(x)` だけの文）と、戻り値が `unit` の関数の最後の式も型エラーです（警告の仕組みが無いため）。`put` と文字列化にも渡せません。
 
+#### 色を止める
+
+`Async` を起こす関数を呼ぶ関数も `Async` を持つ必要があります（関数の「色」が呼び出し元へ広がる）。これを止める方法は `spawn` だけです。`spawn(x)` は `Async<T>` の値 `x` を走らせ始め、`Task<T>` を返します。`spawn` 自体は効果を起こさず、`Task<T>` は効果を持たない普通の値なので、`Async` を持たない関数から使えます。
+
+```
+fn on_click() {                              // Async を持たない
+    spawn(save(doc)).then(fn(r) { show(r) })
+}
+```
+
+| | `Async<T>` | `Task<T>` |
+|---|---|---|
+| 作り方 | `Async` を宣言した関数の呼び出し | `spawn(x)`（`x` は `Async<T>`） |
+| 走り始める時 | `.await` か合流（`all`・`join`）で待つ時 | `spawn` の時 |
+| 結果の受け取り方 | `.await`（`Async` の効果を起こす） | `then(f)`・`peek()`・`wait()`。何もしなければ手放す |
+| 効果 | 待つ所で `Async` と、関数の残りの効果 | 無い |
+
+- `spawn` に渡す値は `Async` のほかの効果を起こせません（型エラー）。失敗は本体の中で `handle` して `Result` にしてから渡します。
+- `t.then(f)` は、終わった時に `f(結果)` を呼びます。`f` は効果を持ちません。
+- `t.peek()` は、終わっていれば `Some(結果)`、まだなら `None` を返します。
+- `t.wait()` は終わるまでブロックして結果を返します。ネイティブでだけ使えます。JavaScript と WASM の出力は、呼び出しの位置を付けてエラーにします。
+- JavaScript では、`spawn` が Promise を走らせ始め、状態（未完了・値・失敗）を持つオブジェクトを返します。`spawn` した処理の失敗は `console.error` に出し、`then` の関数は呼びません。
+- インタプリタ・WASM・ネイティブでは、`spawn` の時点で最後まで実行します（`peek` はいつも `Some`、`then` の関数はその場で呼ぶ）。そのため、`spawn` した処理の出力の順が JavaScript と異なることがあります。
+- `then`・`peek` は std のメソッドで、組み込みの `task_then`・`task_done`・`task_value` を呼びます。`spawn` を使うファイルは std を読み込みます。
+
 実装:
 
 | 実行方式 | 操作の呼び出し | resume しない腕 | Async |
@@ -188,6 +213,7 @@ fn main() ! Async {
 | インタプリタ | 処理中の handle の並びから、一番内側の腕を呼ぶ | 抜け出す理由（`Flow::Abort`）として handle まで戻す | `Async<T>` は引数を閉じ込めた関数で、`.await` で呼ぶ（順に実行する） |
 | JavaScript | `$op` が同じように腕を呼ぶ | 例外（`$Abort`）で handle の `try` まで戻す | `Async` を持つ関数を `async function` にする。`Async<T>` は Promise を返す引数なしの関数で、`.await` は `await v()` |
 | WASM・ネイティブ（IR） | ランタイムの `__perform` が同じように腕を呼ぶ | 中断の印を置き、効果を持つ関数・関数の値の呼び出しの後で調べて 1 段ずつ戻す。handle の本体は `Catch` で抜ける | インタプリタと同じ（`all` は順に実行する） |
+| 目標（未実装）: WASM・ネイティブ | | | `Async` の関数を `poll` で進めるステートマシンに変換し、`all`・`join`・`spawn` を本当に並行に動かす |
 
 型検査は、`.await` の直下の呼び出しをそのまま待つ呼び出しに、それ以外の `Async<T>` を作る呼び出しを「引数を一時変数に置き、その呼び出しを本体にした引数なしの無名関数」に、それ以外の `.await` をその値の呼び出しに書き換えます。出力側はこの書き換えの結果だけを扱います。
 
@@ -318,6 +344,7 @@ fn main() {
 | `Vec<T>` | 配列。書き換えられないので、`Vec<int[x -> x > 0]>` は `Vec<int>` として使える |
 | `Ref<T>` | 書き換えられる参照。`new_ref(x)` で作り、`read(r)` で読み、`write(r, x)` で書く。無名関数や handle の腕が写し取っても同じ値を指す（`mut` 変数は写し取った時の値になる） |
 | `Async<T>` | まだ走っていない非同期の処理。`.await` で待つと `T` になる（3.5 節） |
+| `Task<T>` | `spawn` で走らせ始めた処理。効果を持たない値で、`then`・`peek`・`wait` で結果を受け取る（3.5 節） |
 | `(x: A, B) -> C` | 関数型。引数名は省ける。細分化型の条件では前の引数の値を参照できる |
 | `T[x -> 条件]` | 細分化型。条件を満たす `T` の値だけを許す |
 | `Type` | 型引数に指定する種類。`<A: Type>` は `<A>` と同じ |
@@ -426,6 +453,8 @@ macro unless('unless' expr:Expr block:Block) {
 | `set_at(v, i, x)` | `(Vec<T>, int, T) -> Vec<T>`。`v` の `i` 番目を `x` にした新しい `Vec`。`i` が範囲内であることを添字と同じく証明する。`xs = set_at(xs, i, x)` の形は `push` と同じく、その場で書き換える（O(1)） |
 | `all(xs)` | `(Vec<Async<T>>) -> Async<Vec<T>>`。`.await` で待つ（3.5 節） |
 | `resume(x)` | `handle` の腕の中で、続きを再開する（3.5 節） |
+| `spawn(x)` | `(Async<T>) -> Task<T>`。効果を起こさない。`x` は `Async` のほかの効果を持てない（3.5 節） |
+| `task_then(t, f)` `task_done(t)` `task_value(t)` | std の `Task::then`・`Task::peek` の実装用の組み込み関数 |
 
 ## 10. ライブラリ
 
@@ -448,6 +477,7 @@ macro unless('unless' expr:Expr block:Block) {
 | `map(xs, f)` `filter(xs, f)` `fold(xs, init, f)` | `Vec` の高階関数。`f` の効果をそのまま起こす（効果の多相） |
 | `concat(a, b)` `reverse(xs)` `take(xs, n)` `drop(xs, n)` `last(xs)` `range(a, b)` `sum(xs)` | `Vec` の操作。`last` は `Option` を返す。`range` は `a` 以上 `b` 未満の `int` の `Vec` |
 | `Pair<A, B>` = `{ first, second }`、`join(a, b)` | 2 つの値の組と、`Async<A>` と `Async<B>` の合流（3.5 節） |
+| `t.then(f)` `t.peek()` | `Task<T>` のメソッド。`t.wait()` は組み込み（3.5 節） |
 | `some(xs, f)` `every(xs, f)` `find(xs, f)` | 一つでも・すべてが条件を満たすか、最初の要素（`Option`）。`f` の効果をそのまま起こす。`all` は並行実行の組み込みなので `every` と呼ぶ |
 | `xs.join(sep)` `repeat(s, n)` `trim(s)` `replace(s, from, to)` `lines(s)` `ends_with(s, w)` `includes(s, w)` | 文字列の操作 |
 | `Map<V>`、`empty()` `get(m, k)` `set(m, k, v)` `keys(m)` | 文字列のキーから値への表。`set` は新しい `Map` を返す。線形探索 |

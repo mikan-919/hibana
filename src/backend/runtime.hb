@@ -897,6 +897,28 @@ fn __write(r: int, x: int) {
     __setv(__payload(r), x)
 }
 
+// spawn。その場で最後まで実行し、Task<T> は結果の値そのものにする
+// ponytail: 実行の待ち行列を持たないので、spawn した処理が JavaScript より先に走る。poll で進めるステートマシンに変換すれば並行に動かせる
+fn __spawn(f: int) -> int {
+    f()
+}
+
+fn __task_then(t: int, f: int) {
+    f(t)
+}
+
+fn __task_done(t: int) -> bool {
+    true
+}
+
+fn __task_wait(t: int) -> int {
+    t
+}
+
+fn __task_value(t: int) -> int {
+    t
+}
+
 // 構築子と関数の値
 
 fn __data_new(ctor: int, n: int) -> int {

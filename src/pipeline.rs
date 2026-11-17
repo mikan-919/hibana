@@ -268,5 +268,27 @@ fn select_exports<'a>(program: &'a ir::Program, names: &[String]) -> R<Vec<&'a i
 
 /// 型検査済みプログラムから JavaScript を作る。
 pub fn emit_js(checked: &Checked) -> R<String> {
+    reject_wait(checked)?;
     Ok(js::emit(&checked.program, &checked.info))
+}
+
+/// Task の wait()（終わるまでブロックする）はネイティブでだけ使える。JavaScript と WASM の出力の前に、呼び出しの位置を付けて拒む。
+/// ponytail: 使わない関数の中の wait() も拒む。公開関数から辿れる関数だけを調べるなら、IR の選択と同じ探索をここでもする
+pub fn reject_wait(checked: &Checked) -> R<()> {
+    let mut last = None;
+    let mut found = None;
+    for f in &checked.program.fns {
+        typeck::walk(&parser::Expr::Block(f.body.clone()), &mut |e| match e {
+            parser::Expr::At(span, _) => last = Some(*span),
+            parser::Expr::Call(n, _) if n == "task_wait" && found.is_none() => found = Some(last),
+            _ => {}
+        });
+    }
+    let Some(span) = found else { return Ok(()) };
+    let error = crate::error::Error::from("Task の wait() はネイティブでだけ使える（JavaScript と WASM では then か peek を使う）");
+    let error = match span {
+        Some(span) => error.at(span),
+        None => error,
+    };
+    Err(error.with_sources(checked.program.modules.iter().map(|module| &module.source)).with_line())
 }

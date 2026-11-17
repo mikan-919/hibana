@@ -283,7 +283,7 @@ pub(super) const LIBS: &[(&str, &str)] = &[
     ("std::math", include_str!("../../lib/math.hb")),
 ];
 
-pub(super) const PRELUDE_NAMES: &[&str] = &["Result", "Ok", "Err", "parse_int", "refine"];
+pub(super) const PRELUDE_NAMES: &[&str] = &["Result", "Ok", "Err", "parse_int", "refine", "spawn"];
 
 // use した名前の取り込み方
 #[derive(Debug, Clone)]
@@ -461,7 +461,7 @@ fn parse_modules_tokens(
     }
     g.validate()?;
     let grammar = Rc::new(g);
-    let mut types: HashSet<Name> = ["Vec", "Ref", "Type", "Async"].map(Name::from).into();
+    let mut types: HashSet<Name> = ["Vec", "Ref", "Type", "Async", "Task"].map(Name::from).into();
     let mut generic_fns: HashSet<Name> = [Name::from("refine")].into();
     // 組み込みと利用者のファイルの名前・モジュール名・パターンのリテラル。マクロの衛生性で名前を付け替えない
     let mut globals: HashSet<Name> = [
@@ -503,6 +503,12 @@ fn parse_modules_tokens(
         "read",
         "write",
         "Async",
+        "Task",
+        "spawn",
+        "task_then",
+        "task_done",
+        "task_value",
+        "task_wait",
         "Vec",
         "Type",
     ]

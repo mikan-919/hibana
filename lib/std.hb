@@ -257,6 +257,16 @@ fn join_into<T>(a: Async<T>, r: Ref<Option<T>>) ! Async {
     write(r, Some(a.await))
 }
 
+// spawn で走らせた処理。終わったら f を呼ぶ（f は効果を持たない）
+fn Task::then<T>(t: Task<T>, f: (T) -> unit) {
+    task_then(t, f)
+}
+
+// 終わっていれば結果を Some で返す
+fn Task::peek<T>(t: Task<T>) -> Option<T> {
+    if task_done(t) { Some(task_value(t)) } else { None }
+}
+
 // ---- 文字列 ----
 
 // xs.join(sep)。要素の間に sep を挟んでつなぐ（関数の join は Async の合流）
