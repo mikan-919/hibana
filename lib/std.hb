@@ -39,6 +39,18 @@ impl Eq for int {
     fn eq(self, other: int) -> bool { self == other }
 }
 
+impl Eq for number {
+    fn eq(self, other: number) -> bool { self == other }
+}
+
+impl Ord for number {
+    fn lt(self, other: number) -> bool { self < other }
+}
+
+impl Display for number {
+    fn to_string(self) -> String { to_str(self) }
+}
+
 impl Eq for String {
     fn eq(self, other: String) -> bool { self == other }
 }
@@ -483,13 +495,13 @@ fn parse_json_int(s: String, i: int) -> Parsed {
         // 負数は負のまま蓄積し、int の最小値を絶対値なしで表す。
         if !overflow {
             if neg {
-                if n < -922337203685477580 || (n == -922337203685477580 && d > 8) {
+                if n < -900719925474099 || (n == -900719925474099 && d > 1) {
                     overflow = true
                 } else {
                     n = n * 10 - d
                 }
             } else {
-                if n > 922337203685477580 || (n == 922337203685477580 && d > 7) {
+                if n > 900719925474099 || (n == 900719925474099 && d > 1) {
                     overflow = true
                 } else {
                     n = n * 10 + d

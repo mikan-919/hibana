@@ -167,7 +167,8 @@ impl Ck {
                 }
                 true
             }
-            _ => same(&a, &b),
+            // 部分型への数値変換は式の検査で行う。number の実装を int の辞書に流用しない。
+            _ => same(&a, &b) && !(base(&a) == prim("number") && base(&b) == prim("int")),
         })
     }
 

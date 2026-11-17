@@ -32,7 +32,7 @@ pub struct Program {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueType {
     Int,
-    Num,
+    Number,
     Bool,
     Str,
     Unit,
@@ -142,7 +142,7 @@ impl fmt::Display for ValueType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Int => "int",
-            Self::Num => "num",
+            Self::Number => "number",
             Self::Bool => "bool",
             Self::Str => "String",
             Self::Unit => "unit",
@@ -173,10 +173,10 @@ impl Import {
 }
 
 fn boundary(t: ValueType) -> bool {
-    matches!(t, ValueType::Int | ValueType::Num | ValueType::Bool | ValueType::Str | ValueType::Unit)
+    matches!(t, ValueType::Int | ValueType::Number | ValueType::Bool | ValueType::Str | ValueType::Unit)
 }
 
-// 型検査は num の演算の引数を #num で包む。リテラルはそのまま残る。
+// 型検査は number の演算の引数を #num で包む。リテラルはそのまま残る。
 fn numeric(e: &Ast) -> bool {
     matches!(e.peel(), Ast::Num(_)) || matches!(e.peel(), Ast::Call(n, _) if n == "#num")
 }
@@ -211,7 +211,8 @@ impl Function {
     /// 呼ぶ関数の名前。算術の範囲外などで呼ぶランタイムの関数も含む
     pub fn calls(&self) -> Vec<&str> {
         let mut names = Vec::new();
-        if self.result_type == ValueType::Num || self.param_types.contains(&ValueType::Num) { names.push("__num_checked"); }
+        if self.result_type == ValueType::Int || self.param_types.contains(&ValueType::Int) { names.push("__int_in"); }
+        if self.result_type == ValueType::Number || self.param_types.contains(&ValueType::Number) { names.push("__num_checked"); }
         self.each(&mut |n| match n {
             Node::Expr(Expr::Call(n, _) | Expr::Func(n)) => names.push(n.as_str()),
             Node::Expr(Expr::Prim(Prim::Add | Prim::Sub | Prim::Mul, _)) => {
@@ -273,7 +274,7 @@ fn each_block<'a>(b: &'a Block, f: &mut impl FnMut(Node<'a>)) {
 fn value_type(e: &Ast) -> ValueType {
     match e.peel() {
         Ast::Var(n) if n == "int" => ValueType::Int,
-        Ast::Var(n) if n == "num" || n == "number" => ValueType::Num,
+        Ast::Var(n) if n == "number" => ValueType::Number,
         Ast::Var(n) if n == "bool" => ValueType::Bool,
         Ast::Var(n) if n == "String" => ValueType::Str,
         Ast::Var(n) if n == "unit" => ValueType::Unit,
@@ -432,13 +433,14 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>) -> R<Prog
             Some(f) => {
                 let param_types: Vec<_> = f.params.iter().map(|(_, t)| value_type(t)).collect();
                 let result_type = ret_type(f);
-                if param_types.contains(&ValueType::Num) || result_type == ValueType::Num {
+                if param_types.contains(&ValueType::Int) || result_type == ValueType::Int { pending.push("__int_in".into()); }
+                if param_types.contains(&ValueType::Number) || result_type == ValueType::Number {
                     pending.push("__num_checked".into());
                 }
                 if exported(&name) {
                     return Err("外部関数を直接公開できない".into());
                 }
-                // ponytail: WASM の境界は int・num・str・unit。ほかの型は接続コードに変換を足す
+                // ponytail: WASM の境界は int・number・str・unit。ほかの型は接続コードに変換を足す
                 if !param_types
                     .iter()
                     .chain([&result_type])
@@ -814,6 +816,7 @@ impl Lower<'_, '_> {
                 Expr::Const(NUM, (-n).to_bits() as i64)
             }
             Ast::Unary("-", a) if !self.raw && numeric(a) => call("__neg", vec![self.expr(a)?]),
+            Ast::Unary("-", a) if !self.raw => call("__ineg", vec![self.expr(a)?]),
             Ast::Unary("-", a) => prim(Prim::Sub, vec![int(0), self.expr(a)?]),
             Ast::Unary(_, a) => prim(Prim::Not, vec![self.expr(a)?]),
             Ast::Binary(op @ ("&&" | "||"), a, b) => {
@@ -826,7 +829,7 @@ impl Lower<'_, '_> {
                 Expr::If(Box::new(a), t, f)
             }
             Ast::Binary(op, a, b) => {
-                let number = !self.raw && numeric(a);
+                let number = !self.raw && (numeric(a) || numeric(b));
                 let (a, b) = (self.expr(a)?, self.expr(b)?);
                 if *op == "**" {
                     return Ok(call(if number { "__value_pow" } else { "__pow" }, vec![a, b]));
@@ -834,6 +837,9 @@ impl Lower<'_, '_> {
                 if number && matches!(*op, "-" | "*" | "/" | "%" | "<" | "<=" | ">" | ">=") {
                     let name = match *op { "-" => "__sub", "*" => "__mul", "/" => "__div", "%" => "__rem", "<" => "__lt", "<=" => "__le", ">" => "__gt", _ => "__ge" };
                     return Ok(call(name, vec![a, b]));
+                }
+                if !self.raw && matches!(*op, "-" | "*") {
+                    return Ok(call(if *op == "-" { "__isub" } else { "__imul" }, vec![a, b]));
                 }
                 let p = match *op {
                     "+" => Prim::Add,
@@ -852,31 +858,8 @@ impl Lower<'_, '_> {
                 if self.raw || !matches!(p, Prim::Add | Prim::Eq | Prim::Ne) {
                     return Ok(prim(p, vec![a, b]));
                 }
-                // 整数と真偽値はその場で計算し、ほかはランタイムを呼ぶ
-                let mut stmts = Vec::new();
-                let a = self.temp(a, &mut stmts);
-                let b = self.temp(b, &mut stmts);
-                let tag = prim(Prim::Tag, vec![a.clone()]);
-                let (cond, fast, slow) = if p == Prim::Add {
-                    (
-                        prim(Prim::Eq, vec![tag, int(INT)]),
-                        add(a.clone(), b.clone()),
-                        call("__add", vec![a, b]),
-                    )
-                } else {
-                    (
-                        prim(Prim::Le, vec![tag, int(BOOL)]),
-                        prim(Prim::Eq, vec![a.clone(), b.clone()]),
-                        call("__eq", vec![a, b]),
-                    )
-                };
-                let v = Expr::If(Box::new(cond), leaf(fast), leaf(slow));
-                let v = if p == Prim::Ne {
-                    prim(Prim::Not, vec![v])
-                } else {
-                    v
-                };
-                block(stmts, v)
+                let v = call(if p == Prim::Add { "__add" } else { "__eq" }, vec![a, b]);
+                if p == Prim::Ne { prim(Prim::Not, vec![v]) } else { v }
             }
             Ast::Call(n, args) => self.call(n, args)?,
             Ast::Apply(f, args) => {
@@ -1247,7 +1230,7 @@ mod tests {
         let ir = crate::to_ir(src).unwrap();
         assert_eq!(
             ir,
-            "fn add(%0, %1) {\n  return (Sub %0 %1)\n}\nfn main() {\n  %0 = (call add 1 2)\n  %1 = (Mul %0 3)\n  (Div %1 4)\n  return ()\n}\n"
+            "fn add(%0, %1) {\n  return (call __isub %0 %1)\n}\nfn main() {\n  %0 = (call add 1 2)\n  %1 = (call __imul %0 3)\n  (Div %1 4)\n  return ()\n}\n"
         );
     }
 

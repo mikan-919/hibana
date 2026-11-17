@@ -487,7 +487,6 @@ fn parse_modules_tokens(
         "str_of",
         "error",
         "int",
-        "num",
         "number",
         "num_floor",
         "num_sqrt",

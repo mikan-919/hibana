@@ -245,26 +245,26 @@ mod tests {
 
     #[test]
     fn runtime_refinements() {
-        assert_eq!(out(include_str!("../../tests/programs/types/runtime_refine.hb")).unwrap(), "ok:ok\nbad\nbad\nok\n1\ntrue\n1.5\n3\n");
+        assert_eq!(out(include_str!("../../tests/programs/types/runtime_refine.hb")).unwrap(), "std.Ok(3)\nstd.Err(\"安全整数の範囲外か整数でない\")\nstd.Err(\"安全整数の範囲外か整数でない\")\nstd.Err(\"安全整数の範囲外か整数でない\")\nstd.Ok(0)\nstd.Ok(3)\nstd.Err(\"細分化型の条件を満たさない\")\nok:ok\nbad\nbad\nok\n1\ntrue\n1.5\n3\n");
         assert!(out("type Title = String[s -> len(s) > 0]\nfn main() { let t: Title = '' }").is_err());
     }
 
     #[test]
     fn numeric_values() {
         let src = include_str!("../../tests/programs/types/num.hb");
-        assert_eq!(out(src).unwrap(), "2.5\n1.5\n1.5\n-0.5\n0.25\n1\n1.5\n2\ntrue\ntrue\ntrue\n[0.5, 2.5]\n-0\n0.00000001\n1000000000000000000000\n");
+        assert_eq!(out(src).unwrap(), "1.5\n[1, 2.5]\ntrue\ntrue\n1\n2.5\n3\n6\n0.5\n101\n-101\n2.5\n4\n2.5\n1.5\n1.5\n-0.5\n0.25\n1\n1.5\n2\ntrue\ntrue\ntrue\n[0.5, 2.5]\n-0\n0.00000001\n1000000000000000000000\n0.5\n0.5\n");
         for src in [
             "fn main() { let x: int = 0.5 }",
-            "fn main() { let x: num[x -> x > 0] = -0.5 }",
-            "fn main() { let x: num[x -> x > 9007199254740992] = 9007199254740993 }",
-            "struct P { x: num }\nfn f(p: P) -> int[x -> x == 1] { if p.x > 0 && p.x < 1 { 0 } else { 1 } }\nfn main() {}",
-            "fn f(x: num) { let mut y: num = x\n if y > 0 { y = -1.0\n let z: num[z -> z > 0] = y } }\nfn main() {}",
-            "fn f(x: num) -> num[y -> y >= 1] { if x > 0 { x } else { 1 } }\nfn main() {}",
-            "fn f(x: num) -> num[y -> y > x] { x + 1.0 }\nfn main() {}",
+            "fn main() { let x: number[x -> x > 0] = -0.5 }",
+            "fn main() { let x: number[x -> x > 9007199254740992] = 9007199254740993 }",
+            "struct P { x: number }\nfn f(p: P) -> int[x -> x == 1] { if p.x > 0 && p.x < 1 { 0 } else { 1 } }\nfn main() {}",
+            "fn f(x: number) { let mut y: number = x\n if y > 0 { y = -1.0\n let z: number[z -> z > 0] = y } }\nfn main() {}",
+            "fn f(x: number) -> number[y -> y >= 1] { if x > 0 { x } else { 1 } }\nfn main() {}",
+            "fn f(x: number) -> number[y -> y > x] { x + 1.0 }\nfn main() {}",
         ] { assert!(out(src).is_err(), "{src}"); }
         let math = include_str!("../../tests/programs/stdlib/math.hb");
         assert_eq!(out(math).unwrap(), "3\n1.5\n2\n-3\n5\n");
-        for (name, source) in [("num", src), ("math", math)] {
+        for (name, source) in [("number", src), ("math", math)] {
             let path = std::env::temp_dir().join(format!("hibana-{name}-{}.cjs", std::process::id()));
             std::fs::write(&path, super::to_js(source).unwrap()).unwrap();
             let result = std::process::Command::new("node").arg(&path).output().unwrap();
@@ -449,18 +449,18 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("hibana-native-err-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let cases = [
-            ("fn f(a: int, b: int) -> int { a + b }\nfn main() { put(1)\n put(f(9223372036854775807, 1)) }", "オーバーフロー"),
-            ("fn f(a: int, b: int) -> int { a * b }\nfn main() { put(1)\n put(f(-1, -9223372036854775807 - 1)) }", "オーバーフロー"),
+            ("fn f(a: int, b: int) -> int { a + b }\nfn main() { put(1)\n put(f(9007199254740991, 1)) }", "オーバーフロー"),
+            ("fn f(a: int, b: int) -> int { a * b }\nfn main() { put(1)\n put(f(-2, -9007199254740991)) }", "オーバーフロー"),
             ("fn f(a: int, b: int) -> int { a / b }\nfn main() { put(1)\n put(f(1, 0)) }", "0 で除算した"),
-            ("fn f(a: int, b: int) -> int { a % b }\nfn main() { put(1)\n put(f(-9223372036854775807 - 1, -1)) }", "オーバーフロー"),
+            ("fn f(a: int, b: int) -> int { a - b }\nfn main() { put(1)\n put(f(-9007199254740991, 1)) }", "オーバーフロー"),
             ("fn f(a: int, b: int) -> int { a ** b }\nfn main() { put(1)\n put(f(2, -1)) }", "負の指数"),
             ("fn f(a: int, b: int) -> int { a ** b }\nfn main() { put(1)\n put(f(3, 100)) }", "オーバーフロー"),
             ("fn main() { put(1)\n put(1.0 / 0.0) }", "0 で除算した"),
             ("fn main() { put(1)\n put(1.0 % 0.0) }", "0 で除算した"),
-            ("fn main() { put(1)\n put(2.0 ** 1024.0) }", "num の演算結果が有限でない"),
+            ("fn main() { put(1)\n put(2.0 ** 1024.0) }", "number の演算結果が有限でない"),
             ("use std::math\nfn main() { put(1)\n put(math::sqrt(-1)) }", "sqrt の引数が負"),
-            ("use std::math\nfn main() { put(1)\n put(math::floor(9223372036854775808.0)) }", "floor の結果が int の範囲外"),
-            ("fn main() { put(1)\n put(2.0 ** 0.5) }", "num の小数の指数は未対応"),
+            ("use std::math\nfn main() { put(1)\n put(math::floor(9007199254740992.0)) }", "floor の結果が int の範囲外"),
+            ("fn main() { put(1)\n put(2.0 ** 0.5) }", "number の小数の指数は未対応"),
         ];
         for (i, (src, msg)) in cases.iter().enumerate() {
             let exe = tmp.join(format!("e{i}"));
@@ -471,7 +471,7 @@ mod tests {
             assert_eq!(String::from_utf8(r.stdout).unwrap(), "1\n", "{src}");
             assert!(String::from_utf8(r.stderr).unwrap().contains(msg), "{src}");
         }
-        let src = "fn main() { put(-9223372036854775807 - 1)\n put(0)\n put(-42)\n put(true)\n put('日本語') }";
+        let src = "fn main() { put(-9007199254740991)\n put(0)\n put(-42)\n put(true)\n put('日本語') }";
         let exe = tmp.join("put");
         std::fs::write(&exe, crate::to_native(src).unwrap()).unwrap();
         std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();

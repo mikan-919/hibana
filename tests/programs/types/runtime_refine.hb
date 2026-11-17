@@ -11,6 +11,13 @@ impl Factory for int { fn value() -> int { 3 } }
 fn produce<A: Factory>() -> A { value() }
 
 fn main() {
+    put(refine<int>(3.0))
+    put(refine<int>(1.5))
+    put(refine<int>(9007199254740992.0))
+    put(refine<int>(-9007199254740992.0))
+    put(refine<int>(-0.0))
+    put(refine<int[n -> n > 2]>(3.0))
+    put(refine<int[n -> n > 2]>(2.0))
     for s in ['ok', '', 'length'] {
         put(match title(s) { Ok(value) -> 'ok:' + value Err(_) -> 'bad' })
     }
@@ -18,6 +25,6 @@ fn main() {
     put(require_title(once(counter)))
     put(read(counter))
     put(match refine<Positive>(-1) { Ok(_) -> false Err(_) -> true })
-    put(match refine<num[n -> n > 0 && n < 10]>(1.5) { Ok(v) -> v.to_string() Err(_) -> 'bad' })
+    put(match refine<number[n -> n > 0 && n < 10]>(1.5) { Ok(v) -> v.to_string() Err(_) -> 'bad' })
     put(produce<int>())
 }

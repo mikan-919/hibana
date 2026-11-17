@@ -65,17 +65,23 @@ test 'json string escapes' {
 }
 
 test 'json int boundaries' {
-    assert(match parse_json('9223372036854775807') { Some(v) -> match v { JInt(n) -> n == 9223372036854775807 _ -> false } None -> false })
-    assert(match parse_json('-9223372036854775808') { Some(v) -> match v { JInt(n) -> n == -9223372036854775807 - 1 _ -> false } None -> false })
-    assert(match parse_json('9223372036854775808') { None -> true _ -> false })
-    assert(match parse_json('-9223372036854775809') { None -> true _ -> false })
+    assert(match parse_json('9007199254740991') { Some(v) -> match v { JInt(n) -> n == 9007199254740991 _ -> false } None -> false })
+    assert(match parse_json('-9007199254740991') { Some(v) -> match v { JInt(n) -> n == -9007199254740991 _ -> false } None -> false })
+    assert(match parse_json('9007199254740992') { None -> true _ -> false })
+    assert(match parse_json('-9007199254740992') { None -> true _ -> false })
 }
 
 test 'parse int' {
-    for n in [0, 7, -12, 9223372036854775807, -9223372036854775807 - 1] {
+    for n in [0, 7, -12, 9007199254740991, -9007199254740991] {
         assert(match parse_int(n.to_string()) { Ok(parsed) -> parsed == n Err(_) -> false })
     }
-    for s in ['', '-', '+1', ' 1', '1 ', '1.5', '1x', '１２', '9223372036854775808', '-9223372036854775809'] {
+    for s in ['', '-', '+1', ' 1', '1 ', '1.5', '1x', '１２', '9007199254740992', '-9007199254740992'] {
         assert(match parse_int(s) { Ok(_) -> false Err(_) -> true })
     }
+}
+
+test "number traits" {
+    assert_eq(1.5, 1.5)
+    assert_eq(max(1.5, 2.5), 2.5)
+    assert_eq(min(1.5, 2.5), 1.5)
 }

@@ -2,7 +2,7 @@
 // 型検査は通さず、構文解析だけして IR に変換する。演算子はすべて値の中身（64 ビット整数）の演算になる。
 // __load などの __ で始まる組み込みは、IR の命令に直接変換する（src/backend/ir.rs の prim）。
 //
-// 値の型の番号: 0 unit, 1 int, 2 bool, 3 String, 4 Vec, 5 type の値・構造体, 6 関数, 7 型, 8 Ref, 9 num（中身は f64 のビット列）
+// 値の型の番号: 0 unit, 1 int, 2 bool, 3 String, 4 Vec, 5 type の値・構造体, 6 関数, 7 型, 8 Ref, 9 number（中身は f64 のビット列）
 // ヒープ上の形（各欄は 8 バイト、値は型の番号と中身の 16 バイト）:
 //   String: [長さ][UTF-8 のバイト列]
 //   Vec: [要素数][値...]
@@ -50,21 +50,39 @@ fn __div_zero() {
     __die('0 で除算した')
 }
 
-// 指数が 64 を超えると、-1・0・1 以外は範囲外になる。-1・0・1 は偶奇だけで決まる
+// 利用者の整数演算。ランタイム内部の64ビット演算とは分ける。
+fn __i53(n: int) -> int {
+    if n > 9007199254740991 || n < -9007199254740991 { __overflow() }
+    n
+}
+fn __iadd(a: int, b: int) -> int { __i53(a + b) }
+fn __isub(a: int, b: int) -> int { __i53(a - b) }
+fn __imul(a: int, b: int) -> int { __i53(a * b) }
+fn __ineg(a: int) -> int { __i53(0 - a) }
+
+// WASM 境界の f64 のビット列を安全整数へ変換する。
+fn __int_in(bits: int) -> int {
+    if __and(__shr(__payload(bits), 52), 2047) == 2047 { __die('安全整数の範囲外') }
+    let v = __mkv(9, __payload(bits))
+    if __f_lt(v, -9007199254740991.0) || __f_lt(9007199254740991.0, v) || !__f_eq(__f_floor(v), v) { __die('安全整数の範囲外') }
+    __f_to_int(v)
+}
+
+// 指数が 52 を超えると、-1・0・1 以外は範囲外になる。-1・0・1 は偶奇だけで決まる
 fn __pow(a: int, b: int) -> int {
     if b < 0 {
         __die('負の指数')
     }
     let mut n = b
-    if n > 64 {
+    if n > 52 {
         if a > 1 || a < 0 - 1 {
             __overflow()
         }
-        n = 64 + n % 2
+        n = 52 + n % 2
     }
     let mut r = 1
     while n > 0 {
-        r = r * a
+        r = __imul(r, a)
         n = n - 1
     }
     r
@@ -113,84 +131,92 @@ fn __cat(a: String, b: String) -> String {
     __mkv(3, p)
 }
 
-// + の整数以外。文字列の連結
+// 数値の加算と文字列の連結。値の型の番号に応じて処理する
 fn __add(a: String, b: String) -> String {
-    if __tag(a) == 9 { return __num_checked(__f_add(a, b)) }
+    if __tag(a) == 9 || __tag(b) == 9 { return __num_checked(__f_add(__num(a), __num(b))) }
+    if __tag(a) == 1 { return __iadd(a, b) }
     __cat(a, b)
 }
 
-fn __num_checked(bits: int) -> num {
-    if __and(__shr(__payload(bits), 52), 2047) == 2047 { __die('num の演算結果が有限でない') }
+fn __num_checked(bits: int) -> number {
+    if __and(__shr(__payload(bits), 52), 2047) == 2047 { __die('number の演算結果が有限でない') }
     __mkv(9, __payload(bits))
 }
 
-fn __num(v: int) -> num {
+fn __num(v: int) -> number {
     if __tag(v) == 9 { return __num_checked(v) }
     __num_checked(__f_from_int(v))
 }
 
 fn __neg(v: int) -> int {
     if __tag(v) == 9 { return __num_checked(__f_neg(v)) }
-    0 - v
+    __ineg(v)
 }
 fn __sub(a: int, b: int) -> int {
-    if __tag(a) == 9 { return __num_checked(__f_sub(a, b)) }
-    a - b
+    if __tag(a) == 9 || __tag(b) == 9 { return __num_checked(__f_sub(__num(a), __num(b))) }
+    __isub(a, b)
 }
 fn __mul(a: int, b: int) -> int {
-    if __tag(a) == 9 { return __num_checked(__f_mul(a, b)) }
-    a * b
+    if __tag(a) == 9 || __tag(b) == 9 { return __num_checked(__f_mul(__num(a), __num(b))) }
+    __imul(a, b)
 }
 fn __div(a: int, b: int) -> int {
-    if __tag(a) == 9 {
-        if __f_eq(b, 0.0) { __div_zero() }
-        return __num_checked(__f_div(a, b))
+    if __tag(a) == 9 || __tag(b) == 9 {
+        if __f_eq(__num(b), 0.0) { __div_zero() }
+        return __num_checked(__f_div(__num(a), __num(b)))
     }
     a / b
 }
 fn __lt(a: int, b: int) -> bool {
-    if __tag(a) == 9 { return __f_lt(a, b) }
+    if __tag(a) == 9 || __tag(b) == 9 { return __f_lt(__num(a), __num(b)) }
     a < b
 }
 fn __le(a: int, b: int) -> bool {
-    if __tag(a) == 9 { return __f_le(a, b) }
+    if __tag(a) == 9 || __tag(b) == 9 { return __f_le(__num(a), __num(b)) }
     a <= b
 }
 fn __gt(a: int, b: int) -> bool { __lt(b, a) }
 fn __ge(a: int, b: int) -> bool { __le(b, a) }
 
-fn __num_floor(v: num) -> int {
-    let n = __f_floor(v)
-    if __f_lt(n, -9223372036854775808.0) || !__f_lt(n, 9223372036854775808.0) { __die('floor の結果が int の範囲外') }
+fn __num_floor(v: number) -> int {
+    let n = __f_floor(__num(v))
+    if __f_lt(n, -9007199254740991.0) || __f_lt(9007199254740991.0, n) { __die('floor の結果が int の範囲外') }
     __f_to_int(n)
 }
-fn __num_sqrt(v: num) -> num {
+fn __num_sqrt(value: number) -> number {
+    let v = __num(value)
     if __f_lt(v, 0.0) { __die('sqrt の引数が負') }
     __num_checked(__f_sqrt(v))
 }
 
-// ponytail: num の指数は int の範囲の整数のみ。小数の指数には対数・指数関数の実装が必要
-fn __value_pow(a: int, b: int) -> int {
-    if __tag(a) != 9 { return __pow(a, b) }
-    let mut n = __num_floor(b)
-    if !__f_eq(__f_from_int(n), b) { __die('num の小数の指数は未対応') }
+// ponytail: number の指数は整数のみ。小数の指数には対数・指数関数の実装が必要
+fn __value_pow(left: int, right: int) -> int {
+    if __tag(left) != 9 && __tag(right) != 9 { return __pow(left, right) }
+    let a = __num(left)
+    let b = __num(right)
+    if !__f_eq(__f_floor(b), b) { __die('number の小数の指数は未対応') }
+    let mut n = b
     let mut factor = a
-    if n < 0 {
-        if __f_eq(a, 0.0) { __die('num の演算結果が有限でない') }
+    if __f_lt(n, 0.0) {
+        n = __f_neg(n)
+        if __f_eq(a, 0.0) { __die('number の演算結果が有限でない') }
         factor = __num_checked(__f_div(1.0, a))
     }
     let mut result = 1.0
-    while n != 0 {
-        if n % 2 != 0 { result = __num_checked(__f_mul(result, factor)) }
-        n = n / 2
-        if n != 0 { factor = __num_checked(__f_mul(factor, factor)) }
+    while !__f_eq(n, 0.0) {
+        let half = __f_floor(__f_div(n, 2.0))
+        if !__f_eq(__f_mul(half, 2.0), n) { result = __num_checked(__f_mul(result, factor)) }
+        n = half
+        if !__f_eq(n, 0.0) { factor = __num_checked(__f_mul(factor, factor)) }
     }
     result
 }
 
 // 仮数の整数除算で余りを求め、除算の結果が桁あふれする場合も扱う
-fn __rem(a: int, b: int) -> int {
-    if __tag(a) != 9 { return a % b }
+fn __rem(left: int, right: int) -> int {
+    if __tag(left) != 9 && __tag(right) != 9 { return left % right }
+    let a = __num(left)
+    let b = __num(right)
     let sign = __shl(__shr(__payload(a), 63), 63)
     let mut x = __and(__payload(a), 9223372036854775807)
     let y = __and(__payload(b), 9223372036854775807)
@@ -275,7 +301,7 @@ fn __big_mul(p: int, factor: int) {
         i = i + 1
     }
     if carry != 0 {
-        if n >= 40 { __die('num の表示用整数が範囲外') }
+        if n >= 40 { __die('number の表示用整数が範囲外') }
         __store(p + 8 + n * 8, carry)
         __store(p, n + 1)
     }
@@ -383,7 +409,7 @@ fn __num_str(bits: int) -> String {
             }
             done = true
         } else {
-            if count >= 17 { __die('num の表示を丸められない') }
+            if count >= 17 { __die('number の表示を丸められない') }
             __big_mul(r, 10); __big_mul(lo, 10); __big_mul(hi, 10)
         }
     }
@@ -435,6 +461,7 @@ fn __int_str(n: int) -> String {
 fn __eq(a: int, b: int) -> bool {
     let t = __tag(a)
     if t != __tag(b) {
+        if (t == 1 && __tag(b) == 9) || (t == 9 && __tag(b) == 1) { return __f_eq(__num(a), __num(b)) }
         return false
     }
     if t == 9 { return __f_eq(a, b) }

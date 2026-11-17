@@ -6,7 +6,7 @@ fn async_annotations_survive_cloning_and_numeric_elaboration() {
 extern '' { fn delay(n: int) -> int with Async }
 fn apply<E: Effect>(f: () -> int with E) -> int with E { f() }
 fn main() with Async {
-    let result: num = apply(fn() { delay(7).await })
+    let result: number = apply(fn() { delay(7).await })
     put(result)
     put(all([delay(2), delay(3)]).await)
 }
@@ -123,4 +123,14 @@ fn main() with Async {{\n    put(1 / {operand})\n}}\n"
             "実行時エラー: 0 で除算した（3 行 9 列）\n"
         );
     }
+}
+
+
+#[test]
+fn runtime_integer_refinement_evaluates_an_async_argument_once() {
+    let source = "use std -> *\nextern '' { fn once() -> number with Async }\nfn main() with Async { put(refine<int>(once().await)) }";
+    let javascript = hibana::to_js(source).unwrap();
+    let output = Command::new("node").args(["-e", &format!("let calls = 0; globalThis.once = async () => {{ if (++calls > 1) throw Error('呼び出しが重複'); return 3; }};\n{javascript}")]).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(output.stdout, b"std.Ok(3)\n");
 }

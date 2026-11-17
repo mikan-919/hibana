@@ -1,4 +1,5 @@
 use crate::parser::Name;
+use crate::check::typeck::{MIN_SAFE_INT, MAX_SAFE_INT};
 use crate::error::Error;
 use crate::lexer::{Span, Tok, Token};
 use crate::meta::{self, Node, Syn};
@@ -185,6 +186,19 @@ fn int(v: Value) -> i64 {
     }
 }
 
+fn number(v: &Value) -> f64 {
+    match v { Value::Int(n) => *n as f64, Value::Num(n) => *n, _ => unreachable!("型検査済み") }
+}
+
+fn value_eq(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Int(i), Value::Num(f)) | (Value::Num(f), Value::Int(i)) => (*i as f64) == *f,
+        (Value::Arr(a), Value::Arr(b)) => a.len() == b.len() && a.iter().zip(b.iter()).all(|(a,b)| value_eq(a,b)),
+        (Value::Data(a), Value::Data(b)) => a.0 == b.0 && a.1.len() == b.1.len() && a.1.iter().zip(&b.1).all(|(a,b)| value_eq(a,b)),
+        _ => a == b,
+    }
+}
+
 fn boolean(v: Value) -> bool {
     match v {
         Value::Bool(b) => b,
@@ -198,23 +212,23 @@ fn arith(op: &str, a: i64, b: i64) -> Option<i64> {
         "-" => a.checked_sub(b),
         "*" => a.checked_mul(b),
         "/" => a.checked_div(b),
-        // 指数が 64 を超えると、-1・0・1 以外は範囲外になる。-1・0・1 は偶奇だけで決まる
-        "**" if b > 64 && !(-1..=1).contains(&a) => None,
-        "**" => a.checked_pow(if b > 64 { 64 + b % 2 } else { b } as u32),
+        // 指数が 52 を超えると、-1・0・1 以外は範囲外になる。-1・0・1 は偶奇だけで決まる
+        "**" if b > 52 && !(-1..=1).contains(&a) => None,
+        "**" => a.checked_pow(if b > 52 { 52 + b % 2 } else { b } as u32),
         _ => a.checked_rem(b),
-    }
+    }.filter(|n| (MIN_SAFE_INT..=MAX_SAFE_INT).contains(n))
 }
 
 // 整数の指数は各出力先で乗算の順序もそろえる。
 pub(crate) fn num_pow(a: f64, b: f64) -> f64 {
-    if b.fract() != 0.0 || !(-9223372036854775808.0..9223372036854775808.0).contains(&b) { return a.powf(b); }
-    let mut n = b as i64;
-    let mut factor = if n < 0 { 1.0 / a } else { a };
+    if b.fract() != 0.0 { return a.powf(b); }
+    let mut n = b.abs();
+    let mut factor = if b < 0.0 { 1.0 / a } else { a };
     let mut result = 1.0;
-    while n != 0 {
-        if n % 2 != 0 { result *= factor; }
-        n /= 2;
-        if n != 0 { factor *= factor; }
+    while n != 0.0 {
+        if n % 2.0 != 0.0 { result *= factor; }
+        n = (n / 2.0).trunc();
+        if n != 0.0 { factor *= factor; }
     }
     result
 }
@@ -560,7 +574,7 @@ impl Interp<'_> {
                 if let Value::Num(n) = value { return Ok(Value::Num(-n)); }
                 let n = int(value);
                 Value::Int(
-                    n.checked_neg()
+                    n.checked_neg().filter(|n| (MIN_SAFE_INT..=MAX_SAFE_INT).contains(n))
                         .ok_or(Flow::Error("オーバーフロー".into()))?,
                 )
             }
@@ -573,14 +587,15 @@ impl Interp<'_> {
             }
             Expr::Binary(op, l, r) => {
                 let (a, b) = (self.expr(l, env)?, self.expr(r, env)?);
-                if let (Value::Num(x), Value::Num(y)) = (&a, &b) {
+                if matches!(a, Value::Num(_)) || matches!(b, Value::Num(_)) {
+                    let (x, y) = (number(&a), number(&b));
                     return match *op {
                         "==" => Ok(Value::Bool(x == y)), "!=" => Ok(Value::Bool(x != y)),
                         "<" => Ok(Value::Bool(x < y)), "<=" => Ok(Value::Bool(x <= y)), ">" => Ok(Value::Bool(x > y)), ">=" => Ok(Value::Bool(x >= y)),
-                        "/" | "%" if *y == 0.0 => error("0 で除算した".into()),
+                        "/" | "%" if y == 0.0 => error("0 で除算した".into()),
                         op => {
-                            let n = match op { "+" => x + y, "-" => x - y, "*" => x * y, "/" => x / y, "%" => x % y, "**" => num_pow(*x, *y), _ => unreachable!("型検査済み") };
-                            if !n.is_finite() { return error("num の演算結果が有限でない".into()); }
+                            let n = match op { "+" => x + y, "-" => x - y, "*" => x * y, "/" => x / y, "%" => x % y, "**" => num_pow(x, y), _ => unreachable!("型検査済み") };
+                            if !n.is_finite() { return error("number の演算結果が有限でない".into()); }
                             Ok(Value::Num(n))
                         }
                     };
@@ -589,8 +604,8 @@ impl Interp<'_> {
                     "+" if matches!(a, Value::Str(_)) => {
                         Value::Str(format!("{}{}", str_val(a), str_val(b)).into())
                     }
-                    "==" => Value::Bool(a == b),
-                    "!=" => Value::Bool(a != b),
+                    "==" => Value::Bool(value_eq(&a, &b)),
+                    "!=" => Value::Bool(!value_eq(&a, &b)),
                     "<" => Value::Bool(int(a) < int(b)),
                     "<=" => Value::Bool(int(a) <= int(b)),
                     ">" => Value::Bool(int(a) > int(b)),
@@ -615,10 +630,10 @@ impl Interp<'_> {
                 if name == "#num" {
                     match vs.remove(0) { Value::Int(n) => Value::Num(n as f64), v @ Value::Num(_) => v, _ => unreachable!("型検査済み") }
                 } else if name == "num_floor" || name == "num_sqrt" {
-                    let Value::Num(n) = vs[0] else { unreachable!("型検査済み") };
+                    let n = number(&vs[0]);
                     if name == "num_floor" {
                         let n = n.floor();
-                        if !(-9223372036854775808.0..9223372036854775808.0).contains(&n) { return error("floor の結果が int の範囲外".into()); }
+                        if !(MIN_SAFE_INT as f64..=MAX_SAFE_INT as f64).contains(&n) { return error("floor の結果が int の範囲外".into()); }
                         Value::Int(n as i64)
                     } else {
                         if n < 0.0 { return error("sqrt の引数が負".into()); }

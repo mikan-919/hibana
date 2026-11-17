@@ -81,12 +81,12 @@ api = await instantiate(bytes, { hibana_host: {
     return '[' + s + ']';
   },
   show: s => { messages.push(s); },
-  increment: n => n + 1n,
+  increment: n => n + 1,
   invert: value => { assert.equal(typeof value, 'boolean'); return !value; },
   __EXPORTS__: s => s,
 }});
 assert.deepEqual(Object.keys(api), ['echo', 'literal', 'run', 'add', 'notify', 'negate', 'dispose']);
-assert.equal(api.dispose(), 7n);
+assert.equal(api.dispose(), 7);
 assert.equal(api.negate(true), false);
 assert.equal(api.negate(false), true);
 assert.throws(() => api.negate(1), TypeError);
@@ -96,13 +96,13 @@ for (const text of ['', '日本語🌸', 'a\0b', 'x'.repeat(200000)]) {
   assert.equal(messages.at(-1), '[' + text + ']');
 }
 assert.equal(api.literal(), 'こんにちは🌸');
-assert.equal(api.add(41), 42n);
+assert.equal(api.add(41), 42);
 assert.equal(api.notify('done'), undefined);
 assert.equal(messages.at(-1), 'done');
 assert.throws(() => api.echo(123), TypeError);
 assert.throws(() => api.echo(), TypeError);
 assert.throws(() => api.add(1.5), RangeError);
-assert.throws(() => api.add(1n << 63n), RangeError);
+assert.throws(() => api.add(1n), RangeError);
 for (const next of ['throw', 'invalid', 'async', 'reenter']) {
   mode = next;
   assert.throws(() => api.run('test'));

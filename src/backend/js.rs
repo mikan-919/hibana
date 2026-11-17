@@ -1,30 +1,35 @@
 // 型検査を通ったプログラムから型を消し、JavaScript を出力する
 //
-// 値の表し方: int は BigInt（64ビットを超えたら実行時エラー）、bool・str は JavaScript の値、
+// 値の表し方: int と number は JavaScript の number（整数は53ビット安全整数）、bool・str は JavaScript の値、
 // unit は undefined、Vec は配列、type の値は { $c: 構築子名, $f: [フィールド] }、関数は関数、
 // 型は名前の文字列。式は1つずつ一時変数に入れて、評価の順序をインタプリタと揃える
 use crate::parser::{Arm, Block, Expr, Fn, Program, Stmt};
 use std::collections::HashMap;
 
 const PRELUDE: &str = r#""use strict";
-const $MIN = -(2n ** 63n), $MAX = 2n ** 63n - 1n;
-function $chk(x) { if (typeof x === "number") { if (!Number.isFinite(x)) throw new Error("num の演算結果が有限でない"); return x; } if (x < $MIN || x > $MAX) throw new Error("オーバーフロー"); return x; }
-function $add(a, b) { return typeof a === "string" ? a + b : $chk(a + b); }
-function $sub(a, b) { return $chk(a - b); }
-function $mul(a, b) { return $chk(a * b); }
-function $div(a, b) { if (b === 0n || b === 0) throw new Error("0 で除算した"); return $chk(a / b); }
-function $rem(a, b) { if (b === 0n || b === 0) throw new Error("0 で除算した"); if (a === $MIN && b === -1n) throw new Error("オーバーフロー"); return $chk(a % b); }
-function $pow(a, b) {
-  if (typeof a === "number") {
-    if (!Number.isInteger(b) || b < -(2 ** 63) || b >= 2 ** 63) return $chk(a ** b);
-    let n = BigInt(b), factor = n < 0n ? $chk(1 / a) : a, result = 1;
-    while (n !== 0n) { if (n % 2n !== 0n) result = $chk(result * factor); n /= 2n; if (n !== 0n) factor = $chk(factor * factor); }
-    return result;
-  }
-  if (b < 0n) throw new Error("負の指数"); if (b > 64n) { if (a > 1n || a < -1n) throw new Error("オーバーフロー"); b = 64n + b % 2n; } return $chk(a ** b);
+const $SAFE_MAX = 9007199254740991;
+function $ichk(x) { if (!Number.isSafeInteger(x)) throw new Error("オーバーフロー"); return x === 0 ? 0 : x; }
+function $fchk(x) { if (!Number.isFinite(x)) throw new Error("number の演算結果が有限でない"); return x; }
+function $iadd(a, b) { return typeof a === "string" ? a + b : $ichk(a + b); }
+function $isub(a, b) { return $ichk(a - b); }
+function $imul(a, b) { return $ichk(a * b); }
+function $idiv(a, b) { if (b === 0) throw new Error("0 で除算した"); return $ichk(Math.trunc(a / b)); }
+function $irem(a, b) { if (b === 0) throw new Error("0 で除算した"); return $ichk(a % b); }
+function $ipow(a, b) { if (b < 0) throw new Error("負の指数"); if (b > 52) { if (a > 1 || a < -1) throw new Error("オーバーフロー"); b = 52 + b % 2; } return $ichk(a ** b); }
+function $ineg(a) { return $ichk(-a); }
+function $fadd(a, b) { return $fchk(a + b); }
+function $fsub(a, b) { return $fchk(a - b); }
+function $fmul(a, b) { return $fchk(a * b); }
+function $fdiv(a, b) { if (b === 0) throw new Error("0 で除算した"); return $fchk(a / b); }
+function $frem(a, b) { if (b === 0) throw new Error("0 で除算した"); return $fchk(a % b); }
+function $fpow(a, b) {
+  if (!Number.isInteger(b)) return $fchk(a ** b);
+  let n = Math.abs(b), factor = b < 0 ? $fchk(1 / a) : a, result = 1;
+  while (n !== 0) { if (n % 2 !== 0) result = $fchk(result * factor); n = Math.trunc(n / 2); if (n !== 0) factor = $fchk(factor * factor); }
+  return result;
 }
-function $neg(a) { return $chk(-a); }
-function $num_floor(n) { const x = Math.floor(n); if (!(x >= -(2 ** 63) && x < 2 ** 63)) throw new Error("floor の結果が int の範囲外"); return BigInt(x); }
+function $fneg(a) { return $fchk(-a); }
+function $num_floor(n) { const x = Math.floor(n); if (!Number.isSafeInteger(x)) throw new Error("floor の結果が int の範囲外"); return x === 0 ? 0 : x; }
 function $num_sqrt(n) { if (n < 0) throw new Error("sqrt の引数が負"); return Math.sqrt(n); }
 let $w;
 // 失敗した式の位置を例外に保持する。内側で付いた位置と、with を抜ける制御はそのまま通す
@@ -47,14 +52,14 @@ function $numstr(v) {
   const s = String(v);
   if (!s.includes("e")) return s;
   const [mantissa, exponent] = s.split("e"), sign = v < 0 ? "-" : "", m = mantissa.replace("-", "");
-  const digits = m.replace(".", ""), point = (m.includes(".") ? m.indexOf(".") : m.length) + Number(exponent);
+  const digits = m.replace(".", ""), point = (m.includes(".") ? m.indexOf(".") : m.length) + (+exponent);
   if (point <= 0) return sign + "0." + "0".repeat(-point) + digits;
   if (point >= digits.length) return sign + digits + "0".repeat(point - digits.length);
   return sign + digits.slice(0, point) + "." + digits.slice(point);
 }
 function $show(v) {
   if (typeof v === "number") return $numstr(v);
-  if (typeof v === "bigint" || typeof v === "boolean") return String(v);
+  if (typeof v === "boolean") return String(v);
   if (typeof v === "string") return JSON.stringify(v);
   if (v === undefined) return "()";
   if (typeof v === "function") return "<fn>";
@@ -124,7 +129,7 @@ function $input() {
   }
   return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(new Uint8Array(bytes));
 }
-function $len(v) { return BigInt(typeof v === "string" ? [...v].length : v.length); }
+function $len(v) { return typeof v === "string" ? [...v].length : v.length; }
 function $split(s, sep) { return sep === "" ? ["", ...s, ""] : s.split(sep); }
 function $starts_with(s, p) { return s.startsWith(p); }
 // x = push(x, e)。$o は x の変数だけが指している配列の印で、x を他で読むと $sh が消す
@@ -133,25 +138,25 @@ function $opush(v, x) {
   if (v.$o) { v.push(x); return v; }
   const c = [...v, x]; c.$o = true; return c;
 }
-function $set(v, i, x) { const c = [...v]; c[Number(i)] = x; return c; }
+function $set(v, i, x) { const c = [...v]; c[i] = x; return c; }
 function $oset(v, i, x) {
-  if (v.$o) { v[Number(i)] = x; return v; }
-  const c = [...v]; c[Number(i)] = x; c.$o = true; return c;
+  if (v.$o) { v[i] = x; return v; }
+  const c = [...v]; c[i] = x; c.$o = true; return c;
 }
 function $chars(s) { return [...s]; }
-function $code(s) { return s.length ? BigInt(s.codePointAt(0)) : -1n; }
-function $char_from_codepoint(n) { return n < 0n || n > 0x10ffffn || (n >= 0xd800n && n <= 0xdfffn) ? "" : String.fromCodePoint(Number(n)); }
+function $code(s) { return s.length ? s.codePointAt(0) : -1; }
+function $char_from_codepoint(n) { return n < 0 || n > 0x10ffff || (n >= 0xd800 && n <= 0xdfff) ? "" : String.fromCodePoint(n); }
 function $panic(m) { throw new Error(m); }
-function $now_ms() { return BigInt(Date.now()); }
+function $now_ms() { return Date.now(); }
 function $slice(s, i, j) {
   const cs = [...s];
-  if (!(0n <= i && i <= j && j <= BigInt(cs.length))) throw new Error(`slice の範囲 ${i}..${j} が文字列の外`);
-  return cs.slice(Number(i), Number(j)).join("");
+  if (!(0 <= i && i <= j && j <= cs.length)) throw new Error(`slice の範囲 ${i}..${j} が文字列の外`);
+  return cs.slice(i, j).join("");
 }
 // extern の関数の境界で、宣言した型 d に従って値を変換する。$to は hibana から JS へ、$from は JS から hibana へ
 function $to(d, v) {
-  if (d === "num") return $chk(v);
-  if (d === "int") return Number(v);
+  if (d === "number") return $fchk(v);
+  if (d === "int") return v;
   if (d.vec) return v.map((x) => $to(d.vec, x));
   if (d.fn && d.async) return (...a) => Promise.resolve(v(...a.map((x, i) => $from(d.fn[i], x)))).then((r) => $to(d.ret, r));
   if (d.fn) return (...a) => $to(d.ret, v(...a.map((x, i) => $from(d.fn[i], x))));
@@ -159,14 +164,13 @@ function $to(d, v) {
   return v;
 }
 function $from(d, v) {
-  if (d === "num") {
-    if (typeof v !== "number") throw new Error("JavaScript の値 " + v + " は num でない");
-    return $chk(v);
+  if (d === "number") {
+    if (typeof v !== "number") throw new Error("JavaScript の値 " + v + " は number でない");
+    return $fchk(v);
   }
   if (d === "int") {
-    if (typeof v === "bigint") return $chk(v);
-    if (!Number.isInteger(v)) throw new Error("JavaScript の値 " + v + " は int でない");
-    return BigInt(v);
+    if (typeof v !== "number" || !Number.isSafeInteger(v)) throw new Error("JavaScript の値 " + v + " は int でない");
+    return v === 0 ? 0 : v;
   }
   if (d === "unit") return undefined;
   if (d.vec) return Array.from(v, (x) => $from(d.vec, x));
@@ -176,6 +180,10 @@ function $from(d, v) {
   return v;
 }
 "#;
+
+fn numeric(e: &Expr) -> bool {
+    matches!(e.peel(), Expr::Num(_)) || matches!(e.peel(), Expr::Call(n, _) if n == "#num")
+}
 
 pub fn emit(prog: &Program, info: &crate::typeck::Info) -> String {
     let mut g = Gen {
@@ -259,7 +267,7 @@ fn desc(prog: &Program, t: &Expr, depth: usize) -> String {
         return "\"any\"".into();
     }
     match t.peel() {
-        Expr::Var(n) if n == "num" || n == "number" => "\"num\"".into(),
+        Expr::Var(n) if n == "number" => "\"number\"".into(),
         Expr::Var(n) if n == "int" || n == "unit" => lit(n),
         Expr::Refine(b, ..) => desc(prog, b, depth + 1),
         Expr::Call(n, args) if n == "Vec" && args.len() == 1 => {
@@ -602,14 +610,15 @@ impl Gen<'_> {
 
     #[inline(never)]
     fn binary(&mut self, op: &str, l: &Expr, r: &Expr) -> String {
+        let prefix = if numeric(l) || numeric(r) { "f" } else { "i" };
         let (a, b) = (self.expr(l), self.expr(r));
         let v = match op {
-            "+" => format!("$add({a}, {b})"),
-            "-" => format!("$sub({a}, {b})"),
-            "*" => format!("$mul({a}, {b})"),
-            "/" => format!("$div({a}, {b})"),
-            "%" => format!("$rem({a}, {b})"),
-            "**" => format!("$pow({a}, {b})"),
+            "+" => format!("${prefix}add({a}, {b})"),
+            "-" => format!("${prefix}sub({a}, {b})"),
+            "*" => format!("${prefix}mul({a}, {b})"),
+            "/" => format!("${prefix}div({a}, {b})"),
+            "%" => format!("${prefix}rem({a}, {b})"),
+            "**" => format!("${prefix}pow({a}, {b})"),
             "==" => format!("$eq({a}, {b})"),
             "!=" => format!("!$eq({a}, {b})"),
             op => format!("({a} {op} {b})"),
@@ -621,7 +630,7 @@ impl Gen<'_> {
     fn expr_inner(&mut self, e: &Expr, id: Option<crate::parser::NodeId>) -> String {
         match e {
             Expr::At(..) | Expr::Id(..) => unreachable!("expr で外している"),
-            Expr::Int(n) => format!("{n}n"),
+            Expr::Int(n) => n.to_string(),
             Expr::Num(n) => format!("{n:?}"),
             Expr::Bool(b) => b.to_string(),
             Expr::Str(s) => lit(s),
@@ -641,7 +650,7 @@ impl Gen<'_> {
             Expr::Unary(op, x) => {
                 let a = self.expr(x);
                 self.let_(if *op == "-" {
-                    format!("$neg({a})")
+                    format!("${}neg({a})", if numeric(x) { "f" } else { "i" })
                 } else {
                     format!("!{a}")
                 })
@@ -663,7 +672,7 @@ impl Gen<'_> {
                 }
                 let mut vs = if name == "len" { vec![self.look(&args[0])] } else { self.args(args) };
                 let v = match name.as_str() {
-                    "#num" => format!("Number({})", vs[0]),
+                    "#num" => vs[0].clone(),
                     "num_floor" | "num_sqrt" => format!("${name}({})", vs[0]),
                     // 腕の値として返し、$op が呼んだ所の値にする
                     "#resume" => format!(
@@ -737,7 +746,7 @@ impl Gen<'_> {
             }
             Expr::Index(v, i) => {
                 let (a, b) = (self.look(v), self.expr(i));
-                self.let_(format!("{a}[Number({b})]"))
+                self.let_(format!("{a}[{b}]"))
             }
             Expr::Array(items) => {
                 let vs = self.args(items);

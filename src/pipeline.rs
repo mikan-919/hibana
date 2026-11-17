@@ -75,7 +75,8 @@ pub fn link(program: &ir::Program, exports: &[String]) -> R<ir::Program> {
             }
             if let Some(f) = program.imports.iter().find(|f| f.name() == name) {
                 strings |= has_str(f.param_types(), f.result_type());
-                if f.param_types().contains(&ir::ValueType::Num) || f.result_type() == ir::ValueType::Num { pending.push("__num_checked"); }
+                if f.param_types().contains(&ir::ValueType::Int) || f.result_type() == ir::ValueType::Int { pending.push("__int_in"); }
+                if f.param_types().contains(&ir::ValueType::Number) || f.result_type() == ir::ValueType::Number { pending.push("__num_checked"); }
                 continue;
             }
             let function = functions
@@ -112,7 +113,7 @@ pub fn emit_wasm(program: &ir::Program, exports: Option<&[String]>) -> R<Vec<u8>
 }
 
 /// 公開関数を JavaScript から呼ぶための ES モジュールを作る。
-/// int は BigInt、num は Number、str は文字列、unit は undefined として渡す。
+/// int と number は Number、str は文字列、unit は undefined として渡す。
 pub fn emit_js_glue(program: &ir::Program, exports: &[String]) -> R<String> {
     let signatures = boundary_signatures(program, exports)?;
     let hosts = serde_json::to_string(&signatures.imports).unwrap();
@@ -139,22 +140,22 @@ export async function instantiate(bytes, imports = {}) {
       new Uint8Array(instance.exports.memory.buffer, ptr, data.length).set(data);
       return BigInt.asIntN(64, (BigInt(data.length) << 32n) | BigInt(ptr));
     }
-    if (type === "num") {
-      if (typeof value !== "number" || !Number.isFinite(value)) throw new TypeError("有限な num が必要");
+    if (type === "number") {
+      if (typeof value !== "number" || !Number.isFinite(value)) throw new TypeError("有限な number が必要");
       return value;
     }
-    if (typeof value !== "number" && typeof value !== "bigint") throw new TypeError("整数が必要");
-    if (typeof value === "number" && !Number.isSafeInteger(value)) throw new RangeError("安全な整数が必要");
-    const n = BigInt(value);
-    if (n < -(1n << 63n) || n >= (1n << 63n)) throw new RangeError("64 ビット整数の範囲外");
-    return n;
+    if (typeof value !== "number" || !Number.isSafeInteger(value)) throw new RangeError("安全な整数が必要");
+    return value === 0 ? 0 : value;
   }
   function decode(value, type) {
     if (type === 'bool') return value !== 0n;
     if (type === "unit") return undefined;
-    if (type === "int") return value;
-    if (type === "num") {
-      if (!Number.isFinite(value)) throw new RangeError("num の演算結果が有限でない");
+    if (type === "int") {
+      if (typeof value !== "number" || !Number.isSafeInteger(value)) throw new RangeError("安全な整数が必要");
+      return value === 0 ? 0 : value;
+    }
+    if (type === "number") {
+      if (!Number.isFinite(value)) throw new RangeError("number の演算結果が有限でない");
       return value;
     }
     const packed = BigInt.asUintN(64, value);

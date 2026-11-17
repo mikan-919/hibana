@@ -1,6 +1,6 @@
 //! 細分化型の項・評価器・事実の照合。
 use crate::parser::Name;
-use super::typeck::{bound, neu, prim, ref_t, PiV, V, PRIMS, SYN_FNS};
+use super::typeck::{bound, neu, prim, ref_t, PiV, V, PRIMS, SYN_FNS, MIN_SAFE_INT, MAX_SAFE_INT};
 use crate::error::{Error, R};
 use crate::parser::{Ctor, Data, Expr, Fn};
 use std::collections::HashMap;
@@ -18,7 +18,7 @@ pub(crate) enum Term {
     Proj(V, Name),
     // 型の計算で扱えない式（while・代入・put など）。どの値とも等しくない
     Opaque(usize),
-    // num の値。整数用の証明規則を適用しないための印
+    // number の値。整数用の証明規則を適用しないための印
     Num(V),
 }
 
@@ -143,27 +143,131 @@ pub(super) fn prove_facts<'a>(goal: &V, facts: impl Iterator<Item = &'a V> + Clo
     *goal == V::Bool(true) || facts.clone().any(implies)
 }
 
+// #num の印を外して同じ数値の項を照合する。
+fn number_term(v: &V) -> &V {
+    if let V::Neu(n) = v && let Term::Num(v) = &**n { number_term(v) } else { v }
+}
+
+fn constant(v: &V) -> Option<f64> {
+    match number_term(v) { V::Int(n) => Some(*n as f64), V::Num(n) if n.is_finite() => Some(*n), _ => None }
+}
+
+// 厳密不等式も閉区間へ弱める。端点は最近接・偶数丸めの単調性で伝播する。
+fn interval(v: &V, facts: &[&V]) -> Option<(f64, f64)> {
+    let v = number_term(v);
+    if let Some(c) = constant(v) { return Some((c, c)); }
+    let mut lo: Option<f64> = None;
+    let mut hi: Option<f64> = None;
+    for f in facts {
+        if let V::Neu(n) = f && let Term::Bin(op, a, b) = &**n {
+            if number_term(a) == v && let Some(c) = constant(b) {
+                if matches!(*op, "<" | "<=" | "==") { hi = Some(hi.map_or(c, |h| h.min(c))); }
+                if *op == "==" { lo = Some(lo.map_or(c, |l| l.max(c))); }
+            }
+            if number_term(b) == v && let Some(c) = constant(a) {
+                if matches!(*op, "<" | "<=" | "==") { lo = Some(lo.map_or(c, |l| l.max(c))); }
+                if *op == "==" { hi = Some(hi.map_or(c, |h| h.min(c))); }
+            }
+        }
+    }
+    let propagated = match v {
+        V::Neu(n) => match &**n {
+            Term::Un("-", x) => interval(x, facts).map(|(a,b)| (-b,-a)),
+            Term::Bin(op @ ("+" | "-" | "*"), x, y) => {
+                match (interval(x, facts), interval(y, facts)) {
+                    (Some((a,b)), Some((c,d))) => Some(match *op {
+                        "+" => (a+c,b+d), "-" => (a-d,b-c),
+                        _ => { let corners = [a*c,a*d,b*c,b*d];
+                            if !corners.iter().all(|c| c.is_finite()) { return None; }
+                            (corners.into_iter().fold(f64::INFINITY, f64::min), corners.into_iter().fold(f64::NEG_INFINITY, f64::max))
+                        }
+                    }),
+                    _ => None,
+                }
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some((a,b)) = propagated && a.is_finite() && b.is_finite() {
+        lo = Some(lo.map_or(a, |l| l.max(a)));
+        hi = Some(hi.map_or(b, |h| h.min(b)));
+    }
+    match (lo,hi) { (Some(a),Some(b)) if a <= b => Some((a,b)), _ => None }
+}
+
+fn sign(v: &V, facts: &[&V], positive: bool) -> bool {
+    if let Some(c) = constant(v) { return if positive { c > 0.0 } else { c >= 0.0 }; }
+    for f in facts {
+        if let V::Neu(n) = f && let Term::Bin(op, a, b) = &**n
+            && number_term(b) == number_term(v) && let Some(c) = constant(a)
+            && ((matches!(*op, "<" | "<=" | "==") && c > 0.0)
+                || (c == 0.0 && (*op == "<" || (!positive && matches!(*op, "<=" | "=="))))) { return true; }
+        if let V::Neu(n) = f && let Term::Bin("==", a, b) = &**n
+            && number_term(a) == number_term(v) && let Some(c) = constant(b)
+            && (if positive { c > 0.0 } else { c >= 0.0 }) { return true; }
+    }
+    if let Some((lo,_)) = interval(v, facts) && (if positive { lo > 0.0 } else { lo >= 0.0 }) { return true; }
+    if !positive && let V::Neu(n) = number_term(v) {
+        match &**n {
+            Term::Bin("+" | "*", a, b) => return sign(a, facts, false) && sign(b, facts, false),
+            Term::Bin("/", a, b) => return sign(a, facts, false) && sign(b, facts, true),
+            Term::Call(f, _) if f == "num_sqrt" => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+fn strict_shift(a: &V, b: &V, facts: &[&V]) -> bool {
+    let shifted = |v: &V, shifted: &V, subtract: bool| {
+        let V::Neu(n) = number_term(shifted) else { return false };
+        let Term::Bin(op, x, c) = &**n else { return false };
+        if *op != (if subtract { "-" } else { "+" }) || number_term(x) != number_term(v) { return false; }
+        let Some(c) = constant(c).filter(|c| *c > 0.0) else { return false };
+        let Some((lo,hi)) = interval(v, facts) else { return false };
+        let m = lo.abs().max(hi.abs());
+        let delta = if subtract { -c } else { c };
+        (lo + delta).is_finite() && (hi + delta).is_finite() && 2.0 * (m.next_up() - m) <= c
+    };
+    shifted(a, b, false) || shifted(b, a, true)
+}
+
+fn prove_number(goal: &V, facts: &[&V]) -> bool {
+    if *goal == V::Bool(true) || facts.contains(&goal) { return true; }
+    let V::Neu(n) = goal else { return false };
+    match &**n {
+        Term::Bin("&&", a, b) => prove_number(a, facts) && prove_number(b, facts),
+        Term::Bin("||", a, b) => prove_number(a, facts) || prove_number(b, facts),
+        Term::Bin(op, a, b) => {
+            if *op == "<=" && constant(a) == Some(0.0) && sign(b, facts, false) { return true; }
+            if *op == "<" && constant(a) == Some(0.0) && sign(b, facts, true) { return true; }
+            if *op == "<" && strict_shift(a, b, facts) { return true; }
+            if *op == "<=" && number_term(a) == number_term(b) { return true; }
+            match (interval(a, facts), interval(b, facts)) {
+                (Some((al,ah)),Some((bl,bh))) => match *op {
+                    "<=" => ah <= bl, "<" => ah < bl, "!=" => ah < bl || bh < al,
+                    "==" => al == ah && bl == bh && al == bl, _ => false,
+                },
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
 // 事実との照合と定数の代入で示し、残りを Z3 に問い合わせる。
 pub(super) fn prove<'a>(
     goal: &V,
     facts: impl Iterator<Item = &'a V> + Clone,
     smt: &mut super::smt::Smt,
 ) -> bool {
-    // ponytail: num の証明は定数評価と事実の一致だけ。浮動小数点用の証明器を導入するまで整数用の規則と Z3 の Int に渡さない
-    if has_num(goal) || facts.clone().any(has_num) {
-        fn known<'a>(goal: &V, facts: impl Iterator<Item = &'a V> + Clone) -> bool {
-            if *goal == V::Bool(true) || facts.clone().any(|f| f == goal) { return true; }
-            if let V::Neu(n) = goal {
-                match &**n {
-                    Term::Bin("&&", a, b) => return known(a, facts.clone()) && known(b, facts),
-                    Term::Bin("||", a, b) => return known(a, facts.clone()) || known(b, facts),
-                    _ => {}
-                }
-            }
-            false
-        }
-        return known(goal, facts);
+    // 浮動小数点数は専用の規則で扱う。整数のゴールからも浮動小数点数の事実を除く。
+    if has_num(goal) {
+        return prove_number(goal, &facts.collect::<Vec<_>>());
     }
+    let integer_facts: Vec<_> = facts.filter(|f| !has_num(f)).collect();
+    let facts = integer_facts.into_iter();
     if prove_facts(goal, facts.clone()) {
         return true;
     }
@@ -205,7 +309,7 @@ pub(super) fn un(op: &'static str, v: V) -> V {
         }
     }
     match (op, v) {
-        ("-", V::Int(n)) if n != i64::MIN => V::Int(-n),
+        ("-", V::Int(n)) if (MIN_SAFE_INT..=MAX_SAFE_INT).contains(&n) => V::Int(-n),
         ("-", V::Num(n)) => V::Num(-n),
         ("!", V::Bool(b)) => V::Bool(!b),
         (op, v) => neu(Term::Un(op, v)),
@@ -254,7 +358,8 @@ pub(super) fn bin(op: &'static str, a: V, b: V) -> V {
         _ => None,
     };
     if let Some(r) = r {
-        return r;
+        let valid = match &r { Int(n) => (MIN_SAFE_INT..=MAX_SAFE_INT).contains(n), Num(n) => n.is_finite(), _ => true };
+        if valid { return r; }
     }
     // > と >= は向きを揃えて < と <= にする
     match op {

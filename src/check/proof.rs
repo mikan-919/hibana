@@ -45,7 +45,7 @@ impl Ck {
 
     // 変数を束縛し、型の細分化の条件をその変数についての事実として加える
     pub(super) fn bind(&mut self, name: &Name, ty: V, val: V, mutable: bool) -> R<()> {
-        let val = if base(&ty) == prim("num") { crate::check::prove::num(val) } else { val };
+        let val = if base(&ty) == prim("number") { crate::check::prove::num(val) } else { val };
         for p in split(&ty).1 {
             let f = self.norm.subst(&p, 0, &val)?;
             self.add_fact(f);
@@ -133,13 +133,13 @@ impl Ck {
     pub(super) fn subsume(&mut self, e: &mut Expr, got: &V, expected: &V) -> R<()> {
         let (eb, eps) = split(expected);
         let (gb, gps) = split(got);
-        if eb == prim("num") && (gb == prim("int") || gb == prim("num"))
+        if eb == prim("number") && (gb == prim("int") || gb == prim("number"))
             && !matches!(e.peel(), Expr::Call(n, _) if n == "#num")
             && !matches!(e.peel(), Expr::Num(_))
         {
             let old = std::mem::replace(e, Expr::Int(0));
             *e = Expr::Call("#num".into(), vec![old]);
-            if gb == prim("int") { return self.subsume(e, &prim("num"), expected); }
+            if gb == prim("int") { return self.subsume(e, &prim("number"), expected); }
         }
         if !same(&eb, &gb) {
             return Err(mismatch(expected, got).into());
@@ -233,17 +233,33 @@ impl Ck {
         if args.len() != 2 { return Err("refine<型>(値) と書く".into()); }
         let target = self.eval_type(&args[0])?;
         let (base, conditions) = split(&target);
-        let V::Prim(kind @ ("int" | "num" | "String" | "bool")) = base else { return Err("refine は int・num・String・bool の細分化型に使う".into()) };
+        let V::Prim(kind @ ("int" | "number" | "String" | "bool")) = base else { return Err("refine は int・number・String・bool の細分化型に使う".into()) };
         let name = Name::temporary("refine", self.norm.fresh());
         let mut condition = Expr::Bool(true);
         for p in conditions { condition = Expr::Binary("&&", Box::new(condition), Box::new(predicate(&p, &name)?)); }
-        let value = args.pop().unwrap();
+        let input_ty = self.expr(&mut args[1].clone())?;
+        let narrowing = kind == "int" && super::base(&input_ty) == prim("number");
+        let input_name = Name::temporary("refine_input", self.norm.fresh());
+        let input = args.pop().unwrap();
+        let value = if narrowing { Expr::Call("num_floor".into(), vec![Expr::Var(input_name.clone())]) } else { input.clone() };
         let expected = V::DataT(Rc::new(("std.Result".into(), vec![target, prim("String")])));
         let leaf = |value| Block { id: Default::default(), stmts: vec![], tail: Some(Box::new(value)) };
         let mut expanded = Expr::Block(Block { id: Default::default(),
             stmts: vec![Stmt::Let { name: name.clone().into(), mutable: false, ty: Some(Expr::Var(kind.into())), init: value }],
             tail: Some(Box::new(Expr::If(Box::new(condition), leaf(Expr::Call("std.Ok".into(), vec![Expr::Var(name.into())])), Some(Box::new(Expr::Block(leaf(Expr::Call("std.Err".into(), vec![Expr::Str("細分化型の条件を満たさない".into())])))))))),
         });
+        if narrowing {
+            let var = || Expr::Var(input_name.clone());
+            let cmp = |op, a, b| Expr::Binary(op, Box::new(a), Box::new(b));
+            // 範囲検査を先に行い、floor 自体が範囲外で停止するのを防ぐ。
+            let bounds = cmp("&&", cmp("<=", Expr::Num(MIN_SAFE_INT as f64), var()), cmp("<=", var(), Expr::Num(MAX_SAFE_INT as f64)));
+            let integral = cmp("==", Expr::Call("num_floor".into(), vec![var()]), var());
+            let guard = cmp("&&", bounds, integral);
+            expanded = Expr::Block(Block { id: Default::default(),
+                stmts: vec![Stmt::Let { name: input_name, mutable: false, ty: Some(Expr::Var("number".into())), init: input }],
+                tail: Some(Box::new(Expr::If(Box::new(guard), leaf(expanded), Some(Box::new(Expr::Block(leaf(Expr::Call("std.Err".into(), vec![Expr::Str("安全整数の範囲外か整数でない".into())])))))))),
+            });
+        }
         self.check(&mut expanded, &expected)?;
         *e = expanded;
         Ok(expected)

@@ -34,12 +34,12 @@ const api = await instantiate(await response.arrayBuffer(), {
   },
 });
 console.log(api.echo("日本語も渡せる"));
-console.log(api.answer(41)); // 42n
+console.log(api.answer(41)); // 42
 console.log(api.greet("hibana"));
 ```
 
-- `int` の引数は安全な整数の `Number` または符号付き 64 ビット範囲の `BigInt`。戻り値は `BigInt` です。
-- `num` は有限な `Number` で渡します。WASM の境界では `f64` になり、`NaN` と無限大は拒否します。
+- `int` は ±(2^53 − 1) の範囲の安全整数を `Number` で受け渡します。`BigInt` は受理しません。接続コードと WASM の入口で有限性・整数性・範囲を検査し、負の0は正の0へ正規化します。
+- `number` は有限な `Number` で渡します。WASM の境界では `f64` になり、`NaN` と無限大は拒否します。
 - `String` は JavaScript の文字列です。UTF-8 として WASM のメモリへ渡します。
 - `bool` は JavaScript の真偽値で渡し、整数の0・1は受け付けません。
 - 戻り値のない関数は `undefined` を返します。
@@ -51,7 +51,7 @@ console.log(api.greet("hibana"));
 
 ## 現在の対応範囲
 
-整数・`num` の演算、変数、分岐、ループ、文字列、配列、構造体、トレイト、`with` による要求と提供（`exit` を含む）、標準入力に対応し、`examples/first.hb` は4つの実行方式で出力を比較しています。`num` の指数は `int` の範囲内の整数に限り、小数の指数は未対応です。公開関数と外部関数の境界では `int`・`num`・`String`・`bool`・`unit` を渡せます。メモリの自動回収には未対応です。
+整数・`number` の演算、変数、分岐、ループ、文字列、配列、構造体、トレイト、`with` による要求と提供（`exit` を含む）、標準入力に対応し、`examples/first.hb` は4つの実行方式で出力を比較しています。`number` の指数は整数に限り、小数の指数は未対応です。公開関数と外部関数の境界では `int`・`number`・`String`・`bool`・`unit` を渡せます。メモリの自動回収には未対応です。
 
 文字列の一時領域はバンプアロケータで確保します。呼び出し終了後は再利用されますが、増えた WASM メモリは縮みません。JS に返した文字列はコピーされ、次の呼び出し後も使えます。生の WASM 関数やポインタを直接呼ぶのではなく、生成された接続コードを使ってください。
 

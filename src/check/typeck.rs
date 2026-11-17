@@ -58,7 +58,10 @@ pub(crate) struct PiV {
 
 // js は JavaScript の値をそのまま持ち回る型（extern で使う）。never は戻らない効果の操作（fail など）の戻り値の型
 // Effect は効果の並びの型（<E: Effect> の効果の変数に使う）
-pub(super) const PRIMS: &[&str] = &["int", "num", "number", "bool", "String", "syn", "unit", "js", "never", "Effect"];
+pub(crate) const MIN_SAFE_INT: i64 = -9007199254740991;
+pub(crate) const MAX_SAFE_INT: i64 = 9007199254740991;
+
+pub(super) const PRIMS: &[&str] = &["int", "number", "bool", "String", "syn", "unit", "js", "never", "Effect"];
 
 // マクロ本体の中でだけ使える組み込み関数 (名前, 引数, 戻り値)
 pub(super) const SYN_FNS: &[(&str, &[&str], &str)] = &[
@@ -108,8 +111,8 @@ const BUILTINS: &[&str] = &[
 
 // 文字列の組み込み関数 (名前, 引数, 戻り値)。split の戻り値は Vec<String>
 const STR_FNS: &[(&str, &[&str], &str)] = &[
-    ("num_floor", &["num"], "int"),
-    ("num_sqrt", &["num"], "num"),
+    ("num_floor", &["number"], "int"),
+    ("num_sqrt", &["number"], "number"),
     ("input", &[], "String"),
     ("split", &["String", "String"], "Vec<String>"),
     ("starts_with", &["String", "String"], "bool"),
@@ -125,7 +128,6 @@ const STR_FNS: &[(&str, &[&str], &str)] = &[
 ];
 
 pub(super) fn prim(name: &str) -> V {
-    let name = if name == "number" { "num" } else { name };
     V::Prim(
         PRIMS
             .iter()
@@ -360,6 +362,7 @@ fn same(expected: &V, got: &V) -> bool {
     }
     match (expected, &base(got)) {
         // Vec の要素も同じ向きで判定する。両側の base を取ると、必要な条件まで失われる。
+        (V::Prim("number"), V::Prim("int")) => true,
         (V::VecT(expected), V::VecT(got)) => same(expected, got),
         // 種類の分からない syn とは互いに使える
         (V::Prim("syn"), V::Syn(_)) | (V::Syn(_), V::Prim("syn")) => true,
@@ -371,6 +374,18 @@ fn same(expected: &V, got: &V) -> bool {
         }
         (a, b) => a == b,
     }
+}
+
+// 型の条件を外して共通上位型を求める。データ型の引数は不変。
+fn join_type(a: &V, b: &V) -> Option<V> {
+    if a == b { return Some(a.clone()); }
+    let (a, b) = (base(a), base(b));
+    if a == prim("never") { return Some(b); }
+    if b == prim("never") { return Some(a); }
+    if let (V::VecT(x), V::VecT(y)) = (&a, &b) {
+        return join_type(x, y).map(|t| V::VecT(Rc::new(t)));
+    }
+    if same(&a, &b) { Some(a) } else if same(&b, &a) { Some(b) } else { None }
 }
 
 fn want(e: &V, got: &V, what: &str) -> R<()> {
@@ -1029,10 +1044,10 @@ impl Ck {
                 prim("String")
             }
             "+" | "-" | "*" | "**" | "/" | "%" | "<" | "<=" | ">" | ">=" => {
-                let numeric = if base(&lt) == prim("num") || base(&rt) == prim("num") { prim("num") } else { int.clone() };
-                if numeric == prim("num") {
-                    self.check(&mut l, &numeric)?;
-                    self.check(&mut r, &numeric)?;
+                let numeric = if base(&lt) == prim("number") || base(&rt) == prim("number") { prim("number") } else { int.clone() };
+                if numeric == prim("number") {
+                    self.subsume(&mut l, &lt, &numeric)?;
+                    self.subsume(&mut r, &rt, &numeric)?;
                 } else {
                     want(&int, &lt, &op)?;
                     want(&int, &rt, &op)?;
@@ -1051,17 +1066,16 @@ impl Ck {
             _ => {
                 // == と !=
                 let lt = base(&lt);
-                if (lt == prim("num") && base(&rt) == int) || (lt == int && base(&rt) == prim("num")) {
-                    self.check(&mut l, &prim("num"))?;
-                    self.check(&mut r, &prim("num"))?;
+                if (lt == prim("number") && base(&rt) == int) || (lt == int && base(&rt) == prim("number")) {
+                    self.subsume(&mut l, &lt, &prim("number"))?;
+                    self.subsume(&mut r, &rt, &prim("number"))?;
                     *e = Expr::Binary(op, l, r);
                     return Ok(boolean);
                 }
-                if lt == prim("num") {
-                    self.check(&mut l, &lt)?;
-                    self.check(&mut r, &lt)?;
-                }
-                want(&lt, &base(&rt), &op)?;
+                let joined = join_type(&lt, &rt).ok_or_else(|| mismatch(&lt, &rt))?;
+                self.subsume(&mut l, &lt, &joined)?;
+                self.subsume(&mut r, &rt, &joined)?;
+                let lt = joined;
                 if lt == prim("syn") {
                     return Err("syn は比較できない".into());
                 }
@@ -1295,10 +1309,13 @@ impl Ck {
         Ok(match &mut *e {
             Expr::At(..) | Expr::Id(..) => unreachable!("先頭で外している"),
             Expr::Method(..) => unreachable!("expr_inner の先頭で分けている"),
-            Expr::Int(_) => int,
+            Expr::Int(n) => {
+                if !(MIN_SAFE_INT..=MAX_SAFE_INT).contains(n) { return Err("整数リテラルが53ビット安全整数の範囲外".into()); }
+                int
+            },
             Expr::Num(n) => {
-                if !n.is_finite() { return Err("num の値は有限でなければならない".into()); }
-                prim("num")
+                if !n.is_finite() { return Err("number の値は有限でなければならない".into()); }
+                prim("number")
             }
             Expr::Bool(_) => boolean,
             Expr::Str(_) => prim("String"),
@@ -1348,12 +1365,27 @@ impl Ck {
                 prim("syn")
             }
             Expr::Array(items) => {
-                let Some(first) = items.first_mut() else {
+                if items.is_empty() {
                     return Err("空の配列には型を書く（例: let v: Vec<int> = []）".into());
-                };
-                let a = base(&self.expr(first)?);
-                for it in &mut items[1..] {
-                    self.check(it, &a)?;
+                }
+                let mut types = Vec::new();
+                let mut error = None;
+                let mut joined = None;
+                for it in items.iter_mut() {
+                    let mut inferred = it.clone();
+                    match self.expr(&mut inferred) {
+                        Ok(t) => {
+                            joined = Some(match joined { None => base(&t), Some(a) => join_type(&a, &t).ok_or_else(|| mismatch(&a, &t))? });
+                            *it = inferred;
+                            types.push(Some(t));
+                        }
+                        Err(e) => { error = Some(e); types.push(None); }
+                    }
+                }
+                let Some(a) = joined else { return Err(error.unwrap()) };
+                for (it, t) in items.iter_mut().zip(&types) {
+                    // [] や引数の型を省いた無名関数には、ほかの要素の型を渡す。
+                    if let Some(t) = t { self.subsume(it, t, &a)?; } else { self.check(it, &a)?; }
                 }
                 V::VecT(Rc::new(a))
             }
@@ -1379,15 +1411,15 @@ impl Ck {
             }
             Expr::Unary(op, x) => {
                 let xt = self.expr(x)?;
-                let t = if *op == "-" && base(&xt) == prim("num") { prim("num") } else if *op == "-" { int } else { boolean };
+                let t = if *op == "-" && base(&xt) == prim("number") { prim("number") } else if *op == "-" { int } else { boolean };
                 want(&t, &xt, op)?;
-                if *op == "-" && t == prim("num") { self.check(x, &t)?; }
+                if *op == "-" && t == prim("number") { self.subsume(x, &xt, &t)?; }
                 t
             }
             Expr::Call(name, args) if name == "#num" => {
                 let t = base(&self.expr(&mut args[0])?);
-                if t != int && t != prim("num") { return Err("num への変換には int か num が必要".into()); }
-                prim("num")
+                if t != int && t != prim("number") { return Err("number への変換には int か number が必要".into()); }
+                prim("number")
             }
             Expr::Binary(..) => unreachable!("expr で分けている"),
             Expr::Handle(id, body, arms) => return self.handle(*id, body, arms, None),
@@ -1675,14 +1707,7 @@ impl Ck {
                     }
                     Err(e) => return Err(e),
                 };
-                if tt == prim("never") { et }
-                else if et == prim("never") || tt == et {
-                    tt
-                } else {
-                    let (tb, eb) = (base(&tt), base(&et));
-                    want(&tb, &eb, "if の分岐")?;
-                    if tb == prim("never") { eb } else { tb }
-                }
+                join_type(&tt, &et).ok_or_else(|| mismatch(&tt, &et))?
             }
             // 残りは文字列の組み込み関数
             Expr::Call(name, args) => {
@@ -2398,8 +2423,7 @@ impl Ck {
                 Some(prev) if prev == prim("never") => t,
                 Some(prev) if t == prim("never") || prev == t => prev,
                 Some(prev) => {
-                    want(&base(&prev), &t, &r("場合ごとの型")).map_err(at)?;
-                    base(&prev)
+                    join_type(&prev, &t).ok_or_else(|| at(mismatch(&prev, &t).into()))?
                 }
             });
         }
