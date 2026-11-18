@@ -68,7 +68,7 @@ nix develop -c cargo run -q -- tests/programs/types/refine.hb
 | WebAssembly | `hibana::to_wasm`、`hibana::to_web` | `to_wasm` は `main` 用、`to_web` は指定した公開関数とJavaScript接続コードを生成する |
 | ネイティブ | `hibana::to_native` | x86-64のLinux用。Cの標準ライブラリや外部リンカーに依存せず、外部関数は未対応 |
 
-WASMの公開関数・外部関数の境界で渡せる型は `int`・`number`・`String`・`bool`・`unit` です。外部関数の接続は同期呼び出しに限ります。IRを使うWASMとネイティブは、シャドースタックを根にするマーク＆スイープのGC（使わなくなったメモリを自動で回収する仕組み）で、確保したメモリを回収します。`Task.wait()` はネイティブ向けで、JavaScriptとWASMでは拒否されます。詳細は[WASMの説明](wasm.md)と[言語仕様の既知の制約](spec.md#12-既知の制約)にあります。
+WASMの公開関数・外部関数の境界で渡せる型は `int`・`number`・`String`・`bool`・`unit` と、それらの `Vec` と構造体です。外部関数の接続は同期呼び出しに限ります。IRを使うWASMとネイティブは、シャドースタックを根にするマーク＆スイープのGC（使わなくなったメモリを自動で回収する仕組み）で、確保したメモリを回収します。`Task.wait()` はネイティブ向けで、JavaScriptとWASMでは拒否されます。詳細は[WASMの説明](wasm.md)と[言語仕様の既知の制約](spec.md#12-既知の制約)にあります。
 
 ## 実装を読む入口
 

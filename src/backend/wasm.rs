@@ -100,11 +100,14 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
                     && (!(f.param_types.contains(&ValueType::Str)
                         || f.result_type == ValueType::Str)
                         || program.functions.iter().any(|g| g.name == "__str_in"))
+                    && (!(f.param_types.contains(&ValueType::Value) || f.result_type == ValueType::Value)
+                        || program.functions.iter().any(|g| g.name == "__val_in"))
             }
         })
         .collect();
+    // 文字列と Vec・構造体は、接続コードが __hibana_alloc で確保した領域に書いて渡す
     let has_str =
-        |ts: &[ValueType], r: ValueType| ts.iter().chain([&r]).any(|t| matches!(t, ValueType::Str));
+        |ts: &[ValueType], r: ValueType| ts.iter().chain([&r]).any(|t| matches!(t, ValueType::Str | ValueType::Value));
     let strings = exported
         .iter()
         .any(|f| has_str(&f.param_types, f.result_type))
@@ -193,6 +196,7 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
                     I::Drop,
                     I::LocalGet(t),
                 ]),
+                ValueType::Value => out.extend([I::LocalGet(i), I::LocalGet(i + 1), I::Call(indices["__val_out"]), I::LocalSet(t), I::Drop, I::LocalGet(t)]),
                 ValueType::Number => out.extend([I::LocalGet(i + 1), I::F64ReinterpretI64]),
                 ValueType::Int => out.extend([I::LocalGet(i + 1), I::F64ConvertI64S]),
                 _ => out.push(I::LocalGet(i + 1)),
@@ -224,6 +228,7 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
                 I::Drop,
                 I::LocalGet(n),
             ]),
+            ValueType::Value => out.extend([I::Call(indices["__val_out"]), I::LocalSet(n), I::Drop, I::LocalGet(n)]),
             ValueType::Number => out.extend([I::LocalSet(n), I::Drop, I::LocalGet(n), I::F64ReinterpretI64]),
             ValueType::Int => out.extend([I::LocalSet(n), I::Drop, I::LocalGet(n), I::F64ConvertI64S]),
             _ => out.extend([I::LocalSet(n), I::Drop, I::LocalGet(n)]),
@@ -342,6 +347,7 @@ fn from_raw(t: ValueType, at: u32, indices: &HashMap<&str, u32>) -> Vec<I<'stati
             I::LocalGet(at),
             I::Call(indices["__str_in"]),
         ],
+        ValueType::Value => vec![I::LocalSet(at), I::I64Const(ir::INT), I::LocalGet(at), I::Call(indices["__val_in"])],
         ValueType::Int => vec![I::I64ReinterpretF64, I::LocalSet(at), I::I64Const(ir::NUM), I::LocalGet(at), I::Call(indices["__int_in"])],
         ValueType::Number => vec![I::I64ReinterpretF64, I::LocalSet(at), I::I64Const(ir::NUM), I::LocalGet(at), I::Call(indices["__num_checked"])],
         ValueType::Bool => vec![I::LocalSet(at), I::I64Const(ir::BOOL), I::LocalGet(at)],
@@ -905,7 +911,7 @@ trap(x.div, 1, 0); eq(x.div(min, -1), max); trap(x.rem, 1, 0); eq(x.rem(min, -1)
     fn rejects_unsupported_programs() {
         assert!(
             crate::to_wasm(
-                "extern 'browser' {\n    fn show(xs: Vec<int>)\n}\nfn main() { show([1]) }"
+                "extern 'browser' {\n    fn show(r: Ref<int>)\n}\nfn main() { show(new_ref(1)) }"
             )
             .unwrap_err()
             .contains("未対応")

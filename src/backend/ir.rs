@@ -27,6 +27,48 @@ const RUNTIME: &str = include_str!("runtime.hb");
 pub struct Program {
     pub(crate) functions: Vec<Function>,
     pub(crate) imports: Vec<Import>,
+    // 公開関数と外部関数の境界の型（引数, 戻り値）。Vec と構造体を渡す接続コードが使う
+    pub(crate) boundary: HashMap<String, (Vec<BoundaryType>, BoundaryType)>,
+}
+
+/// WASM の境界で渡す値の形。Vec と構造体は runtime.hb の __val_in・__val_out のバイト列で渡す
+#[derive(Debug, Clone, PartialEq)]
+pub enum BoundaryType {
+    Int,
+    Number,
+    Bool,
+    Str,
+    Unit,
+    Vec(Box<BoundaryType>),
+    // 構築子の番号（IR の構築子の並び）と、宣言の順のフィールド
+    Struct(i64, Vec<(String, BoundaryType)>),
+}
+
+impl BoundaryType {
+    // 接続コードに渡す JSON。基本の型は名前、Vec は {"vec": 要素}、構造体は {"ctor": 番号, "fields": [[名前, 型], ...]}
+    pub fn json(&self) -> serde_json::Value {
+        use serde_json::json;
+        match self {
+            Self::Int => json!("int"),
+            Self::Number => json!("number"),
+            Self::Bool => json!("bool"),
+            Self::Str => json!("String"),
+            Self::Unit => json!("unit"),
+            Self::Vec(x) => json!({ "vec": x.json() }),
+            Self::Struct(k, fields) => json!({ "ctor": k, "fields": fields.iter().map(|(n, t)| json!([n, t.json()])).collect::<Vec<_>>() }),
+        }
+    }
+
+    fn value_type(&self) -> ValueType {
+        match self {
+            Self::Int => ValueType::Int,
+            Self::Number => ValueType::Number,
+            Self::Bool => ValueType::Bool,
+            Self::Str => ValueType::Str,
+            Self::Unit => ValueType::Unit,
+            Self::Vec(_) | Self::Struct(..) => ValueType::Value,
+        }
+    }
 }
 
 /// WASM の境界で渡せる型。それ以外は Other
@@ -37,6 +79,8 @@ pub enum ValueType {
     Bool,
     Str,
     Unit,
+    // Vec と構造体。中身は Program::boundary の型で決まる
+    Value,
     Other,
 }
 
@@ -149,6 +193,7 @@ impl fmt::Display for ValueType {
             Self::Bool => "bool",
             Self::Str => "String",
             Self::Unit => "unit",
+            Self::Value => "value",
             Self::Other => "other",
         })
     }
@@ -176,7 +221,7 @@ impl Import {
 }
 
 fn boundary(t: ValueType) -> bool {
-    matches!(t, ValueType::Int | ValueType::Number | ValueType::Bool | ValueType::Str | ValueType::Unit)
+    matches!(t, ValueType::Int | ValueType::Number | ValueType::Bool | ValueType::Str | ValueType::Unit | ValueType::Value)
 }
 
 // 型検査は number の演算の引数を #num で包む。リテラルはそのまま残る。
@@ -349,6 +394,8 @@ struct Source<'a> {
 
 struct Ctx<'a> {
     sources: HashMap<&'a str, Source<'a>>,
+    // 型の名前から宣言。境界の型（BoundaryType）を作るのに使う
+    datas: HashMap<&'a str, &'a parser::Data>,
     // 構築子の名前から (番号, フィールド名)
     ctors: HashMap<&'a str, (i64, Vec<&'a str>)>,
     ctor_list: Vec<(&'a Name, Vec<&'a str>)>,
@@ -391,6 +438,7 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>) -> R<Prog
             .collect(),
         ctor_list,
         types: p.datas.iter().map(|d| d.name.as_str()).collect(),
+        datas: p.datas.iter().map(|d| (d.name.as_str(), d)).collect(),
         sources,
         made: Vec::new(),
         lambdas: 0,
@@ -423,6 +471,7 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>) -> R<Prog
     let mut visited = HashSet::new();
     let mut functions = Vec::new();
     let mut imports = Vec::new();
+    let mut descs = HashMap::new();
     while let Some(name) = pending.pop() {
         if !visited.insert(name.clone()) {
             continue;
@@ -432,10 +481,12 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>) -> R<Prog
             .get(name.as_str())
             .map(|s| s.f)
             .filter(|f| f.js.is_some());
-        let function = match js {
+        let mut function = match js {
             Some(f) => {
-                let param_types: Vec<_> = f.params.iter().map(|(_, t)| value_type(t)).collect();
-                let result_type = ret_type(f);
+                let (param_types, result_type) = cx.boundary(f, &mut descs);
+                if param_types.iter().chain([&result_type]).any(|t| *t == ValueType::Value) {
+                    pending.extend(["__val_in".to_string(), "__val_out".to_string()]);
+                }
                 if param_types.contains(&ValueType::Int) || result_type == ValueType::Int { pending.push("__int_in".into()); }
                 if param_types.contains(&ValueType::Number) || result_type == ValueType::Number {
                     pending.push("__num_checked".into());
@@ -443,7 +494,7 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>) -> R<Prog
                 if exported(&name) {
                     return Err("外部関数を直接公開できない".into());
                 }
-                // ponytail: WASM の境界は int・number・str・unit。ほかの型は接続コードに変換を足す
+                // WASM の境界は int・number・String・bool・unit と、それらの Vec と構造体（BoundaryType）
                 if !param_types
                     .iter()
                     .chain([&result_type])
@@ -465,6 +516,16 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>) -> R<Prog
             None => cx.generated(&name)?,
         };
         if exported(&name) {
+            if let Some(f) = cx.sources.get(name.as_str()).map(|s| s.f)
+                && f.implicit == 0
+            {
+                let (param_types, result_type) = cx.boundary(f, &mut descs);
+                if param_types.iter().chain([&result_type]).any(|t| *t == ValueType::Value) {
+                    pending.extend(["__val_in".to_string(), "__val_out".to_string()]);
+                }
+                function.param_types = param_types;
+                function.result_type = result_type;
+            }
             if !function.boundary() {
                 return Err(format!("IR は関数 {} の境界の型に未対応", function.name).into());
             }
@@ -499,7 +560,7 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>) -> R<Prog
         key(a).cmp(&key(b))
     });
     imports.sort_by_key(|f| order[f.name.as_str()]);
-    Ok(Program { functions, imports })
+    Ok(Program { functions, imports, boundary: descs })
 }
 
 impl<'a> Ctx<'a> {
@@ -613,6 +674,47 @@ impl<'a> Ctx<'a> {
             return Ok(f);
         }
         Err(format!("IR に関数 {name} が無い").into())
+    }
+
+    // 境界の関数の引数と戻り値の型。Vec と構造体は Value にし、形を descs に記録する
+    fn boundary(&self, f: &parser::Fn, descs: &mut HashMap<String, (Vec<BoundaryType>, BoundaryType)>) -> (Vec<ValueType>, ValueType) {
+        let ty = |t: Option<&Ast>| match t.map_or(Some(BoundaryType::Unit), |t| self.desc(t, &mut Vec::new())) {
+            Some(d) => (d.value_type(), Some(d)),
+            None => (t.map_or(ValueType::Unit, value_type), None),
+        };
+        let params: Vec<_> = f.params.iter().map(|(_, t)| ty(Some(t))).collect();
+        let result = ty(f.ret.as_ref());
+        if let (Some(ps), Some(r)) = (params.iter().map(|p| p.1.clone()).collect::<Option<Vec<_>>>(), result.1.clone()) {
+            descs.insert(f.name.to_string(), (ps, r));
+        }
+        (params.into_iter().map(|p| p.0).collect(), result.0)
+    }
+
+    // 境界で渡せる型の形。int・number・bool・String・unit と、それらの Vec と、型引数の無い構造体。
+    // 自分を含む構造体（seen にある型）や、Ref・関数の型を含むものは None
+    fn desc(&self, t: &Ast, seen: &mut Vec<Name>) -> Option<BoundaryType> {
+        Some(match t.peel() {
+            Ast::Var(n) if n == "int" => BoundaryType::Int,
+            Ast::Var(n) if n == "number" => BoundaryType::Number,
+            Ast::Var(n) if n == "bool" => BoundaryType::Bool,
+            Ast::Var(n) if n == "String" => BoundaryType::Str,
+            Ast::Var(n) if n == "unit" => BoundaryType::Unit,
+            Ast::Refine(base, _, _) => self.desc(base, seen)?,
+            Ast::Call(n, xs) if n == "Vec" && xs.len() == 1 => BoundaryType::Vec(Box::new(self.desc(&xs[0], seen)?)),
+            Ast::Var(n) => {
+                let d = self.datas.get(n.as_str())?;
+                let [c] = d.ctors.as_slice() else { return None };
+                if !d.params.is_empty() || c.name.structure_owner().is_none() || seen.contains(n) {
+                    return None;
+                }
+                let (k, _) = self.ctors.get(c.name.as_str())?;
+                seen.push(n.clone());
+                let fields = c.fields.iter().map(|(f, t)| Some((f.to_string(), self.desc(t, seen)?))).collect::<Option<Vec<_>>>();
+                seen.pop();
+                BoundaryType::Struct(*k, fields?)
+            }
+            _ => return None,
+        })
     }
 
     // GC が動かない呼び出し先。ランタイムの関数のうち利用者の関数を呼ばないものと、変換の中で作る関数
@@ -1490,7 +1592,7 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_and_invalid_programs() {
-        let src = "extern 'browser' {\n    fn show(xs: Vec<int>)\n}\nfn main() { show([1]) }";
+        let src = "extern 'browser' {\n    fn show(r: Ref<int>)\n}\nfn main() { show(new_ref(1)) }";
         assert!(crate::to_ir(src).unwrap_err().contains("未対応"));
         assert!(crate::to_ir("fn main() { let x = 1 + true }").is_err());
     }

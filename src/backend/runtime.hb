@@ -1269,6 +1269,127 @@ fn __str_out(s: String) -> int {
     __or(__shl(__load(p), 32), p + 8)
 }
 
+// Vec と構造体の境界。値を 8 バイトの語の並びにして (長さ << 32) | 位置 で渡す。
+// 値は [型の番号][中身]、unit は [0]、文字列は [3][長さ][バイト列（8 バイトに切り上げ）]、
+// Vec は [4][要素数][要素...]、構造体は [5][構築子の番号][フィールド数][フィールド...]
+
+fn __val_size(v: int) -> int {
+    let t = __tag(v)
+    if t == 0 {
+        return 8
+    }
+    if t == 3 {
+        return 16 + (__load(__payload(v)) + 7) / 8 * 8
+    }
+    if t == 4 || t == 5 {
+        let p = __payload(v)
+        let mut at = p + 8
+        let mut n = __load(p)
+        let mut s = 16
+        if t == 5 {
+            at = p + 16
+            n = __load(p + 8)
+            s = 24
+        }
+        let mut i = 0
+        while i < n {
+            s = s + __val_size(__getv(at + i * 16))
+            i = i + 1
+        }
+        return s
+    }
+    16
+}
+
+// v を q から書き、書き終えた次の位置を返す
+fn __val_write(v: int, q: int) -> int {
+    let t = __tag(v)
+    __store(q, t)
+    if t == 0 {
+        return q + 8
+    }
+    let p = __payload(v)
+    if t == 3 {
+        let n = __load(p)
+        __store(q + 8, n)
+        __copy(q + 16, p + 8, n)
+        return q + 16 + (n + 7) / 8 * 8
+    }
+    if t == 4 || t == 5 {
+        let mut at = p + 8
+        let mut n = __load(p)
+        let mut r = q + 16
+        if t == 5 {
+            __store(q + 8, __load(p))
+            at = p + 16
+            n = __load(p + 8)
+            __store(q + 16, n)
+            r = q + 24
+        } else {
+            __store(q + 8, n)
+        }
+        let mut i = 0
+        while i < n {
+            r = __val_write(__getv(at + i * 16), r)
+            i = i + 1
+        }
+        return r
+    }
+    __store(q + 8, p)
+    q + 16
+}
+
+fn __val_out(v: int) -> int {
+    let n = __val_size(v)
+    let q = __alloc(n)
+    __val_write(v, q)
+    __or(__shl(n, 32), q)
+}
+
+fn __val_in(packed: int) -> int {
+    let cursor = __alloc(8)
+    __store(cursor, __and(packed, 4294967295))
+    __val_read(cursor)
+}
+
+// cursor が指す位置から値を 1 つ読み、cursor を次の位置へ進める
+fn __val_read(cursor: int) -> int {
+    let q = __load(cursor)
+    let t = __load(q)
+    if t == 0 {
+        __store(cursor, q + 8)
+        return __mkv(0, 0)
+    }
+    if t == 3 {
+        let n = __load(q + 8)
+        __store(cursor, q + 16 + (n + 7) / 8 * 8)
+        return __bytes(q + 16, n)
+    }
+    if t == 4 {
+        let n = __load(q + 8)
+        __store(cursor, q + 16)
+        let p = __arr_new(n)
+        let mut i = 0
+        while i < n {
+            __setv(p + 8 + i * 16, __val_read(cursor))
+            i = i + 1
+        }
+        return __mkv(4, p)
+    }
+    if t == 5 {
+        let n = __load(q + 16)
+        __store(cursor, q + 24)
+        let p = __data_new(__load(q + 8), n)
+        let mut i = 0
+        while i < n {
+            __setv(p + 16 + i * 16, __val_read(cursor))
+            i = i + 1
+        }
+        return __mkv(5, p)
+    }
+    __store(cursor, q + 16)
+    __mkv(t, __load(q + 8))
+}
 // 要求と提供（with）。with の本体を抜ける中断は、行き先の番号を置き、呼び出しの後の検査で 1 段ずつ戻って伝える（ir.rs の checked）
 
 fn __aborting() -> bool {
