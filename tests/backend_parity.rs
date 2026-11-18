@@ -231,6 +231,32 @@ fn main() {
 }
 
 #[test]
+fn failing_sync_main_drains_started_tasks() {
+    let source = r#"
+use std -> *
+fn step(n: int) -> int with Async { n }
+fn work() -> int with Async {
+    let n = step(42).await
+    put(n)
+    n
+}
+fn fail() { panic('main の失敗 ' + 42.to_string()) }
+fn main() {
+    let task = spawn(work())
+    task.then(fn(n) { panic('then の失敗 ' + n.to_string()) })
+    task.then(fn(n) { put(n + 1) })
+    fail()
+    put('失敗後の main')
+}
+"#;
+    check_backends(
+        "failing-sync-main",
+        source,
+        reported(false, "42\n43\n", "実行時エラー: main の失敗 42"),
+    );
+}
+
+#[test]
 fn task_display() {
     let source = r#"
 use std -> *

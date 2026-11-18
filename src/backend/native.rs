@@ -81,10 +81,13 @@ pub fn emit(program: &Program) -> R<Vec<u8>> {
         result_type: ir::ValueType::Unit,
         finish_at_boundary: false,
         locals: 0,
-        body: vec![Stmt::Return(Expr::Call(
-            "__finish_entry".into(),
-            vec![Expr::Call("main".into(), vec![])],
-        ))],
+        body: vec![
+            Stmt::Eval(Expr::Call("__begin_entry".into(), vec![])),
+            Stmt::Return(Expr::Call(
+                "__finish_entry".into(),
+                vec![Expr::Call("main".into(), vec![])],
+            )),
+        ],
     });
     let main = if entry.is_some() { program.functions.len() } else { main } as u32;
     let functions = || program.functions.iter().chain(entry.iter());

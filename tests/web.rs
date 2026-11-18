@@ -85,6 +85,43 @@ for (const name of ['web', 'linked']) {
 }
 
 #[test]
+fn web_sync_main_drains_started_tasks_before_throwing() {
+    let source = r#"
+fn step(n: int) -> int with Async { n }
+fn work() with Async { put(step(42).await) }
+pub fn main(fail: bool) with {} {
+    spawn(work())
+    if fail { panic('main の失敗') }
+}
+"#;
+    let web = hibana::to_web(source, &["main".into()]).unwrap();
+    let dir = std::env::temp_dir().join(format!("hibana-web-sync-main-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("web.wasm"), web.wasm).unwrap();
+    std::fs::write(dir.join("web.mjs"), web.javascript).unwrap();
+    let script = r#"
+import { readFileSync } from 'node:fs';
+import assert from 'node:assert/strict';
+import { instantiate } from './web.mjs';
+const messages = [];
+const api = await instantiate(readFileSync('web.wasm'), {
+  hibana: { print: message => { messages.push(message); } },
+});
+assert.throws(() => api.main(true), { name: 'RuntimeError', message: '実行時エラー: main の失敗' });
+assert.deepEqual(messages, ['42']);
+api.main(false);
+assert.deepEqual(messages, ['42', '42']);
+"#;
+    let output = Command::new("node")
+        .args(["--input-type=module", "-e", script])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+}
+
+#[test]
 fn web_strings_and_host_functions() {
     let source = r#"
 extern 'browser' {

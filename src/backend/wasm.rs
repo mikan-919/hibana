@@ -230,6 +230,9 @@ fn emit_module(program: &Program, selected: Option<&[String]>, with_glue: bool) 
                 out.extend([I::I64Const(ir::NUM), I::LocalGet(i as u32), I::I64ReinterpretF64, I::Call(indices[if *p == ValueType::Int { "__int_in" } else { "__num_checked" }])]);
             } else { out.extend(from_raw(*p, i as u32, &indices).into_iter().skip(1)); }
         }
+        if f.finish_at_boundary {
+            out.extend([I::Call(indices["__begin_entry"]), I::Drop, I::Drop]);
+        }
         out.push(I::Call(indices[f.name.as_str()]));
         if f.finish_at_boundary {
             out.push(I::Call(indices["__finish_entry"]));

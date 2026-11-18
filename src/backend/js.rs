@@ -91,18 +91,21 @@ function $spawn(f) {
   $h = h;
   return t;
 }
-let $mainFailed = false, $thenFailed = false;
+let $mainFailure, $thenFailure;
+function $deferFailure(e, main) {
+  const scheduled = $mainFailure || $thenFailure;
+  if (main) $mainFailure = { e };
+  else $thenFailure ??= { e };
+  if (scheduled) return;
+  // 残りの仕事が終わってから、main の失敗、または最初の then の失敗を報告する。
+  const finish = () => $failed(($mainFailure ?? $thenFailure).e);
+  if (globalThis.process?.once) process.once("beforeExit", finish);
+  else setTimeout(finish, 0);
+}
 function $then(t, g) {
   t.p.then(() => {
     if (t.s !== 1) return;
-    try { g(t.v); } catch (e) {
-      if ($thenFailed) return;
-      $thenFailed = true;
-      // 残りの仕事が終わってから、最初の失敗を報告する。
-      const finish = () => { if (!$mainFailed) $failed(e); };
-      if (globalThis.process?.once) process.once("beforeExit", finish);
-      else setTimeout(finish, 0);
-    }
+    try { g(t.v); } catch (e) { $deferFailure(e, false); }
   });
 }
 class $Abort { constructor(h, v) { this.h = h; this.v = v; } }
@@ -291,7 +294,7 @@ pub fn emit(prog: &Program, info: &crate::typeck::Info) -> String {
     }
     // import は ES モジュールの先頭に置く
     let mut out = imports + &out;
-    out += &format!("(async () => {{ try {{ await {}(); }} catch (e) {{ $mainFailed = true; $failed(e); }} }})();\n", ident("f_", "main"));
+    out += &format!("(async () => {{ try {{ await {}(); }} catch (e) {{ $deferFailure(e, true); }} }})();\n", ident("f_", "main"));
     out
 }
 
