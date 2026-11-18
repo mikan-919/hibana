@@ -45,7 +45,7 @@ impl Ck {
 
     // 変数を束縛し、型の細分化の条件をその変数についての事実として加える
     pub(super) fn bind(&mut self, name: &Name, ty: V, val: V, mutable: bool) -> R<()> {
-        let val = if base(&ty) == prim("num") { crate::check::prove::num(val) } else { val };
+        let val = if base(&ty) == prim("number") { crate::check::prove::num(val) } else { val };
         for p in split(&ty).1 {
             let f = self.norm.subst(&p, 0, &val)?;
             self.add_fact(f);
@@ -133,13 +133,13 @@ impl Ck {
     pub(super) fn subsume(&mut self, e: &mut Expr, got: &V, expected: &V) -> R<()> {
         let (eb, eps) = split(expected);
         let (gb, gps) = split(got);
-        if eb == prim("num") && (gb == prim("int") || gb == prim("num"))
+        if eb == prim("number") && (gb == prim("int") || gb == prim("number"))
             && !matches!(e.peel(), Expr::Call(n, _) if n == "#num")
             && !matches!(e.peel(), Expr::Num(_))
         {
             let old = std::mem::replace(e, Expr::Int(0));
             *e = Expr::Call("#num".into(), vec![old]);
-            if gb == prim("int") { return self.subsume(e, &prim("num"), expected); }
+            if gb == prim("int") { return self.subsume(e, &prim("number"), expected); }
         }
         if !same(&eb, &gb) {
             return Err(mismatch(expected, got).into());
@@ -214,17 +214,33 @@ impl Ck {
     // 実行時の検査を通常の if と構築子へ展開し、成功する枝で細分化条件を証明する。
     // ponytail: 基本型の条件式だけを扱う。データ型は条件式の再構築と証明の対応を足してから対応する。
     pub(super) fn refine_value(&mut self, e: &mut Expr) -> R<V> {
-        fn predicate(v: &V, name: &Name) -> R<Expr> {
+        // 条件の値を実行時の式にする。Var(0) は検査する値。ほかの変数は、その値を持つ見えている変数を探し、
+        // 値を検査する前に let で写した名前（captures）を使う。値の式が mut の変数を書き換えても、条件は型を評価した時点の値で検査する
+        fn predicate(v: &V, name: &Name, vars: &HashMap<(bool, usize), Name>, captures: &mut Vec<(Name, Name)>) -> R<Expr> {
+            let mut go = |v: &V| predicate(v, name, vars, captures);
             Ok(match v {
                 V::Int(n) => Expr::Int(*n), V::Num(n) => Expr::Num(*n), V::Bool(b) => Expr::Bool(*b), V::Str(s) => Expr::Str(s.to_string()),
                 V::Neu(n) => match &**n {
                     Term::Var(0, _) => Expr::Var(name.into()),
-                    Term::Num(v) => predicate(v, name)?,
-                    Term::Un(op, v) => Expr::Unary(op, Box::new(predicate(v, name)?)),
-                    Term::Bin(op, a, b) => Expr::Binary(op, Box::new(predicate(a, name)?), Box::new(predicate(b, name)?)),
-                    Term::Call(f, args) => Expr::Call(f.clone(), args.iter().map(|v| predicate(v, name)).collect::<R<_>>()?),
-                    Term::Proj(v, field) => Expr::Field(Box::new(predicate(v, name)?), field.clone()),
-                    _ => return Err("refine の条件を実行時の式に変換できない".into()),
+                    Term::Var(..) | Term::Opaque(_) => match vars.get(&match &**n { Term::Opaque(k) => (true, *k), Term::Var(id, _) => (false, *id), _ => unreachable!() }) {
+                        Some(var) => {
+                            let capture = match captures.iter().find(|c| c.1 == *var) {
+                                Some(c) => c.0.clone(),
+                                None => {
+                                    let c = Name::temporary("refine_capture", NodeId::default().raw() as usize);
+                                    captures.push((c.clone(), var.clone()));
+                                    c
+                                }
+                            };
+                            Expr::Var(capture)
+                        }
+                        None => return Err("refine の条件の変数が見えない（実行時の式に変換できない）".into()),
+                    },
+                    Term::Num(v) => go(v)?,
+                    Term::Un(op, v) => Expr::Unary(op, Box::new(go(v)?)),
+                    Term::Bin(op, a, b) => { let a = go(a)?; Expr::Binary(op, Box::new(a), Box::new(go(b)?)) }
+                    Term::Call(f, args) => Expr::Call(f.clone(), args.iter().map(go).collect::<R<_>>()?),
+                    Term::Proj(v, field) => Expr::Field(Box::new(go(v)?), field.clone()),
                 },
                 _ => return Err("refine の条件を実行時の式に変換できない".into()),
             })
@@ -233,17 +249,51 @@ impl Ck {
         if args.len() != 2 { return Err("refine<型>(値) と書く".into()); }
         let target = self.eval_type(&args[0])?;
         let (base, conditions) = split(&target);
-        let V::Prim(kind @ ("int" | "num" | "String" | "bool")) = base else { return Err("refine は int・num・String・bool の細分化型に使う".into()) };
+        let V::Prim(kind @ ("int" | "number" | "String" | "bool")) = base else { return Err("refine は int・number・String・bool の細分化型に使う".into()) };
         let name = Name::temporary("refine", self.norm.fresh());
+        // 変数の値の項から、その値を持つ見えている変数の名前。内側の宣言を優先する
+        let mut vars = HashMap::new();
+        for scope in &self.scopes {
+            for (n, entry) in &scope.vars {
+                if let V::Neu(t) = &entry.val {
+                    match &**t {
+                        Term::Var(id, _) => { vars.insert((false, *id), n.clone()); }
+                        Term::Opaque(k) => { vars.insert((true, *k), n.clone()); }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let mut captures = Vec::new();
         let mut condition = Expr::Bool(true);
-        for p in conditions { condition = Expr::Binary("&&", Box::new(condition), Box::new(predicate(&p, &name)?)); }
-        let value = args.pop().unwrap();
+        for p in conditions { condition = Expr::Binary("&&", Box::new(condition), Box::new(predicate(&p, &name, &vars, &mut captures)?)); }
+        let input_ty = self.expr(&mut args[1].clone())?;
+        let narrowing = kind == "int" && super::base(&input_ty) == prim("number");
+        let input_name = Name::temporary("refine_input", self.norm.fresh());
+        let input = args.pop().unwrap();
+        let value = if narrowing { Expr::Call("num_floor".into(), vec![Expr::Var(input_name.clone())]) } else { input.clone() };
         let expected = V::DataT(Rc::new(("std.Result".into(), vec![target, prim("String")])));
         let leaf = |value| Block { id: Default::default(), stmts: vec![], tail: Some(Box::new(value)) };
         let mut expanded = Expr::Block(Block { id: Default::default(),
             stmts: vec![Stmt::Let { name: name.clone().into(), mutable: false, ty: Some(Expr::Var(kind.into())), init: value }],
             tail: Some(Box::new(Expr::If(Box::new(condition), leaf(Expr::Call("std.Ok".into(), vec![Expr::Var(name.into())])), Some(Box::new(Expr::Block(leaf(Expr::Call("std.Err".into(), vec![Expr::Str("細分化型の条件を満たさない".into())])))))))),
         });
+        if narrowing {
+            let var = || Expr::Var(input_name.clone());
+            let cmp = |op, a, b| Expr::Binary(op, Box::new(a), Box::new(b));
+            // 範囲検査を先に行い、floor 自体が範囲外で停止するのを防ぐ。
+            let bounds = cmp("&&", cmp("<=", Expr::Num(MIN_SAFE_INT as f64), var()), cmp("<=", var(), Expr::Num(MAX_SAFE_INT as f64)));
+            let integral = cmp("==", Expr::Call("num_floor".into(), vec![var()]), var());
+            let guard = cmp("&&", bounds, integral);
+            expanded = Expr::Block(Block { id: Default::default(),
+                stmts: vec![Stmt::Let { name: input_name, mutable: false, ty: Some(Expr::Var("number".into())), init: input }],
+                tail: Some(Box::new(Expr::If(Box::new(guard), leaf(expanded), Some(Box::new(Expr::Block(leaf(Expr::Call("std.Err".into(), vec![Expr::Str("安全整数の範囲外か整数でない".into())])))))))),
+            });
+        }
+        if !captures.is_empty() {
+            let stmts = captures.into_iter().map(|(c, var)| Stmt::Let { name: c, mutable: false, ty: None, init: Expr::Var(var) }).collect();
+            expanded = Expr::Block(Block { id: Default::default(), stmts, tail: Some(Box::new(expanded)) });
+        }
         self.check(&mut expanded, &expected)?;
         *e = expanded;
         Ok(expected)

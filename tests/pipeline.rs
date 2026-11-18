@@ -47,10 +47,10 @@ import { pathToFileURL } from 'node:url';
 const { instantiate } = await import(pathToFileURL(process.argv[2]));
 const printed = [];
 const x = await instantiate(fs.readFileSync(process.argv[1]), { hibana: { print: n => printed.push(n) } });
-if (Object.keys(x).join(',') !== 'twice,log' || x.twice(21) !== 42n) throw Error('unexpected exports');
-x.log(-5n);
+if (Object.keys(x).join(',') !== 'twice,log' || x.twice(21) !== 42) throw Error('unexpected exports');
+x.log(-5);
 if (printed[0] !== '-5') throw Error('print');
-for (const value of [1.5, Number.MAX_SAFE_INTEGER + 1, 1n << 63n, '1']) {
+for (const value of [1.5, Number.MAX_SAFE_INTEGER + 1, 1n, '1']) {
   try { x.twice(value); throw Error('accepted invalid input'); } catch (e) { if (!(e instanceof TypeError || e instanceof RangeError)) throw e; }
 }
 try { x.twice(); throw Error('accepted missing argument'); } catch (e) { if (!(e instanceof TypeError)) throw e; }
@@ -108,13 +108,13 @@ const messages = [];
 const x = await instantiate(fs.readFileSync(process.argv[1]), { hibana_host: {
   show: message => { messages.push(message); },
   decorate: (message, n) => {
-    if (typeof n !== 'bigint') throw Error('host int');
+    if (typeof n !== 'number') throw Error('host int');
     return `${message}:${n}`;
   },
-  count: () => 42n
+  count: () => 42
 } });
 if (Object.keys(x).join(',') !== 'answer,log,greet') throw Error('export order');
-if (x.answer() !== 42n) throw Error('int result');
+if (x.answer() !== 42) throw Error('int result');
 if (x.greet('こんにちは', 7) !== 'こんにちは:7') throw Error('str result');
 if (x.log('記録') !== undefined || messages.join(',') !== '記録') throw Error('unit result');
 "#;
@@ -139,13 +139,19 @@ fn load_uses_explicit_base_directory_without_changing_caller() {
     let b = dir.join("b");
     std::fs::create_dir_all(&a).unwrap();
     std::fs::create_dir_all(&b).unwrap();
-    std::fs::write(a.join("util.hb"), "fn value() -> int { 1 }").unwrap();
-    std::fs::write(b.join("util.hb"), "fn value() -> int { 2 }").unwrap();
-    let source = "use 'util.hb'\n";
+    std::fs::write(a.join("util.ts"), "export function value(): number { return 1; }").unwrap();
+    std::fs::write(b.join("util.ts"), "export function value(): string { return 'two'; }").unwrap();
+    let source = "use './util.ts'\n";
     hibana::parser::set_base_dir(&a);
     let loaded = pipeline::load(source, &b).unwrap();
-    assert!(loaded.modules.iter().any(|module| module.source.text.contains("{ 2 }")));
+    assert!(loaded.modules.iter().any(|module| module.source.text.contains("-> String")));
     let loaded = hibana::parser::load_modules(source, &a).unwrap();
+    assert!(loaded.modules.iter().any(|module| module.source.text.contains("-> number")));
+    std::fs::write(a.join("util.hb"), "fn value() -> int { 1 }").unwrap();
+    std::fs::write(b.join("util.hb"), "fn value() -> int { 2 }").unwrap();
+    let loaded = pipeline::load("use util", &b).unwrap();
+    assert!(loaded.modules.iter().any(|module| module.source.text.contains("{ 2 }")));
+    let loaded = hibana::parser::load_modules("use util", &a).unwrap();
     assert!(loaded.modules.iter().any(|module| module.source.text.contains("{ 1 }")));
     std::fs::remove_dir_all(dir).unwrap();
 }

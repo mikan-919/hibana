@@ -11,7 +11,7 @@ const BIN: &[&str] = &["=", "==", "!=", "<=", ">=", "&&", "||", "=>", "->"];
 // 新しい宣言や文を始めるキーワード（続きの行にしない）
 const STARTS: &[&str] = &[
     "fn", "let", "type", "syntax", "macro", "use", "module", "extern", "return", "exit",
-    "trait", "impl", "struct", "enum",
+    "trait", "impl", "struct", "enum", "pub", "break", "continue",
 ];
 
 fn punct(t: &Token) -> &str {
@@ -280,8 +280,8 @@ mod tests {
     // use の -> { ... } を次の行に続けて書いた時は、続きの行として字下げする
     #[test]
     fn use_continuation() {
-        let src = "use './lib'\n-> { a }\n        -> { B, C }\nfn main() {}\n";
-        let want = "use './lib'\n    -> { a }\n    -> { B, C }\nfn main() {}\n";
+        let src = "use std\n-> { map }\n        -> { Option, Result }\nfn main() {}\n";
+        let want = "use std\n    -> { map }\n    -> { Option, Result }\nfn main() {}\n";
         assert_eq!(format(src).unwrap(), want);
     }
 

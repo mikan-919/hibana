@@ -1,6 +1,6 @@
 // 構造化 IR を WebAssembly に変換する。
 // IR の値（型の番号と中身）は 2 つの i64 で表し、関数は 2 つの i64 を返す。
-// 公開関数と外部関数の境界では、int は i64、num は f64、str は (長さ << 32) | 位置 の i64 に変換する。
+// 公開関数と外部関数の境界では、int と number は f64、str は (長さ << 32) | 位置 の i64 に変換する。
 // メモリ: [0, 8) は使わない、[8, 72) はランタイムの状態（runtime.hb の __static）、その後に文字列のリテラル、ヒープ。
 use crate::ir::{self, Block, Expr, Node, Prim, Program, Stmt, ValueType};
 use std::collections::HashMap;
@@ -12,7 +12,11 @@ use wasm_encoder::{
 
 const STATIC: i64 = 8;
 const FAIL_AT: i64 = 24;
-const LITERALS: u32 = 72;
+// 文字列定数は __static の後ろに置く
+const LITERALS: u32 = STATIC as u32 + ir::STATIC_BYTES as u32;
+// シャドースタックの大きさ。局所変数 1 つに 16 バイト使う
+// ponytail: 固定の 4 MB。再帰が深いと __frame_push が止める。足りなければヒープから大きい区画を取り直す
+const SHADOW: u64 = 4 << 20;
 
 pub fn emit(program: &Program) -> Vec<u8> {
     emit_selected(program, None)
@@ -45,7 +49,7 @@ impl Types {
         })
     }
     fn boundary(&mut self, params: &[ValueType], result: ValueType) -> u32 {
-        let ty = |t: ValueType| if t == ValueType::Num { ValType::F64 } else { ValType::I64 };
+        let ty = |t: ValueType| if matches!(t, ValueType::Int | ValueType::Number) { ValType::F64 } else { ValType::I64 };
         self.signature(params.iter().copied().map(ty).collect(), if result == ValueType::Unit { vec![] } else { vec![ty(result)] })
     }
 }
@@ -79,7 +83,11 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
     while data.len() % 8 != 0 {
         data.push(0);
     }
-    let heap = LITERALS as u64 + data.len() as u64;
+    // 文字列定数の後ろにシャドースタック（runtime.hb の __frame_push）の区画を置き、その後ろをヒープにする
+    let shadow = LITERALS as u64 + data.len() as u64;
+    // その後ろに標準入力の区画（runtime.hb の __input）を置く。リセットしても読んだ入力の残りを保つ
+    let input = shadow + SHADOW;
+    let heap = input + 4112;
     let pages = heap.div_ceil(65536).max(1);
     let exported: Vec<&ir::Function> = program
         .functions
@@ -92,11 +100,14 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
                     && (!(f.param_types.contains(&ValueType::Str)
                         || f.result_type == ValueType::Str)
                         || program.functions.iter().any(|g| g.name == "__str_in"))
+                    && (!(f.param_types.contains(&ValueType::Value) || f.result_type == ValueType::Value)
+                        || program.functions.iter().any(|g| g.name == "__val_in"))
             }
         })
         .collect();
+    // 文字列と Vec・構造体は、接続コードが __hibana_alloc で確保した領域に書いて渡す
     let has_str =
-        |ts: &[ValueType], r: ValueType| ts.iter().chain([&r]).any(|t| matches!(t, ValueType::Str));
+        |ts: &[ValueType], r: ValueType| ts.iter().chain([&r]).any(|t| matches!(t, ValueType::Str | ValueType::Value));
     let strings = exported
         .iter()
         .any(|f| has_str(&f.param_types, f.result_type))
@@ -104,6 +115,7 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
             .imports
             .iter()
             .any(|f| has_str(&f.param_types, f.result_type));
+    let reset_state = strings || exported.iter().any(|f| f.finish_at_boundary);
 
     let mut types = Types::default();
     let mut imports = ImportSection::new();
@@ -162,6 +174,7 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
             types: &mut types,
             depth: 0,
             catches: Vec::new(),
+            loops: Vec::new(),
         };
         e.stmts(&f.body);
         e.out.extend([I::I64Const(0), I::I64Const(0), I::End]);
@@ -184,7 +197,9 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
                     I::Drop,
                     I::LocalGet(t),
                 ]),
-                ValueType::Num => out.extend([I::LocalGet(i + 1), I::F64ReinterpretI64]),
+                ValueType::Value => out.extend([I::LocalGet(i), I::LocalGet(i + 1), I::Call(indices["__val_out"]), I::LocalSet(t), I::Drop, I::LocalGet(t)]),
+                ValueType::Number => out.extend([I::LocalGet(i + 1), I::F64ReinterpretI64]),
+                ValueType::Int => out.extend([I::LocalGet(i + 1), I::F64ConvertI64S]),
                 _ => out.push(I::LocalGet(i + 1)),
             }
         }
@@ -201,11 +216,14 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
         exports.export(&f.name, ExportKind::Func, wrappers + k as u32);
         let mut out = Vec::new();
         for (i, p) in f.param_types.iter().enumerate() {
-            if *p == ValueType::Num {
-                out.extend([I::I64Const(ir::NUM), I::LocalGet(i as u32), I::I64ReinterpretF64, I::Call(indices["__num_checked"])]);
+            if matches!(p, ValueType::Int | ValueType::Number) {
+                out.extend([I::I64Const(ir::NUM), I::LocalGet(i as u32), I::I64ReinterpretF64, I::Call(indices[if *p == ValueType::Int { "__int_in" } else { "__num_checked" }])]);
             } else { out.extend(from_raw(*p, i as u32, &indices).into_iter().skip(1)); }
         }
         out.push(I::Call(indices[f.name.as_str()]));
+        if f.finish_at_boundary {
+            out.push(I::Call(indices["__finish_entry"]));
+        }
         match f.result_type {
             ValueType::Unit => out.extend([I::Drop, I::Drop]),
             ValueType::Str => out.extend([
@@ -214,14 +232,16 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
                 I::Drop,
                 I::LocalGet(n),
             ]),
-            ValueType::Num => out.extend([I::LocalSet(n), I::Drop, I::LocalGet(n), I::F64ReinterpretI64]),
+            ValueType::Value => out.extend([I::Call(indices["__val_out"]), I::LocalSet(n), I::Drop, I::LocalGet(n)]),
+            ValueType::Number => out.extend([I::LocalSet(n), I::Drop, I::LocalGet(n), I::F64ReinterpretI64]),
+            ValueType::Int => out.extend([I::LocalSet(n), I::Drop, I::LocalGet(n), I::F64ConvertI64S]),
             _ => out.extend([I::LocalSet(n), I::Drop, I::LocalGet(n)]),
         }
         out.push(I::End);
         code.function(&function(&[(1, ValType::I64)], &out));
     }
     if strings {
-        // JavaScript の接続コードが文字列を書く領域を確保する。リセットは確保の状態を最初に戻す
+        // JavaScript の接続コードが文字列やデータを書く領域を確保する
         functions.function(types_i32(&mut types));
         let mut out = vec![I::I64Const(ir::INT), I::LocalGet(0), I::I64ExtendI32U];
         out.extend([
@@ -237,8 +257,12 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
             f.instruction(i);
         }
         code.function(&f);
+        exports.export("__hibana_alloc", ExportKind::Func, alloc);
+    }
+    if reset_state {
         functions.function(types.get(0, 0));
-        let reset = [
+        // 中断、処理中の with、シャドースタック、GC、非同期の仕事をリセットする
+        let mut reset = vec![
             I::I32Const(STATIC as i32),
             I::I64Const(heap as i64),
             I::I64Store(mem(0, 3)),
@@ -248,11 +272,14 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
             I::I64Const(16),
             I::I64Shl,
             I::I64Store(mem(0, 3)),
-            I::End,
         ];
+        reset.extend([I::I32Const(STATIC as i32 + 64), I::I64Const(shadow as i64), I::I64Store(mem(0, 3))]);
+        for k in [24, 32, 40, 48, 56, 88, 96, 104, 120, 128, 136, 152, 160, 168, 176] {
+            reset.extend([I::I32Const(STATIC as i32 + k), I::I64Const(0), I::I64Store(mem(0, 3))]);
+        }
+        reset.push(I::End);
         code.function(&function(&[], &reset));
-        exports.export("__hibana_alloc", ExportKind::Func, alloc);
-        exports.export("__hibana_reset", ExportKind::Func, alloc + 1);
+        exports.export("__hibana_reset", ExportKind::Func, alloc + u32::from(strings));
     }
     if strings || writes || reads || selected.is_none() {
         exports.export("memory", ExportKind::Memory, 0);
@@ -268,8 +295,12 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
     let mut init = Vec::new();
     init.extend(heap.to_le_bytes());
     init.extend((pages * 65536).to_le_bytes());
-    // 実行時エラーの文字列、中断、処理中の with は 0 から始める
+    // 実行時エラーの文字列、中断、処理中の with、シャドースタック、GC の状態は 0 から始める。+112 は文字列定数の終わり
     init.extend([0u8; 48]);
+    for v in [shadow, shadow, shadow + SHADOW, 0, 0, 0, heap, 0, 0, 0, input, 0, 0, 0, 0] {
+        init.extend(v.to_le_bytes());
+    }
+    debug_assert_eq!(init.len(), ir::STATIC_BYTES);
     init.extend(data);
     let mut datas = DataSection::new();
     datas.active(0, &ConstExpr::i32_const(STATIC as i32), init);
@@ -323,7 +354,9 @@ fn from_raw(t: ValueType, at: u32, indices: &HashMap<&str, u32>) -> Vec<I<'stati
             I::LocalGet(at),
             I::Call(indices["__str_in"]),
         ],
-        ValueType::Num => vec![I::I64ReinterpretF64, I::LocalSet(at), I::I64Const(ir::NUM), I::LocalGet(at), I::Call(indices["__num_checked"])],
+        ValueType::Value => vec![I::LocalSet(at), I::I64Const(ir::INT), I::LocalGet(at), I::Call(indices["__val_in"])],
+        ValueType::Int => vec![I::I64ReinterpretF64, I::LocalSet(at), I::I64Const(ir::NUM), I::LocalGet(at), I::Call(indices["__int_in"])],
+        ValueType::Number => vec![I::I64ReinterpretF64, I::LocalSet(at), I::I64Const(ir::NUM), I::LocalGet(at), I::Call(indices["__num_checked"])],
         ValueType::Bool => vec![I::LocalSet(at), I::I64Const(ir::BOOL), I::LocalGet(at)],
         _ => vec![I::LocalSet(at), I::I64Const(ir::INT), I::LocalGet(at)],
     }
@@ -356,6 +389,7 @@ struct Emit<'a, 'b> {
     // 入れ子になった block・loop・if の数と、Catch の位置（br の深さを数える）
     depth: u32,
     catches: Vec<u32>,
+    loops: Vec<u32>,
 }
 
 impl Emit<'_, '_> {
@@ -393,9 +427,16 @@ impl Emit<'_, '_> {
                     self.depth += 2;
                     self.payload(c);
                     self.out.extend([I::I64Eqz, I::BrIf(1)]);
+                    self.loops.push(self.depth);
                     self.stmts(body);
+                    self.loops.pop();
                     self.depth -= 2;
                     self.out.extend([I::Br(0), I::End, I::End]);
+                }
+                Stmt::Break | Stmt::Continue => {
+                    let head = *self.loops.last().expect("ループの本体の中だけ");
+                    let depth = self.depth - head + u32::from(matches!(s, Stmt::Break));
+                    self.out.push(I::Br(depth));
                 }
                 Stmt::Return(e) => {
                     self.expr(e);
@@ -773,7 +814,7 @@ x.__hibana_reset(); if (x.__hibana_alloc(1) !== first || x.literal() !== packed 
 const m = new WebAssembly.Module(require('fs').readFileSync(0));
 if (JSON.stringify(WebAssembly.Module.imports(m)) !== '[]') throw Error('unexpected imports');
 const x = new WebAssembly.Instance(m, {}).exports;
-if (Object.keys(x).join(',') !== 'result' || x.result(20n) !== 41n) throw Error('unexpected exports or result');
+if (Object.keys(x).join(',') !== 'result' || x.result(20) !== 41) throw Error('unexpected exports or result');
 "#;
         let mut child = Command::new("node")
             .args(["-e", script])
@@ -792,7 +833,7 @@ if (Object.keys(x).join(',') !== 'result' || x.result(20n) !== 41n) throw Error(
         let bytes = crate::to_wasm_library(used, &["result".into(), "plus".into()]).unwrap();
         let result = node(&bytes, r#"const m = new WebAssembly.Module(require('fs').readFileSync(0));
 const x = new WebAssembly.Instance(m, {}).exports;
-if (Object.keys(x).join(',') !== 'plus,result' || x.plus(20n, 22n) !== 42n) throw Error('exports');"#);
+if (Object.keys(x).join(',') !== 'plus,result' || x.plus(20, 22) !== 42) throw Error('exports');"#);
         assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
 
         assert!(
@@ -824,9 +865,11 @@ process.stdout.write(Buffer.from(x.memory.buffer, p + 8, n));
 "#;
         for (src, expected) in [
             ("fn f(a: int, b: int) -> int { a / b } fn main() { put(f(1, 0)) }", "0 で除算した"),
-            ("fn f(a: int, b: int) -> int { a + b } fn main() { put(f(9223372036854775807, 1)) }", "オーバーフロー"),
+            ("fn f(a: int, b: int) -> int { a + b } fn main() { put(f(9007199254740991, 1)) }", "オーバーフロー"),
             ("fn f(a: int, b: int) -> int { a ** b } fn main() { put(f(2, -1)) }", "負の指数"),
             ("fn f(a: int, b: int) -> int { a ** b } fn main() { put(f(2, 63)) }", "オーバーフロー"),
+            ("fn main() { panic('同期の失敗') }", "同期の失敗"),
+            ("fn work() with Async { panic('非同期の失敗') } fn main() with Async { work().await }", "非同期の失敗"),
         ] {
             let result = node(&crate::to_wasm(src).unwrap(), script);
             assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
@@ -849,12 +892,12 @@ x = new WebAssembly.Instance(m, {hibana: {write: (fd, p, n) => process.stdout.wr
 x.main();
 function eq(value, expected) { if (value !== expected) throw Error(`${value} != ${expected}`); }
 function trap(f, a, b) { try { f(a, b); } catch (e) { if (e instanceof WebAssembly.RuntimeError) return; throw e; } throw Error('trap expected'); }
-const min = -(1n << 63n), max = (1n << 63n) - 1n;
-eq(x.add(-4n, 5n), 1n); eq(x.sub(-4n, 5n), -9n); eq(x.mul(-4n, 5n), -20n);
-eq(x.div(-7n, 3n), -2n); eq(x.rem(-7n, 3n), -1n); eq(x.mul(min, 1n), min);
-trap(x.add, max, 1n); trap(x.add, min, -1n); trap(x.sub, min, 1n); trap(x.sub, max, -1n);
-trap(x.mul, max, 2n); trap(x.mul, min, -1n); trap(x.mul, -1n, min);
-trap(x.div, 1n, 0n); trap(x.div, min, -1n); trap(x.rem, 1n, 0n); trap(x.rem, min, -1n);
+const min = -9007199254740991, max = 9007199254740991;
+eq(x.add(-4, 5), 1); eq(x.sub(-4, 5), -9); eq(x.mul(-4, 5), -20);
+eq(x.div(-7, 3), -2); eq(x.rem(-7, 3), -1); eq(x.mul(min, 1), min);
+trap(x.add, max, 1); trap(x.add, min, -1); trap(x.sub, min, 1); trap(x.sub, max, -1);
+trap(x.mul, max, 2); eq(x.mul(min, -1), max); eq(x.mul(-1, min), max);
+trap(x.div, 1, 0); eq(x.div(min, -1), max); trap(x.rem, 1, 0); eq(x.rem(min, -1), 0);
 "#;
         let mut child = Command::new("node")
             .args(["-e", script])
@@ -877,7 +920,7 @@ trap(x.div, 1n, 0n); trap(x.div, min, -1n); trap(x.rem, 1n, 0n); trap(x.rem, min
     fn rejects_unsupported_programs() {
         assert!(
             crate::to_wasm(
-                "extern 'browser' {\n    fn show(xs: Vec<int>)\n}\nfn main() { show([1]) }"
+                "extern 'browser' {\n    fn show(r: Ref<int>)\n}\nfn main() { show(new_ref(1)) }"
             )
             .unwrap_err()
             .contains("未対応")

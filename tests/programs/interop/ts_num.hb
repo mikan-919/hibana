@@ -1,4 +1,4 @@
-// TypeScript の number は境界で int（BigInt）と変換される
+// TypeScript の number は有限な number として受け渡す
 use './js/num.ts'
 use std -> *
 

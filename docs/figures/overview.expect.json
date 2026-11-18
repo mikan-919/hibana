@@ -1,0 +1,6 @@
+{
+  "format": "vlmkit-anim/expect@1",
+  "modules": ["load", "parse", "check", "eval", "js", "ir", "wasm", "native"],
+  "deps": ["load->parse", "parse->check", "check->eval", "check->js", "check->ir", "ir->wasm", "ir->native"],
+  "groups": {}
+}

@@ -1,4 +1,4 @@
-use crate::{error, eval, fmt, lexer, parser, typeck};
+use crate::{error, eval, fmt, parser, typeck};
 #[cfg(test)]
 use crate::{run, to_js, to_web};
 
@@ -133,19 +133,14 @@ fn test_cmd(files: &[&str]) -> Result<bool, String> {
         let path = p.display().to_string();
         let src = std::fs::read_to_string(p).map_err(|e| format!("{path}: {e}"))?;
         parser::set_base_dir(p.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new(".")));
-        // ponytail: main の無いファイルには空の main を足す（型検査が main を要るため）。main を要らなくするなら型検査に入口を渡す
-        let has_main = lexer::lex(&src).is_ok_and(|ts| {
-            ts.windows(2).any(|w| w[0].tok == lexer::Tok::Punct("fn") && w[1].tok == lexer::Tok::Ident("main".into()))
-        });
-        let full = if has_main { src.clone() } else { format!("{src}\nfn main() {{}}\n") };
-        let prog = parser::load_modules(&full, &parser::base_dir()).and_then(parser::parse_modules).and_then(|mut prog| {
-            typeck::check(&mut prog)?;
+        let prog = parser::load_modules(&src, &parser::base_dir()).and_then(parser::parse_modules).and_then(|mut prog| {
+            typeck::check_library(&mut prog)?;
             Ok(prog)
         });
         let prog = match prog {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("{:?}", report(&path, &full, e));
+                eprintln!("{:?}", report(&path, &src, e));
                 total += 1;
                 continue;
             }
@@ -159,7 +154,7 @@ fn test_cmd(files: &[&str]) -> Result<bool, String> {
                 }
                 Err(e) => {
                     println!("失敗 {label}");
-                    eprintln!("{:?}", report(&path, &full, e));
+                    eprintln!("{:?}", report(&path, &src, e));
                 }
             }
         }
@@ -245,26 +240,26 @@ mod tests {
 
     #[test]
     fn runtime_refinements() {
-        assert_eq!(out(include_str!("../../tests/programs/types/runtime_refine.hb")).unwrap(), "ok:ok\nbad\nbad\nok\n1\ntrue\n1.5\n3\n");
+        assert_eq!(out(include_str!("../../tests/programs/types/runtime_refine.hb")).unwrap(), "std.Ok(3)\nstd.Err(\"安全整数の範囲外か整数でない\")\nstd.Err(\"安全整数の範囲外か整数でない\")\nstd.Err(\"安全整数の範囲外か整数でない\")\nstd.Ok(0)\nstd.Ok(3)\nstd.Err(\"細分化型の条件を満たさない\")\nok:ok\nbad\nbad\nok\n1\ntrue\n1.5\n3\nstd.Ok(5)\nstd.Err(\"細分化型の条件を満たさない\")\nstd.Ok(5)\n0\n3\n-1\n");
         assert!(out("type Title = String[s -> len(s) > 0]\nfn main() { let t: Title = '' }").is_err());
     }
 
     #[test]
     fn numeric_values() {
         let src = include_str!("../../tests/programs/types/num.hb");
-        assert_eq!(out(src).unwrap(), "2.5\n1.5\n1.5\n-0.5\n0.25\n1\n1.5\n2\ntrue\ntrue\ntrue\n[0.5, 2.5]\n-0\n0.00000001\n1000000000000000000000\n");
+        assert_eq!(out(src).unwrap(), "1.5\n[1, 2.5]\ntrue\ntrue\n1\n2.5\n3\n6\n0.5\n101\n-101\n2.5\n4\n2.5\n1.5\n1.5\n-0.5\n0.25\n1\n1.5\n2\ntrue\ntrue\ntrue\n[0.5, 2.5]\n-0\n0.00000001\n1000000000000000000000\n0.5\n0.5\n");
         for src in [
             "fn main() { let x: int = 0.5 }",
-            "fn main() { let x: num[x -> x > 0] = -0.5 }",
-            "fn main() { let x: num[x -> x > 9007199254740992] = 9007199254740993 }",
-            "struct P { x: num }\nfn f(p: P) -> int[x -> x == 1] { if p.x > 0 && p.x < 1 { 0 } else { 1 } }\nfn main() {}",
-            "fn f(x: num) { let mut y: num = x\n if y > 0 { y = -1.0\n let z: num[z -> z > 0] = y } }\nfn main() {}",
-            "fn f(x: num) -> num[y -> y >= 1] { if x > 0 { x } else { 1 } }\nfn main() {}",
-            "fn f(x: num) -> num[y -> y > x] { x + 1.0 }\nfn main() {}",
+            "fn main() { let x: number[x -> x > 0] = -0.5 }",
+            "fn main() { let x: number[x -> x > 9007199254740992] = 9007199254740993 }",
+            "struct P { x: number }\nfn f(p: P) -> int[x -> x == 1] { if p.x > 0 && p.x < 1 { 0 } else { 1 } }\nfn main() {}",
+            "fn f(x: number) { let mut y: number = x\n if y > 0 { y = -1.0\n let z: number[z -> z > 0] = y } }\nfn main() {}",
+            "fn f(x: number) -> number[y -> y >= 1] { if x > 0 { x } else { 1 } }\nfn main() {}",
+            "fn f(x: number) -> number[y -> y > x] { x + 1.0 }\nfn main() {}",
         ] { assert!(out(src).is_err(), "{src}"); }
         let math = include_str!("../../tests/programs/stdlib/math.hb");
         assert_eq!(out(math).unwrap(), "3\n1.5\n2\n-3\n5\n");
-        for (name, source) in [("num", src), ("math", math)] {
+        for (name, source) in [("number", src), ("math", math)] {
             let path = std::env::temp_dir().join(format!("hibana-{name}-{}.cjs", std::process::id()));
             std::fs::write(&path, super::to_js(source).unwrap()).unwrap();
             let result = std::process::Command::new("node").arg(&path).output().unwrap();
@@ -441,6 +436,57 @@ mod tests {
         assert!(reasons.is_empty(), "IR が未対応のプログラムがある");
     }
 
+    // IR の 2 つの出力で src を実行し、(ネイティブの出力, WASM の出力, WASM のメモリのバイト数) を返す。
+    // ネイティブは仮想メモリを limit_kb に制限して動かす
+    fn ir_run(src: &str, limit_kb: u64) -> (String, String, u64) {
+        let tmp = std::env::temp_dir().join(format!("hibana-ir-run-{}-{}", std::process::id(), crate::parser::NodeId::default().raw()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut native = String::new();
+        #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let exe = tmp.join("program");
+            std::fs::write(&exe, crate::to_native(src).unwrap()).unwrap();
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let r = std::process::Command::new("sh").arg("-c").arg(format!("ulimit -v {limit_kb}; exec \"$0\"")).arg(&exe).output().unwrap();
+            assert!(r.status.success(), "ネイティブ: {}", String::from_utf8_lossy(&r.stderr));
+            native = String::from_utf8(r.stdout).unwrap();
+        }
+        let path = tmp.join("program.wasm");
+        std::fs::write(&path, crate::to_wasm(src).unwrap()).unwrap();
+        let script = "let x; x = new WebAssembly.Instance(new WebAssembly.Module(require('fs').readFileSync(process.argv[1])), {hibana: {write: (fd,p,n) => process.stdout.write(Buffer.from(x.memory.buffer, Number(p), Number(n))), now_ms: () => BigInt(Date.now())}}).exports; x.main(); process.stderr.write(String(x.memory.buffer.byteLength));";
+        let r = std::process::Command::new("node").args(["-e", script]).arg(&path).output().unwrap();
+        assert!(r.status.success(), "WASM: {}", String::from_utf8_lossy(&r.stderr));
+        std::fs::remove_dir_all(&tmp).unwrap();
+        (native, String::from_utf8(r.stdout).unwrap(), String::from_utf8(r.stderr).unwrap().parse().unwrap())
+    }
+
+    // mut の変数が所有する Vec への push・set_at はその場で書き換える。毎回写すと 10 万要素で数十 GB を確保する
+    #[test]
+    fn ir_vec_updates_in_place() {
+        let src = "fn main() {\n let mut xs: Vec<int> = []\n for i in 0..100000 { xs = push(xs, i) }\n for i in 0..len(xs) { if i < len(xs) { xs = set_at(xs, i, xs[i] * 2) } }\n let mut s = 0\n for x in xs { s = s + x }\n put(len(xs))\n put(s) }";
+        let want = "100000\n9999900000\n";
+        let (native, wasm, memory) = ir_run(src, 262144);
+        #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+        assert_eq!(native, want);
+        let _ = native;
+        assert_eq!(wasm, want);
+        assert!(memory < 64 << 20, "WASM のメモリ {memory} バイト");
+    }
+
+    // 30 万回のループで数百 MB を確保しても、GC が回収してメモリが増え続けない
+    #[test]
+    fn ir_gc_bounds_memory() {
+        let src = include_str!("../../tests/programs/basics/gc.hb").replace("0..5000", "0..300000");
+        let want = "0\n44850000\n3\n75000\nitem 12 [12, 13, 14]\n";
+        let (native, wasm, memory) = ir_run(&src, 131072);
+        #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+        assert_eq!(native, want);
+        let _ = native;
+        assert_eq!(wasm, want);
+        assert!(memory < 48 << 20, "WASM のメモリ {memory} バイト");
+    }
+
     // 範囲外と 0 による除算は、ネイティブでもメッセージを出して終了コード 1 で終わる
     #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
     #[test]
@@ -449,18 +495,18 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("hibana-native-err-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let cases = [
-            ("fn f(a: int, b: int) -> int { a + b }\nfn main() { put(1)\n put(f(9223372036854775807, 1)) }", "オーバーフロー"),
-            ("fn f(a: int, b: int) -> int { a * b }\nfn main() { put(1)\n put(f(-1, -9223372036854775807 - 1)) }", "オーバーフロー"),
+            ("fn f(a: int, b: int) -> int { a + b }\nfn main() { put(1)\n put(f(9007199254740991, 1)) }", "オーバーフロー"),
+            ("fn f(a: int, b: int) -> int { a * b }\nfn main() { put(1)\n put(f(-2, -9007199254740991)) }", "オーバーフロー"),
             ("fn f(a: int, b: int) -> int { a / b }\nfn main() { put(1)\n put(f(1, 0)) }", "0 で除算した"),
-            ("fn f(a: int, b: int) -> int { a % b }\nfn main() { put(1)\n put(f(-9223372036854775807 - 1, -1)) }", "オーバーフロー"),
+            ("fn f(a: int, b: int) -> int { a - b }\nfn main() { put(1)\n put(f(-9007199254740991, 1)) }", "オーバーフロー"),
             ("fn f(a: int, b: int) -> int { a ** b }\nfn main() { put(1)\n put(f(2, -1)) }", "負の指数"),
             ("fn f(a: int, b: int) -> int { a ** b }\nfn main() { put(1)\n put(f(3, 100)) }", "オーバーフロー"),
             ("fn main() { put(1)\n put(1.0 / 0.0) }", "0 で除算した"),
             ("fn main() { put(1)\n put(1.0 % 0.0) }", "0 で除算した"),
-            ("fn main() { put(1)\n put(2.0 ** 1024.0) }", "num の演算結果が有限でない"),
+            ("fn main() { put(1)\n put(2.0 ** 1024.0) }", "number の演算結果が有限でない"),
             ("use std::math\nfn main() { put(1)\n put(math::sqrt(-1)) }", "sqrt の引数が負"),
-            ("use std::math\nfn main() { put(1)\n put(math::floor(9223372036854775808.0)) }", "floor の結果が int の範囲外"),
-            ("fn main() { put(1)\n put(2.0 ** 0.5) }", "num の小数の指数は未対応"),
+            ("use std::math\nfn main() { put(1)\n put(math::floor(9007199254740992.0)) }", "floor の結果が int の範囲外"),
+            ("fn main() { put(1)\n put(2.0 ** 0.5) }", "number の小数の指数は未対応"),
         ];
         for (i, (src, msg)) in cases.iter().enumerate() {
             let exe = tmp.join(format!("e{i}"));
@@ -471,7 +517,7 @@ mod tests {
             assert_eq!(String::from_utf8(r.stdout).unwrap(), "1\n", "{src}");
             assert!(String::from_utf8(r.stderr).unwrap().contains(msg), "{src}");
         }
-        let src = "fn main() { put(-9223372036854775807 - 1)\n put(0)\n put(-42)\n put(true)\n put('日本語') }";
+        let src = "fn main() { put(-9007199254740991)\n put(0)\n put(-42)\n put(true)\n put('日本語') }";
         let exe = tmp.join("put");
         std::fs::write(&exe, crate::to_native(src).unwrap()).unwrap();
         std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -809,10 +855,31 @@ fn main() {
             crate::smt::without_z3(|| {
                 if name == "wasm_web.hb" {
                     super::to_web(&src, &["echo".into(), "answer".into(), "greet".into()]).map(|_| ())
+                } else if !src.contains("fn main(") {
+                    // main のない依存ファイルも、ライブラリとして証明を検査する。
+                    let modules = crate::pipeline::load(&src, p.parent().unwrap())?;
+                    let program = crate::pipeline::parse(modules)?;
+                    crate::pipeline::check(program, crate::pipeline::Kind::Library).map(|_| ())
                 } else {
                     super::to_js(&src).map(|_| ())
                 }
             }).unwrap_or_else(|e| panic!("{name}: {e}"));
+        }
+    }
+
+    // 入れ子のパターンの網羅されていない場合は、元のパターンの形の例で示す。let は構造体の分解だけを受け付ける
+    #[test]
+    fn nested_patterns_report_missing_cases() {
+        for (src, want) in [
+            ("use std -> *\nfn f(j: Option<Json>) -> int { match j { Some(JInt(n)) -> n\n None -> 0 } }\nfn main() {}", "（例: Some(JNull)）"),
+            ("use std -> *\nfn f(o: Option<Option<int>>) -> int { match o { Some(Some(1)) -> 1\n None -> 0 } }\nfn main() {}", "match に Some(Some(_)) の場合が無い"),
+            ("fn f(s: String) -> int { match s { 'a' -> 1 } }\nfn main() {}", "match に _ の場合が無い"),
+            ("use std -> *\nfn main() { let Some(x) = Some(1)\n put(x) }", "let のパターンには構造体の分解だけを書ける"),
+            ("struct P { x: int }\nfn main() { let P { z } = P { x: 1 }\n put(z) }", "構造体 P にフィールド z は無い"),
+            ("use std -> *\nfn f(o: Option<int>) -> int { match o { Some('a') -> 1\n Some(None) -> 2\n _ -> 0 } }\nfn main() {}", "構築子とリテラルのパターンは混ぜられない"),
+        ] {
+            let e = out(src).unwrap_err();
+            assert!(e.msg.contains(want), "{src}: {}", e.msg);
         }
     }
 
@@ -828,12 +895,37 @@ fn main() {
     }
 
     #[test]
+    fn loop_control() {
+        let src = include_str!("../../tests/programs/basics/loop_control.hb");
+        assert_eq!(out(src).unwrap(), "10\n12\n30\n32\n4\n101\n1\n9\n1\n2\n0\n");
+
+        let with_break = "fn f(run: bool) -> bool[b -> !b] { while run { break }; run } fn main() {}";
+        let e = super::to_js(with_break).unwrap_err();
+        assert!(e.contains("条件 !run を証明できない"), "{e}");
+
+        for src in [
+            "fn main() { let mut xs = [1]; while xs[0] == 1 { xs = []; continue } }",
+            "fn main() { let mut xs = [1]; for i in 0..len(xs) { put(xs[i]); xs = []; continue } }",
+        ] {
+            let e = super::to_js(src).unwrap_err();
+            assert!(e.contains("添字の範囲"), "{e}");
+        }
+
+        let nested_break = "fn f(run: bool) -> bool[b -> !b] { while run { for n in 0..1 { break }; continue }; run } fn main() {}";
+        assert!(super::to_js(nested_break).is_ok());
+    }
+
+    #[test]
     fn errors() {
         for (src, msg) in [
             ("fn main() { let x = 1; x = 2; }", "mut でない"),
             ("fn main() { let x: int = true; }", "int が必要"),
             ("fn f() -> int { true } fn main() {}", "戻り値"),
             ("fn main() { if 1 { } }", "if の条件"),
+            ("fn main() { break }", "break はループの本体の中でだけ使える"),
+            ("fn main() { while { continue } {} }", "continue はループの本体の中でだけ使える"),
+            ("fn main() { while true { let f: () -> unit = fn() { break }; break } }", "break はループの本体の中でだけ使える"),
+            ("trait Log { fn log(self) } fn main() { while true { with Log(fn() { continue }) { log() }; break } }", "continue はループの本体の中でだけ使える"),
             ("fn main() { put(1 / 0); }", "0 で除算"),
             ("fn main() { y; }", "未定義の変数"),
             ("fn main() { 1 + ; }", "式が必要"),

@@ -18,6 +18,8 @@ pub enum NameKind {
     Requirement(Box<Name>),
     TraitMethod(Box<Name>, Box<Name>),
     Temporary(String, usize),
+    // パターンを分けて作った変数。文字列は、その変数が元のパターンのどこかを示す雛形（□ が変数の位置）。網羅されていない例の表示に使う
+    Pattern(String, usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -182,6 +184,13 @@ impl Name {
         Self {
             spelling: format!("{hint}#{index}"),
             kind: NameKind::Temporary(hint.into(), index),
+        }
+    }
+
+    pub fn pattern(template: &str, index: usize) -> Self {
+        Self {
+            spelling: format!("pat#{index}"),
+            kind: NameKind::Pattern(template.into(), index),
         }
     }
 

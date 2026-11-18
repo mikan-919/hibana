@@ -1,0 +1,31 @@
+{
+  "format": "vlmkit-anim/scene@1",
+  "kind": "diagram",
+  "title": "hibanaの処理の流れ",
+  "layout": "lr",
+  "nodes": [
+    { "id": "load", "label": "load\n読み込み" },
+    { "id": "parse", "label": "parse\n解析・展開・名前解決" },
+    { "id": "check", "label": "check\n型・要求・証明" },
+    { "id": "eval", "label": "eval\nインタプリタ" },
+    { "id": "js", "label": "js\nJavaScript" },
+    { "id": "ir", "label": "ir\n中間表現" },
+    { "id": "wasm", "label": "wasm\nWebAssembly" },
+    { "id": "native", "label": "native\nLinux実行ファイル" }
+  ],
+  "edges": [
+    { "from": "load", "to": "parse" },
+    { "from": "parse", "to": "check" },
+    { "from": "check", "to": "eval" },
+    { "from": "check", "to": "js" },
+    { "from": "check", "to": "ir" },
+    { "from": "ir", "to": "wasm" },
+    { "from": "ir", "to": "native" }
+  ],
+  "sequence": [
+    { "note": "loadで必要なファイルを読み、parseで解析・マクロ展開・名前解決を行う。実装: pipeline::load、pipeline::parse。" },
+    { "note": "checkで型、要求、細分化型の条件を検査し、実行に必要な引数を補う。実装: pipeline::check。" },
+    { "note": "evalは検査後の構文木を評価し、jsは構文木と検査情報からJavaScriptを生成する。irは構文木を中間表現へ変換する。実装: run、to_js、pipeline::lower。" },
+    { "note": "wasmとnativeは共通の中間表現から出力を作る。実装: to_wasm、to_native。" }
+  ]
+}

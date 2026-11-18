@@ -88,6 +88,6 @@ fn main() with Async {
         shout('hey')
     }
     // spawn は Async<T> を走らせ始め、要求を持たない Task<T> を返す。then は終わった時に呼ぶ
-    // JavaScript では main が戻った後に終わるので、出力が実行方式で揃うよう最後に置く
+    // then の関数は main が戻った後に実行される
     spawn(name(6)).then(fn(s) { put('then ' + s) })
 }

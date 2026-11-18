@@ -1,8 +1,7 @@
 // 構造化 IR を Cranelift で機械語にし、libc を使わない静的な ELF の実行ファイルを作る。
-// リンカーは使わない。関数とデータを 1 つの区画に並べ、再配置を自分で埋める。
+// リンカーは使わない。機械語と文字列を RX、可変状態を RW の区画に並べ、再配置を自分で埋める。
 // IR の値（型の番号と中身）は 2 つの i64 で表し、関数は 2 つの i64 を返す。
 // ponytail: x86-64 の Linux だけ。aarch64 は syscall の機械語（SYSCALL・START）を足せば動く。macOS・Windows は OS のライブラリを通す別の出力が要る
-// ponytail: 区画は読み書き実行をすべて許す（確保の状態を書くため）。分けるならデータ用の区画を足す
 use crate::error::R;
 use crate::ir::{self, Block, Expr, Node, Prim, Program, Stmt};
 use cranelift_codegen::binemit::Reloc;
@@ -22,8 +21,9 @@ use std::collections::HashMap;
 
 // 読み込む位置。Linux の静的な実行ファイルの慣例に合わせる
 const BASE: u64 = 0x400000;
-// ELF ヘッダー（64 バイト）とプログラムヘッダー 1 つ（56 バイト）の後
-const CODE_START: usize = 128;
+// ELF ヘッダー（64 バイト）とプログラムヘッダー 2 つ（各 56 バイト）の後
+const CODE_START: usize = 176;
+const PAGE_SIZE: usize = 0x1000;
 // 名前の区分。UserExternalName の namespace に入れる
 const FUNC: u32 = 0;
 const DATA: u32 = 1;
@@ -73,21 +73,33 @@ pub fn emit(program: &Program) -> R<Vec<u8>> {
         .functions
         .iter()
         .position(|f| f.name == "main")
-        .ok_or("ネイティブ出力には main が必要")? as u32;
+        .ok_or("ネイティブ出力には main が必要")?;
+    let entry = program.functions[main].finish_at_boundary.then(|| ir::Function {
+        name: "main$entry".into(),
+        params: 0,
+        param_types: vec![],
+        result_type: ir::ValueType::Unit,
+        finish_at_boundary: false,
+        locals: 0,
+        body: vec![Stmt::Return(Expr::Call(
+            "__finish_entry".into(),
+            vec![Expr::Call("main".into(), vec![])],
+        ))],
+    });
+    let main = if entry.is_some() { program.functions.len() } else { main } as u32;
+    let functions = || program.functions.iter().chain(entry.iter());
     let mut flags = settings::builder();
     flags.set("opt_level", "speed").unwrap();
     let isa = cranelift_native::builder()
         .map_err(|e| format!("この CPU には未対応: {e}"))?
         .finish(settings::Flags::new(flags))
         .map_err(|e| format!("Cranelift の設定に失敗した: {e}"))?;
-    let n = program.functions.len() as u32;
+    let n = functions().count() as u32;
     let mut g = Gen {
         isa,
         ctx: Context::new(),
         fctx: FunctionBuilderContext::new(),
-        indices: program
-            .functions
-            .iter()
+        indices: functions()
             .enumerate()
             .map(|(i, f)| (f.name.clone(), i as u32))
             .collect(),
@@ -96,11 +108,11 @@ pub fn emit(program: &Program) -> R<Vec<u8>> {
         syscall: n,
     };
     // ランタイムの状態（runtime.hb の __static）。最初の確保で mmap する
-    g.datas.push(vec![0; 64]);
+    g.datas.push(vec![0; ir::STATIC_BYTES]);
     for s in ["実行時エラー: ", "\n"] {
         g.literal(s);
     }
-    for f in &program.functions {
+    for f in functions() {
         f.each(&mut |n| {
             if let Node::Expr(Expr::Str(s)) = n {
                 g.literal(s);
@@ -108,7 +120,7 @@ pub fn emit(program: &Program) -> R<Vec<u8>> {
         });
     }
     let mut codes = Vec::new();
-    for f in &program.functions {
+    for f in functions() {
         let func = g.function(f);
         codes.push(g.compile(func)?);
     }
@@ -202,6 +214,7 @@ impl Gen {
             literals: &self.literals,
             syscall: self.syscall,
             catches: Vec::new(),
+            loops: Vec::new(),
         };
         e.stmts(&f.body);
         let unit = e.b.ins().iconst(I64, ir::UNIT);
@@ -229,21 +242,23 @@ fn import(b: &mut FunctionBuilder, index: u32, params: usize, results: usize) ->
 struct Body<'a, 'f> {
     b: FunctionBuilder<'f>,
     vars: Vec<Variable>,
-    funcs: HashMap<u32, FuncRef>,
+    funcs: HashMap<(u32, usize), FuncRef>,
     indices: &'a HashMap<String, u32>,
     literals: &'a HashMap<String, u32>,
     syscall: u32,
     // 入れ子の Catch の後の区画。Escape はいちばん内側へ飛ぶ
     catches: Vec<cranelift_codegen::ir::Block>,
+    loops: Vec<(cranelift_codegen::ir::Block, cranelift_codegen::ir::Block)>,
 }
 
 impl Body<'_, '_> {
     fn func(&mut self, index: u32, params: usize, results: usize) -> FuncRef {
-        if let Some(f) = self.funcs.get(&index) {
+        // 同じ関数でも、番地だけを取る所（Expr::Func）と呼ぶ所で引数の数が違うので、数ごとに分ける
+        if let Some(f) = self.funcs.get(&(index, params)) {
             return *f;
         }
         let f = import(&mut self.b, index, params, results);
-        self.funcs.insert(index, f);
+        self.funcs.insert((index, params), f);
         f
     }
 
@@ -299,7 +314,7 @@ impl Body<'_, '_> {
         self.b.switch_to_block(ok);
     }
 
-    // return の後の到達しない位置に、続きを書くための区画を作る
+    // 分岐や return の後の到達しない位置に、続きを書くための区画を作る
     fn unreachable(&mut self) {
         let next = self.b.create_block();
         self.b.switch_to_block(next);
@@ -327,9 +342,17 @@ impl Body<'_, '_> {
                     let c = self.expr(c).1;
                     self.b.ins().brif(c, inner, &[], exit, &[]);
                     self.b.switch_to_block(inner);
+                    self.loops.push((head, exit));
                     self.stmts(body);
+                    self.loops.pop();
                     self.b.ins().jump(head, &[]);
                     self.b.switch_to_block(exit);
+                }
+                Stmt::Break | Stmt::Continue => {
+                    let (head, exit) = *self.loops.last().expect("ループの本体の中だけ");
+                    let target = if matches!(s, Stmt::Break) { exit } else { head };
+                    self.b.ins().jump(target, &[]);
+                    self.unreachable();
                 }
                 Stmt::Return(e) => {
                     let (t, p) = self.expr(e);
@@ -576,14 +599,21 @@ fn link(codes: &[Code], datas: &[Vec<u8>]) -> Vec<u8> {
         funcs.push(out.len());
         out.extend(&c.bytes);
     }
-    let mut places = Vec::new();
-    for d in datas {
+    let mut places = vec![0; datas.len()];
+    // 文字列定数は機械語と同じ RX の区画に置く。
+    for (i, d) in datas.iter().enumerate().skip(1) {
         while out.len() % 8 != 0 {
             out.push(0);
         }
-        places.push(out.len());
+        places[i] = out.len();
         out.extend(d);
     }
+    let rx_size = out.len();
+    // __static だけを RW の区画に置き、RX とページを共有させない。
+    let rw_start = rx_size.next_multiple_of(PAGE_SIZE);
+    out.resize(rw_start, 0);
+    places[0] = rw_start;
+    out.extend(&datas[0]);
     let addr = |offset: usize| BASE + offset as u64;
     for (c, start) in codes.iter().zip(&funcs) {
         for &(offset, kind, namespace, index, addend) in &c.relocs {
@@ -606,7 +636,6 @@ fn link(codes: &[Code], datas: &[Vec<u8>]) -> Vec<u8> {
         }
     }
     let entry = addr(*funcs.last().unwrap());
-    let size = out.len() as u64;
     let mut h = Vec::with_capacity(CODE_START);
     h.extend([0x7f, b'E', b'L', b'F', 2, 1, 1, 0]);
     h.extend([0u8; 8]);
@@ -619,17 +648,77 @@ fn link(codes: &[Code], datas: &[Vec<u8>]) -> Vec<u8> {
     h.extend(0u32.to_le_bytes());
     h.extend(64u16.to_le_bytes());
     h.extend(56u16.to_le_bytes());
-    h.extend(1u16.to_le_bytes());
+    h.extend(2u16.to_le_bytes());
     h.extend([0u8; 6]);
-    // 読み込む区画 1 つ。読み書きと実行を許す
-    h.extend(1u32.to_le_bytes());
-    h.extend(7u32.to_le_bytes());
-    h.extend(0u64.to_le_bytes());
-    h.extend(BASE.to_le_bytes());
-    h.extend(BASE.to_le_bytes());
-    h.extend(size.to_le_bytes());
-    h.extend(size.to_le_bytes());
-    h.extend(0x1000u64.to_le_bytes());
+    // PT_LOAD: 機械語と文字列は RX（5）、__static は RW（6）。
+    for (flags, offset, size) in [(5u32, 0, rx_size), (6, rw_start, datas[0].len())] {
+        h.extend(1u32.to_le_bytes());
+        h.extend(flags.to_le_bytes());
+        h.extend((offset as u64).to_le_bytes());
+        h.extend(addr(offset).to_le_bytes());
+        h.extend(addr(offset).to_le_bytes());
+        h.extend((size as u64).to_le_bytes());
+        h.extend((size as u64).to_le_bytes());
+        h.extend((PAGE_SIZE as u64).to_le_bytes());
+    }
     out[..h.len()].copy_from_slice(&h);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn elf_separates_rx_and_rw_segments() {
+        // 機械語と文字列がページ境界の手前・境界上・複数ページになる場合。
+        for code_size in [32, PAGE_SIZE - CODE_START - 24, 2 * PAGE_SIZE] {
+            let codes = [Code {
+                bytes: vec![0xcc; code_size],
+                relocs: vec![
+                    (0, Reloc::Abs8, DATA, 0, 0),
+                    (8, Reloc::Abs8, DATA, 1, 0),
+                    (16, Reloc::X86PCRel4, DATA, 0, -4),
+                ],
+            }];
+            let datas = [vec![0; 64], vec![0x61; 24]];
+            let elf = link(&codes, &datas);
+            let u16_at = |at| u16::from_le_bytes(elf[at..at + 2].try_into().unwrap());
+            let u32_at = |at| u32::from_le_bytes(elf[at..at + 4].try_into().unwrap());
+            let u64_at = |at| u64::from_le_bytes(elf[at..at + 8].try_into().unwrap());
+            assert_eq!(&elf[..4], b"\x7fELF");
+            assert_eq!(u16_at(54), 56);
+            assert_eq!(u16_at(56), 2);
+            let ph = u64_at(32) as usize;
+            let rx_size = u64_at(ph + 32) as usize;
+            let rw_start = u64_at(ph + 56 + 8) as usize;
+            assert_eq!(rx_size, CODE_START + code_size + datas[1].len());
+            assert_eq!(rw_start, rx_size.next_multiple_of(PAGE_SIZE));
+            for (at, flags, offset, size) in [
+                (ph, 5, 0, rx_size),
+                (ph + 56, 6, rw_start, datas[0].len()),
+            ] {
+                assert_eq!(u32_at(at), 1);
+                assert_eq!(u32_at(at + 4), flags);
+                assert_eq!(u64_at(at + 8), offset as u64);
+                assert_eq!(u64_at(at + 16), BASE + offset as u64);
+                assert_eq!(u64_at(at + 24), BASE + offset as u64);
+                assert_eq!(u64_at(at + 32), size as u64);
+                assert_eq!(u64_at(at + 40), size as u64);
+                assert_eq!(u64_at(at + 48), PAGE_SIZE as u64);
+            }
+            assert_eq!(u64_at(24), BASE + CODE_START as u64);
+            assert_eq!(u64_at(CODE_START), BASE + rw_start as u64);
+            assert_eq!(
+                u64_at(CODE_START + 8),
+                BASE + (CODE_START + code_size) as u64
+            );
+            let rel = i32::from_le_bytes(
+                elf[CODE_START + 16..CODE_START + 20].try_into().unwrap(),
+            );
+            assert_eq!(rel as i64, rw_start as i64 - (CODE_START + 20) as i64);
+            assert_eq!(&elf[CODE_START + code_size..rx_size], &datas[1]);
+            assert_eq!(&elf[rw_start..], &datas[0]);
+        }
+    }
 }

@@ -145,7 +145,7 @@ impl Ck {
         let r = arms.iter_mut().try_for_each(|a| {
             let waits = has_async(&self.norm.fns[&a.ctor].effects);
             self.in_arm += usize::from(!waits);
-            let r = self.arm(a, &insts, &t, waits);
+            let r = self.without_loop(|ck| ck.arm(a, &insts, &t, waits));
             self.in_arm -= usize::from(!waits);
             r
         });
@@ -266,7 +266,7 @@ impl Ck {
         };
         let body = Block { id: NodeId::default(), stmts: vec![], tail: Some(Box::new(Expr::Id(id, Box::new(call)))) };
         self.awaits.insert(body.id);
-        let thunk = Expr::Lam(vec![], None, vec![], body);
+        let thunk = Expr::Lam(vec![], None, None, body);
         *e = Expr::Block(Block { id: NodeId::default(), stmts, tail: Some(Box::new(thunk)) });
     }
 
@@ -307,18 +307,22 @@ fn quote_type(v: &V) -> Option<Expr> {
     })
 }
 
-// 効果の節（! と with の効果）を省いた関数の効果を、本体から推論して宣言に書き込む。
+// with を省いた非公開関数の効果を、本体から推論して宣言に書き込む。
 // 本体の複製を検査して起きた効果を集め、変わらなくなるまで繰り返す（再帰と相互再帰の不動点）。
 // ponytail: 毎回すべての対象を検査し直し、回数は 8 回まで。遅くなれば呼び出しの依存の順に、変わった関数の呼び出し元だけを検査する
-pub(super) fn infer_effects(ck: &mut Ck, prog: &mut Program) {
+pub(super) fn infer_effects(ck: &mut Ck, prog: &mut Program) -> R<()> {
     let targets: Vec<usize> = (0..prog.fns.len())
         .filter(|&i| {
             let f = &prog.fns[i];
-            f.effects.is_empty() && f.op.is_none() && f.js.is_none() && !f.alias && !is_impl(&f.name)
+            !f.public && !f.effects_explicit && f.effects.is_empty()
+                && f.op.is_none() && f.js.is_none() && !f.alias && !is_impl(&f.name)
         })
         .collect();
     ck.inferring = true;
-    for _ in 0..8 {
+    // 1 回の反復で、要求は呼び出しの連鎖を少なくとも 1 段伝わる。連鎖は対象の関数の数より長くならない
+    let limit = targets.len().max(1) + 4;
+    let mut converged = false;
+    for _ in 0..limit {
         let mut changed = false;
         for &i in &targets {
             let mut g = prog.fns[i].clone();
@@ -346,6 +350,7 @@ pub(super) fn infer_effects(ck: &mut Ck, prog: &mut Program) {
             }
         }
         if !changed {
+            converged = true;
             break;
         }
     }
@@ -356,6 +361,10 @@ pub(super) fn infer_effects(ck: &mut Ck, prog: &mut Program) {
     ck.var_awaits.clear();
     ck.async_inst.clear();
     ck.async_calls.clear();
+    if !converged {
+        return Err(format!("非公開関数の要求の推論が {limit} 回で収束しない（with を明示する）").into());
+    }
+    Ok(())
 }
 
 // 効果の節に Async を書いたか

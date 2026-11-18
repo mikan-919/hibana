@@ -24,7 +24,7 @@ impl Checked {
 }
 
 /// use したファイルを `base_dir` から読み、構文解析に渡すモジュール表を作る。
-/// 組み込みのライブラリと、指定ディレクトリからのファイルを読み込む。
+/// 組み込みライブラリと、名前で指定した hibana ファイル、JavaScript / TypeScript の型宣言を読み込む。
 pub fn load(source: &str, base_dir: &Path) -> R<parser::ModuleSet> {
     parser::load_modules(source, base_dir)
 }
@@ -45,7 +45,7 @@ pub fn check(mut program: parser::Program, kind: Kind) -> R<Checked> {
 
 /// 公開する関数から辿れる関数を IR に変換する。None はすべての関数を変換する。
 pub fn lower(checked: &Checked, exports: Option<&[String]>) -> R<ir::Program> {
-    ir::lower_selected(&checked.program, exports)
+    ir::lower_selected(&checked.program, exports, &checked.info)
 }
 
 /// IR から公開関数とその呼び出し先を選ぶ。
@@ -64,6 +64,10 @@ pub fn link(program: &ir::Program, exports: &[String]) -> R<ir::Program> {
     let mut strings = selected
         .iter()
         .any(|f| has_str(f.param_types(), f.result_type()));
+    let has_value = |ts: &[ir::ValueType], r: ir::ValueType| ts.iter().chain([&r]).any(|t| *t == ir::ValueType::Value);
+    if selected.iter().any(|f| has_value(f.param_types(), f.result_type())) {
+        pending.extend(["__val_in", "__val_out"]);
+    }
     // 境界で文字列を渡すなら、変換するランタイムの関数も含める
     loop {
         if strings {
@@ -75,7 +79,9 @@ pub fn link(program: &ir::Program, exports: &[String]) -> R<ir::Program> {
             }
             if let Some(f) = program.imports.iter().find(|f| f.name() == name) {
                 strings |= has_str(f.param_types(), f.result_type());
-                if f.param_types().contains(&ir::ValueType::Num) || f.result_type() == ir::ValueType::Num { pending.push("__num_checked"); }
+                if has_value(f.param_types(), f.result_type()) { pending.extend(["__val_in", "__val_out"]); }
+                if f.param_types().contains(&ir::ValueType::Int) || f.result_type() == ir::ValueType::Int { pending.push("__int_in"); }
+                if f.param_types().contains(&ir::ValueType::Number) || f.result_type() == ir::ValueType::Number { pending.push("__num_checked"); }
                 continue;
             }
             let function = functions
@@ -100,6 +106,7 @@ pub fn link(program: &ir::Program, exports: &[String]) -> R<ir::Program> {
             .filter(|f| visited.contains(f.name.as_str()))
             .cloned()
             .collect(),
+        boundary: program.boundary.clone(),
     })
 }
 
@@ -112,7 +119,7 @@ pub fn emit_wasm(program: &ir::Program, exports: Option<&[String]>) -> R<Vec<u8>
 }
 
 /// 公開関数を JavaScript から呼ぶための ES モジュールを作る。
-/// int は BigInt、num は Number、str は文字列、unit は undefined として渡す。
+/// int と number は Number、str は文字列、unit は undefined として渡す。
 pub fn emit_js_glue(program: &ir::Program, exports: &[String]) -> R<String> {
     let signatures = boundary_signatures(program, exports)?;
     let hosts = serde_json::to_string(&signatures.imports).unwrap();
@@ -123,7 +130,84 @@ export async function instantiate(bytes, imports = {}) {
   let active = false;
   const encoder = new TextEncoder();
   const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+  // Vec と構造体は 8 バイトの語の並びで渡す（runtime.hb の __val_in・__val_out）。
+  // 値は [型の番号][中身]、文字列は [3][長さ][バイト列]、Vec は [4][要素数][要素...]、構造体は [5][構築子][フィールド数][フィールド...]
+  function put(out, type, value) {
+    if (typeof type === "object" && type.vec !== undefined) {
+      if (!Array.isArray(value)) throw new TypeError("配列が必要");
+      out.push(4n, BigInt(value.length));
+      for (const item of value) put(out, type.vec, item);
+    } else if (typeof type === "object") {
+      if (typeof value !== "object" || value === null) throw new TypeError("オブジェクトが必要");
+      out.push(5n, BigInt(type.ctor), BigInt(type.fields.length));
+      for (const [name, field] of type.fields) {
+        if (!(name in value)) throw new TypeError("フィールドが必要: " + name);
+        put(out, field, value[name]);
+      }
+    } else if (type === "String") {
+      if (typeof value !== "string") throw new TypeError("文字列が必要");
+      const data = encoder.encode(value);
+      out.push(3n, BigInt(data.length));
+      for (let i = 0; i < data.length; i += 8) {
+        let word = 0n;
+        for (let k = 7; k >= 0; k--) word = (word << 8n) | BigInt(data[i + k] ?? 0);
+        out.push(BigInt.asIntN(64, word));
+      }
+    } else if (type === "number") {
+      if (typeof value !== "number" || !Number.isFinite(value)) throw new TypeError("有限な number が必要");
+      out.push(9n, new BigInt64Array(new Float64Array([value]).buffer)[0]);
+    } else if (type === "bool") {
+      if (typeof value !== "boolean") throw new TypeError("真偽値が必要");
+      out.push(2n, value ? 1n : 0n);
+    } else if (type === "unit") {
+      if (value !== undefined) throw new TypeError("unit は undefined が必要");
+      out.push(0n);
+    } else {
+      if (typeof value !== "number" || !Number.isSafeInteger(value)) throw new RangeError("安全な整数が必要");
+      out.push(1n, BigInt(value));
+    }
+  }
+  function take(view, at, type) {
+    const word = (k) => view.getBigInt64(at + 8 * k, true);
+    if (typeof type === "object" && type.vec !== undefined) {
+      const items = [];
+      let next = at + 16;
+      for (let i = 0; i < Number(word(1)); i++) {
+        const [item, after] = take(view, next, type.vec);
+        items.push(item);
+        next = after;
+      }
+      return [items, next];
+    }
+    if (typeof type === "object") {
+      const object = {};
+      let next = at + 24;
+      for (const [name, field] of type.fields) {
+        const [item, after] = take(view, next, field);
+        object[name] = item;
+        next = after;
+      }
+      return [object, next];
+    }
+    if (type === "String") {
+      const n = Number(word(1));
+      return [decoder.decode(new Uint8Array(view.buffer, view.byteOffset + at + 16, n)), at + 16 + Math.ceil(n / 8) * 8];
+    }
+    if (type === "unit") return [undefined, at + 8];
+    if (type === "bool") return [word(1) !== 0n, at + 16];
+    if (word(0) === 9n) return [view.getFloat64(at + 8, true), at + 16];
+    const n = Number(word(1));
+    return [n === 0 ? 0 : n, at + 16];
+  }
   function encode(value, type) {
+    if (typeof type === "object") {
+      const words = [];
+      put(words, type, value);
+      const data = new Uint8Array(new BigInt64Array(words).buffer);
+      const ptr = instance.exports.__hibana_alloc(data.length) >>> 0;
+      new Uint8Array(instance.exports.memory.buffer, ptr, data.length).set(data);
+      return BigInt.asIntN(64, (BigInt(data.length) << 32n) | BigInt(ptr));
+    }
     if (type === 'bool') {
       if (typeof value !== 'boolean') throw new TypeError('真偽値が必要');
       return value ? 1n : 0n;
@@ -139,22 +223,27 @@ export async function instantiate(bytes, imports = {}) {
       new Uint8Array(instance.exports.memory.buffer, ptr, data.length).set(data);
       return BigInt.asIntN(64, (BigInt(data.length) << 32n) | BigInt(ptr));
     }
-    if (type === "num") {
-      if (typeof value !== "number" || !Number.isFinite(value)) throw new TypeError("有限な num が必要");
+    if (type === "number") {
+      if (typeof value !== "number" || !Number.isFinite(value)) throw new TypeError("有限な number が必要");
       return value;
     }
-    if (typeof value !== "number" && typeof value !== "bigint") throw new TypeError("整数が必要");
-    if (typeof value === "number" && !Number.isSafeInteger(value)) throw new RangeError("安全な整数が必要");
-    const n = BigInt(value);
-    if (n < -(1n << 63n) || n >= (1n << 63n)) throw new RangeError("64 ビット整数の範囲外");
-    return n;
+    if (typeof value !== "number" || !Number.isSafeInteger(value)) throw new RangeError("安全な整数が必要");
+    return value === 0 ? 0 : value;
   }
   function decode(value, type) {
+    if (typeof type === "object") {
+      const packed = BigInt.asUintN(64, value);
+      const view = new DataView(instance.exports.memory.buffer, Number(packed & 0xffffffffn), Number(packed >> 32n));
+      return take(view, 0, type)[0];
+    }
     if (type === 'bool') return value !== 0n;
     if (type === "unit") return undefined;
-    if (type === "int") return value;
-    if (type === "num") {
-      if (!Number.isFinite(value)) throw new RangeError("num の演算結果が有限でない");
+    if (type === "int") {
+      if (typeof value !== "number" || !Number.isSafeInteger(value)) throw new RangeError("安全な整数が必要");
+      return value === 0 ? 0 : value;
+    }
+    if (type === "number") {
+      if (!Number.isFinite(value)) throw new RangeError("number の演算結果が有限でない");
       return value;
     }
     const packed = BigInt.asUintN(64, value);
@@ -169,10 +258,14 @@ export async function instantiate(bytes, imports = {}) {
     if (typeof callback !== "function") throw new TypeError("外部関数が必要: " + name);
     host[name] = (...args) => encode(callback(...args.map((value, i) => decode(value, params[i]))), result);
   }
-  // put の 1 行と現在時刻。1 行は imports.hibana.print（無ければ console.log）に渡す
+  // 標準出力と標準エラーは別の関数に渡す
   const print = imports.hibana?.print ?? console.log;
+  const error = imports.hibana?.error ?? console.error;
   const hibana = {
-    write: (fd, ptr, len) => print(decoder.decode(new Uint8Array(instance.exports.memory.buffer, Number(ptr), Number(len))).replace(/\n$/, "")),
+    write: (fd, ptr, len) => {
+      const output = Number(fd) === 2 ? error : print;
+      output(decoder.decode(new Uint8Array(instance.exports.memory.buffer, Number(ptr), Number(len))).replace(/\n$/, ""));
+    },
     now_ms: () => BigInt(Date.now()),
     read: (fd, ptr, len) => {
       const target = new Uint8Array(instance.exports.memory.buffer, Number(ptr), Number(len));
@@ -210,19 +303,24 @@ export async function instantiate(bytes, imports = {}) {
 }
 
 // JS 接続コードに渡す境界の型名とシグネチャ。
-type BoundarySignature<'a> = (&'a str, Vec<String>, String);
+type BoundarySignature<'a> = (&'a str, Vec<serde_json::Value>, serde_json::Value);
 
 struct BoundarySignatures<'a> {
     exports: Vec<BoundarySignature<'a>>,
     imports: Vec<BoundarySignature<'a>>,
 }
 
+// 型は名前の文字列。Vec と構造体は ir::BoundaryType::json の形
 fn boundary_signature<'a>(
+    program: &ir::Program,
     name: &'a str,
     params: &[ir::ValueType],
     result: &ir::ValueType,
 ) -> BoundarySignature<'a> {
-    fn ty(t: &ir::ValueType) -> String { t.to_string() }
+    if let Some((ps, r)) = program.boundary.get(name) {
+        return (name, ps.iter().map(|t| t.json()).collect(), r.json());
+    }
+    let ty = |t: &ir::ValueType| serde_json::Value::String(t.to_string());
     (name, params.iter().map(ty).collect(), ty(result))
 }
 
@@ -232,12 +330,12 @@ fn boundary_signatures<'a>(
 ) -> R<BoundarySignatures<'a>> {
     let exports = select_exports(program, exports)?
         .into_iter()
-        .map(|f| boundary_signature(&f.name, &f.param_types, &f.result_type))
+        .map(|f| boundary_signature(program, &f.name, &f.param_types, &f.result_type))
         .collect();
     let imports = program
         .imports
         .iter()
-        .map(|f| boundary_signature(&f.name, &f.param_types, &f.result_type))
+        .map(|f| boundary_signature(program, &f.name, &f.param_types, &f.result_type))
         .collect();
     Ok(BoundarySignatures { exports, imports })
 }

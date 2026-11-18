@@ -4,7 +4,8 @@ use crate::parser::Name;
 // 値はすべて V（型の番号 tag と中身 payload の 2 つの 64 ビット整数）で表す。番号は runtime.hb の先頭を参照。
 // 文字列の連結・比較・表示などはランタイム（runtime.hb）の関数を呼ぶ。ランタイムも同じ変換で IR にする。
 // with（Handle）は、中断の印を置いて呼び出しの後で調べ、1 段ずつ戻って抜ける（Lower::checked）。腕の値は #resume で呼んだ所へ返し、exit で with を抜ける
-// ponytail: Vec の push は毎回写す（runtime.hb の __arr_push）
+// mut の変数が所有する Vec への push・set_at はその場で書き換える（runtime.hb の __push_own・__set_at_own）
+// 利用者の関数には GC のシャドースタックを付ける（Ctx::shadow。仕組みは runtime.hb の先頭）
 use crate::error::R;
 use crate::parser::{self, Expr as Ast, Stmt as AstStmt};
 use std::collections::{HashMap, HashSet};
@@ -19,23 +20,75 @@ pub const DATA: i64 = 5;
 pub const FN: i64 = 6;
 pub const TY: i64 = 7;
 pub const NUM: i64 = 9;
+// with の記録の並び（runtime.hb の __handle_push）と Promise。ランタイムの中と非同期の変換だけで使う
+pub const HANDLERS: i64 = 10;
+pub const PROMISE: i64 = 11;
 
 const RUNTIME: &str = include_str!("runtime.hb");
+
+mod coroutine;
+
+// runtime.hb の __static の大きさ
+pub(crate) const STATIC_BYTES: usize = 184;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub(crate) functions: Vec<Function>,
     pub(crate) imports: Vec<Import>,
+    // 公開関数と外部関数の境界の型（引数, 戻り値）。Vec と構造体を渡す接続コードが使う
+    pub(crate) boundary: HashMap<String, (Vec<BoundaryType>, BoundaryType)>,
+}
+
+/// WASM の境界で渡す値の形。Vec と構造体は runtime.hb の __val_in・__val_out のバイト列で渡す
+#[derive(Debug, Clone, PartialEq)]
+pub enum BoundaryType {
+    Int,
+    Number,
+    Bool,
+    Str,
+    Unit,
+    Vec(Box<BoundaryType>),
+    // 構築子の番号（IR の構築子の並び）と、宣言の順のフィールド
+    Struct(i64, Vec<(String, BoundaryType)>),
+}
+
+impl BoundaryType {
+    // 接続コードに渡す JSON。基本の型は名前、Vec は {"vec": 要素}、構造体は {"ctor": 番号, "fields": [[名前, 型], ...]}
+    pub fn json(&self) -> serde_json::Value {
+        use serde_json::json;
+        match self {
+            Self::Int => json!("int"),
+            Self::Number => json!("number"),
+            Self::Bool => json!("bool"),
+            Self::Str => json!("String"),
+            Self::Unit => json!("unit"),
+            Self::Vec(x) => json!({ "vec": x.json() }),
+            Self::Struct(k, fields) => json!({ "ctor": k, "fields": fields.iter().map(|(n, t)| json!([n, t.json()])).collect::<Vec<_>>() }),
+        }
+    }
+
+    fn value_type(&self) -> ValueType {
+        match self {
+            Self::Int => ValueType::Int,
+            Self::Number => ValueType::Number,
+            Self::Bool => ValueType::Bool,
+            Self::Str => ValueType::Str,
+            Self::Unit => ValueType::Unit,
+            Self::Vec(_) | Self::Struct(..) => ValueType::Value,
+        }
+    }
 }
 
 /// WASM の境界で渡せる型。それ以外は Other
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueType {
     Int,
-    Num,
+    Number,
     Bool,
     Str,
     Unit,
+    // Vec と構造体。中身は Program::boundary の型で決まる
+    Value,
     Other,
 }
 
@@ -53,6 +106,8 @@ pub struct Function {
     pub(crate) params: u32,
     pub(crate) param_types: Vec<ValueType>,
     pub(crate) result_type: ValueType,
+    // 公開関数の入口で仕事の並びを空にし、Promise なら完了値を取り出す
+    pub(crate) finish_at_boundary: bool,
     // 引数を含む局所変数の数。引数は 0 から順に並ぶ
     pub(crate) locals: u32,
     pub(crate) body: Vec<Stmt>,
@@ -133,6 +188,8 @@ pub enum Stmt {
     Set(u32, Expr),
     Eval(Expr),
     While(Expr, Vec<Stmt>),
+    Break,
+    Continue,
     Return(Expr),
     // いちばん内側の Catch から unit で抜ける
     Escape,
@@ -142,10 +199,11 @@ impl fmt::Display for ValueType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Int => "int",
-            Self::Num => "num",
+            Self::Number => "number",
             Self::Bool => "bool",
             Self::Str => "String",
             Self::Unit => "unit",
+            Self::Value => "value",
             Self::Other => "other",
         })
     }
@@ -173,10 +231,10 @@ impl Import {
 }
 
 fn boundary(t: ValueType) -> bool {
-    matches!(t, ValueType::Int | ValueType::Num | ValueType::Bool | ValueType::Str | ValueType::Unit)
+    matches!(t, ValueType::Int | ValueType::Number | ValueType::Bool | ValueType::Str | ValueType::Unit | ValueType::Value)
 }
 
-// 型検査は num の演算の引数を #num で包む。リテラルはそのまま残る。
+// 型検査は number の演算の引数を #num で包む。リテラルはそのまま残る。
 fn numeric(e: &Ast) -> bool {
     matches!(e.peel(), Ast::Num(_)) || matches!(e.peel(), Ast::Call(n, _) if n == "#num")
 }
@@ -211,7 +269,9 @@ impl Function {
     /// 呼ぶ関数の名前。算術の範囲外などで呼ぶランタイムの関数も含む
     pub fn calls(&self) -> Vec<&str> {
         let mut names = Vec::new();
-        if self.result_type == ValueType::Num || self.param_types.contains(&ValueType::Num) { names.push("__num_checked"); }
+        if self.finish_at_boundary { names.push("__finish_entry"); }
+        if self.result_type == ValueType::Int || self.param_types.contains(&ValueType::Int) { names.push("__int_in"); }
+        if self.result_type == ValueType::Number || self.param_types.contains(&ValueType::Number) { names.push("__num_checked"); }
         self.each(&mut |n| match n {
             Node::Expr(Expr::Call(n, _) | Expr::Func(n)) => names.push(n.as_str()),
             Node::Expr(Expr::Prim(Prim::Add | Prim::Sub | Prim::Mul, _)) => {
@@ -238,7 +298,7 @@ fn each_stmts<'a>(stmts: &'a [Stmt], f: &mut impl FnMut(Node<'a>)) {
         f(Node::Stmt(s));
         match s {
             Stmt::Set(_, e) | Stmt::Eval(e) | Stmt::Return(e) => each_expr(e, f),
-            Stmt::Escape => {}
+            Stmt::Break | Stmt::Continue | Stmt::Escape => {}
             Stmt::While(c, body) => {
                 each_expr(c, f);
                 each_stmts(body, f);
@@ -273,7 +333,7 @@ fn each_block<'a>(b: &'a Block, f: &mut impl FnMut(Node<'a>)) {
 fn value_type(e: &Ast) -> ValueType {
     match e.peel() {
         Ast::Var(n) if n == "int" => ValueType::Int,
-        Ast::Var(n) if n == "num" || n == "number" => ValueType::Num,
+        Ast::Var(n) if n == "number" => ValueType::Number,
         Ast::Var(n) if n == "bool" => ValueType::Bool,
         Ast::Var(n) if n == "String" => ValueType::Str,
         Ast::Var(n) if n == "unit" => ValueType::Unit,
@@ -345,6 +405,8 @@ struct Source<'a> {
 
 struct Ctx<'a> {
     sources: HashMap<&'a str, Source<'a>>,
+    // 型の名前から宣言。境界の型（BoundaryType）を作るのに使う
+    datas: HashMap<&'a str, &'a parser::Data>,
     // 構築子の名前から (番号, フィールド名)
     ctors: HashMap<&'a str, (i64, Vec<&'a str>)>,
     ctor_list: Vec<(&'a Name, Vec<&'a str>)>,
@@ -352,14 +414,18 @@ struct Ctx<'a> {
     // 変換の途中で作った関数（無名関数）
     made: Vec<Function>,
     lambdas: usize,
+    // 型検査が記録した、JavaScript で待つ呼び出しと async にする本体（js.rs と同じ所で待つ）
+    info: &'a crate::typeck::Info,
+    // コルーチンに panic を伝えるため、要求のない関数の呼び出しも検査する
+    panic_checks: bool,
 }
 
 pub fn lower(p: &parser::Program) -> R<Program> {
-    lower_selected(p, None)
+    lower_selected(p, None, &crate::typeck::Info::default())
 }
 
 /// exports から辿れる関数だけを変換する。None はすべての関数を変換する。
-pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>) -> R<Program> {
+pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>, info: &crate::typeck::Info) -> R<Program> {
     let runtime = parser::parse(RUNTIME)?;
     let mut sources = HashMap::new();
     for f in &runtime.fns {
@@ -387,9 +453,12 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>) -> R<Prog
             .collect(),
         ctor_list,
         types: p.datas.iter().map(|d| d.name.as_str()).collect(),
+        datas: p.datas.iter().map(|d| (d.name.as_str(), d)).collect(),
         sources,
         made: Vec::new(),
         lambdas: 0,
+        info,
+        panic_checks: !info.awaits.is_empty() || p.fns.iter().any(|f| has_async(&f.effects)),
     };
     if exports.is_none() && (!p.datas.is_empty() || !p.tests.is_empty()) {
         return Err("IR は型宣言とテスト宣言に未対応".into());
@@ -419,62 +488,84 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>) -> R<Prog
     let mut visited = HashSet::new();
     let mut functions = Vec::new();
     let mut imports = Vec::new();
-    while let Some(name) = pending.pop() {
-        if !visited.insert(name.clone()) {
-            continue;
-        }
-        let js = cx
-            .sources
-            .get(name.as_str())
-            .map(|s| s.f)
-            .filter(|f| f.js.is_some());
-        let function = match js {
-            Some(f) => {
-                let param_types: Vec<_> = f.params.iter().map(|(_, t)| value_type(t)).collect();
-                let result_type = ret_type(f);
-                if param_types.contains(&ValueType::Num) || result_type == ValueType::Num {
-                    pending.push("__num_checked".into());
-                }
-                if exported(&name) {
-                    return Err("外部関数を直接公開できない".into());
-                }
-                // ponytail: WASM の境界は int・num・str・unit。ほかの型は接続コードに変換を足す
-                if !param_types
-                    .iter()
-                    .chain([&result_type])
-                    .all(|t| boundary(*t))
-                {
-                    return Err(format!("IR は関数 {} の境界の型に未対応", f.name).into());
-                }
-                if param_types.iter().chain([&result_type]).any(|t| matches!(t, ValueType::Str)) {
-                    pending.extend(["__str_in".to_string(), "__str_out".to_string()]);
-                }
-                imports.push(Import {
-                    name: f.name.to_string(),
-                    param_types,
-                    result_type,
-                });
+    let mut descs = HashMap::new();
+    loop {
+        while let Some(name) = pending.pop() {
+            if !visited.insert(name.clone()) {
                 continue;
             }
-            None if cx.sources.contains_key(name.as_str()) => cx.function(&name)?,
-            None => cx.generated(&name)?,
-        };
-        if exported(&name) {
-            if !function.boundary() {
-                return Err(format!("IR は関数 {} の境界の型に未対応", function.name).into());
+            let js = cx
+                .sources
+                .get(name.as_str())
+                .map(|s| s.f)
+                .filter(|f| f.js.is_some());
+            let mut function = match js {
+                Some(f) => {
+                    let (param_types, result_type) = cx.boundary(f, &mut descs);
+                    if param_types.iter().chain([&result_type]).any(|t| *t == ValueType::Value) {
+                        pending.extend(["__val_in".to_string(), "__val_out".to_string()]);
+                    }
+                    if param_types.contains(&ValueType::Int) || result_type == ValueType::Int { pending.push("__int_in".into()); }
+                    if param_types.contains(&ValueType::Number) || result_type == ValueType::Number {
+                        pending.push("__num_checked".into());
+                    }
+                    if exported(&name) {
+                        return Err("外部関数を直接公開できない".into());
+                    }
+                    // WASM の境界は int・number・String・bool・unit と、それらの Vec と構造体（BoundaryType）
+                    if !param_types
+                        .iter()
+                        .chain([&result_type])
+                        .all(|t| boundary(*t))
+                    {
+                        return Err(format!("IR は関数 {} の境界の型に未対応", f.name).into());
+                    }
+                    if param_types.iter().chain([&result_type]).any(|t| matches!(t, ValueType::Str)) {
+                        pending.extend(["__str_in".to_string(), "__str_out".to_string()]);
+                    }
+                    imports.push(Import {
+                        name: f.name.to_string(),
+                        param_types,
+                        result_type,
+                    });
+                    continue;
+                }
+                None if cx.sources.contains_key(name.as_str()) => cx.function(&name)?,
+                None => cx.generated(&name)?,
+            };
+            if exported(&name) {
+                if let Some(f) = cx.sources.get(name.as_str()).map(|s| s.f)
+                    && f.implicit == 0
+                {
+                    let (param_types, result_type) = cx.boundary(f, &mut descs);
+                    if param_types.iter().chain([&result_type]).any(|t| *t == ValueType::Value) {
+                        pending.extend(["__val_in".to_string(), "__val_out".to_string()]);
+                    }
+                    function.param_types = param_types;
+                    function.result_type = result_type;
+                }
+                if !function.boundary() {
+                    return Err(format!("IR は関数 {} の境界の型に未対応", function.name).into());
+                }
+                if function.param_types.iter().chain([&function.result_type]).any(|t| matches!(t, ValueType::Str))
+                {
+                    pending.extend(["__str_in".to_string(), "__str_out".to_string()]);
+                }
             }
-            if function.param_types.iter().chain([&function.result_type]).any(|t| matches!(t, ValueType::Str))
-            {
-                pending.extend(["__str_in".to_string(), "__str_out".to_string()]);
+            pending.extend(function.calls().into_iter().map(String::from));
+            for f in std::mem::take(&mut cx.made) {
+                pending.extend(f.calls().into_iter().map(String::from));
+                visited.insert(f.name.clone());
+                functions.push(f);
             }
+            functions.push(function);
         }
-        pending.extend(function.calls().into_iter().map(String::from));
-        for f in std::mem::take(&mut cx.made) {
-            pending.extend(f.calls().into_iter().map(String::from));
-            visited.insert(f.name.clone());
-            functions.push(f);
-        }
-        functions.push(function);
+        // 同期の main でも spawn した仕事が残る。main の入口でその仕事を動かす
+        let asyncs = ["__co_new", "__spawn", "__all", "__aperform"].iter().any(|n| visited.contains(*n));
+        let Some(main) = functions.iter_mut().find(|f| f.name == "main" && !f.finish_at_boundary) else { break };
+        if !asyncs { break; }
+        main.finish_at_boundary = true;
+        pending.push("__finish_entry".into());
     }
     // 宣言の順（ランタイム、利用者の関数）に並べ、出力を決まった形にする
     let order: HashMap<&str, usize> = runtime
@@ -494,13 +585,18 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>) -> R<Prog
         key(a).cmp(&key(b))
     });
     imports.sort_by_key(|f| order[f.name.as_str()]);
-    Ok(Program { functions, imports })
+    Ok(Program { functions, imports, boundary: descs })
 }
 
 impl<'a> Ctx<'a> {
     fn function(&mut self, name: &str) -> R<Function> {
         let src = &self.sources[name];
-        let (f, runtime) = (src.f, src.runtime);
+        self.lower_fn(src.f, src.runtime, name, false)
+    }
+
+    // 関数 f を name として変換する。variant は要求の多相な関数の async 版（js.rs の f$a）。
+    // async 関数（Async を要求する関数と async 版）はコルーチンにし、入口の関数を返す（Ctx::coroutine）
+    fn lower_fn(&mut self, f: &'a parser::Fn, runtime: bool, name: &str, variant: bool) -> R<Function> {
         if f.op.is_some() {
             return Err(format!("IR は要求の操作 {} に未対応", f.name).into());
         }
@@ -509,7 +605,10 @@ impl<'a> Ctx<'a> {
             vars: HashMap::new(),
             locals: 0,
             raw: runtime,
-            catch_depth: 0,
+            handles: Vec::new(),
+            loop_handle_depth: None,
+            muts: HashSet::new(),
+            variant,
         };
         for (n, _) in &f.params {
             let i = l.local();
@@ -519,14 +618,22 @@ impl<'a> Ctx<'a> {
         let locals = l.locals;
         let mut body = b.stmts;
         body.push(Stmt::Return(b.value));
-        Ok(Function {
-            name: f.name.to_string(),
+        let mut function = Function {
+            name: name.to_string(),
             params: f.params.len() as u32,
             param_types: f.params.iter().map(|(_, t)| value_type(t)).collect(),
             result_type: ret_type(f),
+            finish_at_boundary: !runtime && !variant && has_async(&f.effects),
             locals,
             body,
-        })
+        };
+        if !runtime && (variant || has_async(&f.effects)) {
+            return Ok(self.coroutine(function));
+        }
+        if !runtime {
+            self.shadow(&mut function);
+        }
+        Ok(function)
     }
 
     // 変換の中で名前だけを決めて呼ぶ関数を作る
@@ -536,6 +643,7 @@ impl<'a> Ctx<'a> {
             params,
             param_types: vec![],
             result_type: ValueType::Other,
+            finish_at_boundary: false,
             locals: params,
             body: vec![],
         };
@@ -587,6 +695,13 @@ impl<'a> Ctx<'a> {
             )));
             return Ok(f);
         }
+        // 要求の多相な関数の async 版（js.rs の f$a）。要求の変数を通した呼び出しを待つコルーチンにする
+        if let Some(base) = name.strip_suffix("$a")
+            && let Some(src) = self.sources.get(base).filter(|s| !s.runtime)
+        {
+            let f = src.f;
+            return self.lower_fn(f, false, name, true);
+        }
         // 名前の付いた関数を値として使う時の入口
         if let Some(target) = name.strip_prefix("__w_") {
             let g = self
@@ -603,6 +718,245 @@ impl<'a> Ctx<'a> {
         }
         Err(format!("IR に関数 {name} が無い").into())
     }
+
+    // 境界の関数の引数と戻り値の型。Vec と構造体は Value にし、形を descs に記録する
+    fn boundary(&self, f: &parser::Fn, descs: &mut HashMap<String, (Vec<BoundaryType>, BoundaryType)>) -> (Vec<ValueType>, ValueType) {
+        let ty = |t: Option<&Ast>| match t.map_or(Some(BoundaryType::Unit), |t| self.desc(t, &mut Vec::new())) {
+            Some(d) => (d.value_type(), Some(d)),
+            None => (t.map_or(ValueType::Unit, value_type), None),
+        };
+        let params: Vec<_> = f.params.iter().map(|(_, t)| ty(Some(t))).collect();
+        let result = ty(f.ret.as_ref());
+        if let (Some(ps), Some(r)) = (params.iter().map(|p| p.1.clone()).collect::<Option<Vec<_>>>(), result.1.clone()) {
+            descs.insert(f.name.to_string(), (ps, r));
+        }
+        (params.into_iter().map(|p| p.0).collect(), result.0)
+    }
+
+    // 境界で渡せる型の形。int・number・bool・String・unit と、それらの Vec と、型引数の無い構造体。
+    // 自分を含む構造体（seen にある型）や、Ref・関数の型を含むものは None
+    fn desc(&self, t: &Ast, seen: &mut Vec<Name>) -> Option<BoundaryType> {
+        Some(match t.peel() {
+            Ast::Var(n) if n == "int" => BoundaryType::Int,
+            Ast::Var(n) if n == "number" => BoundaryType::Number,
+            Ast::Var(n) if n == "bool" => BoundaryType::Bool,
+            Ast::Var(n) if n == "String" => BoundaryType::Str,
+            Ast::Var(n) if n == "unit" => BoundaryType::Unit,
+            Ast::Refine(base, _, _) => self.desc(base, seen)?,
+            Ast::Call(n, xs) if n == "Vec" && xs.len() == 1 => BoundaryType::Vec(Box::new(self.desc(&xs[0], seen)?)),
+            Ast::Var(n) => {
+                let d = self.datas.get(n.as_str())?;
+                let [c] = d.ctors.as_slice() else { return None };
+                if !d.params.is_empty() || c.name.structure_owner().is_none() || seen.contains(n) {
+                    return None;
+                }
+                let (k, _) = self.ctors.get(c.name.as_str())?;
+                seen.push(n.clone());
+                let fields = c.fields.iter().map(|(f, t)| Some((f.to_string(), self.desc(t, seen)?))).collect::<Option<Vec<_>>>();
+                seen.pop();
+                BoundaryType::Struct(*k, fields?)
+            }
+            _ => return None,
+        })
+    }
+
+    // GC が動かない呼び出し先。ランタイムの関数のうち利用者の関数を呼ばないものと、変換の中で作る関数
+    fn quiet(&self, n: &str) -> bool {
+        let runtime = self.sources.get(n).is_some_and(|s| s.runtime);
+        (runtime && !CALLBACKS.contains(&n)) || n.starts_with("__field_") || n.starts_with("__ctor_")
+    }
+
+    // 利用者の関数（ランタイム以外）に GC のシャドースタックを付ける（runtime.hb の先頭の説明）
+    fn shadow(&self, f: &mut Function) {
+        let mut s = Shadow { cx: self, next: f.locals, fp: 0, ret: 0, size: 0 };
+        let body = s.spill_stmts(std::mem::take(&mut f.body));
+        s.size = s.next;
+        s.fp = s.next;
+        s.ret = s.next + 1;
+        let mut out = vec![Stmt::Set(s.fp, call("__frame_push", vec![int(s.size as i64)]))];
+        for i in 0..f.params {
+            out.extend(setv(s.slot(i), Expr::Local(i)));
+        }
+        out.push(poll());
+        out.extend(s.frame_stmts(body));
+        f.body = out;
+        f.locals = s.next + 2;
+    }
+}
+
+// 利用者の関数を呼ぶランタイムの関数。中で GC が動きうる
+const CALLBACKS: &[&str] = &["__all", "__perform", "__spawn", "__task_then", "__task_wait", "__co_step"];
+
+// 前回の GC の後に確保したバイト数が上限を超えていれば GC を動かす。安全な位置（関数の入口とループの先頭）に置く
+fn poll() -> Stmt {
+    let st = |k: i64| prim(Prim::Load, vec![add(prim(Prim::Static, vec![]), int(k))]);
+    Stmt::Eval(Expr::If(
+        Box::new(prim(Prim::Gt, vec![st(96), st(104)])),
+        Box::new(Block { stmts: vec![Stmt::Eval(call("__gc", vec![]))], value: unit() }),
+        leaf(unit()),
+    ))
+}
+
+// シャドースタックを付ける変換。局所変数 0..size が区画に写す変数で、fp は区画の位置、ret は戻り値を置く変数
+struct Shadow<'c, 'a> {
+    cx: &'c Ctx<'a>,
+    next: u32,
+    fp: u32,
+    ret: u32,
+    size: u32,
+}
+
+impl Shadow<'_, '_> {
+    fn slot(&self, i: u32) -> Expr {
+        add(Expr::Local(self.fp), int(16 * i as i64))
+    }
+
+    fn may_gc(&self, e: &Expr) -> bool {
+        match e {
+            Expr::Call(n, args) => !self.cx.quiet(n) || args.iter().any(|a| self.may_gc(a)),
+            Expr::CallIndirect(..) => true,
+            Expr::Prim(_, args) => args.iter().any(|a| self.may_gc(a)),
+            Expr::If(c, t, e) => self.may_gc(c) || self.block_may_gc(t) || self.block_may_gc(e),
+            Expr::Block(b) | Expr::Catch(b) => self.block_may_gc(b),
+            Expr::Const(..) | Expr::Str(_) | Expr::Local(_) | Expr::Func(_) => false,
+        }
+    }
+
+    fn block_may_gc(&self, b: &Block) -> bool {
+        self.may_gc(&b.value)
+            || b.stmts.iter().any(|s| match s {
+                Stmt::Set(_, e) | Stmt::Eval(e) | Stmt::Return(e) => self.may_gc(e),
+                Stmt::While(..) => true,
+                Stmt::Break | Stmt::Continue | Stmt::Escape => false,
+            })
+    }
+
+    // 引数の評価の途中で GC が動くと、評価済みの引数は局所変数に無いので根にならない。
+    // 後の引数が GC を起こしうるなら、前の引数を局所変数に移す（評価の順は変えない）
+    fn spill_args(&mut self, mut args: Vec<Expr>) -> (Vec<Stmt>, Vec<Expr>) {
+        let mut pre = Vec::new();
+        for i in 0..args.len() {
+            let constant = matches!(args[i], Expr::Const(..) | Expr::Str(_) | Expr::Func(_));
+            if !constant && args[i + 1..].iter().any(|a| self.may_gc(a)) {
+                let t = self.next;
+                self.next += 1;
+                pre.push(Stmt::Set(t, std::mem::replace(&mut args[i], Expr::Local(t))));
+            }
+        }
+        (pre, args)
+    }
+
+    fn spill(&mut self, e: Expr) -> Expr {
+        let wrap = |pre: Vec<Stmt>, e: Expr| if pre.is_empty() { e } else { block(pre, e) };
+        match e {
+            Expr::Call(n, args) => {
+                let args = args.into_iter().map(|a| self.spill(a)).collect();
+                let (pre, args) = self.spill_args(args);
+                wrap(pre, Expr::Call(n, args))
+            }
+            Expr::Prim(p, args) => {
+                let args = args.into_iter().map(|a| self.spill(a)).collect();
+                let (pre, args) = self.spill_args(args);
+                wrap(pre, Expr::Prim(p, args))
+            }
+            Expr::CallIndirect(f, args) => {
+                let mut all = vec![self.spill(*f)];
+                all.extend(args.into_iter().map(|a| self.spill(a)));
+                let (pre, mut all) = self.spill_args(all);
+                let f = all.remove(0);
+                wrap(pre, Expr::CallIndirect(Box::new(f), all))
+            }
+            Expr::If(c, t, e) => Expr::If(Box::new(self.spill(*c)), Box::new(self.spill_block(*t)), Box::new(self.spill_block(*e))),
+            Expr::Block(b) => Expr::Block(Box::new(self.spill_block(*b))),
+            Expr::Catch(b) => Expr::Catch(Box::new(self.spill_block(*b))),
+            e => e,
+        }
+    }
+
+    fn spill_block(&mut self, b: Block) -> Block {
+        Block { stmts: self.spill_stmts(b.stmts), value: self.spill(b.value) }
+    }
+
+    fn spill_stmts(&mut self, ss: Vec<Stmt>) -> Vec<Stmt> {
+        ss.into_iter()
+            .map(|s| match s {
+                Stmt::Set(i, e) => Stmt::Set(i, self.spill(e)),
+                Stmt::Eval(e) => Stmt::Eval(self.spill(e)),
+                Stmt::Return(e) => Stmt::Return(self.spill(e)),
+                Stmt::While(c, body) => Stmt::While(self.spill(c), self.spill_stmts(body)),
+                s => s,
+            })
+            .collect()
+    }
+
+    // 局所変数への代入を区画にも書き、ループの先頭で GC を確かめ、戻る前に区画を外す
+    fn frame(&self, e: Expr) -> Expr {
+        match e {
+            Expr::Call(n, args) => Expr::Call(n, args.into_iter().map(|a| self.frame(a)).collect()),
+            Expr::Prim(p, args) => Expr::Prim(p, args.into_iter().map(|a| self.frame(a)).collect()),
+            Expr::CallIndirect(f, args) => Expr::CallIndirect(Box::new(self.frame(*f)), args.into_iter().map(|a| self.frame(a)).collect()),
+            Expr::If(c, t, e) => Expr::If(Box::new(self.frame(*c)), Box::new(self.frame_block(*t)), Box::new(self.frame_block(*e))),
+            Expr::Block(b) => Expr::Block(Box::new(self.frame_block(*b))),
+            Expr::Catch(b) => Expr::Catch(Box::new(self.frame_block(*b))),
+            e => e,
+        }
+    }
+
+    fn frame_block(&self, b: Block) -> Block {
+        Block { stmts: self.frame_stmts(b.stmts), value: self.frame(b.value) }
+    }
+
+    fn frame_stmts(&self, ss: Vec<Stmt>) -> Vec<Stmt> {
+        let mut out = Vec::new();
+        for s in ss {
+            match s {
+                Stmt::Set(i, e) => {
+                    out.push(Stmt::Set(i, self.frame(e)));
+                    if i < self.size {
+                        out.extend(setv(self.slot(i), Expr::Local(i)));
+                    }
+                }
+                Stmt::Eval(e) => out.push(Stmt::Eval(self.frame(e))),
+                Stmt::While(c, body) => {
+                    let mut stmts = vec![poll()];
+                    stmts.extend(self.frame_stmts(body));
+                    out.push(Stmt::While(self.frame(c), stmts));
+                }
+                Stmt::Return(e) => {
+                    out.push(Stmt::Set(self.ret, self.frame(e)));
+                    out.push(Stmt::Eval(prim(Prim::Store, vec![add(prim(Prim::Static, vec![]), int(64)), Expr::Local(self.fp)])));
+                    out.push(Stmt::Return(Expr::Local(self.ret)));
+                }
+                s => out.push(s),
+            }
+        }
+        out
+    }
+}
+
+// 式に付いた識別子（いちばん内側の Expr::Id）。型検査は待つ呼び出しをこの識別子で記録する
+fn node_id(mut e: &Ast) -> Option<parser::NodeId> {
+    let mut id = None;
+    loop {
+        match e {
+            Ast::At(_, x) | Ast::InModule(_, x) => e = x,
+            Ast::Id(i, x) => {
+                id = Some(*i);
+                e = x;
+            }
+            _ => return id,
+        }
+    }
+}
+
+// Async を要求する関数か（js.rs の is_async）
+fn has_async(effs: &[Ast]) -> bool {
+    effs.iter().any(|e| matches!(e.peel(), Ast::Var(n) if n == "Async"))
+}
+
+// 要求の変数（<E: Effect>）を持つ関数（js.rs の is_poly）
+fn is_poly(f: &parser::Fn) -> bool {
+    f.params[..f.implicit].iter().any(|(_, t)| matches!(t.peel(), Ast::Var(k) if k == "Effect"))
 }
 
 fn if_return(cond: Expr, v: Expr) -> Stmt {
@@ -622,8 +976,13 @@ struct Lower<'c, 'a> {
     locals: u32,
     // ランタイムの関数。演算子は中身の演算になる
     raw: bool,
-    // この関数の中で囲んでいる handle の本体の数。中断の検査は、あれば本体を抜け、無ければ関数から戻る
-    catch_depth: u32,
+    // 囲んでいる with の番号を持つ局所変数と、ループ本体に入る時のその数
+    handles: Vec<u32>,
+    loop_handle_depth: Option<usize>,
+    // mut で宣言した変数。値を読んで他へ渡す時は __share で Vec の所有の印を消す
+    muts: HashSet<Name>,
+    // 要求の多相な関数の async 版（js.rs の variant）を変換している
+    variant: bool,
 }
 
 // 値を捨てる。unit の塊は中の文を並べ直す
@@ -642,7 +1001,7 @@ impl Lower<'_, '_> {
             return c;
         }
         let t = self.local();
-        let exit = if self.catch_depth > 0 {
+        let exit = if !self.handles.is_empty() {
             Stmt::Escape
         } else {
             Stmt::Return(unit())
@@ -679,8 +1038,11 @@ impl Lower<'_, '_> {
         let mut stmts = Vec::new();
         for s in &b.stmts {
             match s {
-                AstStmt::Let { name, init, .. } => {
+                AstStmt::Let { name, init, mutable, .. } => {
                     let e = self.expr(init)?;
+                    if *mutable && !self.raw {
+                        self.muts.insert(name.clone());
+                    }
                     let i = self.local();
                     stmts.push(Stmt::Set(i, e));
                     self.vars.insert(name.clone(), i);
@@ -696,8 +1058,11 @@ impl Lower<'_, '_> {
         Ok(Block { stmts, value })
     }
 
-    fn body(&mut self, b: &parser::Block) -> R<Vec<Stmt>> {
-        let b = self.block(b)?;
+    fn loop_body(&mut self, b: &parser::Block) -> R<Vec<Stmt>> {
+        let saved = self.loop_handle_depth.replace(self.handles.len());
+        let b = self.block(b);
+        self.loop_handle_depth = saved;
+        let b = b?;
         let mut stmts = b.stmts;
         eval(&mut stmts, b.value);
         Ok(stmts)
@@ -711,30 +1076,39 @@ impl Lower<'_, '_> {
                     .vars
                     .get(n)
                     .ok_or_else(|| format!("IR は変数 {n} に未対応"))?;
-                let v = self.expr(v)?;
+                // x = push(x, e) と x = set_at(x, i, e) は、x が所有する Vec ならその場で書き換える（js.rs の $opush と同じ）
+                let own = self.muts.contains(n);
+                let v = match (v.self_push(n), v.self_set(n)) {
+                    (Some(e), _) if own && !self.cx.sources.contains_key("push") => {
+                        call("__push_own", vec![Expr::Local(i), self.expr(e)?])
+                    }
+                    (_, Some((k, e))) if own && !self.cx.sources.contains_key("set_at") => {
+                        let k = self.expr(k)?;
+                        call("__set_at_own", vec![Expr::Local(i), k, self.expr(e)?])
+                    }
+                    _ => self.expr(v)?,
+                };
                 out.push(Stmt::Set(i, v));
             }
             Ast::While(c, body) => {
                 let c = self.expr(c)?;
-                let body = self.body(body)?;
+                let body = self.loop_body(body)?;
                 out.push(Stmt::While(c, body));
             }
             Ast::For(x, from, to, body) => {
                 let saved = self.vars.clone();
                 let i = self.local();
                 let end = self.local();
+                let x_local = self.local();
                 let (start, limit, item) = match to {
                     Some(to) => {
                         let from = self.expr(from)?;
                         let to = self.expr(to)?;
-                        self.vars.insert(x.clone(), i);
-                        (from, to, None)
+                        (from, to, Expr::Local(i))
                     }
                     None => {
                         let v = self.expr(from)?;
                         let v = self.temp(v, out);
-                        let x_local = self.local();
-                        self.vars.insert(x.clone(), x_local);
                         let at = add(
                             add(v.clone(), int(8)),
                             prim(Prim::Mul, vec![Expr::Local(i), int(16)]),
@@ -742,18 +1116,30 @@ impl Lower<'_, '_> {
                         (
                             int(0),
                             prim(Prim::Load, vec![v]),
-                            Some(Stmt::Set(x_local, getv(at))),
+                            getv(at),
                         )
                     }
                 };
                 out.push(Stmt::Set(i, start));
                 out.push(Stmt::Set(end, limit));
-                let mut stmts: Vec<Stmt> = item.into_iter().collect();
-                stmts.extend(self.body(body)?);
+                // 今の要素を束縛した後で添字を進める。continue は条件の評価に戻る
+                let mut stmts = vec![
+                    Stmt::Set(x_local, item),
+                    Stmt::Set(i, add(Expr::Local(i), int(1))),
+                ];
+                self.vars.insert(x.clone(), x_local);
+                stmts.extend(self.loop_body(body)?);
                 self.vars = saved;
-                stmts.push(Stmt::Set(i, add(Expr::Local(i), int(1))));
                 let c = prim(Prim::Lt, vec![Expr::Local(i), Expr::Local(end)]);
                 out.push(Stmt::While(c, stmts));
+            }
+            Ast::Break | Ast::Continue => {
+                let depth = self.loop_handle_depth.expect("ループの本体の中だけ");
+                // 行き先との間にある with を内側から外す
+                for &h in self.handles[depth..].iter().rev() {
+                    out.push(Stmt::Eval(call("__handle_end", vec![Expr::Local(h), unit()])));
+                }
+                out.push(if matches!(e.peel(), Ast::Break) { Stmt::Break } else { Stmt::Continue });
             }
             Ast::Return(v) => {
                 let v = match v {
@@ -770,31 +1156,70 @@ impl Lower<'_, '_> {
         Ok(())
     }
 
+    // JavaScript で待つ呼び出しか、async にする無名関数の本体か（js.rs の Gen::waits）
+    fn waits(&self, id: Option<parser::NodeId>) -> bool {
+        id.is_some_and(|id| self.cx.info.awaits.contains(&id) || (self.variant && self.cx.info.var_awaits.contains(&id)))
+    }
+
+    // await。js.rs の $k($h, await e) と同じく、待つ前の with の並びを覚え、再開した後で戻す。
+    // #await はコルーチンの変換（Ctx::coroutine）が中断と再開に書き換える
+    fn await_(&mut self, e: Expr) -> Expr {
+        let (h, t) = (self.local(), self.local());
+        let handlers = add(prim(Prim::Static, vec![]), int(48));
+        block(
+            vec![
+                Stmt::Set(h, mkv(HANDLERS, prim(Prim::Load, vec![handlers.clone()]))),
+                Stmt::Set(t, call("#await", vec![e])),
+                Stmt::Eval(prim(Prim::Store, vec![handlers, prim(Prim::Payload, vec![Expr::Local(h)])])),
+            ],
+            Expr::Local(t),
+        )
+    }
+
+    // 局所変数 n（番号 i）の値。mut の変数は他へ渡すので、Vec の所有の印を消す
+    fn shared(&self, n: &Name, i: u32) -> Expr {
+        if !self.muts.contains(n) {
+            return Expr::Local(i);
+        }
+        let vec = prim(Prim::Eq, vec![prim(Prim::Tag, vec![Expr::Local(i)]), int(ARR)]);
+        Expr::If(Box::new(vec), leaf(call("__share", vec![Expr::Local(i)])), leaf(Expr::Local(i)))
+    }
+
+    // 読むだけで他へ渡さない所（len と添字）。変数なら所有の印を残す
+    fn look(&mut self, e: &Ast) -> R<Expr> {
+        match e.peel() {
+            Ast::Var(n) if self.vars.contains_key(n) => Ok(Expr::Local(self.vars[n])),
+            _ => self.expr(e),
+        }
+    }
+
     fn args(&mut self, args: &[Ast]) -> R<Vec<Expr>> {
         args.iter().map(|a| self.expr(a)).collect()
     }
 
-    // 値を並べて確保した領域に書き、型の番号を付ける
+    // 値を並べて確保した領域に書き、型の番号を付ける。値を先にすべて局所変数に置いてから確保する。
+    // 確保した位置は型の番号の無い整数なので、値の評価の途中で GC が動くと回収されてしまう
     fn object(&mut self, tag: i64, new: Expr, header: i64, items: Vec<Expr>) -> Expr {
         let mut stmts = Vec::new();
+        let items: Vec<Expr> = items.into_iter().map(|item| self.temp(item, &mut stmts)).collect();
         let t = self.local();
         stmts.push(Stmt::Set(t, new));
         for (k, item) in items.into_iter().enumerate() {
-            let item = self.temp(item, &mut stmts);
             stmts.extend(setv(add(Expr::Local(t), int(header + 16 * k as i64)), item));
         }
         block(stmts, mkv(tag, Expr::Local(t)))
     }
 
     fn expr(&mut self, e: &Ast) -> R<Expr> {
+        let id = node_id(e);
         Ok(match e.peel() {
             Ast::Int(n) => int(*n),
             Ast::Num(n) => Expr::Const(NUM, n.to_bits() as i64),
             Ast::Bool(b) => Expr::Const(BOOL, *b as i64),
             Ast::Str(s) => Expr::Str(s.clone()),
             Ast::Var(n) => {
-                if let Some(i) = self.vars.get(n) {
-                    return Ok(Expr::Local(*i));
+                if let Some(&i) = self.vars.get(n) {
+                    return Ok(self.shared(n, i));
                 }
                 if let Some((i, _)) = self.cx.ctors.get(n.as_str()) {
                     return Ok(mkv(DATA, call("__data_new", vec![int(*i), int(0)])));
@@ -813,11 +1238,12 @@ impl Lower<'_, '_> {
                 let Ast::Num(n) = a.peel() else { unreachable!() };
                 Expr::Const(NUM, (-n).to_bits() as i64)
             }
-            Ast::Unary("-", a) if !self.raw && numeric(a) => call("__neg", vec![self.expr(a)?]),
+            Ast::Unary("-", a) if !self.raw && numeric(a) => call("__neg", vec![self.look(a)?]),
+            Ast::Unary("-", a) if !self.raw => call("__ineg", vec![self.look(a)?]),
             Ast::Unary("-", a) => prim(Prim::Sub, vec![int(0), self.expr(a)?]),
-            Ast::Unary(_, a) => prim(Prim::Not, vec![self.expr(a)?]),
+            Ast::Unary(_, a) => prim(Prim::Not, vec![self.look(a)?]),
             Ast::Binary(op @ ("&&" | "||"), a, b) => {
-                let (a, b) = (self.expr(a)?, self.expr(b)?);
+                let (a, b) = (self.look(a)?, self.look(b)?);
                 let (t, f) = if *op == "&&" {
                     (leaf(b), leaf(Expr::Const(BOOL, 0)))
                 } else {
@@ -826,14 +1252,18 @@ impl Lower<'_, '_> {
                 Expr::If(Box::new(a), t, f)
             }
             Ast::Binary(op, a, b) => {
-                let number = !self.raw && numeric(a);
-                let (a, b) = (self.expr(a)?, self.expr(b)?);
+                let number = !self.raw && (numeric(a) || numeric(b));
+                // 演算子は値を他へ渡さないので、変数の所有の印を残す
+                let (a, b) = (self.look(a)?, self.look(b)?);
                 if *op == "**" {
                     return Ok(call(if number { "__value_pow" } else { "__pow" }, vec![a, b]));
                 }
                 if number && matches!(*op, "-" | "*" | "/" | "%" | "<" | "<=" | ">" | ">=") {
                     let name = match *op { "-" => "__sub", "*" => "__mul", "/" => "__div", "%" => "__rem", "<" => "__lt", "<=" => "__le", ">" => "__gt", _ => "__ge" };
                     return Ok(call(name, vec![a, b]));
+                }
+                if !self.raw && matches!(*op, "-" | "*") {
+                    return Ok(call(if *op == "-" { "__isub" } else { "__imul" }, vec![a, b]));
                 }
                 let p = match *op {
                     "+" => Prim::Add,
@@ -852,42 +1282,21 @@ impl Lower<'_, '_> {
                 if self.raw || !matches!(p, Prim::Add | Prim::Eq | Prim::Ne) {
                     return Ok(prim(p, vec![a, b]));
                 }
-                // 整数と真偽値はその場で計算し、ほかはランタイムを呼ぶ
-                let mut stmts = Vec::new();
-                let a = self.temp(a, &mut stmts);
-                let b = self.temp(b, &mut stmts);
-                let tag = prim(Prim::Tag, vec![a.clone()]);
-                let (cond, fast, slow) = if p == Prim::Add {
-                    (
-                        prim(Prim::Eq, vec![tag, int(INT)]),
-                        add(a.clone(), b.clone()),
-                        call("__add", vec![a, b]),
-                    )
-                } else {
-                    (
-                        prim(Prim::Le, vec![tag, int(BOOL)]),
-                        prim(Prim::Eq, vec![a.clone(), b.clone()]),
-                        call("__eq", vec![a, b]),
-                    )
-                };
-                let v = Expr::If(Box::new(cond), leaf(fast), leaf(slow));
-                let v = if p == Prim::Ne {
-                    prim(Prim::Not, vec![v])
-                } else {
-                    v
-                };
-                block(stmts, v)
+                let v = call(if p == Prim::Add { "__add" } else { "__eq" }, vec![a, b]);
+                if p == Prim::Ne { prim(Prim::Not, vec![v]) } else { v }
             }
-            Ast::Call(n, args) => self.call(n, args)?,
+            Ast::Call(n, args) => self.call(n, args, id)?,
             Ast::Apply(f, args) => {
                 let f = self.expr(f)?;
                 let args = self.args(args)?;
-                self.checked(Expr::CallIndirect(Box::new(f), args))
+                let c = Expr::CallIndirect(Box::new(f), args);
+                let c = if self.waits(id) { self.await_(c) } else { c };
+                self.checked(c)
             }
             Ast::Field(x, f) => call(&format!("__field_{f}"), vec![self.expr(x)?]),
             Ast::Index(v, i) => {
                 let mut stmts = Vec::new();
-                let (v, i) = (self.expr(v)?, self.expr(i)?);
+                let (v, i) = (self.look(v)?, self.expr(i)?);
                 let at = add(add(v, int(8)), prim(Prim::Mul, vec![i, int(16)]));
                 let at = self.temp(at, &mut stmts);
                 block(stmts, getv(at))
@@ -952,7 +1361,7 @@ impl Lower<'_, '_> {
             }
             Ast::Pi(..) => mkv(TY, Expr::Str("fn".into())),
             Ast::Refine(..) => mkv(TY, Expr::Str("refine".into())),
-            Ast::Assign(..) | Ast::While(..) | Ast::For(..) | Ast::Return(_) => {
+            Ast::Assign(..) | Ast::While(..) | Ast::For(..) | Ast::Break | Ast::Continue | Ast::Return(_) => {
                 let mut stmts = Vec::new();
                 self.effect(e, &mut stmts)?;
                 block(stmts, unit())
@@ -968,13 +1377,20 @@ impl Lower<'_, '_> {
         })
     }
 
-    fn call(&mut self, n: &Name, args: &[Ast]) -> R<Expr> {
+    fn call(&mut self, n: &Name, args: &[Ast], id: Option<parser::NodeId>) -> R<Expr> {
         if let Some(i) = self.vars.get(n) {
             let i = *i;
             let args = self.args(args)?;
-            return Ok(self.checked(Expr::CallIndirect(Box::new(Expr::Local(i)), args)));
+            let c = Expr::CallIndirect(Box::new(Expr::Local(i)), args);
+            let c = if self.waits(id) { self.await_(c) } else { c };
+            return Ok(self.checked(c));
         }
-        let mut args = self.args(args)?;
+        // len は読むだけなので、変数の所有の印を残す
+        let mut args = if n == "len" && !self.cx.sources.contains_key("len") {
+            args.iter().map(|a| self.look(a)).collect::<R<_>>()?
+        } else {
+            self.args(args)?
+        };
         if n == "#num" { return Ok(call("__num", args)); }
         if let Some(p) = intrinsic(n) {
             return Ok(match n.as_str() {
@@ -1008,6 +1424,11 @@ impl Lower<'_, '_> {
                 let items = args.split_off(k);
                 let new = call("__arr_new", vec![int(items.len() as i64)]);
                 let items = self.object(ARR, new, 8, items);
+                // メソッドの宣言に with Async があれば、腕の Promise を待つ（js.rs の $aop）
+                if has_async(&f.effects) {
+                    let c = self.await_(call("__aperform", vec![Expr::Str(n.to_string()), items]));
+                    return Ok(self.checked(c));
+                }
                 return Ok(self.checked(call("__perform", vec![Expr::Str(n.to_string()), items])));
             }
             // 推論したジェネリック引数は実行時には要らないので unit で埋める
@@ -1016,10 +1437,20 @@ impl Lower<'_, '_> {
                 full.append(&mut args);
                 args = full;
             }
-            // 効果の無い関数は中断しない
-            let effects = !f.effects.is_empty();
+            // async 関数は呼んで待つ。要求の多相な関数を Async で使う所は、async 版を呼んで待つ（js.rs と同じ）
+            let poly = !src.runtime
+                && id.is_some_and(|id| self.cx.info.async_inst.contains(&id) || (self.variant && is_poly(f) && self.cx.info.var_awaits.contains(&id)));
+            if poly {
+                let c = self.await_(call(&format!("{n}$a"), args));
+                return Ok(self.checked(c));
+            }
             let c = call(n, args);
-            return Ok(if effects { self.checked(c) } else { c });
+            if !src.runtime && has_async(&f.effects) {
+                let c = self.await_(c);
+                return Ok(self.checked(c));
+            }
+            // ponytail: 非同期処理があるプログラムでは、要求の無い関数の呼び出しも検査する。負荷があれば、中断しうる関数を呼び出しの関係から絞る
+            return Ok(if self.cx.panic_checks || !f.effects.is_empty() { self.checked(c) } else { c });
         }
         if matches!(n.as_str(), "Vec" | "Type" | "Ref" | "Async") || self.cx.types.contains(n.as_str()) {
             return Ok(mkv(TY, Expr::Str(n.to_string())));
@@ -1032,7 +1463,15 @@ impl Lower<'_, '_> {
                 args.push(unit());
             }
             let c = Expr::Call(rt, args);
-            return Ok(if n == "all" { self.checked(c) } else { c });
+            // all は Promise.all を待つ async 関数（js.rs の $all）
+            return Ok(match n.as_str() {
+                "all" if !self.raw => {
+                    let c = self.await_(c);
+                    self.checked(c)
+                }
+                "panic" | "task_wait" if self.cx.panic_checks => self.checked(c),
+                _ => c,
+            });
         }
         // 変換の中で作る関数（__ctor_name など）。無ければ作る時に誤りにする
         if self.raw && n.starts_with("__") {
@@ -1041,10 +1480,20 @@ impl Lower<'_, '_> {
         Err(format!("IR は関数 {n} の呼び出しに未対応").into())
     }
 
-    // 無名関数。見えている局所変数をすべて写し取り、別の関数にする
+    // 無名関数。本体が使う局所変数（exit の行き先を含む）を写し取り、別の関数にする
     // unpack は handle の腕の束縛。腕は引数の Vec を 1 つ受け取り、そこから取り出す
     fn lambda(&mut self, params: &[Name], unpack: &[Name], body: &parser::Block) -> R<Expr> {
-        let mut caps: Vec<(Name, u32)> = self.vars.iter().map(|(n, i)| (n.clone(), *i)).collect();
+        let mut used = HashSet::new();
+        crate::typeck::walk(&Ast::Block(body.clone()), &mut |e| match e {
+            Ast::Var(n) | Ast::Call(n, _) | Ast::Assign(n, _) => {
+                used.insert(n.clone());
+            }
+            Ast::Exit(Some(t), _) => {
+                used.insert(exit_name(*t));
+            }
+            _ => {}
+        });
+        let mut caps: Vec<(Name, u32)> = self.vars.iter().filter(|(n, _)| used.contains(*n)).map(|(n, i)| (n.clone(), *i)).collect();
         caps.sort();
         self.cx.lambdas += 1;
         let name = format!("__lam{}", self.cx.lambdas);
@@ -1053,7 +1502,10 @@ impl Lower<'_, '_> {
             vars: HashMap::new(),
             locals: 1,
             raw: self.raw,
-            catch_depth: 0,
+            handles: Vec::new(),
+            loop_handle_depth: None,
+            muts: HashSet::new(),
+            variant: self.variant,
         };
         let mut stmts = Vec::new();
         // 引数は 1 番から並べる。名前は写し取った変数より後に入れて、外の同じ名前を隠す
@@ -1083,16 +1535,26 @@ impl Lower<'_, '_> {
         stmts.extend(b.stmts);
         stmts.push(Stmt::Return(b.value));
         let locals = l.locals;
-        self.cx.made.push(Function {
+        let mut function = Function {
             name: name.clone(),
             params: 1 + params.len() as u32,
             param_types: vec![],
             result_type: ValueType::Other,
+            finish_at_boundary: false,
             locals,
             body: stmts,
-        });
+        };
+        if !self.raw && self.waits(Some(body.id)) {
+            let entry = self.cx.coroutine(function);
+            self.cx.made.push(entry);
+        } else {
+            if !self.raw {
+                self.cx.shadow(&mut function);
+            }
+            self.cx.made.push(function);
+        }
         let new = call("__fn_new", vec![Expr::Func(name), int(caps.len() as i64)]);
-        let items = caps.into_iter().map(|(_, i)| Expr::Local(i)).collect();
+        let items = caps.into_iter().map(|(n, i)| self.shared(&n, i)).collect();
         Ok(self.object(FN, new, 16, items))
     }
 
@@ -1105,9 +1567,10 @@ impl Lower<'_, '_> {
         let mut fns = Vec::new();
         for a in arms {
             ops.push(Expr::Str(a.ctor.to_string()));
-            let b = parser::Block { id: Default::default(),
-                stmts: vec![],
-                tail: Some(Box::new(a.body.clone())),
+            // 本体のブロックの識別子は残す（async な腕かを型検査が記録している）
+            let b = match &a.body {
+                Ast::Block(b) => b.clone(),
+                body => parser::Block { id: Default::default(), stmts: vec![], tail: Some(Box::new(body.clone())) },
             };
             fns.push(self.lambda(&[Name::from("#args")], &a.binds, &b)?);
         }
@@ -1116,9 +1579,9 @@ impl Lower<'_, '_> {
         let ops = self.object(ARR, call("__arr_new", vec![n.clone()]), 8, ops);
         let fns = self.object(ARR, call("__arr_new", vec![n]), 8, fns);
         stmts.push(Stmt::Eval(call("__handle_push", vec![Expr::Local(h), ops, fns])));
-        self.catch_depth += 1;
+        self.handles.push(h);
         let v = self.expr(body);
-        self.catch_depth -= 1;
+        self.handles.pop();
         let r = self.local();
         stmts.push(Stmt::Set(r, Expr::Catch(leaf(v?))));
         let end = call("__handle_end", vec![Expr::Local(h), Expr::Local(r)]);
@@ -1189,6 +1652,8 @@ fn stmts(f: &mut fmt::Formatter<'_>, ss: &[Stmt], depth: usize) -> fmt::Result {
             Stmt::Set(i, e) => writeln!(f, "{pad}%{i} = {e}")?,
             Stmt::Eval(e) => writeln!(f, "{pad}{e}")?,
             Stmt::Return(e) => writeln!(f, "{pad}return {e}")?,
+            Stmt::Break => writeln!(f, "{pad}break")?,
+            Stmt::Continue => writeln!(f, "{pad}continue")?,
             Stmt::Escape => writeln!(f, "{pad}escape")?,
             Stmt::While(c, body) => {
                 writeln!(f, "{pad}while {c} {{")?;
@@ -1247,7 +1712,8 @@ mod tests {
         let ir = crate::to_ir(src).unwrap();
         assert_eq!(
             ir,
-            "fn add(%0, %1) {\n  return (Sub %0 %1)\n}\nfn main() {\n  %0 = (call add 1 2)\n  %1 = (Mul %0 3)\n  (Div %1 4)\n  return ()\n}\n"
+            // 局所変数は入口で確保したシャドースタックの区画（%2）にも書き、戻る前に区画を外す
+            "fn add(%0, %1) {\n  %2 = (call __frame_push 2)\n  (Store (Add %2 0) (Tag %0))\n  (Store (Add (Add %2 0) 8) (Payload %0))\n  (Store (Add %2 16) (Tag %1))\n  (Store (Add (Add %2 16) 8) (Payload %1))\n  (if (Gt (Load (Add (Static) 96)) (Load (Add (Static) 104))) {\n    (call __gc)\n    () } ())\n  %3 = (call __isub %0 %1)\n  (Store (Add (Static) 64) %2)\n  return %3\n}\nfn main() {\n  %2 = (call __frame_push 2)\n  (if (Gt (Load (Add (Static) 96)) (Load (Add (Static) 104))) {\n    (call __gc)\n    () } ())\n  %0 = (call add 1 2)\n  (Store (Add %2 0) (Tag %0))\n  (Store (Add (Add %2 0) 8) (Payload %0))\n  %1 = (call __imul %0 3)\n  (Store (Add %2 16) (Tag %1))\n  (Store (Add (Add %2 16) 8) (Payload %1))\n  (Div %1 4)\n  %3 = ()\n  (Store (Add (Static) 64) %2)\n  return %3\n}\n"
         );
     }
 
@@ -1262,7 +1728,7 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_and_invalid_programs() {
-        let src = "extern 'browser' {\n    fn show(xs: Vec<int>)\n}\nfn main() { show([1]) }";
+        let src = "extern 'browser' {\n    fn show(r: Ref<int>)\n}\nfn main() { show(new_ref(1)) }";
         assert!(crate::to_ir(src).unwrap_err().contains("未対応"));
         assert!(crate::to_ir("fn main() { let x = 1 + true }").is_err());
     }

@@ -5,12 +5,12 @@ use './js/greet.js'
 use std -> *
 
 // Promise を返す関数は Async を要求する。呼ぶと Async<T> の値になり、.await で待つ。待つ関数にも with Async を書く
-fn twice_later(x: int) -> int with Async {
+fn twice_later(x: number) -> number with Async {
     util.later(x).await + util.later(x).await
 }
 
 // 関数型の要求にも Async を書ける。引数の関数は、Promise を返す関数でも普通の関数でもよい
-fn run_later(f: (int) -> int with Async, x: int) -> int with Async {
+fn run_later(f: (number) -> number with Async, x: number) -> number with Async {
     f(x).await + 1
 }
 

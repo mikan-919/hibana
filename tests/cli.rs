@@ -15,7 +15,7 @@ fn removed_project_commands_are_rejected() {
 }
 
 #[test]
-fn tests_require_explicit_files_and_named_imports_require_builtins() {
+fn tests_require_explicit_files_and_missing_imports_report_the_path() {
     let result = Command::new(env!("CARGO_BIN_EXE_hibana"))
         .arg("test")
         .output()
@@ -25,7 +25,8 @@ fn tests_require_explicit_files_and_named_imports_require_builtins() {
     let error = hibana::pipeline::load("use missing_library\nfn main() {}", std::path::Path::new(".")).unwrap_err();
     assert!(error
         .to_string()
-        .contains("ライブラリ missing_library が無い"));
+        .contains("ライブラリ missing_library を読み込めない"));
+    assert!(error.to_string().contains("missing_library.hb"));
 }
 
 #[test]

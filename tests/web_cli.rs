@@ -21,7 +21,7 @@ fn web_api_emits_pair_and_runs_generated_module() {
 import { readFile } from 'node:fs/promises';
 import { instantiate } from './artifacts/hello.web.mjs';
 const api = await instantiate(await readFile(new URL('./artifacts/hello.web.wasm', import.meta.url)));
-if (api.echo('日本語🌸') !== '日本語🌸' || api.answer(41) !== 42n) throw Error('結果が違う');
+if (api.echo('日本語🌸') !== '日本語🌸' || api.answer(41) !== 42) throw Error('結果が違う');
 "#).unwrap();
     let result = Command::new("node").arg(script).output().unwrap();
     assert!(
