@@ -103,6 +103,40 @@ fn reported<'a>(success: bool, stdout: &'a str, report: &'a str) -> Expected<'a>
 }
 
 #[test]
+fn closure_assignments() {
+    let source = r#"
+fn main() {
+    let mut n = 0
+    let mut values = [0]
+    let mut shared = new_ref(0)
+    let original = shared
+    let next = fn() {
+        n = n + 1
+        values = push(values, n)
+        write(shared, read(shared) + 1)
+        put(n)
+        put(values)
+        put(read(shared))
+    }
+    n = 10
+    values = push(values, n)
+    shared = new_ref(10)
+    next()
+    next()
+    put(n)
+    put(values)
+    put(read(shared))
+    put(read(original))
+}
+"#;
+    check_backends(
+        "closure-assignments",
+        source,
+        success("1\n[0, 1]\n1\n1\n[0, 1]\n2\n10\n[0, 10]\n10\n2\n"),
+    );
+}
+
+#[test]
 fn fractional_exponent() {
     for (name, expression) in [("literal", "2.0 ** 0.5"), ("computed", "2 ** (1.0 / 2)")] {
         check_backends(
