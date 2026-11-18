@@ -306,6 +306,7 @@ impl Resolver<'_> {
                 self.expr(x);
                 self.module = outer;
             }
+            Expr::Try(x) => self.expr(x),
             Expr::Id(_, x)
             | Expr::Unary(_, x)
             | Expr::Field(x, _)

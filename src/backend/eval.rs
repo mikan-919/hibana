@@ -520,7 +520,7 @@ impl Interp<'_> {
             Expr::Num(n) => Value::Num(*n),
             Expr::Bool(b) => Value::Bool(*b),
             Expr::Str(s) => Value::Str(s.as_str().into()),
-            Expr::Method(..) | Expr::Macro(..) | Expr::Await(_) => unreachable!("型検査で弾く・書き換える"),
+            Expr::Method(..) | Expr::Macro(..) | Expr::Await(_) | Expr::Try(_) => unreachable!("型検査で弾く・書き換える"),
             // 細分化型は実行時には名前だけを持つ型
             Expr::Refine(..) => Value::Ty("refine".into()),
             Expr::Array(items) => {

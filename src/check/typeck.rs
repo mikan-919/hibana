@@ -441,7 +441,7 @@ pub(crate) fn walk(e: &Expr, f: &mut dyn FnMut(&Expr)) {
         }
     };
     match e {
-        Expr::At(_, x) | Expr::Id(_, x) | Expr::InModule(_, x)
+        Expr::At(_, x) | Expr::Id(_, x) | Expr::InModule(_, x) | Expr::Try(x)
         | Expr::Await(x)
         | Expr::Unary(_, x)
         | Expr::Field(x, _)
@@ -1357,6 +1357,7 @@ impl Ck {
             Expr::Id(id, inner) => return self.expr_inner(inner, *id),
             Expr::InModule(..) => return self.expr(e),
             Expr::Binary(..) => return self.binary(e),
+            Expr::Try(_) => return self.try_(e),
             _ => {}
         }
         if matches!(e, Expr::Method(..)) {
@@ -1370,7 +1371,7 @@ impl Ck {
         let int = prim("int");
         let boolean = prim("bool");
         Ok(match &mut *e {
-            Expr::At(..) | Expr::Id(..) | Expr::InModule(..) => unreachable!("先頭で外している"),
+            Expr::At(..) | Expr::Id(..) | Expr::InModule(..) | Expr::Try(_) => unreachable!("先頭で外している"),
             Expr::Method(..) => unreachable!("expr_inner の先頭で分けている"),
             Expr::Int(n) => {
                 if !(MIN_SAFE_INT..=MAX_SAFE_INT).contains(n) { return Err("整数リテラルが53ビット安全整数の範囲外".into()); }
@@ -2522,6 +2523,46 @@ impl Ck {
             }
         }
         Ok(expected.cloned().or(result).unwrap_or(prim("never")))
+    }
+
+    // 式?。中の値を一度だけ検査し、let と match に書き換える。Result の Err は Err で、Option の None は None で関数から戻る。
+    // 戻り値の型は同じ種類（Result か Option）でなければならない
+    fn try_(&mut self, e: &mut Expr) -> R<V> {
+        let Expr::Try(inner) = e else { unreachable!() };
+        let t = base(&self.expr(inner)?);
+        let std = |n: &str| Name::qualified("std", Name::from(n));
+        let kind = match &t {
+            V::DataT(dt) if dt.0 == std("Result") => "Result",
+            V::DataT(dt) if dt.0 == std("Option") => "Option",
+            _ => return Err(format!("? は Result か Option の値に使う（実際は {}）", show(&t)).into()),
+        };
+        if !matches!(base(&self.ret), V::DataT(rt) if rt.0 == std(kind)) {
+            return Err(format!("? は {kind} を返す関数の中で使う（戻り値の型は {}）", show(&self.ret)).into());
+        }
+        let tmp = Name::temporary("try", NodeId::default().raw() as usize);
+        let value = Name::temporary("try", NodeId::default().raw() as usize);
+        let arm = |ctor: &str, binds: Vec<Name>, body: Expr| Arm { span: None, ctor: std(ctor), binds, body };
+        let arms = if kind == "Result" {
+            vec![
+                arm("Ok", vec![value.clone()], Expr::Var(value.clone())),
+                arm("Err", vec![value.clone()], Expr::Return(Some(Box::new(Expr::Call(std("Err"), vec![Expr::Var(value)]))))),
+            ]
+        } else {
+            vec![
+                arm("Some", vec![value.clone()], Expr::Var(value)),
+                arm("None", vec![], Expr::Return(Some(Box::new(Expr::Var(std("None")))))),
+            ]
+        };
+        let mut m = Expr::Match(Box::new(Expr::Var(tmp.clone())), arms);
+        self.push();
+        let id = self.norm.fresh();
+        let r = self.bind(&tmp, t.clone(), neu(Term::Var(id, tmp.clone())), false).and_then(|_| self.expr(&mut m));
+        self.pop();
+        let r = r?;
+        let init = std::mem::replace(&mut **inner, Expr::Int(0));
+        let stmts = vec![Stmt::Let { name: tmp, mutable: false, ty: None, init }];
+        *e = Expr::Block(crate::parser::Block { id: NodeId::default(), stmts, tail: Some(Box::new(m)) });
+        Ok(r)
     }
 
     // 他のモジュールの非公開の型の値は、分解もフィールドの読み取りもできない

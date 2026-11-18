@@ -635,7 +635,8 @@ impl Eval {
             | Expr::Method(..)
             | Expr::Await(_)
             | Expr::Quote(_)
-            | Expr::Macro(..) => return Err(Halt::Stuck),
+            | Expr::Macro(..)
+            | Expr::Try(_) => return Err(Halt::Stuck),
         })
     }
 

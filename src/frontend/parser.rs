@@ -79,6 +79,8 @@ pub enum Expr {
     At(Span, Box<Expr>),
     // 型検査後も式と一緒に移動する識別子。
     Id(NodeId, Box<Expr>),
+    // 式?。Result の Err と Option の None で関数から戻る。型検査が let と match に書き換えるので、出力には残らない
+    Try(Box<Expr>),
     // マクロの quote に書いた式。中の名前の公開範囲は、そのマクロを定義したモジュールの権限で判定する
     InModule(String, Box<Expr>),
 }
@@ -2477,13 +2479,7 @@ impl Parser<'_> {
         };
         while !self.at_newline() {
             if self.eat("?") {
-                let ok = self.qualify(&Name::from("Ok"));
-                let err = self.qualify(&Name::from("Err"));
-                let value = Name::temporary("try", self.pos);
-                e = Expr::Match(Box::new(e), vec![
-                    Arm { span: None, ctor: ok, binds: vec![value.clone()], body: Expr::Var(value.clone()) },
-                    Arm { span: None, ctor: err.clone(), binds: vec![value.clone()], body: Expr::Return(Some(Box::new(Expr::Call(err, vec![Expr::Var(value)])))) },
-                ]);
+                e = Expr::Try(Box::new(e));
             } else if self.eat(".") {
                 if self.eat("await") {
                     e = Expr::Await(Box::new(e));
