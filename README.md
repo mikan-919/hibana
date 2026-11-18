@@ -60,5 +60,7 @@ Rust の実装は `src/` 内で役割ごとに分けています。
 - [プロジェクト概要](docs/overview.md)
 - [入門](docs/tutorial.md)
 - [言語仕様](docs/spec.md)
+- [開発ロードマップ](docs/roadmap.md)
+- [用語集](GLOSSARY.md)
 - [WebAssembly](docs/wasm.md)
 - [カテゴリ別の例](tests/programs/README.md)
