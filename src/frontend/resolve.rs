@@ -19,7 +19,12 @@ fn visibility(prog: &Program) -> HashMap<Name, (String, bool)> {
     names
 }
 
-pub fn resolve(prog: &mut Program, uses: &HashMap<String, Vec<Use>>, known: &HashSet<Name>) -> R<()> {
+pub fn resolve(
+    prog: &mut Program,
+    uses: &HashMap<String, Vec<Use>>,
+    known: &HashSet<Name>,
+    grammar: &crate::meta::Grammar,
+) -> R<()> {
     let visibility = visibility(prog);
     let ctors: HashMap<Name, Name> = prog.datas.iter().flat_map(|data| {
         data.ctors.iter().map(move |ctor| (Name::associated(data.name.clone(), ctor.name.local().clone()), ctor.name.clone()))
@@ -34,6 +39,7 @@ pub fn resolve(prog: &mut Program, uses: &HashMap<String, Vec<Use>>, known: &Has
                     let resolved = ctors.get(&qualified).unwrap_or(&qualified);
                     if let Some((owner, false)) = visibility.get(resolved)
                         && owner != module
+                        && !grammar.declares(&qualified)
                     {
                         let error = Error::from(format!("{qualified} は非公開（宣言に pub を付ける）"));
                         return Err(match import.span { Some(span) => error.at(span), None => error });

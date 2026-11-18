@@ -1,6 +1,6 @@
 pub use super::name::{Name, NameKind};
 pub use super::modules::{Module, ModuleSet, load_modules};
-use super::modules::source_tokens;
+use super::modules::{identify_tokens, source_tokens};
 use crate::lexer::{Span, TPart, Tok, Token, lex};
 use crate::meta::{Grammar, Node, Q};
 use std::collections::{HashMap, HashSet};
@@ -444,10 +444,12 @@ fn parse_modules_tokens(
             traits: Rc::default(),
         })
         .collect();
-    let mut g = Grammar::default();
+    let mut g = Grammar::new(&loaded.modules);
+    let mut uses: HashMap<String, Vec<Use>> = HashMap::new();
+    let mut modules: HashMap<String, HashSet<String>> = HashMap::new();
     let mut ends = Vec::new();
     for p in &mut parsers {
-        // 先に syntax と macro だけを読む（宣言より前の関数や宣言の位置でも、後で宣言したマクロを使えるようにする）
+        // use・syntax・macro を先に読み、宣言の順序にかかわらず規則とマクロを参照できるようにする。
         let mut decl_end: HashMap<usize, usize> = HashMap::new();
         {
             let (mut depth, mut i) = (0, 0);
@@ -455,13 +457,18 @@ fn parse_modules_tokens(
                 match &p.toks[i].tok {
                     Tok::Punct("(" | "[" | "{") => depth += 1,
                     Tok::Punct(")" | "]" | "}") => depth -= 1,
-                    Tok::Punct(k @ ("syntax" | "macro")) if depth == 0 => {
-                        let k = *k;
+                    Tok::Punct(k @ ("use" | "syntax" | "macro")) if depth == 0 => {
                         p.pos = i;
-                        if k == "syntax" {
-                            p.syntax_decl(&mut g)?;
-                        } else {
-                            p.macro_decl(&mut g)?;
+                        match *k {
+                            "use" => {
+                                let u = p.use_decl()?;
+                                if matches!(u.names, UseNames::Qualified) {
+                                    modules.entry(p.module.clone()).or_default().insert(u.module.clone());
+                                }
+                                uses.entry(p.module.clone()).or_default().push(u);
+                            }
+                            "syntax" => p.syntax_decl(&mut g)?,
+                            _ => p.macro_decl(&mut g)?,
                         }
                         decl_end.insert(i, p.pos);
                         i = p.pos;
@@ -476,8 +483,19 @@ fn parse_modules_tokens(
 
         ends.push(decl_end);
     }
-    g.validate()?;
+    g.validate(&uses)?;
     let grammar = Rc::new(g);
+    for module in &loaded.modules {
+        if module.name != "std" {
+            uses.entry(module.name.clone()).or_default().push(Use {
+                span: None,
+                module: "std".into(),
+                names: UseNames::List(PRELUDE_NAMES.iter().map(|name| Name::from(*name)).collect()),
+            });
+        }
+    }
+    let uses = Rc::new(uses);
+    let modules = Rc::new(modules);
     let mut types: HashSet<Name> = ["Vec", "Ref", "Type", "Async", "Task"].map(Name::from).into();
     let mut generic_fns: HashSet<Name> = [Name::from("refine")].into();
     // 組み込みと利用者のファイルの名前・モジュール名・パターンのリテラル。マクロの衛生性で名前を付け替えない
@@ -533,8 +551,6 @@ fn parse_modules_tokens(
     // モジュールごとの名前（修飾しない形）と、修飾した形の大域の名前
     let mut mod_names: HashMap<String, HashSet<Name>> = HashMap::new();
     let mut known: HashSet<Name> = HashSet::new();
-    let mut uses: HashMap<String, Vec<Use>> = HashMap::new();
-    let mut modules: HashMap<String, HashSet<String>> = HashMap::new();
     // 名前を宣言する。同じモジュールで既に宣言していれば false
     let mut declare = |m: &str, n: &Name, globals: &mut HashSet<Name>| {
         mod_names
@@ -553,6 +569,8 @@ fn parse_modules_tokens(
     let mut plans = Vec::new();
     for (p, decl_end) in parsers.iter_mut().zip(ends) {
         p.g = grammar.clone();
+        p.uses = uses.clone();
+        p.modules = modules.clone();
         let mut fn_starts = Vec::new();
         let mut data_starts = Vec::new();
         let mut extern_starts = Vec::new();
@@ -569,15 +587,7 @@ fn parse_modules_tokens(
             }
             match p.peek() {
                 Tok::Eof => break,
-                Tok::Punct("use") => {
-                    let u = p.use_decl()?;
-                    // 修飾して使えるのは、-> を付けない use だけ。-> * と -> { } は名前を取り込むだけ
-                    if matches!(u.names, UseNames::Qualified) {
-                        modules.entry(cur.clone()).or_default().insert(u.module.clone());
-                    }
-                    uses.entry(cur).or_default().push(u);
-                }
-                Tok::Punct("syntax" | "macro") => p.pos = decl_end[&p.pos],
+                Tok::Punct("use" | "syntax" | "macro") => p.pos = decl_end[&p.pos],
                 // extern "モジュール" { fn 名前(引数) -> 型 ... }
                 Tok::Punct("extern") => {
                     extern_starts.push(p.pos);
@@ -668,23 +678,12 @@ fn parse_modules_tokens(
     globals.extend(PRELUDE_NAMES.iter().map(|name| Name::from(*name)));
     // 利用者のファイルで修飾して使うモジュールの名前は、マクロの衛生性で付け替えない
     globals.extend(modules.get("").into_iter().flatten().map(|name| Name::from(name.as_str())));
-    for module in &loaded.modules {
-        if module.name != "std" {
-            uses.entry(module.name.clone()).or_default().push(Use {
-                span: None,
-                module: "std".into(),
-                names: UseNames::List(PRELUDE_NAMES.iter().map(|name| Name::from(*name)).collect()),
-            });
-        }
-    }
-    let (types, generic_fns, globals, mod_names, known, uses, modules) = (
+    let (types, generic_fns, globals, mod_names, known) = (
         Rc::new(types),
         Rc::new(generic_fns),
         Rc::new(globals),
         Rc::new(mod_names),
         Rc::new(known),
-        Rc::new(uses),
-        Rc::new(modules),
     );
     for p in &mut parsers {
         p.types = types.clone();
@@ -692,8 +691,6 @@ fn parse_modules_tokens(
         p.globals = globals.clone();
         p.mod_names = mod_names.clone();
         p.known = known.clone();
-        p.uses = uses.clone();
-        p.modules = modules.clone();
     }
     if plans.iter().any(|plan| !plan.declarations.is_empty()) {
         let mut tokens = Vec::new();
@@ -765,7 +762,7 @@ fn parse_modules_tokens(
     }
     loop {
         let mut helpers = prog.clone();
-        crate::resolve::resolve(&mut helpers, &uses, &known)?;
+        crate::resolve::resolve(&mut helpers, &uses, &known, &grammar)?;
         let helpers = Rc::new(helpers);
         for p in &mut parsers {
             p.helpers = helpers.clone();
@@ -845,7 +842,7 @@ fn parse_modules_tokens(
             insts: 0,
         });
     }
-    crate::resolve::resolve(&mut prog, &uses, &known)?;
+    crate::resolve::resolve(&mut prog, &uses, &known, &grammar)?;
     prog.modules = loaded
         .modules
         .iter()
@@ -2511,7 +2508,9 @@ impl Parser<'_> {
             let Some(end) = interp_end(after) else {
                 return self.err("quote の文字列の ${ に対応する } が無い");
             };
-            let value = self.sub_expr(lex(&after[..end])?)?;
+            let mut tokens = lex(&after[..end])?;
+            identify_tokens(&mut tokens, self.toks[self.pos].span.source);
+            let value = self.sub_expr(tokens)?;
             acc = plus(acc, Expr::Str(rest[..at].into()));
             acc = plus(acc, Expr::Call("to_str".into(), vec![value]));
             rest = &after[end + 1..];

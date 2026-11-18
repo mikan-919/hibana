@@ -1,9 +1,9 @@
-use crate::parser::Name;
 // syntax / macro 宣言の解析、パターン照合、マクロ展開
 use crate::error::{Ctx, Error};
 use crate::eval::{self, Value};
+use crate::frontend::source::SourceId;
 use crate::lexer::{Span, Tok, Token, lex};
-use crate::parser::{Block, Expr, Parser, R, Stmt};
+use crate::parser::{Block, Expr, Module, Name, NameKind, Parser, R, Stmt, Use, UseNames, qual};
 use crate::typeck;
 use std::cell::OnceCell;
 use std::cell::RefCell;
@@ -112,7 +112,7 @@ enum Op {
 enum Atom {
     Lit(String),
     Builtin(Builtin),
-    Rule(String),
+    Rule(Name, Span),
     Group(Pattern),
     // 停止集合（このリテラルで始まるトークンの手前で止まる）
     Text(Vec<String>),
@@ -136,7 +136,7 @@ struct Rule {
 }
 
 struct Macro {
-    name: String,
+    name: Name,
     pat: Pattern,
     fields: Vec<(String, bool)>,
     // -> Stmt なら文の位置、-> Expr なら式の位置で試す
@@ -154,8 +154,9 @@ struct Macro {
 
 #[derive(Default)]
 pub struct Grammar {
-    rules: HashMap<String, Rule>,
+    rules: HashMap<Name, Rule>,
     macros: Vec<Macro>,
+    source_modules: HashMap<SourceId, String>,
 }
 
 // quote { ... } の要素
@@ -344,7 +345,7 @@ fn atom_kind(a: &Atom) -> String {
     match a {
         Atom::Lit(_) => "Token".into(),
         Atom::Builtin(b) => format!("{b:?}"),
-        Atom::Rule(r) => r.clone(),
+        Atom::Rule(r, _) => r.to_string(),
         Atom::Text(_) => "Text".into(),
         // 束縛の無い1項だけのグループ (P % ",") はその項の値になる。それ以外は種類を付けない
         Atom::Group(p) => match p.0.as_slice() {
@@ -534,18 +535,57 @@ fn collect_lits(p: &Pattern, out: &mut Vec<String>) {
     }
 }
 
-fn collect_refs(p: &Pattern, out: &mut Vec<String>) {
-    for t in p.0.iter().flat_map(|s| &s.0) {
-        let sep = match &t.op {
-            Op::Sep(a) => Some(&**a),
+// 規則の参照を、パターンを宣言したモジュールから解決する。
+fn resolve_refs(p: &mut Pattern, module: &str, imports: &[Use], rules: &HashSet<Name>) -> R<()> {
+    for t in p.0.iter_mut().flat_map(|s| &mut s.0) {
+        let sep = match &mut t.op {
+            Op::Sep(a) => Some(&mut **a),
             _ => None,
         };
-        for a in std::iter::once(&t.atom).chain(sep) {
+        for a in std::iter::once(&mut t.atom).chain(sep) {
             match a {
-                Atom::Rule(n) => out.push(n.clone()),
-                Atom::Group(inner) => collect_refs(inner, out),
+                Atom::Rule(name, span) => {
+                    *name = resolve_rule(name, module, imports, rules).map_err(|e| e.at(*span))?;
+                }
+                Atom::Group(inner) => resolve_refs(inner, module, imports, rules)?,
                 _ => {}
             }
+        }
+    }
+    Ok(())
+}
+
+fn resolve_rule(name: &Name, module: &str, imports: &[Use], rules: &HashSet<Name>) -> R<Name> {
+    let qualified = match &name.kind {
+        NameKind::Associated(owner, member) => Some((owner.as_str(), member)),
+        NameKind::Qualified(owner, member) => Some((owner.as_str(), member)),
+        _ => None,
+    };
+    let undefined = || Error::from(format!("未定義の規則 {name}"));
+    if let Some((owner, member)) = qualified {
+        let target = qual(owner, member.as_ref());
+        return (imports.iter().any(|u| u.module == owner && matches!(u.names, UseNames::Qualified))
+            && rules.contains(&target))
+            .then_some(target)
+            .ok_or_else(undefined);
+    }
+    let local = qual(module, name);
+    if rules.contains(&local) {
+        return Ok(local);
+    }
+    let mut candidates: Vec<_> = imports.iter()
+        .filter(|u| u.names.takes(name))
+        .map(|u| qual(&u.module, name))
+        .filter(|n| rules.contains(n))
+        .collect();
+    candidates.sort_unstable();
+    candidates.dedup();
+    match candidates.len() {
+        0 => Err(undefined()),
+        1 => Ok(candidates.pop().unwrap()),
+        _ => {
+            let names = candidates.iter().map(Name::as_str).collect::<Vec<_>>();
+            Err(format!("規則 {name} の参照が曖昧（{}）", names.join(", ")).into())
         }
     }
 }
@@ -796,6 +836,13 @@ fn emit_syn(s: &Syn, dollar: &Token, out: &mut Vec<Token>) -> R<()> {
 }
 
 impl Grammar {
+    pub(super) fn new(modules: &[Module]) -> Self {
+        Self {
+            source_modules: modules.iter().map(|m| (m.source.id, m.name.clone())).collect(),
+            ..Self::default()
+        }
+    }
+
     pub fn literals(&self) -> Vec<String> {
         let mut out = Vec::new();
         for p in self
@@ -809,21 +856,27 @@ impl Grammar {
         out
     }
 
-    pub fn validate(&mut self) -> R<()> {
-        let mut refs = Vec::new();
-        for r in self.rules.values() {
-            collect_refs(&r.pat, &mut refs);
+    pub(super) fn declares(&self, name: &Name) -> bool {
+        self.rules.contains_key(name) || self.macros.iter().any(|m| m.name == *name)
+    }
+
+    pub fn validate(&mut self, uses: &HashMap<String, Vec<Use>>) -> R<()> {
+        let rules = self.rules.keys().cloned().collect();
+        let imports = |module: &str| uses.get(module).map_or(&[][..], Vec::as_slice);
+        for (name, rule) in &mut self.rules {
+            let module = match &name.kind {
+                NameKind::Qualified(module, _) => module.as_str(),
+                _ => "",
+            };
+            resolve_refs(&mut rule.pat, module, imports(module), &rules)?;
         }
-        for m in &self.macros {
-            collect_refs(&m.pat, &mut refs);
-        }
-        if let Some(n) = refs.iter().find(|n| !self.rules.contains_key(*n)) {
-            return Err(format!("未定義の規則 {n}").into());
+        for m in &mut self.macros {
+            resolve_refs(&mut m.pat, &m.module, imports(&m.module), &rules)?;
         }
         for (n, r) in &self.rules {
             self.first_pat(&r.pat, &mut vec![n.clone()])?;
         }
-        let names: Vec<String> = self.rules.keys().cloned().collect();
+        let names: Vec<_> = self.rules.keys().cloned().collect();
         for n in names {
             let mut p = self.rules[&n].pat.clone();
             self.resolve_text(&mut p, &[])?;
@@ -848,7 +901,7 @@ impl Grammar {
     }
 
     // st は辿っている規則の列。同じ規則に先頭で戻ったら左再帰
-    fn first_pat(&self, p: &Pattern, st: &mut Vec<String>) -> R<Firsts> {
+    fn first_pat(&self, p: &Pattern, st: &mut Vec<Name>) -> R<Firsts> {
         let (mut acc, mut nullable) = (Vec::new(), false);
         for s in &p.0 {
             let (f, n) = self.first_seq(&s.0, st)?;
@@ -858,7 +911,7 @@ impl Grammar {
         Ok((acc, nullable))
     }
 
-    fn first_seq(&self, terms: &[Term], st: &mut Vec<String>) -> R<Firsts> {
+    fn first_seq(&self, terms: &[Term], st: &mut Vec<Name>) -> R<Firsts> {
         let mut acc = Vec::new();
         for t in terms {
             let (f, n) = self.first_term(t, st)?;
@@ -870,7 +923,7 @@ impl Grammar {
         Ok((acc, true))
     }
 
-    fn first_term(&self, t: &Term, st: &mut Vec<String>) -> R<Firsts> {
+    fn first_term(&self, t: &Term, st: &mut Vec<Name>) -> R<Firsts> {
         let (f, n) = match &t.atom {
             Atom::Lit(s) => (vec![First::Lit(s.clone())], false),
             Atom::Text(_) => (vec![First::Any], false),
@@ -884,9 +937,9 @@ impl Grammar {
                 false,
             ),
             Atom::Group(p) => self.first_pat(p, st)?,
-            Atom::Rule(n) => {
+            Atom::Rule(n, span) => {
                 if st.contains(n) {
-                    return Err(format!("規則 {n} が左再帰している").into());
+                    return Err(Error::from(format!("規則 {n} が左再帰している")).at(*span));
                 }
                 st.push(n.clone());
                 let r = self.first_pat(&self.rules[n].pat, st);
@@ -945,22 +998,30 @@ type Binds = Vec<(String, Node)>;
 impl Parser<'_> {
     pub fn syntax_decl(&mut self, g: &mut Grammar) -> R<()> {
         self.expect("syntax")?;
-        let name = self.ident()?.to_string();
-        if builtin(&name).is_some() || name == "Text" || g.rules.contains_key(&name) {
-            return self.err_at(format!("規則 {name} が重複している"));
+        let name = self.ident()?;
+        if !matches!(name.kind, NameKind::User | NameKind::Hygienic(..)) {
+            return self.err_at("規則の宣言名には修飾しない名前を使う".into());
+        }
+        let key = qual(&self.module, &name);
+        if builtin(&name).is_some() || name == "Text" || g.rules.contains_key(&key) {
+            return self.err_at(format!("規則 {key} が重複している"));
         }
         self.expect("=")?;
         let pat = self.pattern()?;
         // 宣言の終わりは次の宣言の始まりで分かるので、";" は省ける
         self.eat(";");
         let fields = fields(&pat).ctx(|e| format!("規則 {name}: {e}"))?;
-        g.rules.insert(name, Rule { pat, fields });
+        g.rules.insert(key, Rule { pat, fields });
         Ok(())
     }
 
     pub fn macro_decl(&mut self, g: &mut Grammar) -> R<()> {
         self.expect("macro")?;
-        let name = self.ident()?.to_string();
+        let name = self.ident()?;
+        if !matches!(name.kind, NameKind::User | NameKind::Hygienic(..)) {
+            return self.err_at("マクロの宣言名には修飾しない名前を使う".into());
+        }
+        let name = qual(&self.module, name);
         if g.macros.iter().any(|m| m.name == name) {
             return self.err_at(format!("マクロ {name} が重複している"));
         }
@@ -1077,8 +1138,18 @@ impl Parser<'_> {
                     _ => return self.err_at(format!("リテラル {s:?} は1個のトークンでない")),
                 }
             }
-            Tok::Ident(n) if n == "Text" => Atom::Text(vec![]),
-            Tok::Ident(n) => builtin(&n).map(Atom::Builtin).unwrap_or(Atom::Rule(n.to_string())),
+            Tok::Ident(n) => {
+                let span = self.span_of(self.pos);
+                if matches!(self.toks.get(self.pos + 1).map(|t| &t.tok), Some(Tok::Punct("."))) {
+                    self.pos += 2;
+                    return Ok(Atom::Rule(qual(&n, self.ident()?), span));
+                }
+                if n == "Text" {
+                    Atom::Text(vec![])
+                } else {
+                    builtin(&n).map(Atom::Builtin).unwrap_or(Atom::Rule(n, span))
+                }
+            }
             Tok::Punct("(") => {
                 self.pos += 1;
                 let p = self.pattern()?;
@@ -1100,7 +1171,7 @@ impl Parser<'_> {
         };
         let m = &g.macros[k];
         match &m.body {
-            None => Ok(Some(Expr::Macro(m.name.clone(), Box::new(rec)))),
+            None => Ok(Some(Expr::Macro(m.name.to_string(), Box::new(rec)))),
             Some(_) => {
                 let site = self.span_of(start);
                 self.expand(m, rec, site).map(Some)
@@ -1118,9 +1189,28 @@ impl Parser<'_> {
     // pred に合うマクロを照合する。一つだけ合えば、その番号と照合結果を返し、self.pos を直後に進める
     fn find_macro(&mut self, pred: impl Fn(&Macro) -> bool) -> R<Option<(usize, Node)>> {
         let g = self.g.clone();
+        if g.macros.is_empty() {
+            return Ok(None);
+        }
         let start = self.pos;
+        let token = &self.toks[start];
+        // quote のトークンは定義元、差し込んだトークンは元のファイルの use に従う。
+        let module = match g.source_modules.get(&token.span.source) {
+            Some(module) if token.span.start.line > 0 => std::borrow::Cow::Borrowed(module.as_str()),
+            _ => std::borrow::Cow::Owned(self.cur_module()),
+        };
+        let uses = self.uses.clone();
+        let imports = uses.get(module.as_ref());
         let mut hits = Vec::new();
         for (k, m) in g.macros.iter().enumerate().filter(|(_, m)| pred(m)) {
+            if m.module != module
+                && !imports.into_iter().flatten().any(|u| {
+                    u.span.is_some() && u.module == m.module
+                        && (matches!(u.names, UseNames::Qualified) || u.names.takes(m.name.local()))
+                })
+            {
+                continue;
+            }
             self.pos = start;
             if !self.could_start(&m.first) {
                 continue;
@@ -1144,7 +1234,8 @@ impl Parser<'_> {
                 )))
             }
             _ => {
-                let names: Vec<&str> = hits.iter().map(|h| h.1.name.as_str()).collect();
+                let mut names: Vec<_> = hits.iter().map(|h| h.1.name.as_str()).collect();
+                names.sort_unstable();
                 self.err_at(format!("Ambiguous macro match（{}）", names.join(", ")))
             }
         }
@@ -1202,7 +1293,7 @@ impl Parser<'_> {
             .g
             .rules
             .iter()
-            .map(|(n, r)| (n.clone(), field_kinds(&r.pat)))
+            .map(|(n, r)| (n.to_string(), field_kinds(&r.pat)))
             .collect();
         typeck::check_macro_in(&mut b, &field_kinds(&m.pat), &rules, &self.helpers, &m.module).ctx(wrap)?;
         let _ = m.compiled.set(b.clone());
@@ -1505,7 +1596,7 @@ impl Parser<'_> {
                 Ok(Node::Token(s.clone(), span))
             }
             Atom::Builtin(k) => self.m_builtin(*k),
-            Atom::Rule(name) => {
+            Atom::Rule(name, _) => {
                 let g = self.g.clone();
                 let r = &g.rules[name];
                 let mut rb = Vec::new();
@@ -1691,6 +1782,8 @@ fn main() {
             ("syntax E = E '+' Int ;", "左再帰"),
             ("syntax A = 'a b' ;", "1個のトークンでない"),
             ("syntax A = B ;", "未定義の規則"),
+            ("syntax A = Int\nsyntax A = Ident", "規則 A が重複"),
+            ("macro m ('a') {} macro m ('b') {}", "マクロ m が重複"),
             ("macro m (e:Expr '!') {}", "左再帰"),
             ("macro m ('m') { quote { $x } }", "未定義の変数 x"),
             ("macro m ('m') { 1 }", "マクロ本体の値"),

@@ -128,24 +128,25 @@ impl From<&String> for ModuleSet {
     }
 }
 
-pub(super) fn source_tokens(source: &super::source::SourceFile) -> R<Vec<Token>> {
-    fn identify(tokens: &mut [Token], id: super::source::SourceId) {
-        for token in tokens {
-            token.span.source = id;
-            if let Tok::Template(_, parts) = &mut token.tok {
-                for part in parts {
-                    if let TPart::Code(tokens) = part {
-                        identify(tokens, id);
-                    }
+pub(super) fn identify_tokens(tokens: &mut [Token], id: super::source::SourceId) {
+    for token in tokens {
+        token.span.source = id;
+        if let Tok::Template(_, parts) = &mut token.tok {
+            for part in parts {
+                if let TPart::Code(tokens) = part {
+                    identify_tokens(tokens, id);
                 }
             }
         }
     }
+}
+
+pub(super) fn source_tokens(source: &super::source::SourceFile) -> R<Vec<Token>> {
     let mut tokens = lex(&source.text).map_err(|mut error| {
         error.source_id = source.id;
         error.with_sources([source])
     })?;
-    identify(&mut tokens, source.id);
+    identify_tokens(&mut tokens, source.id);
     Ok(tokens)
 }
 

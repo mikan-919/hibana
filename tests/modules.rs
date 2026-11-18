@@ -299,6 +299,65 @@ fn imported_macros_and_types_share_declarations_without_source_concatenation() {
 }
 
 #[test]
+fn syntax_and_macro_names_are_scoped_by_module() {
+    let files = Files::new(
+        "macro-names",
+        &[
+            ("left.hb", "syntax Item = number:Int\nmacro read('left' item:Item) { quote { $item.number } }"),
+            ("right.hb", "syntax Item = word:Ident\nmacro read('right' item:Item) { quote { '${item.word}' } }"),
+        ],
+    );
+    let mut program = files.parse(
+        r#"
+use left
+use right
+use left -> {Item}
+use right -> *
+syntax Item = value:String
+macro read('here' item:Item) { quote { $item.value } }
+macro both('both' l:left::Item r:right.Item) { quote { put($l.number)
+ put('${r.word}') } }
+fn main() { put(left 1)
+ put(right apple)
+ put(here 'local')
+ both 2 pear }
+"#,
+    ).unwrap();
+    hibana::typeck::check(&mut program).unwrap();
+    let mut output = Vec::new();
+    hibana::eval::run(&program, &mut output).unwrap();
+    assert_eq!(output, b"1\napple\nlocal\n2\npear\n");
+
+    let error = files.parse("use left -> {Item}\nuse right -> {Item}\nsyntax Both = Item").unwrap_err();
+    assert!(error.msg.contains("left.Item") && error.msg.contains("right.Item"), "{error}");
+    let error = files.parse("use left\nsyntax Wrong = Item").unwrap_err();
+    assert!(error.msg.contains("未定義の規則 Item"), "{error}");
+    files.parse("use left -> {Item}\nuse left -> *\nsyntax Imported = Item").unwrap();
+}
+
+#[test]
+fn macro_candidates_follow_the_source_of_the_invocation() {
+    let files = Files::new(
+        "macro-scope",
+        &[
+            ("a.hb", "use hidden\nmacro pick('pick') { quote { 1 } }\nmacro wrap('wrap' value:Expr) { quote { hidden_value + $value } }\nfn wrap() -> int { 0 }"),
+            ("b.hb", "macro pick('pick') { quote { 10 } }"),
+            ("hidden.hb", "macro hidden_value('hidden_value') { quote { 100 } }"),
+        ],
+    );
+    let mut program = files.parse(
+        "use a -> {wrap}\nuse b -> {pick}\nfn main() { let hidden_value = 2\n put(wrap pick)\n put(hidden_value) }",
+    ).unwrap();
+    hibana::typeck::check(&mut program).unwrap();
+    let mut output = Vec::new();
+    hibana::eval::run(&program, &mut output).unwrap();
+    assert_eq!(output, b"110\n2\n");
+
+    let error = files.parse("use b\nuse a\nfn main() { put(pick) }").unwrap_err();
+    assert!(error.msg.contains("Ambiguous macro match（a.pick, b.pick）"), "{error}");
+}
+
+#[test]
 fn imported_parse_and_type_errors_keep_their_file_and_local_offsets() {
     for (name, text, expected) in [
         ("lex", "pub fn value() -> int with {} { /*", "/*"),
@@ -369,7 +428,10 @@ fn declaration_macros_keep_generated_names_in_imported_modules() {
         "generated-declarations",
         &[(
             "generated.hb",
-            "macro install('install') -> Decl { let exported = ident('answer')\n quote { fn hidden() -> int { 42 }\n pub fn $exported() -> int with {} { hidden() } } }\ninstall",
+            "install\nuse generator -> {install}",
+        ), (
+            "generator.hb",
+            "macro install('install') -> Decl { let exported = ident('answer')\n quote { fn hidden() -> int { 42 }\n pub fn $exported() -> int with {} { hidden() } } }",
         )],
     );
     let mut program = files
