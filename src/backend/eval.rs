@@ -50,6 +50,8 @@ impl PartialEq for Callable {
 // 通常の値以外で評価を抜ける理由
 enum Flow {
     Return(Value),
+    Break,
+    Continue,
     Error(String),
     // handle の腕が resume しなかった。(handle の番号, handle の値)
     Abort(usize, Value),
@@ -109,6 +111,7 @@ pub fn run_fn(
             }.with_sources(prog.modules.iter().map(|module| &module.source)))
         }
         Err(Flow::Abort(..)) => unreachable!("handle の外には出ない"),
+        Err(Flow::Break | Flow::Continue) => unreachable!("ループの外には出ない"),
     }
 }
 
@@ -137,6 +140,7 @@ pub fn run_macro(b: &Block, vars: Vec<(Name, Value)>, prog: &Program) -> Result<
         Ok(v) | Err(Flow::Return(v)) => Ok(v),
         Err(Flow::Error(e)) => Err(e),
         Err(Flow::Abort(..)) => unreachable!("handle の外には出ない"),
+        Err(Flow::Break | Flow::Continue) => unreachable!("ループの外には出ない"),
     }
 }
 
@@ -461,6 +465,26 @@ impl Interp<'_> {
         r
     }
 
+    fn for_body(
+        &mut self,
+        x: &Name,
+        body: &Block,
+        env: &mut Vec<HashMap<Name, Value>>,
+        items: impl Iterator<Item = Value>,
+    ) -> R<()> {
+        for v in items {
+            env.push(HashMap::from([(x.clone(), v)]));
+            let r = self.block(body, env);
+            env.pop();
+            match r {
+                Ok(_) | Err(Flow::Continue) => {}
+                Err(Flow::Break) => break,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
     fn block_inner(&mut self, b: &Block, env: &mut Vec<HashMap<Name, Value>>) -> R<Value> {
         for s in &b.stmts {
             match s {
@@ -542,6 +566,7 @@ impl Interp<'_> {
                         Flow::Error(e) => Error::from(e),
                         Flow::Return(_) => "${ } の中で return した".into(),
                         Flow::Abort(..) => unreachable!("マクロ本体に handle は無い"),
+                        Flow::Break | Flow::Continue => unreachable!("ループの外には出ない"),
                     })
                 };
                 meta::splice(q, &mut flat, &mut out, &mut ev).map_err(|e| Flow::Error(e.msg))?;
@@ -855,29 +880,31 @@ impl Interp<'_> {
                 }
             }
             Expr::For(x, it, end, body) => {
-                let items: Vec<Value> = match end {
-                    Some(end) => (int(self.expr(it, env)?)..int(self.expr(end, env)?))
-                        .map(Value::Int)
-                        .collect(),
-                    None => match self.expr(it, env)? {
-                        Value::Arr(xs) => xs.to_vec(),
+                let it = self.expr(it, env)?;
+                match end {
+                    Some(end) => {
+                        let range = int(it)..int(self.expr(end, env)?);
+                        self.for_body(x, body, env, range.map(Value::Int))?;
+                    }
+                    None => match it {
+                        Value::Arr(xs) => self.for_body(x, body, env, xs.iter().cloned())?,
                         _ => unreachable!("型検査済み"),
                     },
-                };
-                for v in items {
-                    env.push(HashMap::from([(x.clone(), v)]));
-                    let r = self.block(body, env);
-                    env.pop();
-                    r?;
                 }
                 Value::Unit
             }
             Expr::While(c, body) => {
                 while boolean(self.expr(c, env)?) {
-                    self.block(body, env)?;
+                    match self.block(body, env) {
+                        Ok(_) | Err(Flow::Continue) => {}
+                        Err(Flow::Break) => break,
+                        Err(e) => return Err(e),
+                    }
                 }
                 Value::Unit
             }
+            Expr::Break => return Err(Flow::Break),
+            Expr::Continue => return Err(Flow::Continue),
             Expr::Block(b) => self.block(b, env)?,
             Expr::Return(x) => {
                 let v = match x {

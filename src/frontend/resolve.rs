@@ -330,6 +330,8 @@ impl Resolver<'_> {
             | Expr::Bool(_)
             | Expr::Str(_)
             | Expr::Return(None)
+            | Expr::Break
+            | Expr::Continue
             | Expr::Macro(..)
             | Expr::Quote(_) => {}
         }

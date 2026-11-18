@@ -828,12 +828,37 @@ fn main() {
     }
 
     #[test]
+    fn loop_control() {
+        let src = include_str!("../../tests/programs/basics/loop_control.hb");
+        assert_eq!(out(src).unwrap(), "10\n12\n30\n32\n4\n101\n1\n9\n1\n2\n0\n");
+
+        let with_break = "fn f(run: bool) -> bool[b -> !b] { while run { break }; run } fn main() {}";
+        let e = super::to_js(with_break).unwrap_err();
+        assert!(e.contains("条件 !run を証明できない"), "{e}");
+
+        for src in [
+            "fn main() { let mut xs = [1]; while xs[0] == 1 { xs = []; continue } }",
+            "fn main() { let mut xs = [1]; for i in 0..len(xs) { put(xs[i]); xs = []; continue } }",
+        ] {
+            let e = super::to_js(src).unwrap_err();
+            assert!(e.contains("添字の範囲"), "{e}");
+        }
+
+        let nested_break = "fn f(run: bool) -> bool[b -> !b] { while run { for n in 0..1 { break }; continue }; run } fn main() {}";
+        assert!(super::to_js(nested_break).is_ok());
+    }
+
+    #[test]
     fn errors() {
         for (src, msg) in [
             ("fn main() { let x = 1; x = 2; }", "mut でない"),
             ("fn main() { let x: int = true; }", "int が必要"),
             ("fn f() -> int { true } fn main() {}", "戻り値"),
             ("fn main() { if 1 { } }", "if の条件"),
+            ("fn main() { break }", "break はループの本体の中でだけ使える"),
+            ("fn main() { while { continue } {} }", "continue はループの本体の中でだけ使える"),
+            ("fn main() { while true { let f: () -> unit = fn() { break }; break } }", "break はループの本体の中でだけ使える"),
+            ("trait Log { fn log(self) } fn main() { while true { with Log(fn() { continue }) { log() }; break } }", "continue はループの本体の中でだけ使える"),
             ("fn main() { put(1 / 0); }", "0 で除算"),
             ("fn main() { y; }", "未定義の変数"),
             ("fn main() { 1 + ; }", "式が必要"),

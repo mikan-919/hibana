@@ -319,6 +319,8 @@ struct Ck {
     norm: Eval,
     scopes: Vec<Scope>,
     ret: V,
+    // 検査中のループ本体があり、そのループを抜ける break を見つけたか
+    loop_break: Option<bool>,
     // マクロ本体（コンパイル時に実行するコード）の中か
     in_macro: bool,
     smt: Smt,
@@ -567,6 +569,7 @@ fn check_prog(prog: &mut Program, require_main: bool) -> R<Info> {
         norm: Eval::new(),
         scopes: Vec::new(),
         ret: V::Unit,
+        loop_break: None,
         in_macro: false,
         smt: Smt::new(),
         rules: HashMap::new(),
@@ -765,6 +768,7 @@ fn check_macro_body(
         norm: Eval::new(),
         scopes: vec![Scope::default()],
         ret: prim("syn"),
+        loop_break: None,
         in_macro: true,
         smt: Smt::new(),
         rules: rules.clone(),
@@ -821,6 +825,20 @@ fn check_macro_body(
 }
 
 impl Ck {
+    fn loop_body(&mut self, body: &mut Block) -> R<bool> {
+        let saved = self.loop_break.replace(false);
+        let r = self.block(body);
+        let breaks = std::mem::replace(&mut self.loop_break, saved).unwrap();
+        r.map(|_| breaks)
+    }
+
+    fn without_loop<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        let saved = self.loop_break.take();
+        let r = f(self);
+        self.loop_break = saved;
+        r
+    }
+
     fn block(&mut self, b: &mut Block) -> R<V> {
         self.push();
         let r = self.block_inner(b, None);
@@ -1777,9 +1795,13 @@ impl Ck {
                             let (a, b) = (self.eval_value(it)?, self.eval_value(end)?);
                             let id = self.norm.fresh();
                             let v = neu(Term::Var(id, x.clone()));
-                            self.bind(x, int.clone(), v.clone(), false)?;
                             self.add_fact(bin("<=", a, v.clone()));
-                            self.add_fact(bin("<", v, b));
+                            self.add_fact(bin("<", v.clone(), b));
+                            // 範囲の両端は一度だけ評価する。周回中に変わる変数の今の値とは結び付けない
+                            for n in &names {
+                                self.forget(n)?;
+                            }
+                            self.bind(x, int.clone(), v, false)?;
                         }
                         None => {
                             let V::VecT(el) = base(&self.expr(it)?) else {
@@ -1789,7 +1811,7 @@ impl Ck {
                             self.bind(x, (*el).clone(), v, false)?;
                         }
                     }
-                    self.block(body)
+                    self.loop_body(body)
                 })();
                 self.pop();
                 r?;
@@ -1799,7 +1821,6 @@ impl Ck {
                 prim("unit")
             }
             Expr::While(c, body) => {
-                want(&boolean, &self.expr(c)?, "while の条件")?;
                 // 繰り返しの中で代入される変数についての事実は、2回目以降には成り立たない
                 let mut names = Vec::new();
                 assigned(c, &mut names);
@@ -1807,17 +1828,29 @@ impl Ck {
                 for n in &names {
                     self.forget(n)?;
                 }
+                want(&boolean, &self.expr(c)?, "while の条件")?;
                 let cv = self.eval_value(c)?;
                 self.enter_branch(&cv, true);
-                let r = self.block(body);
+                let r = self.loop_body(body);
                 self.pop();
-                r?;
+                let breaks = r?;
                 for n in &names {
                     self.forget(n)?;
                 }
-                // 抜けた後は条件が偽
-                self.add_fact(un("!", cv));
+                // break で抜ける場合は、条件が偽とは限らない
+                if !breaks {
+                    self.add_fact(un("!", cv));
+                }
                 prim("unit")
+            }
+            Expr::Break | Expr::Continue => {
+                let is_break = matches!(e, Expr::Break);
+                let Some(breaks) = &mut self.loop_break else {
+                    let keyword = if is_break { "break" } else { "continue" };
+                    return Err(format!("{keyword} はループの本体の中でだけ使える").into());
+                };
+                *breaks |= is_break;
+                prim("never")
             }
             Expr::Block(b) => self.block(b)?,
             Expr::Return(x) => {
@@ -2134,21 +2167,21 @@ impl Ck {
         );
         // 無名関数の中では、外側の with の exit は使えない
         let saved_exits = std::mem::take(&mut self.exits);
-        let r = match rt {
+        let r = self.without_loop(|ck| match rt {
             Some(rt) => {
-                self.ret = rt.clone();
+                ck.ret = rt.clone();
                 if rt == prim("unit") {
-                    self.block(body).and_then(|t| no_drop(&t)).map(|_| rt)
+                    ck.block(body).and_then(|t| no_drop(&t)).map(|_| rt)
                 } else {
-                    self.check_block(body, &rt).map(|_| rt)
+                    ck.check_block(body, &rt).map(|_| rt)
                 }
             }
             None => {
                 // 戻り値の型が無いと return の型が分からない
-                self.ret = self.norm.opaque();
-                self.block(body)
+                ck.ret = ck.norm.opaque();
+                ck.block(body)
             }
-        };
+        });
         self.ret = saved;
         (self.avail, self.resume) = saved_eff;
         self.exits = saved_exits;
@@ -2555,7 +2588,7 @@ impl Ck {
                     }
                 }
                 Q::Splice(_, e) => {
-                    let t = self.expr(e)?;
+                    let t = self.without_loop(|ck| ck.expr(e))?;
                     if t == prim("unit") || t == prim("never") {
                         return Err("${ } の値を差し込めない".into());
                     }

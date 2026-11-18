@@ -11,7 +11,7 @@ const BIN: &[&str] = &["=", "==", "!=", "<=", ">=", "&&", "||", "=>", "->"];
 // 新しい宣言や文を始めるキーワード（続きの行にしない）
 const STARTS: &[&str] = &[
     "fn", "let", "type", "syntax", "macro", "use", "module", "extern", "return", "exit",
-    "trait", "impl", "struct", "enum", "pub",
+    "trait", "impl", "struct", "enum", "pub", "break", "continue",
 ];
 
 fn punct(t: &Token) -> &str {

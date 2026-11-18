@@ -162,6 +162,7 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
             types: &mut types,
             depth: 0,
             catches: Vec::new(),
+            loops: Vec::new(),
         };
         e.stmts(&f.body);
         e.out.extend([I::I64Const(0), I::I64Const(0), I::End]);
@@ -359,6 +360,7 @@ struct Emit<'a, 'b> {
     // 入れ子になった block・loop・if の数と、Catch の位置（br の深さを数える）
     depth: u32,
     catches: Vec<u32>,
+    loops: Vec<u32>,
 }
 
 impl Emit<'_, '_> {
@@ -396,9 +398,16 @@ impl Emit<'_, '_> {
                     self.depth += 2;
                     self.payload(c);
                     self.out.extend([I::I64Eqz, I::BrIf(1)]);
+                    self.loops.push(self.depth);
                     self.stmts(body);
+                    self.loops.pop();
                     self.depth -= 2;
                     self.out.extend([I::Br(0), I::End, I::End]);
+                }
+                Stmt::Break | Stmt::Continue => {
+                    let head = *self.loops.last().expect("ループの本体の中だけ");
+                    let depth = self.depth - head + u32::from(matches!(s, Stmt::Break));
+                    self.out.push(I::Br(depth));
                 }
                 Stmt::Return(e) => {
                     self.expr(e);

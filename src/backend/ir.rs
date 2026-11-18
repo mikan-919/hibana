@@ -133,6 +133,8 @@ pub enum Stmt {
     Set(u32, Expr),
     Eval(Expr),
     While(Expr, Vec<Stmt>),
+    Break,
+    Continue,
     Return(Expr),
     // いちばん内側の Catch から unit で抜ける
     Escape,
@@ -239,7 +241,7 @@ fn each_stmts<'a>(stmts: &'a [Stmt], f: &mut impl FnMut(Node<'a>)) {
         f(Node::Stmt(s));
         match s {
             Stmt::Set(_, e) | Stmt::Eval(e) | Stmt::Return(e) => each_expr(e, f),
-            Stmt::Escape => {}
+            Stmt::Break | Stmt::Continue | Stmt::Escape => {}
             Stmt::While(c, body) => {
                 each_expr(c, f);
                 each_stmts(body, f);
@@ -511,7 +513,8 @@ impl<'a> Ctx<'a> {
             vars: HashMap::new(),
             locals: 0,
             raw: runtime,
-            catch_depth: 0,
+            handles: Vec::new(),
+            loop_handle_depth: None,
         };
         for (n, _) in &f.params {
             let i = l.local();
@@ -624,8 +627,9 @@ struct Lower<'c, 'a> {
     locals: u32,
     // ランタイムの関数。演算子は中身の演算になる
     raw: bool,
-    // この関数の中で囲んでいる handle の本体の数。中断の検査は、あれば本体を抜け、無ければ関数から戻る
-    catch_depth: u32,
+    // 囲んでいる with の番号を持つ局所変数と、ループ本体に入る時のその数
+    handles: Vec<u32>,
+    loop_handle_depth: Option<usize>,
 }
 
 // 値を捨てる。unit の塊は中の文を並べ直す
@@ -644,7 +648,7 @@ impl Lower<'_, '_> {
             return c;
         }
         let t = self.local();
-        let exit = if self.catch_depth > 0 {
+        let exit = if !self.handles.is_empty() {
             Stmt::Escape
         } else {
             Stmt::Return(unit())
@@ -698,8 +702,11 @@ impl Lower<'_, '_> {
         Ok(Block { stmts, value })
     }
 
-    fn body(&mut self, b: &parser::Block) -> R<Vec<Stmt>> {
-        let b = self.block(b)?;
+    fn loop_body(&mut self, b: &parser::Block) -> R<Vec<Stmt>> {
+        let saved = self.loop_handle_depth.replace(self.handles.len());
+        let b = self.block(b);
+        self.loop_handle_depth = saved;
+        let b = b?;
         let mut stmts = b.stmts;
         eval(&mut stmts, b.value);
         Ok(stmts)
@@ -718,25 +725,23 @@ impl Lower<'_, '_> {
             }
             Ast::While(c, body) => {
                 let c = self.expr(c)?;
-                let body = self.body(body)?;
+                let body = self.loop_body(body)?;
                 out.push(Stmt::While(c, body));
             }
             Ast::For(x, from, to, body) => {
                 let saved = self.vars.clone();
                 let i = self.local();
                 let end = self.local();
+                let x_local = self.local();
                 let (start, limit, item) = match to {
                     Some(to) => {
                         let from = self.expr(from)?;
                         let to = self.expr(to)?;
-                        self.vars.insert(x.clone(), i);
-                        (from, to, None)
+                        (from, to, Expr::Local(i))
                     }
                     None => {
                         let v = self.expr(from)?;
                         let v = self.temp(v, out);
-                        let x_local = self.local();
-                        self.vars.insert(x.clone(), x_local);
                         let at = add(
                             add(v.clone(), int(8)),
                             prim(Prim::Mul, vec![Expr::Local(i), int(16)]),
@@ -744,18 +749,30 @@ impl Lower<'_, '_> {
                         (
                             int(0),
                             prim(Prim::Load, vec![v]),
-                            Some(Stmt::Set(x_local, getv(at))),
+                            getv(at),
                         )
                     }
                 };
                 out.push(Stmt::Set(i, start));
                 out.push(Stmt::Set(end, limit));
-                let mut stmts: Vec<Stmt> = item.into_iter().collect();
-                stmts.extend(self.body(body)?);
+                // 今の要素を束縛した後で添字を進める。continue は条件の評価に戻る
+                let mut stmts = vec![
+                    Stmt::Set(x_local, item),
+                    Stmt::Set(i, add(Expr::Local(i), int(1))),
+                ];
+                self.vars.insert(x.clone(), x_local);
+                stmts.extend(self.loop_body(body)?);
                 self.vars = saved;
-                stmts.push(Stmt::Set(i, add(Expr::Local(i), int(1))));
                 let c = prim(Prim::Lt, vec![Expr::Local(i), Expr::Local(end)]);
                 out.push(Stmt::While(c, stmts));
+            }
+            Ast::Break | Ast::Continue => {
+                let depth = self.loop_handle_depth.expect("ループの本体の中だけ");
+                // 行き先との間にある with を内側から外す
+                for &h in self.handles[depth..].iter().rev() {
+                    out.push(Stmt::Eval(call("__handle_end", vec![Expr::Local(h), unit()])));
+                }
+                out.push(if matches!(e.peel(), Ast::Break) { Stmt::Break } else { Stmt::Continue });
             }
             Ast::Return(v) => {
                 let v = match v {
@@ -935,7 +952,7 @@ impl Lower<'_, '_> {
             }
             Ast::Pi(..) => mkv(TY, Expr::Str("fn".into())),
             Ast::Refine(..) => mkv(TY, Expr::Str("refine".into())),
-            Ast::Assign(..) | Ast::While(..) | Ast::For(..) | Ast::Return(_) => {
+            Ast::Assign(..) | Ast::While(..) | Ast::For(..) | Ast::Break | Ast::Continue | Ast::Return(_) => {
                 let mut stmts = Vec::new();
                 self.effect(e, &mut stmts)?;
                 block(stmts, unit())
@@ -1036,7 +1053,8 @@ impl Lower<'_, '_> {
             vars: HashMap::new(),
             locals: 1,
             raw: self.raw,
-            catch_depth: 0,
+            handles: Vec::new(),
+            loop_handle_depth: None,
         };
         let mut stmts = Vec::new();
         // 引数は 1 番から並べる。名前は写し取った変数より後に入れて、外の同じ名前を隠す
@@ -1099,9 +1117,9 @@ impl Lower<'_, '_> {
         let ops = self.object(ARR, call("__arr_new", vec![n.clone()]), 8, ops);
         let fns = self.object(ARR, call("__arr_new", vec![n]), 8, fns);
         stmts.push(Stmt::Eval(call("__handle_push", vec![Expr::Local(h), ops, fns])));
-        self.catch_depth += 1;
+        self.handles.push(h);
         let v = self.expr(body);
-        self.catch_depth -= 1;
+        self.handles.pop();
         let r = self.local();
         stmts.push(Stmt::Set(r, Expr::Catch(leaf(v?))));
         let end = call("__handle_end", vec![Expr::Local(h), Expr::Local(r)]);
@@ -1172,6 +1190,8 @@ fn stmts(f: &mut fmt::Formatter<'_>, ss: &[Stmt], depth: usize) -> fmt::Result {
             Stmt::Set(i, e) => writeln!(f, "{pad}%{i} = {e}")?,
             Stmt::Eval(e) => writeln!(f, "{pad}{e}")?,
             Stmt::Return(e) => writeln!(f, "{pad}return {e}")?,
+            Stmt::Break => writeln!(f, "{pad}break")?,
+            Stmt::Continue => writeln!(f, "{pad}continue")?,
             Stmt::Escape => writeln!(f, "{pad}escape")?,
             Stmt::While(c, body) => {
                 writeln!(f, "{pad}while {c} {{")?;

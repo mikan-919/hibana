@@ -627,6 +627,8 @@ impl Eval {
             | Expr::Assign(..)
             | Expr::For(..)
             | Expr::While(..)
+            | Expr::Break
+            | Expr::Continue
             | Expr::Return(_)
             | Expr::Handle(..)
             | Expr::Exit(..)

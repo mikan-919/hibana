@@ -145,7 +145,7 @@ impl Ck {
         let r = arms.iter_mut().try_for_each(|a| {
             let waits = has_async(&self.norm.fns[&a.ctor].effects);
             self.in_arm += usize::from(!waits);
-            let r = self.arm(a, &insts, &t, waits);
+            let r = self.without_loop(|ck| ck.arm(a, &insts, &t, waits));
             self.in_arm -= usize::from(!waits);
             r
         });

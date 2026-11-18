@@ -192,6 +192,7 @@ pub fn emit(prog: &Program, info: &crate::typeck::Info) -> String {
         async_inst: &info.async_inst,
         variant: false,
         exits: HashMap::new(),
+        loop_label: None,
         fns: prog.fns.iter().map(|f| (f.name.as_str(), f)).collect(),
         ctors: prog
             .datas
@@ -389,6 +390,7 @@ struct Gen<'a> {
     variant: bool,
     // with（Handle）の識別子から、その handle の JavaScript の変数。exit が $Abort で抜ける先
     exits: HashMap<crate::parser::NodeId, String>,
+    loop_label: Option<String>,
 }
 
 impl Gen<'_> {
@@ -445,11 +447,13 @@ impl Gen<'_> {
     // 関数の本体を、別の文の並びとして出力する
     fn function(&mut self, params: &[String], body: &Block, is_async: bool) -> String {
         let saved = std::mem::take(&mut self.lines);
+        let saved_loop = self.loop_label.take();
         self.scopes.push(HashMap::new());
         let ps: Vec<String> = params.iter().map(|p| self.bind(p, false)).collect();
         let r = self.block(body);
         self.push(format!("return {r};"));
         self.scopes.pop();
+        self.loop_label = saved_loop;
         let lines = std::mem::replace(&mut self.lines, saved);
         format!(
             "{}function({}) {{\n{}\n}}",
@@ -778,10 +782,13 @@ impl Gen<'_> {
                 t
             }
             Expr::While(c, body) => {
-                self.push("while (true) {".into());
+                let label = self.tmp();
+                self.push(format!("{label}: while (true) {{"));
                 let c = self.expr(c);
                 self.push(format!("if (!{c}) break;"));
+                let saved = self.loop_label.replace(label);
                 self.block(body);
+                self.loop_label = saved;
                 self.push("}".into());
                 "undefined".into()
             }
@@ -789,7 +796,9 @@ impl Gen<'_> {
                 let a = self.expr(it);
                 let head = match end {
                     Some(end) => {
+                        let a = self.let_(a);
                         let b = self.expr(end);
+                        let b = self.let_(b);
                         let i = self.tmp();
                         (format!("for (let {i} = {a}; {i} < {b}; {i}++) {{"), i)
                     }
@@ -798,13 +807,22 @@ impl Gen<'_> {
                         (format!("for (const {i} of {a}) {{"), i)
                     }
                 };
-                self.push(head.0);
+                let label = self.tmp();
+                self.push(format!("{label}: {}", head.0));
                 self.scopes.push(HashMap::new());
                 let js = self.bind(x, false);
                 self.push(format!("const {js} = {};", head.1));
+                let saved = self.loop_label.replace(label);
                 self.block(body);
+                self.loop_label = saved;
                 self.scopes.pop();
                 self.push("}".into());
+                "undefined".into()
+            }
+            Expr::Break | Expr::Continue => {
+                let keyword = if matches!(e, Expr::Break) { "break" } else { "continue" };
+                let label = self.loop_label.as_deref().expect("ループの本体の中だけ");
+                self.push(format!("{keyword} {label};"));
                 "undefined".into()
             }
             Expr::Match(s, arms) => self.match_(s, arms),

@@ -202,6 +202,7 @@ impl Gen {
             literals: &self.literals,
             syscall: self.syscall,
             catches: Vec::new(),
+            loops: Vec::new(),
         };
         e.stmts(&f.body);
         let unit = e.b.ins().iconst(I64, ir::UNIT);
@@ -235,6 +236,7 @@ struct Body<'a, 'f> {
     syscall: u32,
     // 入れ子の Catch の後の区画。Escape はいちばん内側へ飛ぶ
     catches: Vec<cranelift_codegen::ir::Block>,
+    loops: Vec<(cranelift_codegen::ir::Block, cranelift_codegen::ir::Block)>,
 }
 
 impl Body<'_, '_> {
@@ -299,7 +301,7 @@ impl Body<'_, '_> {
         self.b.switch_to_block(ok);
     }
 
-    // return の後の到達しない位置に、続きを書くための区画を作る
+    // 分岐や return の後の到達しない位置に、続きを書くための区画を作る
     fn unreachable(&mut self) {
         let next = self.b.create_block();
         self.b.switch_to_block(next);
@@ -327,9 +329,17 @@ impl Body<'_, '_> {
                     let c = self.expr(c).1;
                     self.b.ins().brif(c, inner, &[], exit, &[]);
                     self.b.switch_to_block(inner);
+                    self.loops.push((head, exit));
                     self.stmts(body);
+                    self.loops.pop();
                     self.b.ins().jump(head, &[]);
                     self.b.switch_to_block(exit);
+                }
+                Stmt::Break | Stmt::Continue => {
+                    let (head, exit) = *self.loops.last().expect("ループの本体の中だけ");
+                    let target = if matches!(s, Stmt::Break) { exit } else { head };
+                    self.b.ins().jump(target, &[]);
+                    self.unreachable();
                 }
                 Stmt::Return(e) => {
                     let (t, p) = self.expr(e);

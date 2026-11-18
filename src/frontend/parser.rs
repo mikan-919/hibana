@@ -42,6 +42,8 @@ pub enum Expr {
     Assign(Name, Box<Expr>),
     If(Box<Expr>, Block, Option<Box<Expr>>),
     While(Box<Expr>, Block),
+    Break,
+    Continue,
     Block(Block),
     Return(Option<Box<Expr>>),
     // 展開コードの無いマクロの照合結果
@@ -2428,6 +2430,8 @@ impl Parser<'_> {
                 self.expect("{")?;
                 Expr::Quote(self.quote_body("}")?)
             }
+            Tok::Punct("break") => Expr::Break,
+            Tok::Punct("continue") => Expr::Continue,
             Tok::Punct("return") => {
                 if self.at_newline() || matches!(self.peek(), Tok::Punct(";" | "}")) {
                     Expr::Return(None)
