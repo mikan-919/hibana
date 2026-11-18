@@ -301,6 +301,9 @@ pub struct Program {
     pub datas: Vec<Data>,
     // test "名前" { 本体 } の (名前, 本体の関数名)。hibana test で実行する
     pub tests: Vec<(String, Name)>,
+    // 型検査が記録した非同期処理の位置を、検査済みの構文木とともに渡す
+    #[doc(hidden)]
+    pub async_info: crate::typeck::Info,
 }
 
 // 組み込みのライブラリ。実行ファイルに埋め込むので、どこからでも use できる

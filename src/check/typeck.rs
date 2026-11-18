@@ -538,9 +538,9 @@ pub(crate) fn callees(f: &Fn) -> Vec<Name> {
 }
 
 // 型検査の結果のうち、出力に使うもの
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Info {
-    // JavaScript で待つ呼び出しの式と、async にする無名関数の本体（節点の識別子）
+    // 待つ呼び出しの式と、async にする無名関数の本体（節点の識別子）
     pub awaits: std::collections::HashSet<NodeId>,
     pub var_awaits: std::collections::HashSet<NodeId>,
     pub async_inst: std::collections::HashSet<NodeId>,
@@ -646,11 +646,13 @@ fn check_prog(prog: &mut Program, require_main: bool) -> R<Info> {
     for f in &mut prog.fns {
         check_fn(&mut ck, f).map_err(|e| at_opt(e, f.span))?;
     }
-    Ok(Info {
+    let info = Info {
         awaits: ck.awaits,
         var_awaits: ck.var_awaits,
         async_inst: ck.async_inst,
-    })
+    };
+    prog.async_info = info.clone();
+    Ok(info)
 }
 
 // 関数 1 つを検査する

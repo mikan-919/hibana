@@ -136,8 +136,7 @@ fn runtime_integer_refinement_evaluates_an_async_argument_once() {
 }
 
 // WASM とネイティブの非同期は、JavaScript の Promise とマイクロタスクと同じ順で動く（src/backend/ir/coroutine.rs）。
-// インタプリタは spawn をその場で最後まで動かすので、ここでは JavaScript と比べる
-fn ir_matches_javascript(name: &str, source: &str) {
+fn ir_matches_javascript(name: &str, source: &str) -> Vec<u8> {
     let dir = std::env::temp_dir().join(format!("hibana-async-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let js = dir.join("main.cjs");
@@ -163,12 +162,43 @@ fn ir_matches_javascript(name: &str, source: &str) {
         assert_eq!(String::from_utf8_lossy(&native.stdout), String::from_utf8_lossy(&want.stdout), "ネイティブ: {name}");
     }
     std::fs::remove_dir_all(dir).unwrap();
+    want.stdout
+}
+
+fn all_backends_match_javascript(name: &str, source: &str) {
+    let want = ir_matches_javascript(name, source);
+    let mut output = Vec::new();
+    hibana::run(source, &mut output).unwrap();
+    assert_eq!(String::from_utf8_lossy(&output), String::from_utf8_lossy(&want), "インタプリタ: {name}");
+}
+
+#[test]
+fn spawn_runs_to_the_first_await_before_returning() {
+    all_backends_match_javascript("spawn", r#"
+use std -> *
+
+fn step() -> int with Async { 42 }
+
+fn work() -> int with Async {
+    put('before await')
+    let value = step().await
+    put('after await')
+    value
+}
+
+fn main() {
+    let t = spawn(work())
+    put(t.peek())
+    t.then(fn(v) { put(v) })
+    put('main end')
+}
+"#);
 }
 
 // spawn した処理・then・all・要求の async な腕・with を抜ける失敗が、JavaScript と同じ順で出力する
 #[test]
 fn ir_async_order_matches_javascript() {
-    ir_matches_javascript("order", r#"
+    all_backends_match_javascript("order", r#"
 use std -> *
 
 fn step(name: String, n: int) -> int with Async {
@@ -224,7 +254,7 @@ fn ok_later() -> int with Async, Fail<String> {
 // await を含むループ・分岐・早い return・再帰・入れ子の with を抜ける中断・要求の多相な関数の async 版・join
 #[test]
 fn ir_async_control_flow_matches_javascript() {
-    ir_matches_javascript("control", r#"
+    all_backends_match_javascript("control", r#"
 use std -> *
 
 fn tick(name: String, n: int) -> int with Async {

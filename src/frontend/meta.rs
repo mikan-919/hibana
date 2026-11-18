@@ -776,6 +776,7 @@ fn emit(v: &Value, dollar: &Token, out: &mut Vec<Token>) -> R<()> {
         }
         Value::Unit => return Err("() は差し込めない".into()),
         Value::Ref(_) => return Err("参照は差し込めない".into()),
+        Value::Task(_) => return Err("Task は差し込めない".into()),
         Value::Syn(s) => return emit_syn(s, dollar, out),
     };
     out.push(at_dollar(&tok(s)));

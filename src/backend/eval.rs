@@ -3,10 +3,17 @@ use crate::check::typeck::{MIN_SAFE_INT, MAX_SAFE_INT};
 use crate::error::Error;
 use crate::lexer::{Span, Tok, Token};
 use crate::meta::{self, Node, Syn};
-use crate::parser::{Block, Expr, Fn, Program, Stmt};
+use crate::parser::{Block, Expr, Fn, NodeId, Program, Stmt};
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::future::Future;
 use std::io::Write;
-use std::rc::Rc;
+use std::pin::Pin;
+use std::rc::{Rc, Weak};
+use std::task::{Context, Poll, Waker};
+
+mod jobs;
+use jobs::{Jobs, Promise};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -23,6 +30,7 @@ pub enum Value {
     // data の値 (構築子, フィールド)
     Data(Rc<(Name, Vec<Value>)>),
     Fn(Rc<Callable>),
+    Task(Rc<Task>),
     // 書き換えられる参照。写し取った関数どうしでも同じものを指す
     Ref(Rc<std::cell::RefCell<Value>>),
 }
@@ -35,6 +43,7 @@ pub enum Callable {
         params: Vec<Name>,
         body: Block,
         env: HashMap<Name, Value>,
+        variant: bool,
     },
     // トップレベルの関数
     Named(Name),
@@ -47,29 +56,45 @@ impl PartialEq for Callable {
     }
 }
 
+#[derive(Debug)]
+pub struct Task(Promise);
+
+impl PartialEq for Task {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+}
+
 // 通常の値以外で評価を抜ける理由
+#[derive(Debug, Clone)]
 enum Flow {
     Return(Value),
     Break,
     Continue,
-    Error(String),
+    Error(String, Option<Span>),
     // handle の腕が resume しなかった。(handle の番号, handle の値)
     Abort(usize, Value),
 }
 
 type R<T> = Result<T, Flow>;
 
-// ponytail: 構文木を直接評価する方式。速度が必要ならバイトコードVMに置き換える
-struct Interp<'a> {
+struct Runtime<'a> {
     fns: HashMap<&'a str, &'a Fn>,
     // 構築子の名前からフィールド名の並び
     ctors: HashMap<&'a str, (&'a Name, Vec<&'a Name>)>,
-    out: &'a mut dyn Write,
+    out: RefCell<&'a mut dyn Write>,
+    info: &'a crate::typeck::Info,
+    next_h: Cell<usize>,
+    callback_error: RefCell<Option<Flow>>,
+}
+
+// 構文木を直接評価する。待っている関数は局所変数と with の記録を持ったまま止まる
+struct Interp<'a> {
+    runtime: Rc<Runtime<'a>>,
+    jobs: Weak<Jobs<'a>>,
     // 処理中の handle (番号, 操作の名前から腕の関数)。内側ほど後ろ
-    handlers: Vec<(usize, HashMap<Name, Value>)>,
-    next_h: usize,
-    // 実行時エラーが起きた一番内側の式の位置
-    err_at: Option<Span>,
+    handlers: Vec<(usize, Rc<HashMap<Name, Value>>)>,
+    variant: bool,
 }
 
 // 型検査を通ったプログラムを前提とする
@@ -78,69 +103,45 @@ pub fn run(prog: &Program, out: &mut dyn Write) -> Result<Value, Error> {
 }
 
 // 引数の無い関数 entry を実行する（main と hibana test のテスト）
-pub fn run_fn(
-    prog: &Program,
-    entry: &str,
-    out: &mut dyn Write,
-) -> Result<Value, Error> {
-    let mut it = Interp {
-        fns: prog.fns.iter().map(|f| (f.name.as_str(), f)).collect(),
-        ctors: prog
-            .datas
-            .iter()
-            .flat_map(|d| &d.ctors)
-            .map(|c| {
-                (
-                    c.name.as_str(),
-                    (&c.name, c.fields.iter().map(|field| &field.0).collect()),
-                )
-            })
-            .collect(),
-        out,
-        handlers: Vec::new(),
-        next_h: 0,
-        err_at: None,
-    };
-    match it.call(entry, vec![]) {
-        Ok(v) | Err(Flow::Return(v)) => Ok(v),
-        Err(Flow::Error(e)) => {
-            let e = Error::from(format!("実行時エラー: {e}"));
-            Err(match it.err_at {
-                Some(s) => e.at(s),
-                None => e,
-            }.with_sources(prog.modules.iter().map(|module| &module.source)))
-        }
-        Err(Flow::Abort(..)) => unreachable!("handle の外には出ない"),
-        Err(Flow::Break | Flow::Continue) => unreachable!("ループの外には出ない"),
-    }
+pub fn run_fn(prog: &Program, entry: &str, out: &mut dyn Write) -> Result<Value, Error> {
+    let jobs = Rc::new(Jobs::default());
+    let mut it = Interp::new(prog, out, &jobs);
+    let runtime = it.runtime.clone();
+    let f = runtime.fns[entry];
+    let result = jobs.promise(async move { it.call(f, vec![], false).await });
+    finish(&jobs, &result, &runtime).map_err(|flow| {
+        let (msg, span) = match flow {
+            Flow::Error(msg, span) => (msg, span),
+            Flow::Abort(..) => ("with で処理されなかった中断".into(), None),
+            Flow::Return(_) | Flow::Break | Flow::Continue => unreachable!("関数本体の外には出ない"),
+        };
+        let err = Error::from(format!("実行時エラー: {msg}"));
+        let err = match span { Some(span) => err.at(span), None => err };
+        err.with_sources(prog.modules.iter().map(|module| &module.source))
+    })
 }
 
 // マクロ本体を実行する。put はコンパイル時の出力として標準エラーに書く
 pub fn run_macro(b: &Block, vars: Vec<(Name, Value)>, prog: &Program) -> Result<Value, String> {
     let mut err = std::io::stderr();
-    let mut it = Interp {
-        fns: prog.fns.iter().map(|f| (f.name.as_str(), f)).collect(),
-        ctors: prog
-            .datas
-            .iter()
-            .flat_map(|d| &d.ctors)
-            .map(|c| {
-                (
-                    c.name.as_str(),
-                    (&c.name, c.fields.iter().map(|field| &field.0).collect()),
-                )
-            })
-            .collect(),
-        out: &mut err,
-        handlers: Vec::new(),
-        next_h: 0,
-        err_at: None,
-    };
-    match it.block(b, &mut vec![vars.into_iter().collect()]) {
+    let jobs = Rc::new(Jobs::default());
+    let mut it = Interp::new(prog, &mut err, &jobs);
+    let runtime = it.runtime.clone();
+    let result = jobs.promise(async move { it.block(b, &mut vec![vars.into_iter().collect()]).await });
+    match finish(&jobs, &result, &runtime) {
         Ok(v) | Err(Flow::Return(v)) => Ok(v),
-        Err(Flow::Error(e)) => Err(e),
+        Err(Flow::Error(e, _)) => Err(e),
         Err(Flow::Abort(..)) => unreachable!("handle の外には出ない"),
         Err(Flow::Break | Flow::Continue) => unreachable!("ループの外には出ない"),
+    }
+}
+
+fn finish(jobs: &Jobs<'_>, promise: &Promise, runtime: &Runtime<'_>) -> R<Value> {
+    while jobs.step() {}
+    let result = promise.result().unwrap_or_else(|| error("非同期処理が完了しなかった".into()));
+    match runtime.callback_error.borrow_mut().take() {
+        Some(e) if result.is_ok() => Err(e),
+        _ => result,
     }
 }
 
@@ -155,6 +156,7 @@ fn show(v: &Value) -> String {
         Value::Unit => "()".into(),
         Value::Syn(s) => format!("{:?}", s.node.strip()),
         Value::Fn(_) => "<fn>".into(),
+        Value::Task(_) => "<task>".into(),
         Value::Ref(_) => "<ref>".into(),
         Value::Data(d) if d.1.is_empty() => d.0.to_string(),
         Value::Data(d) => format!(
@@ -180,7 +182,7 @@ fn str_val(v: Value) -> Rc<str> {
 }
 
 fn error<T>(msg: String) -> R<T> {
-    Err(Flow::Error(msg))
+    Err(Flow::Error(msg, None))
 }
 
 fn int(v: Value) -> i64 {
@@ -237,7 +239,129 @@ pub(crate) fn num_pow(a: f64, b: f64) -> f64 {
     result
 }
 
-impl Interp<'_> {
+impl<'a> Interp<'a> {
+    fn new(prog: &'a Program, out: &'a mut dyn Write, jobs: &Rc<Jobs<'a>>) -> Self {
+        Self {
+            runtime: Rc::new(Runtime {
+                fns: prog.fns.iter().map(|f| (f.name.as_str(), f)).collect(),
+                ctors: prog.datas.iter().flat_map(|d| &d.ctors).map(|c| {
+                    (c.name.as_str(), (&c.name, c.fields.iter().map(|field| &field.0).collect()))
+                }).collect(),
+                out: RefCell::new(out),
+                info: &prog.async_info,
+                next_h: Cell::new(0),
+                callback_error: RefCell::new(None),
+            }),
+            jobs: Rc::downgrade(jobs),
+            handlers: Vec::new(),
+            variant: false,
+        }
+    }
+
+    fn fork(&self) -> Self {
+        Self {
+            runtime: self.runtime.clone(),
+            jobs: self.jobs.clone(),
+            handlers: self.handlers.clone(),
+            variant: self.variant,
+        }
+    }
+
+    fn jobs(&self) -> Rc<Jobs<'a>> {
+        self.jobs.upgrade().expect("実行中は仕事の並びを保持する")
+    }
+
+    fn waits(&self, id: Option<NodeId>) -> bool {
+        let info = self.runtime.info;
+        id.is_some_and(|id| info.awaits.contains(&id) || (self.variant && info.var_awaits.contains(&id)))
+    }
+
+    fn start_apply(&self, f: Value, args: Vec<Value>) -> Rc<Promise> {
+        let mut child = self.fork();
+        self.jobs().promise(async move { child.apply(&f, args).await })
+    }
+
+    async fn apply_at(&mut self, f: Value, args: Vec<Value>, id: Option<NodeId>) -> R<Value> {
+        if self.waits(id) {
+            self.start_apply(f, args).wait().await
+        } else {
+            self.apply(&f, args).await
+        }
+    }
+
+    async fn all(&self, fs: &[Value]) -> R<Value> {
+        let jobs = self.jobs();
+        let promises: Vec<_> = fs.iter().map(|f| self.start_apply(f.clone(), vec![])).collect();
+        let all = Rc::new(Promise::default());
+        if promises.is_empty() {
+            all.settle(Ok(Value::Arr(Rc::new(vec![]))));
+        }
+        let results = Rc::new(RefCell::new((promises.len(), vec![Value::Unit; promises.len()])));
+        for (i, promise) in promises.into_iter().enumerate() {
+            let all = all.clone();
+            let results = results.clone();
+            jobs.start(async move {
+                match promise.wait().await {
+                    Ok(value) => {
+                        let (left, values) = &mut *results.borrow_mut();
+                        values[i] = value;
+                        *left -= 1;
+                        if *left == 0 {
+                            all.settle(Ok(Value::Arr(Rc::new(std::mem::take(values)))));
+                        }
+                    }
+                    Err(e) => all.settle(Err(e)),
+                }
+            });
+        }
+        // JavaScript では all の本体と、all を呼んだ所の両方で待つ
+        let result = jobs.promise(async move { all.wait().await });
+        drop(jobs);
+        result.wait().await
+    }
+
+    fn spawn(&self, f: Value) -> Value {
+        let promise = self.start_apply(f, vec![]);
+        let task = Rc::new(Task(Promise::default()));
+        let done = task.clone();
+        self.jobs().start(async move {
+            let result = promise.wait().await;
+            match &result {
+                Err(Flow::Error(msg, Some(span))) => {
+                    eprintln!("実行時エラー: {msg}（{} 行 {} 列）", span.start.line, span.start.column);
+                }
+                Err(Flow::Error(msg, None)) => eprintln!("実行時エラー: {msg}"),
+                Err(Flow::Abort(..)) => eprintln!("実行時エラー: with で処理されなかった中断"),
+                _ => {}
+            }
+            done.0.settle(result);
+        });
+        Value::Task(task)
+    }
+
+    fn task_then(&self, task: Rc<Task>, f: Value) {
+        let mut child = self.fork();
+        self.jobs().start(async move {
+            if let Ok(value) = task.0.wait().await
+                && let Err(e) = child.apply(&f, vec![value]).await
+            {
+                child.runtime.callback_error.borrow_mut().get_or_insert(e);
+            }
+        });
+    }
+
+    fn task_wait(&self, task: &Task) -> R<Value> {
+        let jobs = self.jobs();
+        loop {
+            if let Some(result) = task.0.result() {
+                return result;
+            }
+            if !jobs.step() {
+                return error("非同期処理が完了しなかった".into());
+            }
+        }
+    }
+
     // マクロ本体用の組み込み関数。該当しなければ None
     fn syn_fn(&mut self, name: &str, vs: &mut Vec<Value>) -> R<Option<Value>> {
         if !matches!(
@@ -259,7 +383,7 @@ impl Interp<'_> {
                 | "panic"
                 | "now_ms"
                 | "ident"
-        ) || self.fns.contains_key(name)
+        ) || self.runtime.fns.contains_key(name)
         {
             return Ok(None);
         }
@@ -371,7 +495,7 @@ impl Interp<'_> {
                     .join(", ")
             ),
             Value::Data(d) if d.0.structure_owner().is_some() => {
-                let fs = &self.ctors[d.0.as_str()].1;
+                let fs = &self.runtime.ctors[d.0.as_str()].1;
                 let name = d.0.structure_owner().unwrap();
                 // struct Name(型, ...) は Name(1, 2)
                 if d.0.structure_style() == Some(crate::frontend::name::StructureStyle::Tuple) {
@@ -400,16 +524,19 @@ impl Interp<'_> {
     }
 
     // 関数の値を呼ぶ
-    fn apply(&mut self, f: &Value, args: Vec<Value>) -> R<Value> {
+    async fn apply(&mut self, f: &Value, args: Vec<Value>) -> R<Value> {
         let Value::Fn(c) = f else {
             unreachable!("型検査済み")
         };
         match &**c {
-            Callable::Named(n) => self.call(n, args),
-            Callable::Lam { params, body, env } => {
+            Callable::Named(n) => self.call(self.runtime.fns[n.as_str()], args, false).await,
+            Callable::Lam { params, body, env, variant } => {
                 let mut scope = env.clone();
                 scope.extend(params.iter().cloned().zip(args));
-                match self.block(body, &mut vec![scope]) {
+                let saved = std::mem::replace(&mut self.variant, *variant);
+                let result = self.block(body, &mut vec![scope]).await;
+                self.variant = saved;
+                match result {
                     Err(Flow::Return(v)) => Ok(v),
                     r => r,
                 }
@@ -417,15 +544,29 @@ impl Interp<'_> {
         }
     }
 
-    fn call(&mut self, name: &str, args: Vec<Value>) -> R<Value> {
-        let f = self.fns[name];
+    async fn call_at(&mut self, f: &'a Fn, args: Vec<Value>, id: Option<NodeId>) -> R<Value> {
+        let info = self.runtime.info;
+        let variant = id.is_some_and(|id| {
+            info.async_inst.contains(&id) || (self.variant && info.var_awaits.contains(&id)
+                && f.params[..f.implicit].iter().any(|(_, t)| matches!(t.peel(), Expr::Var(n) if n == "Effect")))
+        });
+        if variant || has_async(f) {
+            let mut child = self.fork();
+            let pending = self.jobs().promise(async move { child.call(f, args, variant).await });
+            pending.wait().await
+        } else {
+            self.call(f, args, false).await
+        }
+    }
+
+    async fn call(&mut self, f: &'a Fn, args: Vec<Value>, variant: bool) -> R<Value> {
         if f.op.is_some() {
             let k = args.len() - (f.params.len() - f.implicit);
-            return self.perform(&f.name, args[k..].to_vec());
+            return self.perform(f, args[k..].to_vec()).await;
         }
         if f.js.is_some() {
             return error(format!(
-                "extern の関数 {name} は JavaScript 出力（hibana::to_js）でだけ使える"
+                "extern の関数 {} は JavaScript 出力（hibana::to_js）でだけ使える", f.name
             ));
         }
         // 型検査で推論したジェネリック引数は実行時には消えている
@@ -438,20 +579,28 @@ impl Interp<'_> {
             args
         };
         let mut env = vec![f.params.iter().map(|(n, _)| n.clone()).zip(args).collect()];
-        match self.block(&f.body, &mut env) {
+        let saved = std::mem::replace(&mut self.variant, variant);
+        let result = self.block(&f.body, &mut env).await;
+        self.variant = saved;
+        match result {
             Err(Flow::Return(v)) => Ok(v),
             r => r,
         }
     }
 
     // 操作を、それを処理する一番内側の handle の腕で実行する。腕の中の操作は、その handle より外で処理する
-    fn perform(&mut self, op: &Name, args: Vec<Value>) -> R<Value> {
-        let Some(i) = self.handlers.iter().rposition(|h| h.1.contains_key(op)) else {
-            return error(format!("操作 {op} を処理する handle が無い"));
+    async fn perform(&mut self, op: &Fn, args: Vec<Value>) -> R<Value> {
+        let name = &op.name;
+        let Some(i) = self.handlers.iter().rposition(|h| h.1.contains_key(name)) else {
+            return error(format!("操作 {name} を処理する handle が無い"));
         };
-        let (id, f) = (self.handlers[i].0, self.handlers[i].1[op].clone());
+        let (id, f) = (self.handlers[i].0, self.handlers[i].1[name].clone());
         let saved = self.handlers.split_off(i);
-        let r = self.apply(&f, args);
+        let r = if has_async(op) {
+            self.start_apply(f, args).wait().await
+        } else {
+            Box::pin(self.apply(&f, args)).await
+        };
         self.handlers.extend(saved);
         match r? {
             Value::Data(d) if d.0 == "$resume" => Ok(d.1[0].clone()),
@@ -459,14 +608,14 @@ impl Interp<'_> {
         }
     }
 
-    fn block(&mut self, b: &Block, env: &mut Vec<HashMap<Name, Value>>) -> R<Value> {
+    async fn block(&mut self, b: &Block, env: &mut Vec<HashMap<Name, Value>>) -> R<Value> {
         env.push(HashMap::new());
-        let r = self.block_inner(b, env);
+        let r = self.block_inner(b, env).await;
         env.pop();
         r
     }
 
-    fn for_body(
+    async fn for_body(
         &mut self,
         x: &Name,
         body: &Block,
@@ -475,7 +624,7 @@ impl Interp<'_> {
     ) -> R<()> {
         for v in items {
             env.push(HashMap::from([(x.clone(), v)]));
-            let r = self.block(body, env);
+            let r = self.block(body, env).await;
             env.pop();
             match r {
                 Ok(_) | Err(Flow::Continue) => {}
@@ -486,36 +635,228 @@ impl Interp<'_> {
         Ok(())
     }
 
-    fn block_inner(&mut self, b: &Block, env: &mut Vec<HashMap<Name, Value>>) -> R<Value> {
+    async fn block_inner(&mut self, b: &Block, env: &mut Vec<HashMap<Name, Value>>) -> R<Value> {
         for s in &b.stmts {
             match s {
                 Stmt::Let { name, init, .. } => {
-                    let v = self.expr(init, env)?;
+                    let v = self.expr(init, env).await?;
                     env.last_mut().unwrap().insert(name.clone(), v);
                 }
                 Stmt::Expr(e) => {
-                    self.expr(e, env)?;
+                    self.expr(e, env).await?;
                 }
             }
         }
         match &b.tail {
-            Some(e) => self.expr(e, env),
+            Some(e) => self.expr(e, env).await,
             None => Ok(Value::Unit),
         }
     }
 
-    fn expr(&mut self, e: &Expr, env: &mut Vec<HashMap<Name, Value>>) -> R<Value> {
-        let mut e = e;
-        while let Expr::Id(_, inner) | Expr::InModule(_, inner) = e { e = inner; }
-        Ok(match e {
-            Expr::Id(..) | Expr::InModule(..) => unreachable!(),
-            Expr::At(sp, x) => {
-                let r = self.expr(x, env);
-                if matches!(r, Err(Flow::Error(_))) && self.err_at.is_none() {
-                    self.err_at = Some(*sp);
-                }
-                r?
+    fn expr<'b>(&'b mut self, mut e: &'b Expr, env: &'b mut Vec<HashMap<Name, Value>>) -> impl Future<Output = R<Value>> + 'b {
+        let (mut id, mut span) = (None, None);
+        loop {
+            e = match e {
+                Expr::Id(i, inner) => { id = Some(*i); inner }
+                Expr::At(at, inner) => { span = Some(*at); inner }
+                Expr::InModule(_, inner) => inner,
+                _ => break,
+            };
+        }
+        // 再帰で通る式を分け、呼び出しのたびに大きな評価用のスタック区画を作らない
+        let work: Pin<Box<dyn Future<Output = R<Value>> + 'b>> = match e {
+            Expr::Call(name, args) => Box::pin(self.call_expr(name, args, env, id)),
+            Expr::Binary(op, l, r) => Box::pin(self.binary(op, l, r, env)),
+            Expr::If(c, then, els) => Box::pin(self.if_expr(c, then, els.as_deref(), env)),
+            _ => Box::pin(self.expr_inner(e, env, id)),
+        };
+        async move {
+            work.await.map_err(|flow| match flow {
+                Flow::Error(msg, None) => Flow::Error(msg, span),
+                _ => flow,
+            })
+        }
+    }
+
+    async fn call_expr(&mut self, name: &Name, args: &[Expr], env: &mut Vec<HashMap<Name, Value>>, id: Option<NodeId>) -> R<Value> {
+        Ok({
+            let mut vs = Vec::new();
+            for a in args {
+                vs.push(self.expr(a, env).await?);
             }
+            if name == "#num" {
+                match vs.remove(0) { Value::Int(n) => Value::Num(n as f64), v @ Value::Num(_) => v, _ => unreachable!("型検査済み") }
+            } else if name == "num_floor" || name == "num_sqrt" {
+                let n = number(&vs[0]);
+                if name == "num_floor" {
+                    let n = n.floor();
+                    if !(MIN_SAFE_INT as f64..=MAX_SAFE_INT as f64).contains(&n) { return error("floor の結果が int の範囲外".into()); }
+                    Value::Int(n as i64)
+                } else {
+                    if n < 0.0 { return error("sqrt の引数が負".into()); }
+                    Value::Num(n.sqrt())
+                }
+            } else if let Some(f) = env.iter().rev().find_map(|s| s.get(name)).cloned() {
+                self.apply_at(f, vs, id).await?
+            } else if name == "all" && !self.runtime.fns.contains_key(name.as_str()) {
+                let Value::Arr(fs) = &vs[0] else {
+                    unreachable!("型検査済み")
+                };
+                self.all(fs).await?
+            } else if name == "spawn" && !self.runtime.fns.contains_key(name.as_str()) {
+                self.spawn(vs.remove(0))
+            } else if matches!(name.as_str(), "task_then" | "task_done" | "task_value" | "task_wait")
+                && !self.runtime.fns.contains_key(name.as_str())
+            {
+                let Value::Task(task) = vs.remove(0) else { unreachable!("型検査済み") };
+                match name.as_str() {
+                    "task_then" => {
+                        self.task_then(task, vs.remove(0));
+                        Value::Unit
+                    }
+                    "task_done" => Value::Bool(matches!(task.0.result(), Some(Ok(_)))),
+                    "task_value" => task.0.result().and_then(Result::ok).unwrap_or(Value::Unit),
+                    _ => self.task_wait(&task)?,
+                }
+            } else if name == "new_ref" && !self.runtime.fns.contains_key(name.as_str()) {
+                Value::Ref(Rc::new(std::cell::RefCell::new(vs.pop().unwrap())))
+            } else if name == "read" && !self.runtime.fns.contains_key(name.as_str()) {
+                let Value::Ref(r) = &vs[0] else {
+                    unreachable!("型検査済み")
+                };
+                r.borrow().clone()
+            } else if name == "write" && !self.runtime.fns.contains_key(name.as_str()) {
+                let x = vs.pop().unwrap();
+                let Value::Ref(r) = &vs[0] else {
+                    unreachable!("型検査済み")
+                };
+                *r.borrow_mut() = x;
+                Value::Unit
+            } else if name == "push" && !self.runtime.fns.contains_key(name.as_str()) {
+                let x = vs.pop().unwrap();
+                let Value::Arr(xs) = vs.pop().unwrap() else {
+                    unreachable!("型検査済み")
+                };
+                let mut xs = xs.to_vec();
+                xs.push(x);
+                Value::Arr(Rc::new(xs))
+            } else if name == "set_at" && !self.runtime.fns.contains_key(name.as_str()) {
+                let x = vs.pop().unwrap();
+                let i = int(vs.pop().unwrap());
+                let Value::Arr(xs) = vs.pop().unwrap() else {
+                    unreachable!("型検査済み")
+                };
+                let mut xs = xs.to_vec();
+                xs[i as usize] = x;
+                Value::Arr(Rc::new(xs))
+            } else if name == "#resume" {
+                // 腕の値として返し、perform が呼んだ所の値にする
+                Value::Data(Rc::new((
+                    "$resume".into(),
+                    vec![vs.pop().unwrap_or(Value::Unit)],
+                )))
+            } else if self.runtime.ctors.contains_key(name.as_str()) {
+                Value::Data(Rc::new((self.runtime.ctors[name.as_str()].0.clone(), vs)))
+            } else if !self.runtime.fns.contains_key(name.as_str())
+                && name != "put"
+                && name.starts_with(|c: char| c.is_ascii_uppercase())
+            {
+                // 型を作る呼び出し（Option(int) など）。実行時には名前だけを持つ
+                Value::Ty(name.as_str().into())
+            } else if name == "input" {
+                self.runtime.out.borrow_mut().flush().map_err(|e| Flow::Error(e.to_string(), None))?;
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line).map_err(|e| Flow::Error(format!("標準入力を読めません: {e}"), None))?;
+                if line.ends_with('\n') {
+                    line.pop();
+                    if line.ends_with('\r') { line.pop(); }
+                }
+                Value::Str(line.into())
+            } else if let Some(v) = self.syn_fn(name, &mut vs)? {
+                v
+            } else if name == "put" {
+                let s = match &vs[0] {
+                    Value::Int(n) => n.to_string(),
+                    Value::Num(n) => n.to_string(),
+                    Value::Bool(b) => b.to_string(),
+                    Value::Unit => "()".into(),
+                    Value::Str(s) => s.to_string(),
+                    Value::Ty(t) => t.to_string(),
+                    Value::Arr(_) | Value::Data(_) | Value::Fn(_) | Value::Ref(_) | Value::Task(_) => {
+                        self.show(&vs[0])
+                    }
+                    Value::Syn(s) => format!("{:?}", s.node.strip()),
+                };
+                writeln!(self.runtime.out.borrow_mut(), "{s}").map_err(|e| Flow::Error(e.to_string(), None))?;
+                Value::Unit
+            } else {
+                self.call_at(self.runtime.fns[name.as_str()], vs, id).await?
+            }
+        })
+    }
+
+    async fn binary(&mut self, op: &str, l: &Expr, r: &Expr, env: &mut Vec<HashMap<Name, Value>>) -> R<Value> {
+        Ok(match op {
+            "&&" => {
+                Value::Bool(boolean(self.expr(l, env).await?) && boolean(self.expr(r, env).await?))
+            }
+            "||" => {
+                Value::Bool(boolean(self.expr(l, env).await?) || boolean(self.expr(r, env).await?))
+            }
+            _ => {
+                let (a, b) = (self.expr(l, env).await?, self.expr(r, env).await?);
+                if matches!(a, Value::Num(_)) || matches!(b, Value::Num(_)) {
+                    let (x, y) = (number(&a), number(&b));
+                    return match op {
+                        "==" => Ok(Value::Bool(x == y)), "!=" => Ok(Value::Bool(x != y)),
+                        "<" => Ok(Value::Bool(x < y)), "<=" => Ok(Value::Bool(x <= y)), ">" => Ok(Value::Bool(x > y)), ">=" => Ok(Value::Bool(x >= y)),
+                        "/" | "%" if y == 0.0 => error("0 で除算した".into()),
+                        op => {
+                            let n = match op { "+" => x + y, "-" => x - y, "*" => x * y, "/" => x / y, "%" => x % y, "**" => num_pow(x, y), _ => unreachable!("型検査済み") };
+                            if !n.is_finite() { return error("number の演算結果が有限でない".into()); }
+                            Ok(Value::Num(n))
+                        }
+                    };
+                }
+                match op {
+                    "+" if matches!(a, Value::Str(_)) => {
+                        Value::Str(format!("{}{}", str_val(a), str_val(b)).into())
+                    }
+                    "==" => Value::Bool(value_eq(&a, &b)),
+                    "!=" => Value::Bool(!value_eq(&a, &b)),
+                    "<" => Value::Bool(int(a) < int(b)),
+                    "<=" => Value::Bool(int(a) <= int(b)),
+                    ">" => Value::Bool(int(a) > int(b)),
+                    ">=" => Value::Bool(int(a) >= int(b)),
+                    _ => {
+                        let (a, b) = (int(a), int(b));
+                        if b == 0 && matches!(op, "/" | "%") {
+                            return error("0 で除算した".into());
+                        }
+                        if b < 0 && op == "**" {
+                            return error("負の指数".into());
+                        }
+                        Value::Int(arith(op, a, b).ok_or_else(|| Flow::Error("オーバーフロー".into(), None))?)
+                    }
+                }
+            }
+        })
+    }
+
+    async fn if_expr(&mut self, c: &Expr, then: &Block, els: Option<&Expr>, env: &mut Vec<HashMap<Name, Value>>) -> R<Value> {
+        if boolean(self.expr(c, env).await?) {
+            self.block(then, env).await
+        } else if let Some(x) = els {
+            self.expr(x, env).await
+        } else {
+            Ok(Value::Unit)
+        }
+    }
+
+    async fn expr_inner(&mut self, e: &Expr, env: &mut Vec<HashMap<Name, Value>>, id: Option<NodeId>) -> R<Value> {
+        Ok(match e {
+            Expr::Id(..) | Expr::InModule(..) | Expr::At(..) |
+            Expr::Call(..) | Expr::Binary(..) | Expr::If(..) => unreachable!(),
             Expr::Int(n) => Value::Int(*n),
             Expr::Num(n) => Value::Num(*n),
             Expr::Bool(b) => Value::Bool(*b),
@@ -526,22 +867,22 @@ impl Interp<'_> {
             Expr::Array(items) => {
                 let mut vs = Vec::new();
                 for a in items {
-                    vs.push(self.expr(a, env)?);
+                    vs.push(self.expr(a, env).await?);
                 }
                 Value::Arr(Rc::new(vs))
             }
             Expr::Index(v, i) => {
-                let Value::Arr(xs) = self.expr(v, env)? else {
+                let Value::Arr(xs) = self.expr(v, env).await? else {
                     unreachable!("型検査済み")
                 };
-                let i = int(self.expr(i, env)?);
+                let i = int(self.expr(i, env).await?);
                 // 範囲は型検査で証明済み
                 xs[i as usize].clone()
             }
             Expr::Field(x, name) => {
-                let v = self.expr(x, env)?;
+                let v = self.expr(x, env).await?;
                 if let Value::Data(d) = &v {
-                    let i = self.ctors[d.0.as_str()].1
+                    let i = self.runtime.ctors[d.0.as_str()].1
                         .iter()
                         .position(|field| *field == name)
                         .expect("型検査済み");
@@ -561,16 +902,20 @@ impl Interp<'_> {
                 let mut out = Vec::new();
                 let mut ev = |e: &Expr, vars: &[(Name, Value)]| {
                     env.push(vars.iter().cloned().collect());
-                    let r = self.expr(e, env);
+                    // 差し込む式はその場で値にする
+                    let r = match std::pin::pin!(self.expr(e, env)).poll(&mut Context::from_waker(Waker::noop())) {
+                        Poll::Ready(result) => result,
+                        Poll::Pending => error("マクロの差し込みの途中で非同期の処理を待てない".into()),
+                    };
                     env.pop();
                     r.map_err(|f| match f {
-                        Flow::Error(e) => Error::from(e),
+                        Flow::Error(e, _) => Error::from(e),
                         Flow::Return(_) => "${ } の中で return した".into(),
                         Flow::Abort(..) => unreachable!("マクロ本体に handle は無い"),
                         Flow::Break | Flow::Continue => unreachable!("ループの外には出ない"),
                     })
                 };
-                meta::splice(q, &mut flat, &mut out, &mut ev).map_err(|e| Flow::Error(e.msg))?;
+                meta::splice(q, &mut flat, &mut out, &mut ev).map_err(|e| Flow::Error(e.msg, None))?;
                 let n = out.len();
                 Value::Syn(Rc::new(Syn {
                     node: Node::At(0..n, Box::new(Node::Raw)),
@@ -579,193 +924,32 @@ impl Interp<'_> {
             }
             Expr::Var(n) => match env.iter().rev().find_map(|s| s.get(n)) {
                 Some(v) => v.clone(),
-                None if self
+                None if self.runtime
                     .fns
                     .get(n.as_str())
                     .is_some_and(|f| f.alias && f.params.is_empty()) =>
                 {
-                    self.call(n, vec![])?
+                    self.call(self.runtime.fns[n.as_str()], vec![], false).await?
                 }
-                None if self.fns.contains_key(n.as_str()) => {
+                None if self.runtime.fns.contains_key(n.as_str()) => {
                     Value::Fn(Rc::new(Callable::Named(n.clone())))
                 }
-                None if self.ctors.contains_key(n.as_str()) => {
-                    Value::Data(Rc::new((self.ctors[n.as_str()].0.clone(), vec![])))
+                None if self.runtime.ctors.contains_key(n.as_str()) => {
+                    Value::Data(Rc::new((self.runtime.ctors[n.as_str()].0.clone(), vec![])))
                 }
                 // 型検査を通っているので、残りは int などの型名
                 None => Value::Ty(n.as_str().into()),
             },
             Expr::Unary("-", x) => {
-                let value = self.expr(x, env)?;
+                let value = self.expr(x, env).await?;
                 if let Value::Num(n) = value { return Ok(Value::Num(-n)); }
                 let n = int(value);
                 Value::Int(
                     n.checked_neg().filter(|n| (MIN_SAFE_INT..=MAX_SAFE_INT).contains(n))
-                        .ok_or(Flow::Error("オーバーフロー".into()))?,
+                        .ok_or_else(|| Flow::Error("オーバーフロー".into(), None))?,
                 )
             }
-            Expr::Unary(_, x) => Value::Bool(!boolean(self.expr(x, env)?)),
-            Expr::Binary("&&", l, r) => {
-                Value::Bool(boolean(self.expr(l, env)?) && boolean(self.expr(r, env)?))
-            }
-            Expr::Binary("||", l, r) => {
-                Value::Bool(boolean(self.expr(l, env)?) || boolean(self.expr(r, env)?))
-            }
-            Expr::Binary(op, l, r) => {
-                let (a, b) = (self.expr(l, env)?, self.expr(r, env)?);
-                if matches!(a, Value::Num(_)) || matches!(b, Value::Num(_)) {
-                    let (x, y) = (number(&a), number(&b));
-                    return match *op {
-                        "==" => Ok(Value::Bool(x == y)), "!=" => Ok(Value::Bool(x != y)),
-                        "<" => Ok(Value::Bool(x < y)), "<=" => Ok(Value::Bool(x <= y)), ">" => Ok(Value::Bool(x > y)), ">=" => Ok(Value::Bool(x >= y)),
-                        "/" | "%" if y == 0.0 => error("0 で除算した".into()),
-                        op => {
-                            let n = match op { "+" => x + y, "-" => x - y, "*" => x * y, "/" => x / y, "%" => x % y, "**" => num_pow(x, y), _ => unreachable!("型検査済み") };
-                            if !n.is_finite() { return error("number の演算結果が有限でない".into()); }
-                            Ok(Value::Num(n))
-                        }
-                    };
-                }
-                match *op {
-                    "+" if matches!(a, Value::Str(_)) => {
-                        Value::Str(format!("{}{}", str_val(a), str_val(b)).into())
-                    }
-                    "==" => Value::Bool(value_eq(&a, &b)),
-                    "!=" => Value::Bool(!value_eq(&a, &b)),
-                    "<" => Value::Bool(int(a) < int(b)),
-                    "<=" => Value::Bool(int(a) <= int(b)),
-                    ">" => Value::Bool(int(a) > int(b)),
-                    ">=" => Value::Bool(int(a) >= int(b)),
-                    _ => {
-                        let (a, b) = (int(a), int(b));
-                        if b == 0 && matches!(*op, "/" | "%") {
-                            return Err(Flow::Error("0 で除算した".into()));
-                        }
-                        if b < 0 && *op == "**" {
-                            return Err(Flow::Error("負の指数".into()));
-                        }
-                        Value::Int(arith(op, a, b).ok_or(Flow::Error("オーバーフロー".into()))?)
-                    }
-                }
-            }
-            Expr::Call(name, args) => {
-                let mut vs = Vec::new();
-                for a in args {
-                    vs.push(self.expr(a, env)?);
-                }
-                if name == "#num" {
-                    match vs.remove(0) { Value::Int(n) => Value::Num(n as f64), v @ Value::Num(_) => v, _ => unreachable!("型検査済み") }
-                } else if name == "num_floor" || name == "num_sqrt" {
-                    let n = number(&vs[0]);
-                    if name == "num_floor" {
-                        let n = n.floor();
-                        if !(MIN_SAFE_INT as f64..=MAX_SAFE_INT as f64).contains(&n) { return error("floor の結果が int の範囲外".into()); }
-                        Value::Int(n as i64)
-                    } else {
-                        if n < 0.0 { return error("sqrt の引数が負".into()); }
-                        Value::Num(n.sqrt())
-                    }
-                } else if let Some(f) = env.iter().rev().find_map(|s| s.get(name)).cloned() {
-                    self.apply(&f, vs)?
-                } else if name == "all" && !self.fns.contains_key(name.as_str()) {
-                    // 並行の処理が無いので順に実行する
-                    let Value::Arr(fs) = &vs[0] else {
-                        unreachable!("型検査済み")
-                    };
-                    let mut out = Vec::new();
-                    for f in fs.iter() {
-                        out.push(self.apply(f, vec![])?);
-                    }
-                    Value::Arr(Rc::new(out))
-                } else if matches!(name.as_str(), "spawn" | "task_then" | "task_done" | "task_value" | "task_wait")
-                    && !self.fns.contains_key(name.as_str())
-                {
-                    // spawn の時点で最後まで実行し、Task<T> は結果の値そのものにする
-                    // ponytail: 実行の待ち行列を持たないので、spawn した処理が JavaScript より先に走る。待ち行列を持てば同じ順序にできる
-                    match name.as_str() {
-                        "spawn" => self.apply(&vs[0], vec![])?,
-                        "task_then" => {
-                            let t = vs.remove(0);
-                            self.apply(&vs[0], vec![t])?
-                        }
-                        "task_done" => Value::Bool(true),
-                        _ => vs.remove(0),
-                    }
-                } else if name == "new_ref" && !self.fns.contains_key(name.as_str()) {
-                    Value::Ref(Rc::new(std::cell::RefCell::new(vs.pop().unwrap())))
-                } else if name == "read" && !self.fns.contains_key(name.as_str()) {
-                    let Value::Ref(r) = &vs[0] else {
-                        unreachable!("型検査済み")
-                    };
-                    r.borrow().clone()
-                } else if name == "write" && !self.fns.contains_key(name.as_str()) {
-                    let x = vs.pop().unwrap();
-                    let Value::Ref(r) = &vs[0] else {
-                        unreachable!("型検査済み")
-                    };
-                    *r.borrow_mut() = x;
-                    Value::Unit
-                } else if name == "push" && !self.fns.contains_key(name.as_str()) {
-                    let x = vs.pop().unwrap();
-                    let Value::Arr(xs) = vs.pop().unwrap() else {
-                        unreachable!("型検査済み")
-                    };
-                    let mut xs = xs.to_vec();
-                    xs.push(x);
-                    Value::Arr(Rc::new(xs))
-                } else if name == "set_at" && !self.fns.contains_key(name.as_str()) {
-                    let x = vs.pop().unwrap();
-                    let i = int(vs.pop().unwrap());
-                    let Value::Arr(xs) = vs.pop().unwrap() else {
-                        unreachable!("型検査済み")
-                    };
-                    let mut xs = xs.to_vec();
-                    xs[i as usize] = x;
-                    Value::Arr(Rc::new(xs))
-                } else if name == "#resume" {
-                    // 腕の値として返し、perform が呼んだ所の値にする
-                    Value::Data(Rc::new((
-                        "$resume".into(),
-                        vec![vs.pop().unwrap_or(Value::Unit)],
-                    )))
-                } else if self.ctors.contains_key(name.as_str()) {
-                    Value::Data(Rc::new((self.ctors[name.as_str()].0.clone(), vs)))
-                } else if !self.fns.contains_key(name.as_str())
-                    && name != "put"
-                    && name.starts_with(|c: char| c.is_ascii_uppercase())
-                {
-                    // 型を作る呼び出し（Option(int) など）。実行時には名前だけを持つ
-                    Value::Ty(name.as_str().into())
-                } else if name == "input" {
-                    self.out.flush().map_err(|e| Flow::Error(e.to_string()))?;
-                    let mut line = String::new();
-                    std::io::stdin().read_line(&mut line).map_err(|e| Flow::Error(format!("標準入力を読めません: {e}")))?;
-                    if line.ends_with('\n') {
-                        line.pop();
-                        if line.ends_with('\r') { line.pop(); }
-                    }
-                    Value::Str(line.into())
-                } else if let Some(v) = self.syn_fn(name, &mut vs)? {
-                    v
-                } else if name == "put" {
-                    let s = match &vs[0] {
-                        Value::Int(n) => n.to_string(),
-                        Value::Num(n) => n.to_string(),
-                        Value::Bool(b) => b.to_string(),
-                        Value::Unit => "()".into(),
-                        Value::Str(s) => s.to_string(),
-                        Value::Ty(t) => t.to_string(),
-                        Value::Arr(_) | Value::Data(_) | Value::Fn(_) | Value::Ref(_) => {
-                            self.show(&vs[0])
-                        }
-                        Value::Syn(s) => format!("{:?}", s.node.strip()),
-                    };
-                    writeln!(self.out, "{s}").map_err(|e| Flow::Error(e.to_string()))?;
-                    Value::Unit
-                } else {
-                    self.call(name, vs)?
-                }
-            }
+            Expr::Unary(_, x) => Value::Bool(!boolean(self.expr(x, env).await?)),
             Expr::Lam(params, _, _, body) => Value::Fn(Rc::new(Callable::Lam {
                 params: params.iter().map(|p| p.0.clone()).collect(),
                 body: body.clone(),
@@ -773,11 +957,12 @@ impl Interp<'_> {
                     .iter()
                     .flat_map(|s| s.iter().map(|(k, v)| (k.clone(), v.clone())))
                     .collect(),
+                variant: self.variant,
             })),
             Expr::Pi(..) => Value::Ty("fn".into()),
             Expr::Handle(node, body, arms) => {
-                self.next_h += 1;
-                let id = self.next_h;
+                let id = self.runtime.next_h.get() + 1;
+                self.runtime.next_h.set(id);
                 let mut captured: HashMap<Name, Value> = env
                     .iter()
                     .flat_map(|s| s.iter().map(|(k, v)| (k.clone(), v.clone())))
@@ -795,13 +980,14 @@ impl Interp<'_> {
                             params: a.binds.clone(),
                             body,
                             env: captured.clone(),
+                            variant: self.variant,
                         };
                         (a.ctor.clone(), Value::Fn(Rc::new(f)))
                     })
                     .collect();
                 let n = self.handlers.len();
-                self.handlers.push((id, arms));
-                let r = self.expr(body, env);
+                self.handlers.push((id, Rc::new(arms)));
+                let r = self.expr(body, env).await;
                 self.handlers.truncate(n);
                 match r {
                     Err(Flow::Abort(h, v)) if h == id => v,
@@ -809,7 +995,7 @@ impl Interp<'_> {
                 }
             }
             Expr::Exit(target, x) => {
-                let v = self.expr(x, env)?;
+                let v = self.expr(x, env).await?;
                 let name = exit_name(target.expect("型検査が行き先を書き込む"));
                 let Some(Value::Int(h)) = env.iter().rev().find_map(|s| s.get(&name)) else {
                     unreachable!("exit は with の腕の中だけ")
@@ -817,15 +1003,15 @@ impl Interp<'_> {
                 return Err(Flow::Abort(*h as usize, v));
             }
             Expr::Apply(f, args) => {
-                let f = self.expr(f, env)?;
+                let f = self.expr(f, env).await?;
                 let mut vs = Vec::new();
                 for a in args {
-                    vs.push(self.expr(a, env)?);
+                    vs.push(self.expr(a, env).await?);
                 }
-                self.apply(&f, vs)?
+                self.apply_at(f, vs, id).await?
             }
             Expr::Match(s, arms) => {
-                let Value::Data(d) = self.expr(s, env)? else {
+                let Value::Data(d) = self.expr(s, env).await? else {
                     unreachable!("型検査済み")
                 };
                 let arm = arms
@@ -837,15 +1023,15 @@ impl Interp<'_> {
                     scope.extend(arm.binds.iter().cloned().zip(d.1.iter().cloned()));
                 }
                 env.push(scope);
-                let r = self.expr(&arm.body, env);
+                let r = self.expr(&arm.body, env).await;
                 env.pop();
                 r?
             }
             // x = push(x, e): 他から指されていなければ（Rc が一つなら）写さずに足す
             Expr::Assign(name, x)
-                if x.self_push(name).is_some() && !self.fns.contains_key("push") =>
+                if x.self_push(name).is_some() && !self.runtime.fns.contains_key("push") =>
             {
-                let v = self.expr(x.self_push(name).unwrap(), env)?;
+                let v = self.expr(x.self_push(name).unwrap(), env).await?;
                 let slot = env.iter_mut().rev().find_map(|s| s.get_mut(name)).unwrap();
                 let Value::Arr(xs) = slot else {
                     unreachable!("型検査済み")
@@ -854,11 +1040,11 @@ impl Interp<'_> {
                 Value::Unit
             }
             Expr::Assign(name, x)
-                if x.self_set(name).is_some() && !self.fns.contains_key("set_at") =>
+                if x.self_set(name).is_some() && !self.runtime.fns.contains_key("set_at") =>
             {
                 let (i, e) = x.self_set(name).unwrap();
-                let i = int(self.expr(i, env)?);
-                let v = self.expr(e, env)?;
+                let i = int(self.expr(i, env).await?);
+                let v = self.expr(e, env).await?;
                 let slot = env.iter_mut().rev().find_map(|s| s.get_mut(name)).unwrap();
                 let Value::Arr(xs) = slot else {
                     unreachable!("型検査済み")
@@ -867,36 +1053,27 @@ impl Interp<'_> {
                 Value::Unit
             }
             Expr::Assign(name, x) => {
-                let v = self.expr(x, env)?;
+                let v = self.expr(x, env).await?;
                 *env.iter_mut().rev().find_map(|s| s.get_mut(name)).unwrap() = v;
                 Value::Unit
             }
-            Expr::If(c, then, els) => {
-                if boolean(self.expr(c, env)?) {
-                    self.block(then, env)?
-                } else if let Some(x) = els {
-                    self.expr(x, env)?
-                } else {
-                    Value::Unit
-                }
-            }
             Expr::For(x, it, end, body) => {
-                let it = self.expr(it, env)?;
+                let it = self.expr(it, env).await?;
                 match end {
                     Some(end) => {
-                        let range = int(it)..int(self.expr(end, env)?);
-                        self.for_body(x, body, env, range.map(Value::Int))?;
+                        let range = int(it)..int(self.expr(end, env).await?);
+                        self.for_body(x, body, env, range.map(Value::Int)).await?;
                     }
                     None => match it {
-                        Value::Arr(xs) => self.for_body(x, body, env, xs.iter().cloned())?,
+                        Value::Arr(xs) => self.for_body(x, body, env, xs.iter().cloned()).await?,
                         _ => unreachable!("型検査済み"),
                     },
                 }
                 Value::Unit
             }
             Expr::While(c, body) => {
-                while boolean(self.expr(c, env)?) {
-                    match self.block(body, env) {
+                while boolean(self.expr(c, env).await?) {
+                    match self.block(body, env).await {
                         Ok(_) | Err(Flow::Continue) => {}
                         Err(Flow::Break) => break,
                         Err(e) => return Err(e),
@@ -906,16 +1083,20 @@ impl Interp<'_> {
             }
             Expr::Break => return Err(Flow::Break),
             Expr::Continue => return Err(Flow::Continue),
-            Expr::Block(b) => self.block(b, env)?,
+            Expr::Block(b) => self.block(b, env).await?,
             Expr::Return(x) => {
                 let v = match x {
-                    Some(x) => self.expr(x, env)?,
+                    Some(x) => self.expr(x, env).await?,
                     None => Value::Unit,
                 };
                 return Err(Flow::Return(v));
             }
         })
     }
+}
+
+fn has_async(f: &Fn) -> bool {
+    f.effects.iter().any(|e| matches!(e.peel(), Expr::Var(n) if n == "Async"))
 }
 
 // with（Handle）の番号を腕に渡す変数の名前
