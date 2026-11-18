@@ -139,7 +139,9 @@ function $input() {
   const fs = process.getBuiltinModule("node:fs"), bytes = [];
   for (;;) {
     if ($in.pos === $in.end) {
-      const n = fs.readSync(0, $in.buf, 0, $in.buf.length, null);
+      let n;
+      try { n = fs.readSync(0, $in.buf, 0, $in.buf.length, null); }
+      catch (e) { throw new Error("標準入力を読めません", { cause: e }); }
       if (n === 0) break;
       $in.pos = 0;
       $in.end = n;
@@ -155,7 +157,10 @@ function $input() {
       break;
     }
   }
-  return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(new Uint8Array(bytes));
+  const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+  const line = new Uint8Array(bytes);
+  try { return decoder.decode(line); }
+  catch (e) { throw new Error("標準入力の文字コードが UTF-8 でない", { cause: e }); }
 }
 function $len(v) { return typeof v === "string" ? [...v].length : v.length; }
 function $split(s, sep) { return sep === "" ? ["", ...s, ""] : s.split(sep); }

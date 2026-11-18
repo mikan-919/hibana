@@ -13,6 +13,17 @@ fn interact(command: &mut Command, bytes: &[u8]) -> Output {
     output
 }
 
+fn assert_input_error(command: &Command, output: Output, stdout: &[u8], message: &str) {
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(1), "{command:?}: {stderr}");
+    assert_eq!(output.stdout, stdout, "{command:?}");
+    let report = stderr.lines().find(|line| !line.trim().is_empty())
+        .and_then(|line| line.split_once("実行時エラー: "))
+        .map(|(_, message)| message.split('（').next().unwrap());
+    assert_eq!(report, Some(message), "{command:?}: {stderr}");
+    assert_eq!(stderr.matches("実行時エラー:").count(), 1, "{command:?}: {stderr}");
+}
+
 #[test]
 fn input_lines_match_all_backends() {
     let dir = std::env::temp_dir().join(format!("hibana-input-{}", std::process::id()));
@@ -39,7 +50,12 @@ fn input_lines_match_all_backends() {
     std::fs::write(dir.join("input.wasm"), web.wasm).unwrap();
     std::fs::write(dir.join("input-glue.mjs"), web.javascript).unwrap();
     let runner = dir.join("input-wasm.mjs");
-    std::fs::write(&runner, "import {readFileSync} from 'node:fs'; import {instantiate} from './input-glue.mjs'; const api = await instantiate(readFileSync(new URL('./input.wasm', import.meta.url))); api.main();").unwrap();
+    std::fs::write(&runner, r#"
+import {readFileSync} from 'node:fs';
+import {instantiate} from './input-glue.mjs';
+const api = await instantiate(readFileSync(new URL('./input.wasm', import.meta.url)));
+try { api.main(); } catch (e) { console.error(e.message); process.exitCode = 1; }
+"#).unwrap();
     let mut command = Command::new("node");
     command.arg(runner);
     commands.push(command);
@@ -54,14 +70,23 @@ fn input_lines_match_all_backends() {
     for command in &mut commands {
         let output = interact(command, input.as_bytes());
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.stderr.is_empty(), "{command:?}");
         assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
-        let long = "x".repeat(8192);
-        let output = interact(command, format!("{long}\n").as_bytes());
+        let long = format!("{}🌸{}", "x".repeat(4095), "y".repeat(4092));
+        let output = interact(command, format!("{long}\r\n").as_bytes());
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.stderr.is_empty(), "{command:?}");
         assert_eq!(String::from_utf8(output.stdout).unwrap(), format!("prompt\n[{long}]\n[]\n[]\n[]\n[]\n[]\n"));
         for invalid_bytes in [&[0xff, b'\n'][..], &[0xc0, 0xaf, b'\n'], &[0xed, 0xa0, 0x80, b'\n'], &[0xf4, 0x90, 0x80, 0x80, b'\n'], &[0xe3, b'\n']] {
-            let invalid = interact(command, invalid_bytes);
-            assert!(!invalid.status.success());
+            let input = [b"valid\n", invalid_bytes, b"after\n"].concat();
+            let output = interact(command, &input);
+            assert_input_error(command, output, b"prompt\n[valid]\n", "標準入力の文字コードが UTF-8 でない");
+        }
+        #[cfg(target_os = "linux")]
+        {
+            // ディレクトリは開けるが、標準入力からの読み取りは失敗する。
+            let output = command.stdin(std::fs::File::open(&dir).unwrap()).output().unwrap();
+            assert_input_error(command, output, b"prompt\n", "標準入力を読めません");
         }
     }
     assert!(hibana::run("fn main() { input(1) }", &mut Vec::new()).is_err());
@@ -89,8 +114,9 @@ const api = await instantiate(readFileSync(new URL('./input.wasm', import.meta.u
 }}});
 for (const expected of ['\ufeff日本🌸', '', 'last', '']) if (api.next_line() !== expected) throw Error('入力の結果が違う');
 fail = true;
-let rejected = false; try { api.next_line(); } catch { rejected = true; }
-if (!rejected) throw Error('読み取りの失敗を無視した');
+let message;
+try { api.next_line(); } catch (e) { message = e.message; }
+if (message !== '実行時エラー: 標準入力を読めません') throw Error('読み取りの失敗報告が違う: ' + message);
 "#).unwrap();
     let output = Command::new("node").arg(script).output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));

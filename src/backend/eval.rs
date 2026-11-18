@@ -8,7 +8,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::future::Future;
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::pin::Pin;
 use std::rc::{Rc, Weak};
 use std::task::{Context, Poll, Waker};
@@ -775,12 +775,15 @@ impl<'a> Interp<'a> {
                 Value::Ty(name.as_str().into())
             } else if name == "input" {
                 self.runtime.out.borrow_mut().flush().map_err(|e| Flow::Error(e.to_string(), None))?;
-                let mut line = String::new();
-                std::io::stdin().read_line(&mut line).map_err(|e| Flow::Error(format!("標準入力を読めません: {e}"), None))?;
-                if line.ends_with('\n') {
+                let mut line = Vec::new();
+                std::io::stdin().lock().read_until(b'\n', &mut line)
+                    .map_err(|_| Flow::Error("標準入力を読めません".into(), None))?;
+                if line.ends_with(b"\n") {
                     line.pop();
-                    if line.ends_with('\r') { line.pop(); }
+                    if line.ends_with(b"\r") { line.pop(); }
                 }
+                let line = String::from_utf8(line)
+                    .map_err(|_| Flow::Error("標準入力の文字コードが UTF-8 でない".into(), None))?;
                 Value::Str(line.into())
             } else if let Some(v) = self.syn_fn(name, &mut vs)? {
                 v
