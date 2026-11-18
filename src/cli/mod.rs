@@ -436,6 +436,44 @@ mod tests {
         assert!(reasons.is_empty(), "IR が未対応のプログラムがある");
     }
 
+    // IR の 2 つの出力で src を実行し、(ネイティブの出力, WASM の出力, WASM のメモリのバイト数) を返す。
+    // ネイティブは仮想メモリを limit_kb に制限して動かす
+    fn ir_run(src: &str, limit_kb: u64) -> (String, String, u64) {
+        let tmp = std::env::temp_dir().join(format!("hibana-ir-run-{}-{}", std::process::id(), crate::parser::NodeId::default().raw()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut native = String::new();
+        #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let exe = tmp.join("program");
+            std::fs::write(&exe, crate::to_native(src).unwrap()).unwrap();
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let r = std::process::Command::new("sh").arg("-c").arg(format!("ulimit -v {limit_kb}; exec \"$0\"")).arg(&exe).output().unwrap();
+            assert!(r.status.success(), "ネイティブ: {}", String::from_utf8_lossy(&r.stderr));
+            native = String::from_utf8(r.stdout).unwrap();
+        }
+        let path = tmp.join("program.wasm");
+        std::fs::write(&path, crate::to_wasm(src).unwrap()).unwrap();
+        let script = "let x; x = new WebAssembly.Instance(new WebAssembly.Module(require('fs').readFileSync(process.argv[1])), {hibana: {write: (fd,p,n) => process.stdout.write(Buffer.from(x.memory.buffer, Number(p), Number(n))), now_ms: () => BigInt(Date.now())}}).exports; x.main(); process.stderr.write(String(x.memory.buffer.byteLength));";
+        let r = std::process::Command::new("node").args(["-e", script]).arg(&path).output().unwrap();
+        assert!(r.status.success(), "WASM: {}", String::from_utf8_lossy(&r.stderr));
+        std::fs::remove_dir_all(&tmp).unwrap();
+        (native, String::from_utf8(r.stdout).unwrap(), String::from_utf8(r.stderr).unwrap().parse().unwrap())
+    }
+
+    // mut の変数が所有する Vec への push・set_at はその場で書き換える。毎回写すと 10 万要素で数十 GB を確保する
+    #[test]
+    fn ir_vec_updates_in_place() {
+        let src = "fn main() {\n let mut xs: Vec<int> = []\n for i in 0..100000 { xs = push(xs, i) }\n for i in 0..len(xs) { if i < len(xs) { xs = set_at(xs, i, xs[i] * 2) } }\n let mut s = 0\n for x in xs { s = s + x }\n put(len(xs))\n put(s) }";
+        let want = "100000\n9999900000\n";
+        let (native, wasm, memory) = ir_run(src, 262144);
+        #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+        assert_eq!(native, want);
+        let _ = native;
+        assert_eq!(wasm, want);
+        assert!(memory < 64 << 20, "WASM のメモリ {memory} バイト");
+    }
+
     // 範囲外と 0 による除算は、ネイティブでもメッセージを出して終了コード 1 で終わる
     #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
     #[test]

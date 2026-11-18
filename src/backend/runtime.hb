@@ -5,7 +5,7 @@
 // 値の型の番号: 0 unit, 1 int, 2 bool, 3 String, 4 Vec, 5 type の値・構造体, 6 関数, 7 型, 8 Ref, 9 number（中身は f64 のビット列）
 // ヒープ上の形（各欄は 8 バイト、値は型の番号と中身の 16 バイト）:
 //   String: [長さ][UTF-8 のバイト列]
-//   Vec: [要素数][値...]
+//   Vec: [要素数][値...]。位置の直前に [容量][所有の印] を置く（__arr_new）
 //   type の値・構造体: [構築子の番号][フィールド数][値...]
 //   関数: [関数の番号][写し取った変数の数][値...]
 //   Ref: [値]
@@ -731,30 +731,30 @@ fn __split(s: String, sep: String) -> Vec<String> {
     let m = __load(pp)
     let mut out = __arr_new(0)
     if m == 0 {
-        out = __arr_push(out, '')
+        out = __arr_push_own(out, '')
         let mut i = 0
         while i < n {
             let mut e = i + 1
             while e < n && __and(__load8(ps + 8 + e), 192) == 128 {
                 e = e + 1
             }
-            out = __arr_push(out, __bytes(ps + 8 + i, e - i))
+            out = __arr_push_own(out, __bytes(ps + 8 + i, e - i))
             i = e
         }
-        return __mkv(4, __arr_push(out, ''))
+        return __share(__mkv(4, __arr_push_own(out, '')))
     }
     let mut start = 0
     let mut i = 0
     while i + m <= n {
         if __str_eq(pp, __payload(__bytes(ps + 8 + i, m))) {
-            out = __arr_push(out, __bytes(ps + 8 + start, i - start))
+            out = __arr_push_own(out, __bytes(ps + 8 + start, i - start))
             i = i + m
             start = i
         } else {
             i = i + 1
         }
     }
-    __mkv(4, __arr_push(out, __bytes(ps + 8 + start, n - start)))
+    __share(__mkv(4, __arr_push_own(out, __bytes(ps + 8 + start, n - start))))
 }
 
 fn __chars(s: String) -> Vec<String> {
@@ -767,10 +767,10 @@ fn __chars(s: String) -> Vec<String> {
         while e < n && __and(__load8(ps + 8 + e), 192) == 128 {
             e = e + 1
         }
-        out = __arr_push(out, __bytes(ps + 8 + i, e - i))
+        out = __arr_push_own(out, __bytes(ps + 8 + i, e - i))
         i = e
     }
-    __mkv(4, out)
+    __share(__mkv(4, out))
 }
 
 fn __code(s: String) -> int {
@@ -862,17 +862,42 @@ fn __now_ms() -> int {
 
 // Vec
 
+// Vec の位置の直前に [容量][所有の印] の 16 バイトを置く。要素は位置 + 8 から並ぶ。
+// 所有の印が 1 の Vec は 1 つの mut 変数だけが指していて、__push_own・__set_at_own がその場で書き換える。
+// 変数の値を読んで他へ渡す時は、ir.rs が __share で印を消す
 fn __arr_new(n: int) -> int {
-    let p = __alloc(8 + n * 16)
+    let p = __alloc(24 + n * 16) + 16
+    __store(p - 16, n)
+    __store(p - 8, 0)
     __store(p, n)
     p
 }
 
 // 要素を 1 つ足した新しい Vec の位置
-// ponytail: 毎回すべて写す。ループで足すと要素数の 2 乗の時間。C 版の own（自分だけが指す配列はその場で足す）を移せば線形になる
 fn __arr_push(p: int, x: int) -> int {
     let n = __load(p)
     let q = __arr_new(n + 1)
+    __copy(q + 8, p + 8, n * 16)
+    __setv(q + 8 + n * 16, x)
+    q
+}
+
+// 所有している Vec なら容量の余りに足す。足りなければ容量を 2 倍にして写し、写した先を所有する
+fn __arr_push_own(p: int, x: int) -> int {
+    let n = __load(p)
+    if __load(p - 8) == 1 && n < __load(p - 16) {
+        __setv(p + 8 + n * 16, x)
+        __store(p, n + 1)
+        return p
+    }
+    let mut cap = n * 2
+    if cap < 4 {
+        cap = 4
+    }
+    let q = __alloc(24 + cap * 16) + 16
+    __store(q - 16, cap)
+    __store(q - 8, 1)
+    __store(q, n + 1)
     __copy(q + 8, p + 8, n * 16)
     __setv(q + 8 + n * 16, x)
     q
@@ -882,6 +907,18 @@ fn __push(v: int, x: int) -> int {
     __mkv(4, __arr_push(__payload(v), x))
 }
 
+fn __push_own(v: int, x: int) -> int {
+    __mkv(4, __arr_push_own(__payload(v), x))
+}
+
+// Vec の値なら所有の印を消す。それ以外の値はそのまま
+fn __share(v: int) -> int {
+    if __tag(v) == 4 {
+        __store(__payload(v) - 8, 0)
+    }
+    v
+}
+
 fn __set_at(v: int, i: int, x: int) -> int {
     let p = __payload(v)
     let n = __load(p)
@@ -889,6 +926,17 @@ fn __set_at(v: int, i: int, x: int) -> int {
     __copy(q + 8, p + 8, n * 16)
     __setv(q + 8 + i * 16, x)
     __mkv(4, q)
+}
+
+fn __set_at_own(v: int, i: int, x: int) -> int {
+    let p = __payload(v)
+    if __load(p - 8) == 1 {
+        __setv(p + 8 + i * 16, x)
+        return v
+    }
+    let w = __set_at(v, i, x)
+    __store(__payload(w) - 8, 1)
+    w
 }
 
 // 並行に動かす処理が無いので、順に呼ぶ

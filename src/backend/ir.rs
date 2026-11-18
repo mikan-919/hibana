@@ -4,7 +4,7 @@ use crate::parser::Name;
 // 値はすべて V（型の番号 tag と中身 payload の 2 つの 64 ビット整数）で表す。番号は runtime.hb の先頭を参照。
 // 文字列の連結・比較・表示などはランタイム（runtime.hb）の関数を呼ぶ。ランタイムも同じ変換で IR にする。
 // with（Handle）は、中断の印を置いて呼び出しの後で調べ、1 段ずつ戻って抜ける（Lower::checked）。腕の値は #resume で呼んだ所へ返し、exit で with を抜ける
-// ponytail: Vec の push は毎回写す（runtime.hb の __arr_push）
+// mut の変数が所有する Vec への push・set_at はその場で書き換える（runtime.hb の __push_own・__set_at_own）
 use crate::error::R;
 use crate::parser::{self, Expr as Ast, Stmt as AstStmt};
 use std::collections::{HashMap, HashSet};
@@ -515,6 +515,7 @@ impl<'a> Ctx<'a> {
             raw: runtime,
             handles: Vec::new(),
             loop_handle_depth: None,
+            muts: HashSet::new(),
         };
         for (n, _) in &f.params {
             let i = l.local();
@@ -630,6 +631,8 @@ struct Lower<'c, 'a> {
     // 囲んでいる with の番号を持つ局所変数と、ループ本体に入る時のその数
     handles: Vec<u32>,
     loop_handle_depth: Option<usize>,
+    // mut で宣言した変数。値を読んで他へ渡す時は __share で Vec の所有の印を消す
+    muts: HashSet<Name>,
 }
 
 // 値を捨てる。unit の塊は中の文を並べ直す
@@ -685,8 +688,11 @@ impl Lower<'_, '_> {
         let mut stmts = Vec::new();
         for s in &b.stmts {
             match s {
-                AstStmt::Let { name, init, .. } => {
+                AstStmt::Let { name, init, mutable, .. } => {
                     let e = self.expr(init)?;
+                    if *mutable && !self.raw {
+                        self.muts.insert(name.clone());
+                    }
                     let i = self.local();
                     stmts.push(Stmt::Set(i, e));
                     self.vars.insert(name.clone(), i);
@@ -720,7 +726,18 @@ impl Lower<'_, '_> {
                     .vars
                     .get(n)
                     .ok_or_else(|| format!("IR は変数 {n} に未対応"))?;
-                let v = self.expr(v)?;
+                // x = push(x, e) と x = set_at(x, i, e) は、x が所有する Vec ならその場で書き換える（js.rs の $opush と同じ）
+                let own = self.muts.contains(n);
+                let v = match (v.self_push(n), v.self_set(n)) {
+                    (Some(e), _) if own && !self.cx.sources.contains_key("push") => {
+                        call("__push_own", vec![Expr::Local(i), self.expr(e)?])
+                    }
+                    (_, Some((k, e))) if own && !self.cx.sources.contains_key("set_at") => {
+                        let k = self.expr(k)?;
+                        call("__set_at_own", vec![Expr::Local(i), k, self.expr(e)?])
+                    }
+                    _ => self.expr(v)?,
+                };
                 out.push(Stmt::Set(i, v));
             }
             Ast::While(c, body) => {
@@ -789,6 +806,23 @@ impl Lower<'_, '_> {
         Ok(())
     }
 
+    // 局所変数 n（番号 i）の値。mut の変数は他へ渡すので、Vec の所有の印を消す
+    fn shared(&self, n: &Name, i: u32) -> Expr {
+        if !self.muts.contains(n) {
+            return Expr::Local(i);
+        }
+        let vec = prim(Prim::Eq, vec![prim(Prim::Tag, vec![Expr::Local(i)]), int(ARR)]);
+        Expr::If(Box::new(vec), leaf(call("__share", vec![Expr::Local(i)])), leaf(Expr::Local(i)))
+    }
+
+    // 読むだけで他へ渡さない所（len と添字）。変数なら所有の印を残す
+    fn look(&mut self, e: &Ast) -> R<Expr> {
+        match e.peel() {
+            Ast::Var(n) if self.vars.contains_key(n) => Ok(Expr::Local(self.vars[n])),
+            _ => self.expr(e),
+        }
+    }
+
     fn args(&mut self, args: &[Ast]) -> R<Vec<Expr>> {
         args.iter().map(|a| self.expr(a)).collect()
     }
@@ -812,8 +846,8 @@ impl Lower<'_, '_> {
             Ast::Bool(b) => Expr::Const(BOOL, *b as i64),
             Ast::Str(s) => Expr::Str(s.clone()),
             Ast::Var(n) => {
-                if let Some(i) = self.vars.get(n) {
-                    return Ok(Expr::Local(*i));
+                if let Some(&i) = self.vars.get(n) {
+                    return Ok(self.shared(n, i));
                 }
                 if let Some((i, _)) = self.cx.ctors.get(n.as_str()) {
                     return Ok(mkv(DATA, call("__data_new", vec![int(*i), int(0)])));
@@ -832,12 +866,12 @@ impl Lower<'_, '_> {
                 let Ast::Num(n) = a.peel() else { unreachable!() };
                 Expr::Const(NUM, (-n).to_bits() as i64)
             }
-            Ast::Unary("-", a) if !self.raw && numeric(a) => call("__neg", vec![self.expr(a)?]),
-            Ast::Unary("-", a) if !self.raw => call("__ineg", vec![self.expr(a)?]),
+            Ast::Unary("-", a) if !self.raw && numeric(a) => call("__neg", vec![self.look(a)?]),
+            Ast::Unary("-", a) if !self.raw => call("__ineg", vec![self.look(a)?]),
             Ast::Unary("-", a) => prim(Prim::Sub, vec![int(0), self.expr(a)?]),
-            Ast::Unary(_, a) => prim(Prim::Not, vec![self.expr(a)?]),
+            Ast::Unary(_, a) => prim(Prim::Not, vec![self.look(a)?]),
             Ast::Binary(op @ ("&&" | "||"), a, b) => {
-                let (a, b) = (self.expr(a)?, self.expr(b)?);
+                let (a, b) = (self.look(a)?, self.look(b)?);
                 let (t, f) = if *op == "&&" {
                     (leaf(b), leaf(Expr::Const(BOOL, 0)))
                 } else {
@@ -847,7 +881,8 @@ impl Lower<'_, '_> {
             }
             Ast::Binary(op, a, b) => {
                 let number = !self.raw && (numeric(a) || numeric(b));
-                let (a, b) = (self.expr(a)?, self.expr(b)?);
+                // 演算子は値を他へ渡さないので、変数の所有の印を残す
+                let (a, b) = (self.look(a)?, self.look(b)?);
                 if *op == "**" {
                     return Ok(call(if number { "__value_pow" } else { "__pow" }, vec![a, b]));
                 }
@@ -887,7 +922,7 @@ impl Lower<'_, '_> {
             Ast::Field(x, f) => call(&format!("__field_{f}"), vec![self.expr(x)?]),
             Ast::Index(v, i) => {
                 let mut stmts = Vec::new();
-                let (v, i) = (self.expr(v)?, self.expr(i)?);
+                let (v, i) = (self.look(v)?, self.expr(i)?);
                 let at = add(add(v, int(8)), prim(Prim::Mul, vec![i, int(16)]));
                 let at = self.temp(at, &mut stmts);
                 block(stmts, getv(at))
@@ -974,7 +1009,12 @@ impl Lower<'_, '_> {
             let args = self.args(args)?;
             return Ok(self.checked(Expr::CallIndirect(Box::new(Expr::Local(i)), args)));
         }
-        let mut args = self.args(args)?;
+        // len は読むだけなので、変数の所有の印を残す
+        let mut args = if n == "len" && !self.cx.sources.contains_key("len") {
+            args.iter().map(|a| self.look(a)).collect::<R<_>>()?
+        } else {
+            self.args(args)?
+        };
         if n == "#num" { return Ok(call("__num", args)); }
         if let Some(p) = intrinsic(n) {
             return Ok(match n.as_str() {
@@ -1055,6 +1095,7 @@ impl Lower<'_, '_> {
             raw: self.raw,
             handles: Vec::new(),
             loop_handle_depth: None,
+            muts: HashSet::new(),
         };
         let mut stmts = Vec::new();
         // 引数は 1 番から並べる。名前は写し取った変数より後に入れて、外の同じ名前を隠す
@@ -1093,7 +1134,7 @@ impl Lower<'_, '_> {
             body: stmts,
         });
         let new = call("__fn_new", vec![Expr::Func(name), int(caps.len() as i64)]);
-        let items = caps.into_iter().map(|(_, i)| Expr::Local(i)).collect();
+        let items = caps.into_iter().map(|(n, i)| self.shared(&n, i)).collect();
         Ok(self.object(FN, new, 16, items))
     }
 
