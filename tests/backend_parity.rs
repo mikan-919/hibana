@@ -226,3 +226,118 @@ fn main() {
     let output = format!("{quoted}\u{a0}\"]]\n\t\n");
     check_backends("nested-string-display", source, success(&output));
 }
+
+#[test]
+fn equality_by_identity() {
+    let source = r#"
+use std -> *
+struct Handles { task: Task<int>, reference: Ref<int> }
+fn step() -> int with Async { 42 }
+fn id(n: int) -> int { n }
+fn main() {
+    let t = spawn(step())
+    let alias = t
+    let other = spawn(step())
+    let r = new_ref(1)
+    let same = r
+    let different = new_ref(1)
+    put([t == alias, t == other, t != other])
+    put([r == same, r == different, r != different])
+    write(same, 2)
+    write(different, 2)
+    let h = Handles { task: t, reference: r }
+    let shared = Handles { task: alias, reference: same }
+    let separate = Handles { task: t, reference: different }
+    put([r == same, [t] == [alias], [t] == [other], [h] == [shared], h != separate])
+    let callable = new_ref(id)
+    put(callable == callable)
+    other.then(fn(n) { put([t == alias, t == other, h == shared]) })
+}
+"#;
+    check_backends(
+        "equality-by-identity",
+        source,
+        success("[true, false, true]\n[true, false, true]\n[true, true, false, true, true]\ntrue\n[true, false, true]\n"),
+    );
+}
+
+#[test]
+fn equality_trait_dispatch() {
+    check_backends(
+        "existing-eq",
+        include_str!("programs/types/eq.hb"),
+        success("true\ntrue\n"),
+    );
+    let source = r#"
+use std -> *
+type Callback = (int) -> int
+struct Job { id: int, run: Callback }
+impl Eq for Job {
+    fn eq(self, other: Job) -> bool { self.id == other.id }
+}
+fn same<A: Eq>(a: A, b: A) -> bool { a == b }
+fn same_options<A: Eq>(a: Option<A>, b: Option<A>) -> bool { a == b }
+enum Chain<A> { End, Link(rest: Chain<A>, value: A) }
+fn main() {
+    let a = Job { id: 1, run: fn(n) { n } }
+    let b = Job { id: 1, run: fn(n) { n + 1 } }
+    let c = Job { id: 2, run: a.run }
+    put([a == b, a != c, same(a, b), same_options(Some(a), Some(b)), [a] == [b]])
+    let end: Chain<int> = End
+    let xs = Link(end, 1)
+    put([xs == Link(end, 1), xs == Link(end, 2)])
+}
+"#;
+    check_backends(
+        "equality-trait-dispatch",
+        source,
+        success("[true, true, true, true, true]\n[true, false]\n"),
+    );
+}
+
+#[test]
+fn equality_type_errors() {
+    for (declarations, body, message) in [
+        ("", "let a = id\nlet b = id\nput(a == b)", "は比較できない"),
+        ("", "put(step() != step())", "Async<int> は比較できない"),
+        ("", "put([[id]] == [[id]])", "は比較できない"),
+        ("struct Box<A> { value: A }", "put(Box { value: step() } == Box { value: step() })", "Async<int> は比較できない"),
+        (
+            "enum Chain<A> { End, Link(rest: Chain<A>, value: A) }",
+            "let end: Chain<(int) -> int> = End\nput(Link(end, id) != Link(end, id))",
+            "は比較できない",
+        ),
+        ("fn same<A>(a: A, b: A) -> bool { a != b }", "put(same(id, id))", "<A: Eq>"),
+        ("fn same<A>(a: Vec<A>, b: Vec<A>) -> bool { a == b }", "put(same([step()], [step()]))", "組み込みの比較"),
+        ("fn same<A: Eq>(a: A, b: A) -> bool { a == b }", "put(same(id, id))", "は比較できない"),
+        ("fn same<A: Eq>(a: A, b: A) -> bool { a == b }", "put(same(step(), step()))", "Async<int> は比較できない"),
+        (
+            "type Callback = (int) -> int
+             impl Eq for Callback { fn eq(self, other: Callback) -> bool { true } }
+             fn same<A: Eq>(a: A, b: A) -> bool { a == b }",
+            "put(same(id, id))",
+            "は比較できない",
+        ),
+        (
+            "struct Job { run: (int) -> int }
+             impl Eq for Job { fn eq(self, other: Job) -> bool { true } }
+             struct Wrapped<A> { value: A }
+             fn same<A: Eq>(a: Wrapped<A>, b: Wrapped<A>) -> bool { a == b }",
+            "put(same(Wrapped { value: Job { run: id } }, Wrapped { value: Job { run: id } }))",
+            "組み込みの比較",
+        ),
+    ] {
+        let source = format!(
+            "use std -> *\nfn id(n: int) -> int {{ n }}\nfn step() -> int with Async {{ 42 }}\n{declarations}\nfn main() {{ {body} }}"
+        );
+        let errors = [
+            hibana::run(&source, &mut Vec::new()).err(),
+            hibana::to_js(&source).err(),
+            hibana::to_web(&source, &["main".into()]).err(),
+            hibana::to_native(&source).err(),
+        ];
+        let messages = errors.map(|error| error.expect(&source).to_string());
+        assert!(messages[0].contains(message), "{source}\n{}", messages[0]);
+        assert!(messages.iter().all(|m| *m == messages[0]), "{messages:?}");
+    }
+}

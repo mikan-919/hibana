@@ -50,7 +50,7 @@ pub enum Callable {
     Named(Name),
 }
 
-// 関数の値は同じものの時だけ等しい（型検査で比較を禁止していないので、ここで決める）
+// Rust 側で関数の値を比較する場合は同一性を使う。
 impl PartialEq for Callable {
     fn eq(&self, o: &Self) -> bool {
         std::ptr::eq(self, o)
@@ -219,6 +219,7 @@ fn number(v: &Value) -> f64 {
 
 fn value_eq(a: &Value, b: &Value) -> bool {
     match (a, b) {
+        (Value::Ref(a), Value::Ref(b)) => Rc::ptr_eq(a, b),
         (Value::Int(i), Value::Num(f)) | (Value::Num(f), Value::Int(i)) => (*i as f64) == *f,
         (Value::Arr(a), Value::Arr(b)) => a.len() == b.len() && a.iter().zip(b.iter()).all(|(a,b)| value_eq(a,b)),
         (Value::Data(a), Value::Data(b)) => a.0 == b.0 && a.1.len() == b.1.len() && a.1.iter().zip(&b.1).all(|(a,b)| value_eq(a,b)),

@@ -1132,10 +1132,7 @@ impl Ck {
                 let joined = join_type(&lt, &rt).ok_or_else(|| mismatch(&lt, &rt))?;
                 self.subsume(&mut l, &lt, &joined)?;
                 self.subsume(&mut r, &rt, &joined)?;
-                let lt = joined;
-                if lt == prim("syn") {
-                    return Err("syn は比較できない".into());
-                }
+                let lt = base(&joined);
                 if let Some(inst) = self.trait_inst("eq", &lt)? {
                     let call = Expr::Call(Name::trait_method("std.Eq".into(), "eq".into()), vec![*l, *r, inst]);
                     *e = if op == "!=" {
@@ -1145,6 +1142,10 @@ impl Ck {
                     };
                     return Ok(boolean);
                 }
+                if matches!(lt, V::Neu(_)) {
+                    return Err(format!("型 {} を比較するには <A: Eq> のように制約を書く", show(&lt)).into());
+                }
+                self.check_builtin_equality(&lt, &mut Vec::new())?;
                 boolean
             }
         };
