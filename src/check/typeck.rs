@@ -2448,6 +2448,7 @@ impl Ck {
         let Some(d) = self.norm.datas.get(&dt.0).cloned() else {
             return Err(format!("match は data 型の値に使う（実際は {}）", show(&st)).into());
         };
+        self.visible(&d)?;
         let mut covered = Vec::new();
         let mut wildcard = false;
         let mut result: Option<V> = None;
@@ -2510,11 +2511,18 @@ impl Ck {
         Ok(expected.cloned().or(result).unwrap_or(prim("never")))
     }
 
+    // 他のモジュールの非公開の型の値は、分解もフィールドの読み取りもできない
+    fn visible(&self, d: &crate::parser::Data) -> R<()> {
+        if d.public || d.module == self.module { return Ok(()); }
+        Err(format!("{} は非公開（宣言に pub を付ける）", d.name).into())
+    }
+
     // 構造体の値 x のフィールド f の型。フィールドの型の細分化の条件は前のフィールドの値を参照できる
     fn struct_field(&mut self, d: &(Name, Vec<V>), x: &Expr, f: &Name) -> R<V> {
         let Some(data) = self.norm.datas.get(&d.0).cloned() else {
             return Err(format!("型 {} は構造体でないのでフィールドは無い", d.0).into());
         };
+        self.visible(&data)?;
         let [c] = data.ctors.as_slice() else {
             return Err(format!("型 {} は構造体でないのでフィールドは無い", d.0).into());
         };

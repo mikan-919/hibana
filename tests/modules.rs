@@ -466,3 +466,31 @@ fn module_names_stay_in_the_file_that_uses_them() {
     let error = hibana::typeck::check(&mut program).err().unwrap();
     assert!(error.msg.contains("未定義"), "{}", error.msg);
 }
+
+#[test]
+fn private_traits_cannot_be_provided_from_other_modules() {
+    let files = Files::new("private-with", &[("dep.hb", "trait Internal { fn value(self) -> int }\npub fn one() -> int with {} { 1 }")]);
+    for source in [
+        "use dep\nfn main() { put(with dep.Internal(fn() { 3 }) { 1 }) }",
+        "use dep -> *\nfn main() { put(with Internal(fn() { 3 }) { 1 }) }",
+    ] {
+        let error = files.parse(source).unwrap_err();
+        assert!(error.msg.contains("非公開"), "{source}: {error}");
+    }
+}
+
+#[test]
+fn public_declarations_cannot_expose_private_types() {
+    for (dependency, declaration) in [
+        ("struct Secret { v: int }\npub struct Wrapper { s: Secret }", "dep.Wrapper"),
+        ("struct Secret { v: int }\npub fn leak() -> Secret with {} { Secret { v: 1 } }", "dep.leak"),
+        ("struct Secret { v: int }\npub fn take(xs: Vec<Secret>) -> int with {} { 0 }", "dep.take"),
+        ("enum Secret { A }\npub enum Choice { Hidden(s: Secret) }", "dep.Choice"),
+        ("type Secret = int\npub type Shown = Secret", "dep.Shown"),
+        ("trait Internal { fn value(self) -> int }\npub fn need() -> int with Internal { Internal::value() }", "dep.need"),
+    ] {
+        let files = Files::new("private-signature", &[("dep.hb", dependency)]);
+        let error = files.parse("use dep\nfn main() {}").unwrap_err();
+        assert!(error.msg.contains(&format!("公開宣言 {declaration} に非公開型")), "{dependency}: {error}");
+    }
+}

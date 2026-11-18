@@ -98,7 +98,62 @@ pub fn resolve(
         }
         if let Some(error) = r.error { return Err(error); }
     }
+    public_signatures(prog)
+}
+
+// 公開宣言の型（引数・戻り値・with・フィールド・別名の右辺）に、同じモジュールの非公開の型を含められない。
+// 含めると、他のモジュールが名前を書けない型の値を受け取れてしまう
+fn public_signatures(prog: &Program) -> R<()> {
+    let private: HashSet<&Name> = prog.datas.iter().filter(|d| !d.public).map(|d| &d.name)
+        .chain(prog.fns.iter().filter(|f| f.alias && !f.public).map(|f| &f.name))
+        .collect();
+    let find = |ty: &Expr| {
+        let mut found = None;
+        names_in(ty, &mut |n| if found.is_none() && private.contains(n) { found = Some(n.clone()) });
+        found
+    };
+    let fail = |decl: &Name, ty: Name, span: Option<Span>| {
+        let error = Error::from(format!("公開宣言 {decl} に非公開型 {ty} を含められない"));
+        Err(match span { Some(span) => error.at(span), None => error })
+    };
+    for f in prog.fns.iter().filter(|f| f.public) {
+        let alias = f.alias.then_some(f.body.tail.as_deref()).flatten();
+        let types = f.params.iter().map(|p| &p.1).chain(&f.ret).chain(&f.effects).chain(alias);
+        for ty in types {
+            if let Some(n) = find(ty) { return fail(&f.name, n, f.span); }
+        }
+    }
+    for d in prog.datas.iter().filter(|d| d.public) {
+        let types = d.params.iter().map(|p| &p.1).chain(d.ctors.iter().flat_map(|c| c.fields.iter().map(|f| &f.1)));
+        for ty in types {
+            if let Some(n) = find(ty) { return fail(&d.name, n, d.span); }
+        }
+    }
     Ok(())
+}
+
+// 型の式に現れる大域の名前。細分化型の条件は見ない
+fn names_in(e: &Expr, f: &mut impl FnMut(&Name)) {
+    match e.peel() {
+        Expr::Var(n) => f(n),
+        Expr::Call(n, xs) => {
+            f(n);
+            xs.iter().for_each(|x| names_in(x, f));
+        }
+        Expr::Refine(b, _, _) => names_in(b, f),
+        Expr::Pi(ps, r, effs) => {
+            ps.iter().for_each(|p| names_in(&p.1, f));
+            names_in(r, f);
+            effs.iter().for_each(|x| names_in(x, f));
+        }
+        Expr::Array(xs) => xs.iter().for_each(|x| names_in(x, f)),
+        Expr::Apply(g, xs) => {
+            names_in(g, f);
+            xs.iter().for_each(|x| names_in(x, f));
+        }
+        Expr::Block(b) => if let Some(t) = &b.tail { names_in(t, f) },
+        _ => {}
+    }
 }
 
 #[cfg(test)]
@@ -175,8 +230,12 @@ impl Resolver<'_> {
                 return;
             }
         }
-        if let Some(private) = private && self.error.is_none() {
-            let error = Error::from(format!("{private} は非公開（宣言に pub を付ける）"));
+        if let Some(private) = private { self.private(private); }
+    }
+
+    fn private(&mut self, name: Name) {
+        if self.error.is_none() {
+            let error = Error::from(format!("{name} は非公開（宣言に pub を付ける）"));
             self.error = Some(match self.span { Some(span) => error.at(span), None => error });
         }
     }
@@ -285,6 +344,12 @@ impl Resolver<'_> {
             Expr::Handle(_, s, arms) => {
                 self.expr(s);
                 for a in arms {
+                    // 腕の操作名は構文解析で修飾済み。他のモジュールの非公開トレイトは提供できない
+                    if let Some((owner, false)) = self.visibility.get(&a.ctor)
+                        && *owner != self.module
+                    {
+                        self.private(a.ctor.clone());
+                    }
                     let binds = a.binds.clone();
                     self.with(&binds, |r| r.expr(&mut a.body));
                 }
