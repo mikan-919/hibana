@@ -2588,6 +2588,22 @@ mod tests {
     }
 
     #[test]
+    fn repeated_runtime_calls_cannot_reuse_refinement_facts() {
+        for source in [
+            "fn main() { let r = new_ref(0)\n if read(r) == 0 { write(r, 1)\n let x: int[v -> v == read(r)] = 0 } }",
+            "fn main() { if input() == 'a' { let x: String[v -> v == input()] = 'a' } }",
+            "fn main() { if now_ms() == 0 { let x: int[v -> v == now_ms()] = 0 } }",
+            "fn value() -> int { 0 }\nfn main() { if value() == 0 { let x: int[v -> v == value()] = 0 } }",
+            "trait Source { fn next(self) -> int }\nfn value() -> int with Source { next() }\nfn f() with Source { if value() == 0 { let x: int[v -> v == value()] = 0 } }\nfn main() {}",
+            "fn f(g: () -> int) { if g() == 0 { let x: int[v -> v == g()] = 0 } }\nfn main() {}",
+        ] {
+            let error = check(source).unwrap_err();
+            assert!(error.contains("証明できない"), "{source}: {error}");
+        }
+        check("fn main() { let r = new_ref(0)\n let x = read(r)\n write(r, 1)\n let y: int[v -> v == x] = x }").unwrap();
+    }
+
+    #[test]
     fn vector_refinement_compatibility_is_directional() {
         for (expected, got, accepted) in [
             ("Vec<int>", "Vec<int[x -> x > 0]>", true),

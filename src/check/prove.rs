@@ -476,7 +476,7 @@ impl Eval {
         })))
     }
 
-    // 関数を展開する。中で止まったら呼び出しのまま残す
+    // 許可した呼び出しだけを記号計算し、実行時関数は呼び出しごとに区別する
     pub(super) fn call(&mut self, name: &Name, args: Vec<V>) -> R<V> {
         match (name.as_str(), args.as_slice()) {
             ("len", [v]) => return Ok(len(v.clone())),
@@ -487,11 +487,15 @@ impl Eval {
             _ if self.datas.contains_key(name) => {
                 return Ok(V::DataT(Rc::new((name.into(), args))));
             }
+            ("num_floor" | "num_sqrt" | "to_str" | "split" | "starts_with" | "slice"
+                | "chars" | "code" | "char_from_codepoint" | "push" | "set_at" | "[]", _) => {
+                return Ok(neu(Term::Call(name.into(), args)));
+            }
             _ => {}
         }
         // 実行時関数は展開せず、型別名だけを展開する
         let Some(f) = self.fns.get(name).filter(|f| f.alias).cloned() else {
-            return Ok(neu(Term::Call(name.into(), args)));
+            return Ok(self.opaque());
         };
         // 制約の実装を省いた呼び出しは展開しない
         if f.insts > 0 && args.len() < f.params.len() - f.implicit {
@@ -692,5 +696,43 @@ impl Eval {
             },
             v => v.clone(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_calls_get_distinct_opaque_terms() {
+        let prog = crate::parser::parse(
+            "fn runtime() -> int { 1 }\nfn delayed() -> int with Async { 1 }",
+        ).unwrap();
+        let mut eval = Eval::new();
+        eval.fns = prog.fns.into_iter().map(|f| (f.name.clone(), f)).collect();
+        for name in [
+            "read", "input", "now_ms", "new_ref", "write", "put", "panic", "all",
+            "spawn", "task_then", "task_done", "task_value", "task_wait", "runtime",
+            "delayed", "unknown",
+        ] {
+            let args = vec![bound()];
+            let a = eval.call(&name.into(), args.clone()).unwrap();
+            let b = eval.call(&name.into(), args).unwrap();
+            assert!(matches!(&a, V::Neu(n) if matches!(&**n, Term::Opaque(_))), "{name}: {a:?}");
+            assert_ne!(a, b, "{name}");
+        }
+    }
+
+    #[test]
+    fn pure_symbolic_calls_survive_substitution() {
+        let mut eval = Eval::new();
+        let pushed = eval.call(&"push".into(), vec![bound(), V::Int(2)]).unwrap();
+        let length = eval.call(&"len".into(), vec![pushed]).unwrap();
+        let xs = V::Arr(Rc::new(vec![V::Int(1)]));
+        assert_eq!(eval.subst(&length, 0, &xs).unwrap(), V::Int(2));
+
+        let indexed = eval.call(&"[]".into(), vec![bound(), V::Int(0)]).unwrap();
+        assert_eq!(eval.subst(&indexed, 0, &xs).unwrap(),
+            neu(Term::Call("[]".into(), vec![xs, V::Int(0)])));
     }
 }
