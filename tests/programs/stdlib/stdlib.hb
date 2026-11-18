@@ -4,6 +4,9 @@ use std -> *
 test 'vec' {
     assert_eq(concat([1, 2], [3]), [1, 2, 3])
     assert_eq(reverse([1, 2, 3]), [3, 2, 1])
+    assert_eq(reverse<int>([]), [])
+    assert_eq(reverse([1]), [1])
+    assert_eq(reverse(['a', 'b', 'b', 'c']), ['c', 'b', 'b', 'a'])
     assert_eq(take([1, 2, 3], 2), [1, 2])
     assert_eq(drop([1, 2, 3], 2), [3])
     assert_eq(range(2, 5), [2, 3, 4])

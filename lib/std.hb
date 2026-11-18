@@ -192,7 +192,11 @@ fn concat<A>(a: Vec<A>, b: Vec<A>) -> Vec<A> {
 
 fn reverse<A>(xs: Vec<A>) -> Vec<A> {
     let mut out: Vec<A> = []
-    for x in xs { out = concat([x], out) }
+    let mut i = len(xs) - 1
+    while 0 <= i && i < len(xs) {
+        out = push(out, xs[i])
+        i = i - 1
+    }
     out
 }
 
