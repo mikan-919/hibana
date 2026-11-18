@@ -39,6 +39,38 @@ test 'String' {
     assert_eq(trim('  a b \n'), 'a b')
     assert_eq(replace('a-b-c', '-', '+'), 'a+b+c')
     assert_eq(lines('x\ny'), ['x', 'y'])
+    assert_eq(['a'].join(', '), 'a')
+    assert_eq(['a', 'b', 'c', 'd', 'e'].join(''), 'abcde')
+    assert_eq(trim('   '), '')
+    assert_eq(replace('aaa', 'aa', 'b'), 'ba')
+    assert_eq(replace('abc', '', 'x'), 'abc')
+}
+
+// Map は 1000 件のキーでも挿入と取得が合い、set は元の Map を変えない
+test 'Map' {
+    let e: Map<int> = empty()
+    let mut m = e
+    for i in 0..1000 { m = set(m, 'k' + i.to_string(), i * 2) }
+    let before = m
+    for i in 0..1000 { m = set(m, 'k' + i.to_string(), i * 3) }
+    let mut ok = true
+    for i in 0..1000 {
+        if unwrap_or(get(m, 'k' + i.to_string()), -1) != i * 3 { ok = false }
+        if unwrap_or(get(before, 'k' + i.to_string()), -1) != i * 2 { ok = false }
+    }
+    assert(ok)
+    assert_eq(get(m, 'missing'), None)
+    assert_eq(len(keys(m)), 1000)
+    assert_eq(keys(set(set(set(e, 'a', 1), 'b', 2), 'a', 3)), ['b', 'a'])
+}
+
+// JSON の読み書きは入力の長さに比例する（長い文字列と配列）
+test 'JSON' {
+    let mut items: Vec<Json> = []
+    for i in 0..2000 { items = push(items, JStr('s"' + i.to_string() + 'é')) }
+    let text = stringify(JArr(items))
+    assert_eq(match parse_json(text) { Some(j) -> stringify(j) == text None -> false }, true)
+    assert(match parse_json('[1, 2') { Some(_) -> false None -> true })
 }
 
 fn main() with Async {

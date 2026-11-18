@@ -514,7 +514,7 @@ macro unless('unless' expr:Expr block:Block) {
 | `t.then(f)` `t.peek()` | `Task<T>` のメソッド。`t.wait()` は組み込み（3.5 節） |
 | `some(xs, f)` `every(xs, f)` `find(xs, f)` | 一つでも・すべてが条件を満たすか、最初の要素（`Option`）。`f` の要求をそのまま要求する。`all` は並行実行の組み込みなので `every` と呼ぶ |
 | `xs.join(sep)` `repeat(s, n)` `trim(s)` `replace(s, from, to)` `lines(s)` `ends_with(s, w)` `includes(s, w)` | 文字列の操作 |
-| `Map<V>`、`empty()` `get(m, k)` `set(m, k, v)` `keys(m)` | 文字列のキーから値への表。`set` は新しい `Map` を返す。線形探索 |
+| `Map<V>`、`empty()` `get(m, k)` `set(m, k, v)` `keys(m)` | 文字列のキーから値への表（ハッシュで分けたバケットの表）。`get` は O(1)、`set` は新しい `Map` を返し、バケットの並びを写すので O(キーの数)。`keys` は最後に `set` した順 |
 | `Json` = `JNull` \| `JBool` \| `JInt(n: int)` \| `JNum(n: number)` \| `JStr` \| `JArr(Vec<Json>)` \| `JObj(Vec<Field>)`、`Field { key, value }` | JSON の値 |
 | `stringify(j)` `quote_str(s)` | JSON の文字列にする |
 | `parse_json(s)`、`field(j, key)` `str_or(o, d)` `int_or(o, d)` | JSON を読む（`Option<Json>`、読めなければ `None`）。フィールドと値を取り出す |

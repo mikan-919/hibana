@@ -7,8 +7,9 @@ pub enum Result<A, E> { Ok(value: A), Err(error: E) }
 
 // 符号 - と10進数字を読み、文字列全体が整数かを検査する
 pub fn parse_int(s: String) -> Result<int, String> with {} {
-    let parsed = parse_json_int(s, 0)
-    if parsed.ok && parsed.pos == len(s) {
+    let cs = chars(s)
+    let parsed = parse_json_int(cs, 0)
+    if parsed.ok && parsed.pos == len(cs) {
         match parsed.value {
             JInt(n) -> Ok(n)
             _ -> Err('整数として読めない')
@@ -299,20 +300,30 @@ pub fn Task::peek<T>(t: Task<T>) -> Option<T> with {} {
 
 // ---- 文字列 ----
 
-// xs.join(sep)。要素の間に sep を挟んでつなぐ（関数の join は Async の合流）
+// xs.join(sep)。要素の間に sep を挟んでつなぐ（関数の join は Async の合流）。
+// 隣どうしをつなぐ段を繰り返す。各段で全体を 1 回写すので、長さの合計 N に対して O(N log N)
 pub fn Vec::join(xs: Vec<String>, sep: String) -> String with {} {
-    let mut s = ''
-    for i in 0..len(xs) {
-        if i > 0 { s = s + sep }
-        s = s + xs[i]
+    let mut parts: Vec<String> = xs
+    while len(parts) > 1 {
+        let mut next: Vec<String> = []
+        let mut i = 0
+        while i < len(parts) {
+            if i + 1 < len(parts) {
+                next = push(next, at(parts, i) + sep + at(parts, i + 1))
+            } else {
+                next = push(next, at(parts, i))
+            }
+            i = i + 2
+        }
+        parts = next
     }
-    s
+    if len(parts) > 0 { parts[0] } else { '' }
 }
 
 pub fn repeat(s: String, n: int) -> String with {} {
-    let mut r = ''
-    for i in 0..n { r = r + s }
-    r
+    let mut r: Vec<String> = []
+    for i in 0..n { r = push(r, s) }
+    r.join('')
 }
 
 pub fn ends_with(s: String, w: String) -> bool with {} {
@@ -331,63 +342,145 @@ pub fn is_space(c: String) -> bool with {} { c == ' ' || c == '\n' || c == '\t' 
 
 // 前後の空白を除く
 pub fn trim(s: String) -> String with {} {
+    let cs = chars(s)
     let mut a = 0
-    let mut b = len(s)
-    while a < b && is_space(char_at(s, a)) { a = a + 1 }
-    while b > a && is_space(char_at(s, b - 1)) { b = b - 1 }
+    let mut b = len(cs)
+    while a < b && is_space(at(cs, a)) { a = a + 1 }
+    while b > a && is_space(at(cs, b - 1)) { b = b - 1 }
     slice(s, a, b)
 }
 
 // from を to に置き換える（from が空なら変えない）
 pub fn replace(s: String, from: String, to: String) -> String with {} {
     if len(from) == 0 { return s }
-    let mut out = ''
-    let mut i = 0
-    while i < len(s) {
-        if starts_at(s, i, from) {
-            out = out + to
-            i = i + len(from)
-        } else {
-            out = out + char_at(s, i)
-            i = i + 1
-        }
-    }
-    out
+    split(s, from).join(to)
 }
 
 pub fn lines(s: String) -> Vec<String> with {} { split(s, '\n') }
 
-// ---- Map（文字列のキーから値へ） ----
-
-// ponytail: 線形探索。大きくなるならハッシュ表にする
-pub struct Entry<V> { key: String, value: V }
-pub struct Map<V> { entries: Vec<Entry<V>> }
-
-pub fn empty<V>() -> Map<V> with {} {
-    let es: Vec<Entry<V>> = []
-    Map { entries: es }
+// i 文字目（範囲外なら ''）
+pub fn char_at(s: String, i: int) -> String with {} {
+    if 0 <= i && i < len(s) { slice(s, i, i + 1) } else { '' }
 }
 
-pub fn get<V>(m: Map<V>, key: String) -> Option<V> with {} {
-    let mut r: Option<V> = None
-    for e in m.entries {
-        if e.key == key { r = Some(e.value) }
+// chars で分けた文字の並びの i 番目（範囲外なら ''）
+pub fn at(cs: Vec<String>, i: int) -> String with {} {
+    if 0 <= i && i < len(cs) { cs[i] } else { '' }
+}
+
+pub fn starts_at(s: String, i: int, w: String) -> bool with {} {
+    0 <= i && i + len(w) <= len(s) && slice(s, i, i + len(w)) == w
+}
+
+// ---- Map（文字列のキーから値へ） ----
+
+// キーのハッシュで分けたバケットの表。set は新しい Map を返し、元の Map は変わらない。
+// keys の順は最後に set した順。order に set したキーを積み、Entry の seq がそのキーの最新の位置を指す。
+// 古い位置が生きている数の 2 倍を超えるか、キーがバケットの数の 2 倍を超えると作り直す
+// ponytail: set はバケットの並びと order を写すので O(キーの数)。get は O(1)。永続的な木（HAMT）にすれば set も O(log n)
+pub struct Entry<V> { key: String, value: V, seq: int }
+pub struct Map<V> { buckets: Vec<Vec<Entry<V>>>, order: Vec<String>, count: int }
+
+pub fn empty<V>() -> Map<V> with {} {
+    let order: Vec<String> = []
+    Map { buckets: no_buckets(8), order: order, count: 0 }
+}
+
+pub fn no_buckets<V>(n: int) -> Vec<Vec<Entry<V>>> with {} {
+    let mut bs: Vec<Vec<Entry<V>>> = []
+    for i in 0..n {
+        let b: Vec<Entry<V>> = []
+        bs = push(bs, b)
+    }
+    bs
+}
+
+pub fn hash_key(key: String) -> int with {} {
+    let mut h = 0
+    for c in chars(key) { h = (h * 31 + code(c) + 1) % 1000000007 }
+    h
+}
+
+// key の Entry。無ければ None
+pub fn find_entry<V>(m: Map<V>, key: String) -> Option<Entry<V>> with {} {
+    let bs = m.buckets
+    let n = len(bs)
+    let mut r: Option<Entry<V>> = None
+    if n > 0 {
+        let i = hash_key(key) % n
+        if 0 <= i && i < len(bs) {
+            for e in bs[i] {
+                if e.key == key { r = Some(e) }
+            }
+        }
     }
     r
 }
 
+pub fn get<V>(m: Map<V>, key: String) -> Option<V> with {} {
+    match find_entry(m, key) {
+        Some(e) -> Some(e.value)
+        None -> None
+    }
+}
+
 // key の値を value にした新しい Map
 pub fn set<V>(m: Map<V>, key: String, value: V) -> Map<V> with {} {
-    let mut es: Vec<Entry<V>> = []
-    for e in m.entries {
-        if e.key != key { es = push(es, e) }
+    let fresh = match find_entry(m, key) {
+        Some(_) -> 0
+        None -> 1
     }
-    Map { entries: push(es, Entry { key: key, value: value }) }
+    let count = m.count + fresh
+    let mut base = m
+    if count > 2 * len(m.buckets) || len(m.order) > 2 * count + 16 { base = rebuild(m, 2 * count + 8) }
+    let seq = len(base.order)
+    let mut bs = base.buckets
+    let n = len(bs)
+    if n > 0 {
+        let i = hash_key(key) % n
+        if 0 <= i && i < len(bs) {
+            let mut b: Vec<Entry<V>> = []
+            for x in bs[i] {
+                if x.key != key { b = push(b, x) }
+            }
+            bs = set_at(bs, i, push(b, Entry { key: key, value: value, seq: seq }))
+        }
+    }
+    Map { buckets: bs, order: push(base.order, key), count: count }
+}
+
+// 生きている Entry を keys の順に、size 個のバケットへ入れ直す。seq は新しい order の位置にする
+pub fn rebuild<V>(m: Map<V>, size: int) -> Map<V> with {} {
+    let mut bs: Vec<Vec<Entry<V>>> = no_buckets(size)
+    let mut order: Vec<String> = []
+    for k in keys(m) {
+        match find_entry(m, k) {
+            Some(e) -> {
+                let n = len(bs)
+                if n > 0 {
+                    let i = hash_key(k) % n
+                    if 0 <= i && i < len(bs) {
+                        bs = set_at(bs, i, push(bs[i], Entry { key: k, value: e.value, seq: len(order) }))
+                    }
+                }
+                order = push(order, k)
+            }
+            None -> {}
+        }
+    }
+    Map { buckets: bs, order: order, count: len(order) }
 }
 
 pub fn keys<V>(m: Map<V>) -> Vec<String> with {} {
     let mut ks: Vec<String> = []
-    for e in m.entries { ks = push(ks, e.key) }
+    let mut p = 0
+    for k in m.order {
+        match find_entry(m, k) {
+            Some(e) -> { if e.seq == p { ks = push(ks, k) } }
+            None -> {}
+        }
+        p = p + 1
+    }
     ks
 }
 
@@ -398,27 +491,27 @@ pub struct Field { key: String, value: Json }
 
 // JSON の文字列リテラル
 pub fn quote_str(s: String) -> String with {} {
-    let mut out = '"'
-    for i in 0..len(s) {
-        let c = slice(s, i, i + 1)
+    let mut out: Vec<String> = ['"']
+    for c in chars(s) {
         if c == '"' {
-            out = out + '\\"'
+            out = push(out, '\\"')
         } else if c == '\\' {
-            out = out + '\\\\'
+            out = push(out, '\\\\')
         } else if c == '\n' {
-            out = out + '\\n'
+            out = push(out, '\\n')
         } else if c == '\r' {
-            out = out + '\\r'
+            out = push(out, '\\r')
         } else if c == '\t' {
-            out = out + '\\t'
+            out = push(out, '\\t')
         } else if 0 <= code(c) && code(c) < 32 {
-            let digits = '0123456789abcdef'
-            out = out + '\\u00' + char_at(digits, code(c) / 16) + char_at(digits, code(c) % 16)
+            let digits = chars('0123456789abcdef')
+            out = push(out, '\\u00' + at(digits, code(c) / 16) + at(digits, code(c) % 16))
         } else {
-            out = out + c
+            out = push(out, c)
         }
     }
-    out + '"'
+    out = push(out, '"')
+    out.join('')
 }
 
 pub fn stringify(j: Json) -> String with {} {
@@ -432,29 +525,21 @@ pub fn stringify(j: Json) -> String with {} {
         }
         JStr(s) -> quote_str(s)
         JArr(items) -> {
-            let mut out = '['
-            let mut first = true
-            for x in items {
-                if !first { out = out + ',' }
-                out = out + stringify(x)
-                first = false
-            }
-            out + ']'
+            let mut out: Vec<String> = []
+            for x in items { out = push(out, stringify(x)) }
+            '[' + out.join(',') + ']'
         }
         JObj(fields) -> {
-            let mut out = '{'
-            let mut first = true
-            for f in fields {
-                if !first { out = out + ',' }
-                out = out + quote_str(f.key) + ':' + stringify(f.value)
-                first = false
-            }
-            out + '}'
+            let mut out: Vec<String> = []
+            for f in fields { out = push(out, quote_str(f.key) + ':' + stringify(f.value)) }
+            '{' + out.join(',') + '}'
         }
     }
 }
 
 // ---- JSON を読む ----
+
+// 読み手は、最初に chars で分けた文字の並び cs と位置を受け取る。1 文字を読むのは O(1) で、全体は入力の長さに比例する
 
 // 読んだ値と、続きの位置。ok が false なら読めなかった
 pub struct Parsed { ok: bool, value: Json, pos: int }
@@ -463,43 +548,37 @@ pub fn no_parse() -> Parsed with {} {
     Parsed { ok: false, value: JNull, pos: 0 }
 }
 
-// i 文字目（範囲外なら ''）
-pub fn char_at(s: String, i: int) -> String with {} {
-    if 0 <= i && i < len(s) { slice(s, i, i + 1) } else { '' }
-}
-
-pub fn skip_ws(s: String, i: int) -> int with {} {
+pub fn skip_ws(cs: Vec<String>, i: int) -> int with {} {
     let mut j = i
-    while char_at(s, j) == ' ' || char_at(s, j) == '\n' || char_at(s, j) == '\t' || char_at(s, j) == '\r' {
-        j = j + 1
-    }
+    while is_space(at(cs, j)) { j = j + 1 }
     j
 }
 
 // 数字なら 0 から 9、それ以外は -1
 pub fn digit(c: String) -> int with {} {
-    let ds = '0123456789'
-    let mut r = -1
-    for k in 0..10 {
-        if slice(ds, k, k + 1) == c { r = k }
-    }
-    r
+    if len(c) == 1 && 48 <= code(c) && code(c) <= 57 { code(c) - 48 } else { -1 }
 }
 
-pub fn starts_at(s: String, i: int, w: String) -> bool with {} {
-    0 <= i && i + len(w) <= len(s) && slice(s, i, i + len(w)) == w
+// cs の i 文字目から w が続くか
+pub fn chars_at(cs: Vec<String>, i: int, w: String) -> bool with {} {
+    let mut k = i
+    for c in chars(w) {
+        if at(cs, k) != c { return false }
+        k = k + 1
+    }
+    true
 }
 
 // parse_int 用。小数点と指数は読まず、int の範囲を検査する。
-pub fn parse_json_int(s: String, i: int) -> Parsed with {} {
+pub fn parse_json_int(cs: Vec<String>, i: int) -> Parsed with {} {
     let mut j = i
-    let neg = char_at(s, j) == '-'
+    let neg = at(cs, j) == '-'
     if neg { j = j + 1 }
     let start = j
     let mut n = 0
     let mut overflow = false
-    while digit(char_at(s, j)) >= 0 {
-        let d = digit(char_at(s, j))
+    while digit(at(cs, j)) >= 0 {
+        let d = digit(at(cs, j))
         // 負数は負のまま蓄積し、int の最小値を絶対値なしで表す。
         if !overflow {
             if neg {
@@ -651,46 +730,46 @@ pub fn json_decimal(digits: Vec<int>, exponent: int, neg: bool) -> Option<Json> 
     Some(JNum(value))
 }
 
-pub fn parse_json_number(s: String, i: int) -> Parsed with {} {
+pub fn parse_json_number(cs: Vec<String>, i: int) -> Parsed with {} {
     let mut j = i
-    let neg = char_at(s, j) == '-'
+    let neg = at(cs, j) == '-'
     if neg { j = j + 1 }
     let start = j
     let mut digits: Vec<int> = []
-    while digit(char_at(s, j)) >= 0 {
-        digits = push(digits, digit(char_at(s, j)))
+    while digit(at(cs, j)) >= 0 {
+        digits = push(digits, digit(at(cs, j)))
         j = j + 1
     }
-    if j == start || (j > start + 1 && char_at(s, start) == '0') { return no_parse() }
+    if j == start || (j > start + 1 && at(cs, start) == '0') { return no_parse() }
     let mut floating = false
     let mut fraction = 0
-    if char_at(s, j) == '.' {
+    if at(cs, j) == '.' {
         floating = true
         j = j + 1
         let point = j
-        while digit(char_at(s, j)) >= 0 {
-            digits = push(digits, digit(char_at(s, j)))
+        while digit(at(cs, j)) >= 0 {
+            digits = push(digits, digit(at(cs, j)))
             j = j + 1
         }
         fraction = j - point
         if fraction == 0 { return no_parse() }
     }
     let mut exponent = 0
-    if char_at(s, j) == 'e' || char_at(s, j) == 'E' {
+    if at(cs, j) == 'e' || at(cs, j) == 'E' {
         floating = true
         j = j + 1
-        let negative = char_at(s, j) == '-'
-        if negative || char_at(s, j) == '+' { j = j + 1 }
+        let negative = at(cs, j) == '-'
+        if negative || at(cs, j) == '+' { j = j + 1 }
         let power = j
         // 仮数の桁数で打ち消せない指数は飽和させ、桁数に比例する処理で読み終える。
-        while digit(char_at(s, j)) >= 0 {
-            if exponent < len(s) + 400 { exponent = exponent * 10 + digit(char_at(s, j)) }
+        while digit(at(cs, j)) >= 0 {
+            if exponent < len(cs) + 400 { exponent = exponent * 10 + digit(at(cs, j)) }
             j = j + 1
         }
         if j == power { return no_parse() }
         if negative { exponent = -exponent }
     }
-    if !floating { return parse_json_int(s, i) }
+    if !floating { return parse_json_int(cs, i) }
     match json_decimal(digits, exponent - fraction, neg) {
         Some(value) -> Parsed { ok: true, value: value, pos: j }
         None -> no_parse()
@@ -698,65 +777,64 @@ pub fn parse_json_number(s: String, i: int) -> Parsed with {} {
 }
 
 // JSON の Unicode エスケープを4桁読む。途中で切れているものも拒否する。
-pub fn json_hex4(s: String, i: int) -> int with {} {
+pub fn json_hex4(cs: Vec<String>, i: int) -> int with {} {
     let mut n = 0
     for k in 0..4 {
-        let c = char_at(s, i + k)
+        let c = at(cs, i + k)
+        let x = code(c)
         let mut value = -1
-        let lower = '0123456789abcdef'
-        let upper = '0123456789ABCDEF'
-        for h in 0..16 {
-            if c == char_at(lower, h) || c == char_at(upper, h) { value = h }
-        }
+        if len(c) == 1 && 48 <= x && x <= 57 { value = x - 48 }
+        if len(c) == 1 && 97 <= x && x <= 102 { value = x - 87 }
+        if len(c) == 1 && 65 <= x && x <= 70 { value = x - 55 }
         if value < 0 { return -1 }
         n = n * 16 + value
     }
     n
 }
 
-pub fn parse_string(s: String, i: int) -> Parsed with {} {
+pub fn parse_string(cs: Vec<String>, i: int) -> Parsed with {} {
     let mut j = i + 1
-    let mut out = ''
+    let mut out: Vec<String> = []
     let mut done = false
     let mut bad = false
     while !done && !bad {
-        let c = char_at(s, j)
+        let c = at(cs, j)
         if c == '' {
             bad = true
         } else if c == '"' {
             done = true
             j = j + 1
         } else if c == '\\' {
-            let e = char_at(s, j + 1)
+            let e = at(cs, j + 1)
             if e == 'u' {
-                let high = json_hex4(s, j + 2)
+                let high = json_hex4(cs, j + 2)
                 if high < 0 || (56320 <= high && high <= 57343) {
                     bad = true
                 } else if 55296 <= high && high <= 56319 {
-                    let low = json_hex4(s, j + 8)
-                    if char_at(s, j + 6) != '\\' || char_at(s, j + 7) != 'u' || low < 56320 || low > 57343 {
+                    let low = json_hex4(cs, j + 8)
+                    if at(cs, j + 6) != '\\' || at(cs, j + 7) != 'u' || low < 56320 || low > 57343 {
                         bad = true
                     } else {
-                        out = out + char_from_codepoint(65536 + (high - 55296) * 1024 + low - 56320)
+                        out = push(out, char_from_codepoint(65536 + (high - 55296) * 1024 + low - 56320))
                         j = j + 12
                     }
                 } else {
-                    out = out + char_from_codepoint(high)
+                    out = push(out, char_from_codepoint(high))
                     j = j + 6
                 }
             } else {
                 if e == 'n' {
-                    out = out + '\n'
+                    out = push(out, '\n')
                 } else if e == 'r' {
-                    out = out + '\r'
+                    out = push(out, '\r')
                 } else if e == 't' {
-                    out = out + '\t'
+                    out = push(out, '\t')
                 } else if e == 'b' {
-                    out = out + char_from_codepoint(8)
+                    out = push(out, char_from_codepoint(8))
                 } else if e == 'f' {
-                    out = out + char_from_codepoint(12)
+                    out = push(out, char_from_codepoint(12))
                 } else if e == '"' || e == '\\' || e == '/' {
-                    out = out + e
+                    out = push(out, e)
                 } else {
                     bad = true
                 }
@@ -765,48 +843,48 @@ pub fn parse_string(s: String, i: int) -> Parsed with {} {
         } else if code(c) < 32 {
             bad = true
         } else {
-            out = out + c
+            out = push(out, c)
             j = j + 1
         }
     }
-    if bad { no_parse() } else { Parsed { ok: true, value: JStr(out), pos: j } }
+    if bad { no_parse() } else { Parsed { ok: true, value: JStr(out.join('')), pos: j } }
 }
 
-pub fn parse_value(s: String, i0: int) -> Parsed with {} {
-    let i = skip_ws(s, i0)
-    let c = char_at(s, i)
-    if starts_at(s, i, 'null') {
+pub fn parse_value(cs: Vec<String>, i0: int) -> Parsed with {} {
+    let i = skip_ws(cs, i0)
+    let c = at(cs, i)
+    if chars_at(cs, i, 'null') {
         Parsed { ok: true, value: JNull, pos: i + 4 }
-    } else if starts_at(s, i, 'true') {
+    } else if chars_at(cs, i, 'true') {
         Parsed { ok: true, value: JBool(true), pos: i + 4 }
-    } else if starts_at(s, i, 'false') {
+    } else if chars_at(cs, i, 'false') {
         Parsed { ok: true, value: JBool(false), pos: i + 5 }
     } else if c == '"' {
-        parse_string(s, i)
+        parse_string(cs, i)
     } else if c == '[' {
-        parse_array(s, i + 1)
+        parse_array(cs, i + 1)
     } else if c == '{' {
-        parse_object(s, i + 1)
+        parse_object(cs, i + 1)
     } else {
-        parse_json_number(s, i)
+        parse_json_number(cs, i)
     }
 }
 
 // [ の後ろから読む
-pub fn parse_array(s: String, i: int) -> Parsed with {} {
+pub fn parse_array(cs: Vec<String>, i: int) -> Parsed with {} {
     let mut items: Vec<Json> = []
-    let mut j = skip_ws(s, i)
-    let mut done = char_at(s, j) == ']'
+    let mut j = skip_ws(cs, i)
+    let mut done = at(cs, j) == ']'
     if done { j = j + 1 }
     let mut bad = false
     while !done && !bad {
-        let p = parse_value(s, j)
+        let p = parse_value(cs, j)
         if !p.ok {
             bad = true
         } else {
             items = push(items, p.value)
-            j = skip_ws(s, p.pos)
-            let c = char_at(s, j)
+            j = skip_ws(cs, p.pos)
+            let c = at(cs, j)
             if c == ',' {
                 j = j + 1
             } else if c == ']' {
@@ -821,19 +899,19 @@ pub fn parse_array(s: String, i: int) -> Parsed with {} {
 }
 
 // { の後ろから読む
-pub fn parse_object(s: String, i: int) -> Parsed with {} {
+pub fn parse_object(cs: Vec<String>, i: int) -> Parsed with {} {
     let mut fields: Vec<Field> = []
-    let mut j = skip_ws(s, i)
-    let mut done = char_at(s, j) == '}'
+    let mut j = skip_ws(cs, i)
+    let mut done = at(cs, j) == '}'
     if done { j = j + 1 }
     let mut bad = false
     while !done && !bad {
-        let k = parse_string(s, skip_ws(s, j))
-        let colon = skip_ws(s, k.pos)
-        if char_at(s, skip_ws(s, j)) != '"' || !k.ok || char_at(s, colon) != ':' {
+        let k = parse_string(cs, skip_ws(cs, j))
+        let colon = skip_ws(cs, k.pos)
+        if at(cs, skip_ws(cs, j)) != '"' || !k.ok || at(cs, colon) != ':' {
             bad = true
         } else {
-            let v = parse_value(s, colon + 1)
+            let v = parse_value(cs, colon + 1)
             if !v.ok {
                 bad = true
             } else {
@@ -841,8 +919,8 @@ pub fn parse_object(s: String, i: int) -> Parsed with {} {
                     JStr(key) -> { fields = push(fields, Field { key: key, value: v.value }) }
                     _ -> { bad = true }
                 }
-                j = skip_ws(s, v.pos)
-                let c = char_at(s, j)
+                j = skip_ws(cs, v.pos)
+                let c = at(cs, j)
                 if c == ',' {
                     j = j + 1
                 } else if c == '}' {
@@ -859,8 +937,9 @@ pub fn parse_object(s: String, i: int) -> Parsed with {} {
 
 // 文字列全体を JSON として読む。読めなければ None
 pub fn parse_json(s: String) -> Option<Json> with {} {
-    let p = parse_value(s, 0)
-    if p.ok && skip_ws(s, p.pos) == len(s) { Some(p.value) } else { None }
+    let cs = chars(s)
+    let p = parse_value(cs, 0)
+    if p.ok && skip_ws(cs, p.pos) == len(cs) { Some(p.value) } else { None }
 }
 
 // オブジェクトのフィールド。無ければ None
