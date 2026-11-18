@@ -1,4 +1,4 @@
-use crate::{error, eval, fmt, lexer, parser, typeck};
+use crate::{error, eval, fmt, parser, typeck};
 #[cfg(test)]
 use crate::{run, to_js, to_web};
 
@@ -133,19 +133,14 @@ fn test_cmd(files: &[&str]) -> Result<bool, String> {
         let path = p.display().to_string();
         let src = std::fs::read_to_string(p).map_err(|e| format!("{path}: {e}"))?;
         parser::set_base_dir(p.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new(".")));
-        // ponytail: main の無いファイルには空の main を足す（型検査が main を要るため）。main を要らなくするなら型検査に入口を渡す
-        let has_main = lexer::lex(&src).is_ok_and(|ts| {
-            ts.windows(2).any(|w| w[0].tok == lexer::Tok::Punct("fn") && w[1].tok == lexer::Tok::Ident("main".into()))
-        });
-        let full = if has_main { src.clone() } else { format!("{src}\nfn main() {{}}\n") };
-        let prog = parser::load_modules(&full, &parser::base_dir()).and_then(parser::parse_modules).and_then(|mut prog| {
-            typeck::check(&mut prog)?;
+        let prog = parser::load_modules(&src, &parser::base_dir()).and_then(parser::parse_modules).and_then(|mut prog| {
+            typeck::check_library(&mut prog)?;
             Ok(prog)
         });
         let prog = match prog {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("{:?}", report(&path, &full, e));
+                eprintln!("{:?}", report(&path, &src, e));
                 total += 1;
                 continue;
             }
@@ -159,7 +154,7 @@ fn test_cmd(files: &[&str]) -> Result<bool, String> {
                 }
                 Err(e) => {
                     println!("失敗 {label}");
-                    eprintln!("{:?}", report(&path, &full, e));
+                    eprintln!("{:?}", report(&path, &src, e));
                 }
             }
         }
