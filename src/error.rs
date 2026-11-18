@@ -16,6 +16,7 @@ pub struct Error {
     pub origin: Option<(usize, usize)>,
     pub origin_source: Option<SourceId>,
     pub origin_file: Option<SourceFile>,
+    pub origin_label: Option<&'static str>,
     // span の行番号。with_line で msg の前に「行 N: 」を付けると None に戻る
     pub line: Option<usize>,
 }
@@ -76,6 +77,7 @@ impl From<String> for Error {
             origin: None,
             origin_source: None,
             origin_file: None,
+            origin_label: None,
             line: None,
         }
     }

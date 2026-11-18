@@ -15,19 +15,22 @@ struct Report {
     label: String,
     #[help]
     help: Option<String>,
-    #[label("ここで起こしている")]
+    #[label("{origin_label}")]
     origin: Option<miette::SourceSpan>,
+    origin_label: &'static str,
     #[related]
     related: Vec<RelatedSite>,
 }
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
-#[error("効果の操作を呼んでいる位置")]
+#[error("{title}")]
 struct RelatedSite {
+    title: &'static str,
     #[source_code]
     src: miette::NamedSource<String>,
-    #[label("ここで起こしている")]
+    #[label("{label}")]
     span: miette::SourceSpan,
+    label: &'static str,
 }
 
 // 型検査と変換は構文木を再帰でたどるので、深く入れ子になったコードのために大きなスタックで動かす
@@ -102,14 +105,17 @@ fn report(path: &str, src: &str, e: error::Error) -> miette::Report {
             .then(|| "値.to_string() で文字列にする".to_string());
         let related = match (e.origin, &e.origin_file) {
             (Some(span), Some(source)) if source.id != e.source_id => vec![RelatedSite {
+                title: e.origin_label.unwrap_or("効果の操作を呼んでいる位置"),
                 src: miette::NamedSource::new(source.name.clone(), source.text.clone()),
                 span: span.into(),
+                label: e.origin_label.unwrap_or("ここで起こしている"),
             }],
             _ => Vec::new(),
         };
         let report = Report {
             help: e.help.clone().or(to_str),
             origin: e.origin.filter(|_| e.origin_source.is_none_or(|source| source == e.source_id)).map(Into::into),
+            origin_label: e.origin_label.unwrap_or("ここで起こしている"),
             related,
             label,
             msg: e.msg,

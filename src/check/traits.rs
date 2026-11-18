@@ -4,6 +4,59 @@ use super::*;
 // impl から作った、実装の値を作る関数（Show#impl0。メソッドの Show#impl0#show は除く）
 pub(super) fn is_impl(name: &Name) -> bool { name.is_implementation() }
 
+// 両方の実装に共通する型引数があるか、正規化した型の構造を照合する。
+fn overlapping_heads(norm: &mut Eval, a: &V, b: &V, variables: &[usize]) -> R<bool> {
+    let mut pairs = vec![(a.clone(), b.clone())];
+    while let Some((a, b)) = pairs.pop() {
+        if a == b {
+            continue;
+        }
+        let binding = [(&a, &b), (&b, &a)].into_iter().find_map(|(x, y)| match x {
+            V::Neu(n) => match &**n {
+                Term::Var(id, _) if variables.contains(id) => Some((*id, y)),
+                _ => None,
+            },
+            _ => None,
+        });
+        if let Some((id, value)) = binding {
+            // T = Vec<T> のように、解に自分自身を含む場合は一致しない。
+            if mentions(value, id) {
+                return Ok(false);
+            }
+            for (a, b) in &mut pairs {
+                *a = norm.subst(a, id, value)?;
+                *b = norm.subst(b, id, value)?;
+            }
+            continue;
+        }
+        match (a, b) {
+            (V::DataT(a), V::DataT(b)) | (V::Data(a), V::Data(b))
+                if a.0 == b.0 && a.1.len() == b.1.len() =>
+            {
+                pairs.extend(a.1.iter().cloned().zip(b.1.iter().cloned()));
+            }
+            (V::VecT(a), V::VecT(b)) => pairs.push(((*a).clone(), (*b).clone())),
+            (V::Refine(a), V::Refine(b)) => {
+                pairs.push((a.0.clone(), b.0.clone()));
+                pairs.push((a.1.clone(), b.1.clone()));
+            }
+            (V::Pi(a), V::Pi(b)) if a.doms.len() == b.doms.len() => {
+                let (mut ae, mut be) = (flat(&a.effs), flat(&b.effs));
+                if ae.len() != be.len() {
+                    return Ok(false);
+                }
+                ae.sort_by_key(eff_key);
+                be.sort_by_key(eff_key);
+                pairs.extend(ae.into_iter().zip(be));
+                pairs.extend(a.doms.iter().cloned().zip(b.doms.iter().cloned()));
+                pairs.push((a.cod.clone(), b.cod.clone()));
+            }
+            _ => return Ok(false),
+        }
+    }
+    Ok(true)
+}
+
 fn check_equality_type(t: &V) -> R<()> {
     if matches!(t, V::Pi(_) | V::Prim("syn") | V::Syn(_))
         || matches!(t, V::DataT(d) if d.0 == "Async" && !d.1.is_empty())
@@ -24,6 +77,49 @@ fn check_eq_goal(t: &V) -> R<()> {
 }
 
 impl Ck {
+    fn impl_head(&mut self, f: &Fn) -> R<(Vec<usize>, Env, V)> {
+        let mut env: Env = vec![HashMap::new()];
+        let mut ids = Vec::new();
+        for (p, _) in &f.params[..f.implicit] {
+            let id = self.norm.fresh();
+            ids.push(id);
+            env[0].insert(p.clone(), neu(Term::Var(id, format!("?{p}").into())));
+        }
+        let head = self.norm.eval_or_opaque(f.ret.as_ref().unwrap(), &mut env)?;
+        Ok((ids, env, head))
+    }
+
+    pub(super) fn check_impl_overlaps(&mut self, fns: &[Fn]) -> R<()> {
+        let mut heads: HashMap<Name, Vec<(V, Vec<usize>, Option<Span>)>> = HashMap::new();
+        for f in fns.iter().filter(|f| is_impl(&f.name)) {
+            // ponytail: 制約と値引数の充足は調べない。対象を広げるには制約と型の計算を解く必要がある。
+            if f.insts != 0 || f.params[..f.implicit].iter().any(|(_, ty)| {
+                !matches!(ty.peel(), Expr::Var(n) if n == "Type")
+            }) {
+                continue;
+            }
+            let (ids, _, head) = self.impl_head(f).map_err(|e| at_opt(e, f.span))?;
+            let V::DataT(data) = &head else { continue };
+            let same_trait = heads.entry(data.0.clone()).or_default();
+            for (other, other_ids, span) in same_trait.iter() {
+                let variables: Vec<_> = ids.iter().chain(other_ids).copied().collect();
+                if overlapping_heads(&mut self.norm, &head, other, &variables).map_err(|e| at_opt(e, f.span))? {
+                    let mut error = Error::from(format!(
+                        "トレイト実装が重複している（{} と {}）", show(other), show(&head)
+                    ));
+                    if let Some(span) = span {
+                        error.origin = Some((span.start.offset, span.end.offset - span.start.offset));
+                        error.origin_source = Some(span.source);
+                        error.origin_label = Some("重複する実装の宣言");
+                    }
+                    return Err(at_opt(error, f.span));
+                }
+            }
+            same_trait.push((head, ids, f.span));
+        }
+        Ok(())
+    }
+
     // 組み込みの比較はフィールドや配列要素の Eq を呼ばない。
     pub(super) fn check_builtin_equality(&mut self, t: &V, visiting: &mut Vec<V>) -> R<()> {
         let t = base(t);
@@ -83,7 +179,7 @@ impl Ck {
     }
 
     // トレイトの実装を探す。引数の実装（inst#k）とその親、impl の順
-    // ponytail: impl が重なれば名前の順で最初のもの。重なりの検査は孤児ルールと一緒に足す
+    // ponytail: 制約付き impl の重複は検査していない。適用条件の重なりが判定できるようになったら宣言時に検査する。
     pub(super) fn resolve_inst(&mut self, goal: &V, depth: usize) -> R<Expr> {
         self.resolve_in(goal, depth, &[]).map(|r| r.0)
     }
@@ -120,16 +216,7 @@ impl Ck {
             i += 1;
         }
         for f in self.impls.clone() {
-            let mut fenv: Env = vec![HashMap::new()];
-            let mut ids = Vec::new();
-            for (p, _) in &f.params[..f.implicit] {
-                let id = self.norm.fresh();
-                ids.push(id);
-                fenv[0].insert(p.clone(), neu(Term::Var(id, format!("?{p}").into())));
-            }
-            let rt = self
-                .norm
-                .eval_or_opaque(f.ret.as_ref().unwrap(), &mut fenv)?;
+            let (mut ids, mut fenv, rt) = self.impl_head(&f)?;
             let mut sol = HashMap::new();
             ids.extend_from_slice(metas);
             if !self.unify(&rt, goal, &ids, &mut sol)? {
