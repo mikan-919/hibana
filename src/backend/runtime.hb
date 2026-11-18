@@ -18,9 +18,9 @@
 // GC は利用者の関数の入口とループの先頭（ir.rs の安全な位置）でだけ動く。ランタイムの関数の中の生の位置は、
 // GC の間に生きていない。ランタイムの関数から利用者の関数を呼ぶ所（__all・__perform）は、持っている値をシャドースタックに置く
 
-// ランタイムの状態は __static() から 184 バイト:
+// ランタイムの状態は __static() から 200 バイト:
 //   +0 確保の次の位置、+8 区画の終わり、+16 実行時エラーの文字列（WASM だけ使う）
-//   +24 中断の行き先（with の番号。0 は中断していない、-1 は panic）、+32 中断で運ぶ値
+//   +24 中断の行き先（with の番号。0 は中断していない、-1 は実行時エラー）、+32 中断で運ぶ値
 //   +48 処理中のいちばん内側の with、+56 最後に付けた with の番号
 //   +64 シャドースタックの先頭、+72 その始まり、+80 その終わり
 //   +88 確保した区画の並び、+96 前回の GC の後に確保したバイト数、+104 GC を始めるバイト数
@@ -29,7 +29,8 @@
 //   +128 印を付ける作業の並び、+136 その容量
 //   +144 標準入力の区画（__input）
 //   +152 非同期の仕事の並びの先頭（値）、+168 その末尾（__enqueue）
-//   +176 コルーチンを実行中なら 1（panic を Promise の失敗にする）
+//   +176 コルーチンか then の関数を実行中なら 1（実行時エラーを伝える）
+//   +184 then の関数で最初に起きた実行時エラー（文字列の値）
 fn __alloc(n: int) -> int {
     let st = __static()
     if __load(st + 120) == 0 {
@@ -204,6 +205,7 @@ fn __gc() {
     __gc_values(__load(st + 72), (__load(st + 64) - __load(st + 72)) / 16)
     __gc_mark(__getv(st + 32))
     __gc_mark(__getv(st + 152))
+    __gc_mark(__getv(st + 184))
     if __load(st + 48) != 0 {
         __gc_push(__load(st + 48))
     }
@@ -278,13 +280,39 @@ fn __div_zero() {
 
 // 利用者の整数演算。ランタイム内部の64ビット演算とは分ける。
 fn __i53(n: int) -> int {
-    if n > 9007199254740991 || n < -9007199254740991 { __overflow() }
+    if n > 9007199254740991 || n < -9007199254740991 {
+        __panic('オーバーフロー')
+        return 0
+    }
     n
 }
 fn __iadd(a: int, b: int) -> int { __i53(a + b) }
 fn __isub(a: int, b: int) -> int { __i53(a - b) }
-fn __imul(a: int, b: int) -> int { __i53(a * b) }
-fn __ineg(a: int) -> int { __i53(0 - a) }
+fn __imul(a: int, b: int) -> int {
+    // 安全整数の積は64ビットを超えることがあるので、掛ける前に範囲を調べる
+    let x = if a < 0 { 0 - a } else { a }
+    let y = if b < 0 { 0 - b } else { b }
+    if y != 0 && x > 9007199254740991 / y {
+        __panic('オーバーフロー')
+        return 0
+    }
+    a * b
+}
+fn __ineg(a: int) -> int { 0 - a }
+fn __idiv(a: int, b: int) -> int {
+    if b == 0 {
+        __panic('0 で除算した')
+        return 0
+    }
+    a / b
+}
+fn __irem(a: int, b: int) -> int {
+    if b == 0 {
+        __panic('0 で除算した')
+        return 0
+    }
+    a % b
+}
 
 // WASM 境界の f64 のビット列を安全整数へ変換する。
 fn __int_in(bits: int) -> int {
@@ -297,18 +325,21 @@ fn __int_in(bits: int) -> int {
 // 指数が 52 を超えると、-1・0・1 以外は範囲外になる。-1・0・1 は偶奇だけで決まる
 fn __pow(a: int, b: int) -> int {
     if b < 0 {
-        __die('負の指数')
+        __panic('負の指数')
+        return 0
     }
     let mut n = b
     if n > 52 {
         if a > 1 || a < 0 - 1 {
-            __overflow()
+            __panic('オーバーフロー')
+            return 0
         }
         n = 52 + n % 2
     }
     let mut r = 1
     while n > 0 {
         r = __imul(r, a)
+        if __aborting() { return 0 }
         n = n - 1
     }
     r
@@ -359,13 +390,25 @@ fn __cat(a: String, b: String) -> String {
 
 // 数値の加算と文字列の連結。値の型の番号に応じて処理する
 fn __add(a: String, b: String) -> String {
-    if __tag(a) == 9 || __tag(b) == 9 { return __num_checked(__f_add(__num(a), __num(b))) }
+    if __tag(a) == 9 || __tag(b) == 9 { return __num_result(__f_add(__num(a), __num(b))) }
     if __tag(a) == 1 { return __iadd(a, b) }
     __cat(a, b)
 }
 
+fn __num_finite(bits: int) -> bool {
+    __and(__shr(__payload(bits), 52), 2047) != 2047
+}
+
 fn __num_checked(bits: int) -> number {
-    if __and(__shr(__payload(bits), 52), 2047) == 2047 { __die('number の演算結果が有限でない') }
+    if !__num_finite(bits) { __die('number の演算結果が有限でない') }
+    __mkv(9, __payload(bits))
+}
+
+fn __num_result(bits: int) -> number {
+    if !__num_finite(bits) {
+        __panic('number の演算結果が有限でない')
+        return 0.0
+    }
     __mkv(9, __payload(bits))
 }
 
@@ -379,19 +422,22 @@ fn __neg(v: int) -> int {
     __ineg(v)
 }
 fn __sub(a: int, b: int) -> int {
-    if __tag(a) == 9 || __tag(b) == 9 { return __num_checked(__f_sub(__num(a), __num(b))) }
+    if __tag(a) == 9 || __tag(b) == 9 { return __num_result(__f_sub(__num(a), __num(b))) }
     __isub(a, b)
 }
 fn __mul(a: int, b: int) -> int {
-    if __tag(a) == 9 || __tag(b) == 9 { return __num_checked(__f_mul(__num(a), __num(b))) }
+    if __tag(a) == 9 || __tag(b) == 9 { return __num_result(__f_mul(__num(a), __num(b))) }
     __imul(a, b)
 }
 fn __div(a: int, b: int) -> int {
     if __tag(a) == 9 || __tag(b) == 9 {
-        if __f_eq(__num(b), 0.0) { __div_zero() }
-        return __num_checked(__f_div(__num(a), __num(b)))
+        if __f_eq(__num(b), 0.0) {
+            __panic('0 で除算した')
+            return 0.0
+        }
+        return __num_result(__f_div(__num(a), __num(b)))
     }
-    a / b
+    __idiv(a, b)
 }
 fn __lt(a: int, b: int) -> bool {
     if __tag(a) == 9 || __tag(b) == 9 { return __f_lt(__num(a), __num(b)) }
@@ -406,47 +452,57 @@ fn __ge(a: int, b: int) -> bool { __le(b, a) }
 
 fn __num_floor(v: number) -> int {
     let n = __f_floor(__num(v))
-    if __f_lt(n, -9007199254740991.0) || __f_lt(9007199254740991.0, n) { __die('floor の結果が int の範囲外') }
+    if __f_lt(n, -9007199254740991.0) || __f_lt(9007199254740991.0, n) {
+        __panic('floor の結果が int の範囲外')
+        return 0
+    }
     __f_to_int(n)
 }
 fn __num_sqrt(value: number) -> number {
     let v = __num(value)
-    if __f_lt(v, 0.0) { __die('sqrt の引数が負') }
-    __num_checked(__f_sqrt(v))
+    if __f_lt(v, 0.0) {
+        __panic('sqrt の引数が負')
+        return 0.0
+    }
+    __mkv(9, __payload(__f_sqrt(v)))
 }
 
-// ponytail: number の指数は整数のみ。小数の指数には対数・指数関数の実装が必要
 fn __value_pow(left: int, right: int) -> int {
     if __tag(left) != 9 && __tag(right) != 9 { return __pow(left, right) }
     let a = __num(left)
     let b = __num(right)
-    if !__f_eq(__f_floor(b), b) { __die('number の小数の指数は未対応') }
+    if !__f_eq(__f_floor(b), b) {
+        __panic('** の指数は整数値に限る')
+        return 0.0
+    }
     let mut n = b
     let mut factor = a
     if __f_lt(n, 0.0) {
         n = __f_neg(n)
-        if __f_eq(a, 0.0) { __die('number の演算結果が有限でない') }
-        factor = __num_checked(__f_div(1.0, a))
+        factor = __f_div(1.0, a)
     }
     let mut result = 1.0
     while !__f_eq(n, 0.0) {
         let half = __f_floor(__f_div(n, 2.0))
-        if !__f_eq(__f_mul(half, 2.0), n) { result = __num_checked(__f_mul(result, factor)) }
+        if !__f_eq(__f_mul(half, 2.0), n) { result = __f_mul(result, factor) }
         n = half
-        if !__f_eq(n, 0.0) { factor = __num_checked(__f_mul(factor, factor)) }
+        if !__f_eq(n, 0.0) { factor = __f_mul(factor, factor) }
     }
-    result
+    __num_result(result)
 }
 
 // 仮数の整数除算で余りを求め、除算の結果が桁あふれする場合も扱う
 fn __rem(left: int, right: int) -> int {
-    if __tag(left) != 9 && __tag(right) != 9 { return left % right }
+    if __tag(left) != 9 && __tag(right) != 9 { return __irem(left, right) }
     let a = __num(left)
     let b = __num(right)
     let sign = __shl(__shr(__payload(a), 63), 63)
     let mut x = __and(__payload(a), 9223372036854775807)
     let y = __and(__payload(b), 9223372036854775807)
-    if y == 0 { __div_zero() }
+    if y == 0 {
+        __panic('0 で除算した')
+        return 0.0
+    }
     if x < y { return a }
     if x == y { return __mkv(9, sign) }
     let mut ex = __shr(x, 52)
@@ -730,41 +786,61 @@ fn __eq(a: int, b: int) -> bool {
     false
 }
 
-// 文字列の中の値として表示する。インタプリタ（Rust の {:?}）と同じ記号を逃がす
-fn __quote(s: String) -> String {
-    let p = __payload(s)
-    let n = __load(p)
-    let mut out = '"'
-    let mut start = 0
+// dst が 0 なら長さを数え、それ以外なら引用符の内側を dst に書く
+fn __quote_contents(src: int, len: int, dst: int) -> int {
+    let mut size = 0
     let mut i = 0
-    while i < n {
-        let c = __load8(p + 8 + i)
-        let mut esc = ''
-        if c == 34 {
-            esc = '\\"'
+    while i < len {
+        let mut c = __load8(src + i)
+        let mut width = 1
+        // U+0080〜U+009F の UTF-8 は C2 80〜C2 9F
+        if c == 194 && i + 1 < len {
+            let next = __load8(src + i + 1)
+            if next >= 128 && next <= 159 {
+                c = next
+                width = 2
+            }
         }
-        if c == 92 {
-            esc = '\\\\'
+        let escaped = if c == 34 { '\\"' }
+        else if c == 92 { '\\\\' }
+        else if c == 8 { '\\b' }
+        else if c == 9 { '\\t' }
+        else if c == 10 { '\\n' }
+        else if c == 12 { '\\f' }
+        else if c == 13 { '\\r' }
+        else { '' }
+        let bytes = if __load(__payload(escaped)) != 0 { 2 }
+        else if c < 32 || c == 127 || width == 2 { 6 }
+        else { 1 }
+        if dst != 0 {
+            let at = dst + size
+            if bytes == 1 {
+                __store8(at, c)
+            } else if bytes == 2 {
+                __copy(at, __payload(escaped) + 8, 2)
+            } else {
+                let hex = __payload('0123456789abcdef') + 8
+                __copy(at, __payload('\\u00') + 8, 4)
+                __store8(at + 4, __load8(hex + c / 16))
+                __store8(at + 5, __load8(hex + c % 16))
+            }
         }
-        if c == 10 {
-            esc = '\\n'
-        }
-        if c == 9 {
-            esc = '\\t'
-        }
-        if c == 13 {
-            esc = '\\r'
-        }
-        if c == 0 {
-            esc = '\\0'
-        }
-        if __load(__payload(esc)) != 0 {
-            out = __cat(__cat(out, __bytes(p + 8 + start, i - start)), esc)
-            start = i + 1
-        }
-        i = i + 1
+        size = size + bytes
+        i = i + width
     }
-    __cat(__cat(out, __bytes(p + 8 + start, n - start)), '"')
+    size
+}
+
+fn __quote(s: String) -> String {
+    let src = __payload(s)
+    let len = __load(src)
+    let size = __quote_contents(src + 8, len, 0)
+    let out = __alloc(10 + size)
+    __store(out, size + 2)
+    __store8(out + 8, 34)
+    __quote_contents(src + 8, len, out + 9)
+    __store8(out + 9 + size, 34)
+    __mkv(3, out)
 }
 
 fn __join_shown(p: int, n: int) -> String {
@@ -816,6 +892,7 @@ fn __show(v: int) -> String {
 
 fn __show_data(p: int) -> String {
     let ctor = __load(p)
+    if ctor == 0 - 2 { return '<task>' }
     let n = __load(p + 8)
     let name = __ctor_name(ctor)
     let kind = __ctor_kind(ctor)
@@ -880,7 +957,10 @@ fn __input() -> String {
             let read = __sys_read(0, io + 16, 4096)
             if read == 0 { done = true }
             else if read != 0 - 4 {
-                if read < 0 { __die('標準入力を読めません') }
+                if read < 0 {
+                    __panic('標準入力を読めません')
+                    return ''
+                }
                 __store(io, 0)
                 __store(io + 8, read)
             }
@@ -904,14 +984,14 @@ fn __input() -> String {
             __store(io, pos)
         }
     }
-    __utf8_validate(buffer, size)
+    if !__utf8_valid(buffer, size) {
+        __panic('標準入力の文字コードが UTF-8 でない')
+        return ''
+    }
     __bytes(buffer, size)
 }
 
 // UTF-8 の過長表現・代理符号・範囲外・途中で終わる文字を拒否する
-fn __utf8_validate(buffer: int, size: int) {
-    if !__utf8_valid(buffer, size) { __die('標準入力の文字コードが UTF-8 でない') }
-}
 fn __utf8_valid(buffer: int, size: int) -> bool {
     let mut i = 0
     while i < size {
@@ -1081,7 +1161,8 @@ fn __slice(s: String, i: int, j: int) -> String {
     let p = __payload(s)
     let n = __load(p)
     if !(0 <= i && i <= j && j <= __utf8_len(p)) {
-        __die(__cat(__cat(__cat(__cat('slice の範囲 ', __int_str(i)), '..'), __int_str(j)), ' が文字列の外'))
+        __panic(__cat(__cat(__cat(__cat('slice の範囲 ', __int_str(i)), '..'), __int_str(j)), ' が文字列の外'))
+        return ''
     }
     let mut c = 0
     let mut a = 0
@@ -1206,7 +1287,7 @@ fn __write(r: int, x: int) {
 // 非同期（Async）。JavaScript の Promise とマイクロタスクと同じ順で動かす（js.rs の async 関数・await・$all・$spawn・$then・$aop）。
 // Promise は型の番号 11 の値で、構造体と同じ形 [状態][3][値][反応の先頭][反応の末尾]。状態は 0 未完了・1 値・2 失敗。
 // 反応と仕事は構造体 [種類][6][次][a][b][c][結果の状態][結果の値]。Promise が決まると反応を仕事の並び（+152 から）の末尾に移す。
-// 失敗の値は中断 [-3][2][行き先の番号][値]。panic は行き先 -1 とメッセージを持つ。
+// 失敗の値は中断 [-3][2][行き先の番号][値]。実行時エラーは行き先 -1 とメッセージを持つ。
 // 仕事の種類: 1 コルーチンの再開、2 thenable（Promise で解決した Promise）、3 a を同じ結果で解決、4 all の 1 要素、
 // 5 $all の await の続き（with の並びを b に戻して a を解決）、6 spawn の終わり、7 then、8 $aop の await の続き
 // コルーチンの区画は関数の値 [関数][数][Promise][状態の番号][再開の状態][再開の値][局所変数...]（ir.rs の Ctx::coroutine）
@@ -1330,7 +1411,7 @@ fn __co_promise(frame: int) -> int {
     __getv(__payload(frame) + 16)
 }
 
-// 最初の実行と再開は同じ入口を通し、その間の panic を失敗として運ぶ
+// 最初の実行と再開は同じ入口を通し、その間の実行時エラーを失敗として運ぶ
 fn __co_step(frame: int) {
     let at = __static() + 176
     let saved = __load(at)
@@ -1365,7 +1446,6 @@ fn __co_return(frame: int, v: int) {
 }
 
 // 仕事を 1 つ動かす。仕事が無ければ false
-// ponytail: 算術などの __die はその場で終える。続けるには、そのエラーも中断として呼び出し元に伝える
 fn __run_job() -> bool {
     let st = __static()
     let head = __getv(st + 152)
@@ -1428,11 +1508,17 @@ fn __run_job() -> bool {
     } else if kind == 7 {
         let task = __payload(a)
         if __payload(__getv(task + 16)) == 1 {
-            // then は同期関数。wait() がコルーチン内から仕事を進める時も同じ
             let saved = __load(st + 176)
-            __store(st + 176, 0)
+            __store(st + 176, 1)
             b(__getv(task + 32))
             __store(st + 176, saved)
+            if __aborting() {
+                let info = __abort_info()
+                if __tag(__getv(st + 184)) == 0 {
+                    let message = if __is_panic(info) { __panic_message(info) } else { 'with で処理されなかった中断' }
+                    __setv(st + 184, message)
+                }
+            }
         }
     } else if kind == 8 {
         __store(st + 48, __payload(b))
@@ -1456,7 +1542,9 @@ fn __finish_entry(v: int) -> int {
     __setv(roots, v)
     while __run_job() {
     }
-    __store(__static() + 64, roots)
+    let st = __static()
+    __store(st + 64, roots)
+    let mut result = v
     if __tag(v) == 11 {
         let p = __payload(v)
         let status = __load(p)
@@ -1466,9 +1554,11 @@ fn __finish_entry(v: int) -> int {
             if __is_panic(info) { __die(__panic_message(info)) }
             __die('非同期処理が中断した')
         }
-        return __getv(p + 16)
+        result = __getv(p + 16)
     }
-    v
+    let callback_error = __getv(st + 184)
+    if __tag(callback_error) == 3 { __die(callback_error) }
+    result
 }
 
 // all。$all と同じく、すべての関数を呼んでから Promise.all にし、それを待つ async 関数の Promise を返す
@@ -1536,25 +1626,6 @@ fn __task_done(t: int) -> bool {
 fn __task_value(t: int) -> int {
     if __task_done(t) { return __getv(__payload(t) + 32) }
     __mkv(0, 0)
-}
-
-// wait。終わるまで仕事を動かす（ネイティブだけ）
-fn __task_wait(t: int) -> int {
-    let st = __static()
-    let h = __load(st + 48)
-    let roots = __frame_push(2)
-    __setv(roots, t)
-    __setv(roots + 16, __mkv(10, h))
-    let task = __payload(t)
-    while __payload(__getv(task + 16)) == 0 && __run_job() {
-    }
-    __store(st + 64, roots)
-    __store(st + 48, h)
-    if __payload(__getv(task + 16)) == 2 {
-        let info = __getv(task + 32)
-        if __is_panic(info) { __panic(__panic_message(info)) }
-    }
-    __task_value(t)
 }
 
 // 構築子と関数の値

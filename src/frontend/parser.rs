@@ -555,7 +555,6 @@ fn parse_modules_tokens(
         "task_then",
         "task_done",
         "task_value",
-        "task_wait",
         "Vec",
         "Type",
         "with",

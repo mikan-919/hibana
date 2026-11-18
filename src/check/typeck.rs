@@ -106,7 +106,6 @@ const BUILTINS: &[&str] = &[
     "task_then",
     "task_done",
     "task_value",
-    "task_wait",
 ];
 
 // 文字列の組み込み関数 (名前, 引数, 戻り値)。split の戻り値は Vec<String>
@@ -1170,6 +1169,9 @@ impl Ck {
             return self.expr_inner(e, addr);
         }
         let t = self.expr(&mut x)?;
+        if matches!(base(&t), V::DataT(d) if d.0 == "Task") && f == "wait" && xs.is_empty() {
+            return Err("Task.wait() は廃止された。Async の値を待つには .await、Task の成功後に関数を呼ぶには then を使う".into());
+        }
         // 呼び出しの結果に対するメソッドは、結果を一時変数に置いてから呼ぶ。
         // 検査済みの呼び出しをもう一度検査すると、制約の実装の引数を二重に足すため
         if matches!(x.peel(), Expr::Call(..) | Expr::Apply(..)) {
@@ -1186,15 +1188,6 @@ impl Ck {
                 tail: Some(Box::new(inner)),
             });
             return Ok(r);
-        }
-        // t.wait() はブロックして待つ。ネイティブでだけ使えるので、JavaScript と WASM の出力が位置を付けて拒む
-        if let V::DataT(d) = base(&t)
-            && d.0 == "Task"
-            && f == "wait"
-            && xs.is_empty()
-        {
-            *e = Expr::Call("task_wait".into(), vec![*x]);
-            return Ok(d.1[0].clone());
         }
         let ty = match base(&t) {
             V::DataT(d) => Some(d.0.clone()),
@@ -1526,7 +1519,7 @@ impl Ck {
             }
             // std の Task のメソッドの実装に使う組み込み
             Expr::Call(name, args)
-                if matches!(name.as_str(), "task_then" | "task_done" | "task_value" | "task_wait")
+                if matches!(name.as_str(), "task_then" | "task_done" | "task_value")
                     && self.lookup(name).is_none() =>
             {
                 let n = if name == "task_then" { 2 } else { 1 };

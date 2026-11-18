@@ -23,7 +23,7 @@ function $fmul(a, b) { return $fchk(a * b); }
 function $fdiv(a, b) { if (b === 0) throw new Error("0 で除算した"); return $fchk(a / b); }
 function $frem(a, b) { if (b === 0) throw new Error("0 で除算した"); return $fchk(a % b); }
 function $fpow(a, b) {
-  if (!Number.isInteger(b)) return $fchk(a ** b);
+  if (!Number.isInteger(b)) throw new Error("** の指数は整数値に限る");
   let n = Math.abs(b), factor = b < 0 ? $fchk(1 / a) : a, result = 1;
   while (n !== 0) { if (n % 2 !== 0) result = $fchk(result * factor); n = Math.trunc(n / 2); if (n !== 0) factor = $fchk(factor * factor); }
   return result;
@@ -36,8 +36,10 @@ let $w;
 class $Located extends Error { constructor(e, at) { super(e?.message ?? String(e), { cause: e }); this.at = at; } }
 function $at(e, at) { return e instanceof $Located || e instanceof $Abort ? e : new $Located(e, at); }
 function $report(e) { console.error("実行時エラー: " + (e?.message ?? String(e)) + (e instanceof $Located ? "（" + e.at + "）" : "")); }
+function $failed(e) { $report(e); if (globalThis.process) process.exitCode = 1; }
 // 書き換えられる参照
 class $Ref { constructor(v) { this.v = v; } }
+class $Task { constructor() { this.s = 0; this.v = undefined; this.p = null; } }
 function $d(c, f) { return { $c: c, $f: f }; }
 function $field(x, f) { return x.$f[$fi[x.$c][f]]; }
 function $eq(a, b) {
@@ -60,10 +62,11 @@ function $numstr(v) {
 function $show(v) {
   if (typeof v === "number") return $numstr(v);
   if (typeof v === "boolean") return String(v);
-  if (typeof v === "string") return JSON.stringify(v);
+  if (typeof v === "string") return JSON.stringify(v).replace(/[\u007f-\u009f]/g, c => "\\u00" + c.charCodeAt(0).toString(16));
   if (v === undefined) return "()";
   if (typeof v === "function") return "<fn>";
   if (v instanceof $Ref) return "<ref>";
+  if (v instanceof $Task) return "<task>";
   if (Array.isArray(v)) return "[" + v.map($show).join(", ") + "]";
   const [name, style] = $constructors[v.$c] ?? [v.$c, 0];
   if (style === 2) return name + "(" + v.$f.map($show).join(", ") + ")";
@@ -83,12 +86,25 @@ async function $all(fs) {
 // spawn。Async<T> の値を走らせ始め、状態（s: 0 未完了・1 値・2 失敗）を持つ Task を返す。失敗は console.error に出す
 function $spawn(f) {
   const h = $h;
-  const t = { s: 0, v: undefined, p: null };
+  const t = new $Task();
   t.p = f().then((v) => { t.s = 1; t.v = v; }, (e) => { t.s = 2; $report(e); });
   $h = h;
   return t;
 }
-function $then(t, g) { t.p.then(() => { if (t.s === 1) g(t.v); }); }
+let $mainFailed = false, $thenFailed = false;
+function $then(t, g) {
+  t.p.then(() => {
+    if (t.s !== 1) return;
+    try { g(t.v); } catch (e) {
+      if ($thenFailed) return;
+      $thenFailed = true;
+      // 残りの仕事が終わってから、最初の失敗を報告する。
+      const finish = () => { if (!$mainFailed) $failed(e); };
+      if (globalThis.process?.once) process.once("beforeExit", finish);
+      else setTimeout(finish, 0);
+    }
+  });
+}
 class $Abort { constructor(h, v) { this.h = h; this.v = v; } }
 // 要求の呼び出し。一番内側の with の腕を、その with より外の並びで呼ぶ。腕の値が #resume なら呼んだ所の値、それ以外は with を抜ける
 function $find(op) {
@@ -270,7 +286,7 @@ pub fn emit(prog: &Program, info: &crate::typeck::Info) -> String {
     }
     // import は ES モジュールの先頭に置く
     let mut out = imports + &out;
-    out += &format!("(async () => {{ try {{ await {}(); }} catch (e) {{ $report(e); if (globalThis.process) process.exitCode = 1; }} }})();\n", ident("f_", "main"));
+    out += &format!("(async () => {{ try {{ await {}(); }} catch (e) {{ $mainFailed = true; $failed(e); }} }})();\n", ident("f_", "main"));
     out
 }
 
@@ -715,7 +731,7 @@ impl Gen<'_> {
                     "spawn" => format!("$spawn({})", vs[0]),
                     "task_then" => format!("$then({}, {})", vs[0], vs[1]),
                     "task_done" => format!("({}.s === 1)", vs[0]),
-                    "task_value" | "task_wait" => format!("{}.v", vs[0]),
+                    "task_value" => format!("{}.v", vs[0]),
                     "put" => format!("$print({})", vs[0]),
                     "input" => "$input()".into(),
                     "to_str" => format!("$str({})", vs[0]),

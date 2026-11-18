@@ -1,7 +1,7 @@
 // 構造化 IR を WebAssembly に変換する。
 // IR の値（型の番号と中身）は 2 つの i64 で表し、関数は 2 つの i64 を返す。
 // 公開関数と外部関数の境界では、int と number は f64、str は (長さ << 32) | 位置 の i64 に変換する。
-// メモリ: [0, 8) は使わない、[8, 72) はランタイムの状態（runtime.hb の __static）、その後に文字列のリテラル、ヒープ。
+// メモリ: [0, 8) は使わない。その後にランタイムの状態（runtime.hb の __static）、文字列のリテラル、ヒープを置く。
 use crate::ir::{self, Block, Expr, Node, Prim, Program, Stmt, ValueType};
 use std::collections::HashMap;
 use wasm_encoder::{
@@ -11,7 +11,7 @@ use wasm_encoder::{
 };
 
 const STATIC: i64 = 8;
-const FAIL_AT: i64 = 24;
+pub(crate) const FAIL_AT: i64 = 24;
 // 文字列定数は __static の後ろに置く
 const LITERALS: u32 = STATIC as u32 + ir::STATIC_BYTES as u32;
 // シャドースタックの大きさ。局所変数 1 つに 16 バイト使う
@@ -56,12 +56,21 @@ impl Types {
 
 // 公開する関数は selected、None なら境界で渡せる利用者の関数すべて
 pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> {
+    emit_module(program, selected, false)
+}
+
+pub(crate) fn emit_with_glue(program: &Program, exports: &[String]) -> Vec<u8> {
+    emit_module(program, Some(exports), true)
+}
+
+fn emit_module(program: &Program, selected: Option<&[String]>, with_glue: bool) -> Vec<u8> {
     // 文字列のリテラルを並べる。[長さ][バイト列] を 8 バイト境界に置く
     let mut literals: HashMap<String, i64> = HashMap::new();
     let mut data = Vec::new();
     let mut writes = false;
     let mut now = false;
     let mut reads = false;
+    let mut fails = false;
     let mut table: Vec<&str> = Vec::new();
     for f in &program.functions {
         f.each(&mut |n| match n {
@@ -76,6 +85,7 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
             Node::Expr(Expr::Prim(Prim::Write, _)) => writes = true,
             Node::Expr(Expr::Prim(Prim::Now, _)) => now = true,
             Node::Expr(Expr::Prim(Prim::Read, _)) => reads = true,
+            Node::Expr(Expr::Prim(Prim::Fail, _)) if with_glue => fails = true,
             Node::Expr(Expr::Func(name)) if !table.contains(&name.as_str()) => table.push(name),
             _ => {}
         });
@@ -115,7 +125,7 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
             .imports
             .iter()
             .any(|f| has_str(&f.param_types, f.result_type));
-    let reset_state = strings || exported.iter().any(|f| f.finish_at_boundary);
+    let reset_state = fails || strings || exported.iter().any(|f| f.finish_at_boundary);
 
     let mut types = Types::default();
     let mut imports = ImportSection::new();
@@ -261,7 +271,7 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
     }
     if reset_state {
         functions.function(types.get(0, 0));
-        // 中断、処理中の with、シャドースタック、GC、非同期の仕事をリセットする
+        // エラー、中断、処理中の with、シャドースタック、GC、非同期の仕事をリセットする
         let mut reset = vec![
             I::I32Const(STATIC as i32),
             I::I64Const(heap as i64),
@@ -274,14 +284,14 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
             I::I64Store(mem(0, 3)),
         ];
         reset.extend([I::I32Const(STATIC as i32 + 64), I::I64Const(shadow as i64), I::I64Store(mem(0, 3))]);
-        for k in [24, 32, 40, 48, 56, 88, 96, 104, 120, 128, 136, 152, 160, 168, 176] {
+        for k in [16, 24, 32, 40, 48, 56, 88, 96, 104, 120, 128, 136, 152, 160, 168, 176, 184, 192] {
             reset.extend([I::I32Const(STATIC as i32 + k), I::I64Const(0), I::I64Store(mem(0, 3))]);
         }
         reset.push(I::End);
         code.function(&function(&[], &reset));
         exports.export("__hibana_reset", ExportKind::Func, alloc + u32::from(strings));
     }
-    if strings || writes || reads || selected.is_none() {
+    if fails || strings || writes || reads || selected.is_none() {
         exports.export("memory", ExportKind::Memory, 0);
     }
     let mut memory = MemorySection::new();
@@ -297,7 +307,7 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
     init.extend((pages * 65536).to_le_bytes());
     // 実行時エラーの文字列、中断、処理中の with、シャドースタック、GC の状態は 0 から始める。+112 は文字列定数の終わり
     init.extend([0u8; 48]);
-    for v in [shadow, shadow, shadow + SHADOW, 0, 0, 0, heap, 0, 0, 0, input, 0, 0, 0, 0] {
+    for v in [shadow, shadow, shadow + SHADOW, 0, 0, 0, heap, 0, 0, 0, input, 0, 0, 0, 0, 0, 0] {
         init.extend(v.to_le_bytes());
     }
     debug_assert_eq!(init.len(), ir::STATIC_BYTES);

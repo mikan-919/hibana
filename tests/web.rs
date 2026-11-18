@@ -35,6 +35,9 @@ pub fn twice(n: int) -> int with Async {
         spawn(announce())
         return 1 % n
     }
+    if n == 1 {
+        task_then(spawn(step(n)), fn(value) { panic('then の失敗 ' + value.to_string()) })
+    }
     let first = step(n).await
     step(first).await
 }
@@ -66,9 +69,10 @@ for (const name of ['web', 'linked']) {
   });
   assert.equal(api.twice(40), 42);
   if (name === 'web') assert.equal(api.main('結果', 8), '結果: 10');
-  assert.throws(() => api.twice(0), WebAssembly.RuntimeError);
+  assert.throws(() => api.twice(0), { name: 'RuntimeError', message: '実行時エラー: 0 で除算した' });
+  assert.throws(() => api.twice(1), { name: 'RuntimeError', message: '実行時エラー: then の失敗 2' });
   assert.equal(api.twice(-2), 0);
-  assert.deepEqual(messages, []);
+  assert.deepEqual(messages, ['10']);
 }
 "#;
     let output = Command::new("node")

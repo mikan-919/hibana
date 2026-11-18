@@ -287,6 +287,19 @@ export async function instantiate(bytes, imports = {}) {
         instance.exports.__hibana_reset?.();
         const value = instance.exports[name](...args.map((value, i) => encode(value, params[i])));
         return decode(value, result);
+      } catch (e) {
+        if (e instanceof WebAssembly.RuntimeError && instance.exports.memory) {
+          const memory = instance.exports.memory.buffer;
+          const view = new DataView(memory);
+          const failure = __FAIL_AT__;
+          const ptr = Number(view.getBigUint64(failure, true));
+          if (ptr !== 0) {
+            view.setBigUint64(failure, 0n, true);
+            const len = Number(view.getBigUint64(ptr, true));
+            e.message = "実行時エラー: " + decoder.decode(new Uint8Array(memory, ptr + 8, len));
+          }
+        }
+        throw e;
       } finally {
         instance.exports.__hibana_reset?.();
         active = false;
@@ -298,8 +311,10 @@ export async function instantiate(bytes, imports = {}) {
 "#;
     // 挿入した関数名に含まれる文字列を、後続の置換で変更しない。
     let (before, rest) = template.split_once("__HOSTS__").unwrap();
-    let (middle, after) = rest.split_once("__EXPORTS__").unwrap();
-    Ok(format!("{before}{hosts}{middle}{names}{after}"))
+    let (middle, rest) = rest.split_once("__EXPORTS__").unwrap();
+    let (exports, after) = rest.split_once("__FAIL_AT__").unwrap();
+    let fail_at = wasm::FAIL_AT;
+    Ok(format!("{before}{hosts}{middle}{names}{exports}{fail_at}{after}"))
 }
 
 // JS 接続コードに渡す境界の型名とシグネチャ。
@@ -366,27 +381,5 @@ fn select_exports<'a>(program: &'a ir::Program, names: &[String]) -> R<Vec<&'a i
 
 /// 型検査済みプログラムから JavaScript を作る。
 pub fn emit_js(checked: &Checked) -> R<String> {
-    reject_wait(checked)?;
     Ok(js::emit(&checked.program, &checked.info))
-}
-
-/// Task の wait()（終わるまでブロックする）はネイティブでだけ使える。JavaScript と WASM の出力の前に、呼び出しの位置を付けて拒む。
-/// ponytail: 使わない関数の中の wait() も拒む。公開関数から辿れる関数だけを調べるなら、IR の選択と同じ探索をここでもする
-pub fn reject_wait(checked: &Checked) -> R<()> {
-    let mut last = None;
-    let mut found = None;
-    for f in &checked.program.fns {
-        typeck::walk(&parser::Expr::Block(f.body.clone()), &mut |e| match e {
-            parser::Expr::At(span, _) => last = Some(*span),
-            parser::Expr::Call(n, _) if n == "task_wait" && found.is_none() => found = Some(last),
-            _ => {}
-        });
-    }
-    let Some(span) = found else { return Ok(()) };
-    let error = crate::error::Error::from("Task の wait() はネイティブでだけ使える（JavaScript と WASM では then か peek を使う）");
-    let error = match span {
-        Some(span) => error.at(span),
-        None => error,
-    };
-    Err(error.with_sources(checked.program.modules.iter().map(|module| &module.source)).with_line())
 }
