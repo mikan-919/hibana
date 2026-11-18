@@ -116,16 +116,28 @@ async function $aop(op, args) {
 }
 function $str(v) { return typeof v === "string" ? v : $show(v); }
 function $print(v) { console.log($str(v)); }
+// 標準入力は呼び出し間で共有する区画に読む。区画が空の時だけ readSync を 1 回呼ぶ（対話の入力を待たずに返す）
+const $in = { buf: new Uint8Array(4096), pos: 0, end: 0 };
 function $input() {
   if (typeof process === "undefined" || !process.getBuiltinModule) throw new Error("input には Node.js の標準入力が必要です");
-  const fs = process.getBuiltinModule("node:fs"), byte = new Uint8Array(1), bytes = [];
-  // ponytail: 1 バイトずつ読む。行の読み込みが律速になったら、呼び出し間で共有するバッファを使う
-  while (fs.readSync(0, byte, 0, 1, null) !== 0) {
-    if (byte[0] === 10) {
+  const fs = process.getBuiltinModule("node:fs"), bytes = [];
+  for (;;) {
+    if ($in.pos === $in.end) {
+      const n = fs.readSync(0, $in.buf, 0, $in.buf.length, null);
+      if (n === 0) break;
+      $in.pos = 0;
+      $in.end = n;
+      continue;
+    }
+    const nl = $in.buf.subarray($in.pos, $in.end).indexOf(10);
+    const stop = nl < 0 ? $in.end : $in.pos + nl;
+    for (let i = $in.pos; i < stop; i++) bytes.push($in.buf[i]);
+    $in.pos = stop;
+    if (nl >= 0) {
+      $in.pos++;
       if (bytes.at(-1) === 13) bytes.pop();
       break;
     }
-    bytes.push(byte[0]);
   }
   return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(new Uint8Array(bytes));
 }

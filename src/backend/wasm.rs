@@ -12,8 +12,8 @@ use wasm_encoder::{
 
 const STATIC: i64 = 8;
 const FAIL_AT: i64 = 24;
-// __static は 144 バイト（runtime.hb の先頭）。文字列定数はその後ろに置く
-const LITERALS: u32 = STATIC as u32 + 144;
+// __static は 152 バイト（runtime.hb の先頭）。文字列定数はその後ろに置く
+const LITERALS: u32 = STATIC as u32 + 152;
 // シャドースタックの大きさ。局所変数 1 つに 16 バイト使う
 // ponytail: 固定の 4 MB。再帰が深いと __frame_push が止める。足りなければヒープから大きい区画を取り直す
 const SHADOW: u64 = 4 << 20;
@@ -85,7 +85,9 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
     }
     // 文字列定数の後ろにシャドースタック（runtime.hb の __frame_push）の区画を置き、その後ろをヒープにする
     let shadow = LITERALS as u64 + data.len() as u64;
-    let heap = shadow + SHADOW;
+    // その後ろに標準入力の区画（runtime.hb の __input）を置く。リセットしても読んだ入力の残りを保つ
+    let input = shadow + SHADOW;
+    let heap = input + 4112;
     let pages = heap.div_ceil(65536).max(1);
     let exported: Vec<&ir::Function> = program
         .functions
@@ -247,7 +249,7 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
         }
         code.function(&f);
         functions.function(types.get(0, 0));
-        // シャドースタックを空にし、GC の状態（+88 から +104、+120 から +136）を 0 に戻す。区画の位置と +112 は変わらない
+        // シャドースタックを空にし、GC の状態（+88 から +104、+120 から +136）を 0 に戻す。シャドースタックと標準入力の区画の位置、+112 は変わらない
         let mut reset = vec![
             I::I32Const(STATIC as i32),
             I::I64Const(heap as i64),
@@ -284,7 +286,7 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
     init.extend((pages * 65536).to_le_bytes());
     // 実行時エラーの文字列、中断、処理中の with、シャドースタック、GC の状態は 0 から始める。+112 は文字列定数の終わり
     init.extend([0u8; 48]);
-    for v in [shadow, shadow, shadow + SHADOW, 0, 0, 0, heap, 0, 0, 0] {
+    for v in [shadow, shadow, shadow + SHADOW, 0, 0, 0, heap, 0, 0, 0, input] {
         init.extend(v.to_le_bytes());
     }
     init.extend(data);

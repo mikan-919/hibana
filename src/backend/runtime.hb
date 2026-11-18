@@ -18,7 +18,7 @@
 // GC は利用者の関数の入口とループの先頭（ir.rs の安全な位置）でだけ動く。ランタイムの関数の中の生の位置は、
 // GC の間に生きていない。ランタイムの関数から利用者の関数を呼ぶ所（__all・__perform）は、持っている値をシャドースタックに置く
 
-// ランタイムの状態は __static() から 144 バイト:
+// ランタイムの状態は __static() から 152 バイト:
 //   +0 確保の次の位置、+8 区画の終わり、+16 実行時エラーの文字列（WASM だけ使う）
 //   +24 中断の行き先（with の番号。0 は中断していない）、+32 中断で with に渡す値
 //   +48 処理中のいちばん内側の with、+56 最後に付けた with の番号
@@ -27,6 +27,7 @@
 //   +112 これより前の位置は文字列定数（WASM は接続コードが書く。0 なら __static() の位置）
 //   +120 空き区画の並びの表（1024 バイトまでは 16 バイトごと、それより大きい区画は 2 のべきごとの 128 本）
 //   +128 印を付ける作業の並び、+136 その容量
+//   +144 標準入力の区画（__input）
 fn __alloc(n: int) -> int {
     let st = __static()
     if __load(st + 120) == 0 {
@@ -854,32 +855,50 @@ fn __write_str(fd: int, s: String) {
     __sys_write(fd, p + 8, __load(p))
 }
 
+// 標準入力は呼び出し間で共有する区画 [読んだ位置][終わり][4096 バイト]（+144）に読み、改行までを返す。
+// 区画が空の時だけ read を 1 回呼ぶので、対話で 1 行ずつ渡される入力も待たずに返せる
 fn __input() -> String {
+    let st = __static()
+    let mut io = __load(st + 144)
+    if io == 0 {
+        io = __bump(4112)
+        __store(io, 0)
+        __store(io + 8, 0)
+        __store(st + 144, io)
+    }
     let mut capacity = 64
     let mut buffer = __alloc(capacity)
-    let byte = __alloc(1)
     let mut size = 0
     let mut done = false
     while !done {
-        // ponytail: 1バイトずつ読む。読み込みが律速になる場合は、呼び出し間で残りを保持するバッファを足す
-        let read = __sys_read(0, byte, 1)
-        if read == 0 { done = true }
-        else if read != 0 - 4 {
-            if read != 1 { __die('標準入力を読めません') }
-            let b = __load8(byte)
-            if b == 10 {
+        let mut pos = __load(io)
+        let end = __load(io + 8)
+        if pos == end {
+            let read = __sys_read(0, io + 16, 4096)
+            if read == 0 { done = true }
+            else if read != 0 - 4 {
+                if read < 0 { __die('標準入力を読めません') }
+                __store(io, 0)
+                __store(io + 8, read)
+            }
+        } else {
+            let start = pos
+            while pos < end && __load8(io + 16 + pos) != 10 { pos = pos + 1 }
+            let n = pos - start
+            if size + n > capacity {
+                while size + n > capacity { capacity = capacity * 2 }
+                let next = __alloc(capacity)
+                __copy(next, buffer, size)
+                buffer = next
+            }
+            __copy(buffer + size, io + 16 + start, n)
+            size = size + n
+            if pos < end {
+                pos = pos + 1
                 if size > 0 && __load8(buffer + size - 1) == 13 { size = size - 1 }
                 done = true
-            } else {
-                if size == capacity {
-                    capacity = capacity * 2
-                    let next = __alloc(capacity)
-                    __copy(next, buffer, size)
-                    buffer = next
-                }
-                __store8(buffer + size, b)
-                size = size + 1
             }
+            __store(io, pos)
         }
     }
     __utf8_validate(buffer, size)
