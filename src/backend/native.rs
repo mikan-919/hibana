@@ -73,21 +73,33 @@ pub fn emit(program: &Program) -> R<Vec<u8>> {
         .functions
         .iter()
         .position(|f| f.name == "main")
-        .ok_or("ネイティブ出力には main が必要")? as u32;
+        .ok_or("ネイティブ出力には main が必要")?;
+    let entry = program.functions[main].finish_at_boundary.then(|| ir::Function {
+        name: "main$entry".into(),
+        params: 0,
+        param_types: vec![],
+        result_type: ir::ValueType::Unit,
+        finish_at_boundary: false,
+        locals: 0,
+        body: vec![Stmt::Return(Expr::Call(
+            "__finish_entry".into(),
+            vec![Expr::Call("main".into(), vec![])],
+        ))],
+    });
+    let main = if entry.is_some() { program.functions.len() } else { main } as u32;
+    let functions = || program.functions.iter().chain(entry.iter());
     let mut flags = settings::builder();
     flags.set("opt_level", "speed").unwrap();
     let isa = cranelift_native::builder()
         .map_err(|e| format!("この CPU には未対応: {e}"))?
         .finish(settings::Flags::new(flags))
         .map_err(|e| format!("Cranelift の設定に失敗した: {e}"))?;
-    let n = program.functions.len() as u32;
+    let n = functions().count() as u32;
     let mut g = Gen {
         isa,
         ctx: Context::new(),
         fctx: FunctionBuilderContext::new(),
-        indices: program
-            .functions
-            .iter()
+        indices: functions()
             .enumerate()
             .map(|(i, f)| (f.name.clone(), i as u32))
             .collect(),
@@ -100,7 +112,7 @@ pub fn emit(program: &Program) -> R<Vec<u8>> {
     for s in ["実行時エラー: ", "\n"] {
         g.literal(s);
     }
-    for f in &program.functions {
+    for f in functions() {
         f.each(&mut |n| {
             if let Node::Expr(Expr::Str(s)) = n {
                 g.literal(s);
@@ -108,7 +120,7 @@ pub fn emit(program: &Program) -> R<Vec<u8>> {
         });
     }
     let mut codes = Vec::new();
-    for f in &program.functions {
+    for f in functions() {
         let func = g.function(f);
         codes.push(g.compile(func)?);
     }

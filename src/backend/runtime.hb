@@ -1424,10 +1424,21 @@ fn __run_job() -> bool {
     true
 }
 
-// 仕事が無くなるまで動かす（main の後。JavaScript のマイクロタスクを空にするのと同じ）
-fn __run_jobs() {
+// 実行の入口で仕事をすべて動かし、戻り値を取り出す。仕事の中で GC が動くので v を根に置く
+fn __finish_entry(v: int) -> int {
+    let roots = __frame_push(1)
+    __setv(roots, v)
     while __run_job() {
     }
+    __store(__static() + 64, roots)
+    if __tag(v) == 11 {
+        let p = __payload(v)
+        let status = __load(p)
+        if status == 0 { __die('非同期処理が完了しなかった') }
+        if status == 2 { __die('非同期処理が中断した') }
+        return __getv(p + 16)
+    }
+    v
 }
 
 // all。$all と同じく、すべての関数を呼んでから Promise.all にし、それを待つ async 関数の Promise を返す

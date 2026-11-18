@@ -103,6 +103,8 @@ pub struct Function {
     pub(crate) params: u32,
     pub(crate) param_types: Vec<ValueType>,
     pub(crate) result_type: ValueType,
+    // 公開関数の入口で仕事の並びを空にし、Promise なら完了値を取り出す
+    pub(crate) finish_at_boundary: bool,
     // 引数を含む局所変数の数。引数は 0 から順に並ぶ
     pub(crate) locals: u32,
     pub(crate) body: Vec<Stmt>,
@@ -264,6 +266,7 @@ impl Function {
     /// 呼ぶ関数の名前。算術の範囲外などで呼ぶランタイムの関数も含む
     pub fn calls(&self) -> Vec<&str> {
         let mut names = Vec::new();
+        if self.finish_at_boundary { names.push("__finish_entry"); }
         if self.result_type == ValueType::Int || self.param_types.contains(&ValueType::Int) { names.push("__int_in"); }
         if self.result_type == ValueType::Number || self.param_types.contains(&ValueType::Number) { names.push("__num_checked"); }
         self.each(&mut |n| match n {
@@ -480,7 +483,6 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>, info: &cr
     let mut functions = Vec::new();
     let mut imports = Vec::new();
     let mut descs = HashMap::new();
-    let mut wrapped = false;
     loop {
         while let Some(name) = pending.pop() {
             if !visited.insert(name.clone()) {
@@ -552,25 +554,12 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>, info: &cr
             }
             functions.push(function);
         }
-        // 非同期を使う main は、本体（main$impl）の後で仕事の並びを空にする（js.rs の main の呼び出しの後のマイクロタスク）
+        // 同期の main でも spawn した仕事が残る。main の入口でその仕事を動かす
         let asyncs = ["__co_new", "__spawn", "__all", "__aperform"].iter().any(|n| visited.contains(*n));
-        if wrapped || !asyncs {
-            break;
-        }
-        wrapped = true;
-        let Some(main) = functions.iter_mut().find(|f| f.name == "main") else { break };
-        main.name = "main$impl".into();
-        let wrapper = Function {
-            name: "main".into(),
-            params: main.params,
-            param_types: main.param_types.clone(),
-            result_type: main.result_type,
-            locals: 0,
-            body: vec![Stmt::Eval(call("main$impl", vec![])), Stmt::Eval(call("__run_jobs", vec![])), Stmt::Return(unit())],
-        };
-        visited.insert("main$impl".into());
-        pending.extend(wrapper.calls().into_iter().map(String::from));
-        functions.push(wrapper);
+        let Some(main) = functions.iter_mut().find(|f| f.name == "main" && !f.finish_at_boundary) else { break };
+        if !asyncs { break; }
+        main.finish_at_boundary = true;
+        pending.push("__finish_entry".into());
     }
     // 宣言の順（ランタイム、利用者の関数）に並べ、出力を決まった形にする
     let order: HashMap<&str, usize> = runtime
@@ -628,6 +617,7 @@ impl<'a> Ctx<'a> {
             params: f.params.len() as u32,
             param_types: f.params.iter().map(|(_, t)| value_type(t)).collect(),
             result_type: ret_type(f),
+            finish_at_boundary: !runtime && !variant && has_async(&f.effects),
             locals,
             body,
         };
@@ -647,6 +637,7 @@ impl<'a> Ctx<'a> {
             params,
             param_types: vec![],
             result_type: ValueType::Other,
+            finish_at_boundary: false,
             locals: params,
             body: vec![],
         };
@@ -1536,6 +1527,7 @@ impl Lower<'_, '_> {
             params: 1 + params.len() as u32,
             param_types: vec![],
             result_type: ValueType::Other,
+            finish_at_boundary: false,
             locals,
             body: stmts,
         };

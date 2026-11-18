@@ -26,6 +26,61 @@ fn references_cannot_cross_the_wasm_boundary() {
 }
 
 #[test]
+fn web_async_exports_return_completed_values() {
+    let source = r#"
+fn step(n: int) -> int with Async { n + 1 }
+fn announce() with Async { put(step(9).await) }
+pub fn twice(n: int) -> int with Async {
+    if n == 0 {
+        spawn(announce())
+        return 1 % n
+    }
+    let first = step(n).await
+    step(first).await
+}
+pub fn main(label: String, n: int) -> String with Async {
+    let value = twice(n).await
+    label + ': ' + value.to_string()
+}
+"#;
+    let exports = ["twice", "main"].map(String::from);
+    let web = hibana::to_web(source, &exports).unwrap();
+    let checked = pipeline::check(pipeline::parse(source).unwrap(), Kind::Library).unwrap();
+    let all = pipeline::lower(&checked, None).unwrap();
+    let linked_exports = ["twice".into()];
+    let linked = pipeline::link(&all, &linked_exports).unwrap();
+    let dir = std::env::temp_dir().join(format!("hibana-web-async-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("web.wasm"), web.wasm).unwrap();
+    std::fs::write(dir.join("web.mjs"), web.javascript).unwrap();
+    std::fs::write(dir.join("linked.wasm"), pipeline::emit_wasm(&linked, Some(&linked_exports)).unwrap()).unwrap();
+    std::fs::write(dir.join("linked.mjs"), pipeline::emit_js_glue(&linked, &linked_exports).unwrap()).unwrap();
+    let script = r#"
+import { readFileSync } from 'node:fs';
+import assert from 'node:assert/strict';
+for (const name of ['web', 'linked']) {
+  const { instantiate } = await import(`./${name}.mjs`);
+  const messages = [];
+  const api = await instantiate(readFileSync(`${name}.wasm`), {
+    hibana: { print: message => { messages.push(message); } },
+  });
+  assert.equal(api.twice(40), 42);
+  if (name === 'web') assert.equal(api.main('結果', 8), '結果: 10');
+  assert.throws(() => api.twice(0), WebAssembly.RuntimeError);
+  assert.equal(api.twice(-2), 0);
+  assert.deepEqual(messages, []);
+}
+"#;
+    let output = Command::new("node")
+        .args(["--input-type=module", "-e", script])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+}
+
+#[test]
 fn web_strings_and_host_functions() {
     let source = r#"
 extern 'browser' {

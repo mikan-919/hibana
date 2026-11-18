@@ -115,6 +115,7 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
             .imports
             .iter()
             .any(|f| has_str(&f.param_types, f.result_type));
+    let reset_state = strings || exported.iter().any(|f| f.finish_at_boundary);
 
     let mut types = Types::default();
     let mut imports = ImportSection::new();
@@ -220,6 +221,9 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
             } else { out.extend(from_raw(*p, i as u32, &indices).into_iter().skip(1)); }
         }
         out.push(I::Call(indices[f.name.as_str()]));
+        if f.finish_at_boundary {
+            out.push(I::Call(indices["__finish_entry"]));
+        }
         match f.result_type {
             ValueType::Unit => out.extend([I::Drop, I::Drop]),
             ValueType::Str => out.extend([
@@ -237,7 +241,7 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
         code.function(&function(&[(1, ValType::I64)], &out));
     }
     if strings {
-        // JavaScript の接続コードが文字列を書く領域を確保する。リセットは確保の状態を最初に戻す
+        // JavaScript の接続コードが文字列やデータを書く領域を確保する
         functions.function(types_i32(&mut types));
         let mut out = vec![I::I64Const(ir::INT), I::LocalGet(0), I::I64ExtendI32U];
         out.extend([
@@ -253,8 +257,11 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
             f.instruction(i);
         }
         code.function(&f);
+        exports.export("__hibana_alloc", ExportKind::Func, alloc);
+    }
+    if reset_state {
         functions.function(types.get(0, 0));
-        // シャドースタックを空にし、GC の状態（+88 から +104、+120 から +136）と非同期の仕事の並び（+152 から +168）を 0 に戻す。シャドースタックと標準入力の区画の位置、+112 は変わらない
+        // 中断、処理中の with、シャドースタック、GC、非同期の仕事をリセットする
         let mut reset = vec![
             I::I32Const(STATIC as i32),
             I::I64Const(heap as i64),
@@ -267,13 +274,12 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
             I::I64Store(mem(0, 3)),
         ];
         reset.extend([I::I32Const(STATIC as i32 + 64), I::I64Const(shadow as i64), I::I64Store(mem(0, 3))]);
-        for k in [88, 96, 104, 120, 128, 136, 152, 160, 168] {
+        for k in [24, 32, 40, 48, 56, 88, 96, 104, 120, 128, 136, 152, 160, 168] {
             reset.extend([I::I32Const(STATIC as i32 + k), I::I64Const(0), I::I64Store(mem(0, 3))]);
         }
         reset.push(I::End);
         code.function(&function(&[], &reset));
-        exports.export("__hibana_alloc", ExportKind::Func, alloc);
-        exports.export("__hibana_reset", ExportKind::Func, alloc + 1);
+        exports.export("__hibana_reset", ExportKind::Func, alloc + u32::from(strings));
     }
     if strings || writes || reads || selected.is_none() {
         exports.export("memory", ExportKind::Memory, 0);
