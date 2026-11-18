@@ -18,7 +18,7 @@ fn check_backends(name: &str, source: &str, expected: [Expected<'_>; 4]) {
 
     let javascript = dir.join("main.cjs");
     let js = hibana::to_js(source).unwrap();
-    fs::write(&javascript, format!("process.on('uncaughtException', e => {{ console.error(e.message); process.exitCode = 1; }});\n{js}")).unwrap();
+    fs::write(&javascript, js).unwrap();
     let js = Command::new("node").arg(javascript).output().unwrap();
 
     let web = hibana::to_web(source, &["main".into()]).unwrap();
@@ -99,14 +99,20 @@ fn main() with Async {
 }
 
 #[test]
-fn spawned_division_by_zero() {
-    let source = r#"
+fn spawned_arithmetic_failure() {
+    for (name, expression, message) in [
+        ("division", "1 / n", "実行時エラー: 0 で除算した"),
+        ("addition", "9007199254740991 + (n + 1)", "実行時エラー: オーバーフロー"),
+        ("multiplication", "9007199254740991 * (n - 10000)", "実行時エラー: オーバーフロー"),
+        ("power", "2 ** (n + 53)", "実行時エラー: オーバーフロー"),
+    ] {
+        let source = r#"
 use std -> *
 fn step(n: int) -> int with Async { n }
-fn divide(n: int) -> int { 1 / n }
+fn calculate(n: int) -> int { EXPRESSION }
 fn bad() -> int with Async {
     let zero = step(0).await
-    divide(zero)
+    calculate(zero)
 }
 fn good() -> int with Async { step(42).await }
 fn main() {
@@ -115,13 +121,8 @@ fn main() {
     put('main')
 }
 "#;
-    let message = "実行時エラー: 0 で除算した";
-    check_backends("spawned-division", source, [
-        reported(true, "main\n42\n", message),
-        reported(true, "main\n42\n", message),
-        reported(false, "main\n", message),
-        reported(false, "main\n", message),
-    ]);
+        check_backends(name, &source.replace("EXPRESSION", expression), [reported(true, "main\n42\n", message); 4]);
+    }
 }
 
 #[test]
@@ -131,18 +132,15 @@ use std -> *
 fn step() -> int with Async { 42 }
 fn main() {
     let task = spawn(step())
-    task.then(fn(n) { panic('then の失敗') })
+    task.then(fn(n) { panic('then の失敗 ' + n.to_string()) })
+    task.then(fn(n) { put(n / (n - n)) })
     task.then(fn(n) { put(n) })
+    spawn(step()).then(fn(n) { spawn(step()).then(fn(m) { put(m + n) }) })
     put('main')
 }
 "#;
-    let message = "実行時エラー: then の失敗";
-    check_backends("failing-then", source, [
-        reported(false, "main\n42\n", message),
-        reported(false, "main\n42\n", "then の失敗"),
-        reported(false, "main\n", message),
-        reported(false, "main\n", message),
-    ]);
+    let message = "実行時エラー: then の失敗 42";
+    check_backends("failing-then", source, [reported(false, "main\n42\n84\n", message); 4]);
 }
 
 #[test]

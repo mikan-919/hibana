@@ -29,7 +29,7 @@ const RUNTIME: &str = include_str!("runtime.hb");
 mod coroutine;
 
 // runtime.hb の __static の大きさ
-pub(crate) const STATIC_BYTES: usize = 184;
+pub(crate) const STATIC_BYTES: usize = 200;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
@@ -416,8 +416,8 @@ struct Ctx<'a> {
     lambdas: usize,
     // 型検査が記録した、JavaScript で待つ呼び出しと async にする本体（js.rs と同じ所で待つ）
     info: &'a crate::typeck::Info,
-    // コルーチンに panic を伝えるため、要求のない関数の呼び出しも検査する
-    panic_checks: bool,
+    // コルーチンや then に実行時エラーを伝えるため、要求のない関数の呼び出しも検査する
+    runtime_error_checks: bool,
 }
 
 pub fn lower(p: &parser::Program) -> R<Program> {
@@ -458,7 +458,7 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>, info: &cr
         made: Vec::new(),
         lambdas: 0,
         info,
-        panic_checks: !info.awaits.is_empty() || p.fns.iter().any(|f| has_async(&f.effects)),
+        runtime_error_checks: !info.awaits.is_empty() || p.fns.iter().any(|f| has_async(&f.effects)),
     };
     if exports.is_none() && (!p.datas.is_empty() || !p.tests.is_empty()) {
         return Err("IR は型宣言とテスト宣言に未対応".into());
@@ -1255,15 +1255,29 @@ impl Lower<'_, '_> {
                 let number = !self.raw && (numeric(a) || numeric(b));
                 // 演算子は値を他へ渡さないので、変数の所有の印を残す
                 let (a, b) = (self.look(a)?, self.look(b)?);
-                if *op == "**" {
-                    return Ok(call(if number { "__value_pow" } else { "__pow" }, vec![a, b]));
+                if !self.raw {
+                    let arithmetic = match (*op, number) {
+                        ("+", _) => Some("__add"),
+                        ("-", true) => Some("__sub"),
+                        ("-", false) => Some("__isub"),
+                        ("*", true) => Some("__mul"),
+                        ("*", false) => Some("__imul"),
+                        ("/", true) => Some("__div"),
+                        ("/", false) => Some("__idiv"),
+                        ("%", true) => Some("__rem"),
+                        ("%", false) => Some("__irem"),
+                        ("**", true) => Some("__value_pow"),
+                        ("**", false) => Some("__pow"),
+                        _ => None,
+                    };
+                    if let Some(name) = arithmetic {
+                        let c = call(name, vec![a, b]);
+                        return Ok(if self.cx.runtime_error_checks { self.checked(c) } else { c });
+                    }
                 }
-                if number && matches!(*op, "-" | "*" | "/" | "%" | "<" | "<=" | ">" | ">=") {
-                    let name = match *op { "-" => "__sub", "*" => "__mul", "/" => "__div", "%" => "__rem", "<" => "__lt", "<=" => "__le", ">" => "__gt", _ => "__ge" };
+                if number && matches!(*op, "<" | "<=" | ">" | ">=") {
+                    let name = match *op { "<" => "__lt", "<=" => "__le", ">" => "__gt", _ => "__ge" };
                     return Ok(call(name, vec![a, b]));
-                }
-                if !self.raw && matches!(*op, "-" | "*") {
-                    return Ok(call(if *op == "-" { "__isub" } else { "__imul" }, vec![a, b]));
                 }
                 let p = match *op {
                     "+" => Prim::Add,
@@ -1279,10 +1293,10 @@ impl Lower<'_, '_> {
                     ">=" => Prim::Ge,
                     op => return Err(format!("IR は演算子 {op} に未対応").into()),
                 };
-                if self.raw || !matches!(p, Prim::Add | Prim::Eq | Prim::Ne) {
+                if self.raw || !matches!(p, Prim::Eq | Prim::Ne) {
                     return Ok(prim(p, vec![a, b]));
                 }
-                let v = call(if p == Prim::Add { "__add" } else { "__eq" }, vec![a, b]);
+                let v = call("__eq", vec![a, b]);
                 if p == Prim::Ne { prim(Prim::Not, vec![v]) } else { v }
             }
             Ast::Call(n, args) => self.call(n, args, id)?,
@@ -1450,7 +1464,7 @@ impl Lower<'_, '_> {
                 return Ok(self.checked(c));
             }
             // ponytail: 非同期処理があるプログラムでは、要求の無い関数の呼び出しも検査する。負荷があれば、中断しうる関数を呼び出しの関係から絞る
-            return Ok(if self.cx.panic_checks || !f.effects.is_empty() { self.checked(c) } else { c });
+            return Ok(if self.cx.runtime_error_checks || !f.effects.is_empty() { self.checked(c) } else { c });
         }
         if matches!(n.as_str(), "Vec" | "Type" | "Ref" | "Async") || self.cx.types.contains(n.as_str()) {
             return Ok(mkv(TY, Expr::Str(n.to_string())));
@@ -1469,7 +1483,7 @@ impl Lower<'_, '_> {
                     let c = self.await_(c);
                     self.checked(c)
                 }
-                "panic" if self.cx.panic_checks => self.checked(c),
+                "panic" | "num_floor" | "num_sqrt" | "slice" | "input" if self.cx.runtime_error_checks => self.checked(c),
                 _ => c,
             });
         }
@@ -1713,7 +1727,7 @@ mod tests {
         assert_eq!(
             ir,
             // 局所変数は入口で確保したシャドースタックの区画（%2）にも書き、戻る前に区画を外す
-            "fn add(%0, %1) {\n  %2 = (call __frame_push 2)\n  (Store (Add %2 0) (Tag %0))\n  (Store (Add (Add %2 0) 8) (Payload %0))\n  (Store (Add %2 16) (Tag %1))\n  (Store (Add (Add %2 16) 8) (Payload %1))\n  (if (Gt (Load (Add (Static) 96)) (Load (Add (Static) 104))) {\n    (call __gc)\n    () } ())\n  %3 = (call __isub %0 %1)\n  (Store (Add (Static) 64) %2)\n  return %3\n}\nfn main() {\n  %2 = (call __frame_push 2)\n  (if (Gt (Load (Add (Static) 96)) (Load (Add (Static) 104))) {\n    (call __gc)\n    () } ())\n  %0 = (call add 1 2)\n  (Store (Add %2 0) (Tag %0))\n  (Store (Add (Add %2 0) 8) (Payload %0))\n  %1 = (call __imul %0 3)\n  (Store (Add %2 16) (Tag %1))\n  (Store (Add (Add %2 16) 8) (Payload %1))\n  (Div %1 4)\n  %3 = ()\n  (Store (Add (Static) 64) %2)\n  return %3\n}\n"
+            "fn add(%0, %1) {\n  %2 = (call __frame_push 2)\n  (Store (Add %2 0) (Tag %0))\n  (Store (Add (Add %2 0) 8) (Payload %0))\n  (Store (Add %2 16) (Tag %1))\n  (Store (Add (Add %2 16) 8) (Payload %1))\n  (if (Gt (Load (Add (Static) 96)) (Load (Add (Static) 104))) {\n    (call __gc)\n    () } ())\n  %3 = (call __isub %0 %1)\n  (Store (Add (Static) 64) %2)\n  return %3\n}\nfn main() {\n  %2 = (call __frame_push 2)\n  (if (Gt (Load (Add (Static) 96)) (Load (Add (Static) 104))) {\n    (call __gc)\n    () } ())\n  %0 = (call add 1 2)\n  (Store (Add %2 0) (Tag %0))\n  (Store (Add (Add %2 0) 8) (Payload %0))\n  %1 = (call __imul %0 3)\n  (Store (Add %2 16) (Tag %1))\n  (Store (Add (Add %2 16) 8) (Payload %1))\n  (call __idiv %1 4)\n  %3 = ()\n  (Store (Add (Static) 64) %2)\n  return %3\n}\n"
         );
     }
 

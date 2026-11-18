@@ -1,7 +1,7 @@
 // 構造化 IR を WebAssembly に変換する。
 // IR の値（型の番号と中身）は 2 つの i64 で表し、関数は 2 つの i64 を返す。
 // 公開関数と外部関数の境界では、int と number は f64、str は (長さ << 32) | 位置 の i64 に変換する。
-// メモリ: [0, 8) は使わない、[8, 72) はランタイムの状態（runtime.hb の __static）、その後に文字列のリテラル、ヒープ。
+// メモリ: [0, 8) は使わない。その後にランタイムの状態（runtime.hb の __static）、文字列のリテラル、ヒープを置く。
 use crate::ir::{self, Block, Expr, Node, Prim, Program, Stmt, ValueType};
 use std::collections::HashMap;
 use wasm_encoder::{
@@ -284,7 +284,7 @@ fn emit_module(program: &Program, selected: Option<&[String]>, with_glue: bool) 
             I::I64Store(mem(0, 3)),
         ];
         reset.extend([I::I32Const(STATIC as i32 + 64), I::I64Const(shadow as i64), I::I64Store(mem(0, 3))]);
-        for k in [16, 24, 32, 40, 48, 56, 88, 96, 104, 120, 128, 136, 152, 160, 168, 176] {
+        for k in [16, 24, 32, 40, 48, 56, 88, 96, 104, 120, 128, 136, 152, 160, 168, 176, 184, 192] {
             reset.extend([I::I32Const(STATIC as i32 + k), I::I64Const(0), I::I64Store(mem(0, 3))]);
         }
         reset.push(I::End);
@@ -307,7 +307,7 @@ fn emit_module(program: &Program, selected: Option<&[String]>, with_glue: bool) 
     init.extend((pages * 65536).to_le_bytes());
     // 実行時エラーの文字列、中断、処理中の with、シャドースタック、GC の状態は 0 から始める。+112 は文字列定数の終わり
     init.extend([0u8; 48]);
-    for v in [shadow, shadow, shadow + SHADOW, 0, 0, 0, heap, 0, 0, 0, input, 0, 0, 0, 0] {
+    for v in [shadow, shadow, shadow + SHADOW, 0, 0, 0, heap, 0, 0, 0, input, 0, 0, 0, 0, 0, 0] {
         init.extend(v.to_le_bytes());
     }
     debug_assert_eq!(init.len(), ir::STATIC_BYTES);

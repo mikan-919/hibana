@@ -36,6 +36,7 @@ let $w;
 class $Located extends Error { constructor(e, at) { super(e?.message ?? String(e), { cause: e }); this.at = at; } }
 function $at(e, at) { return e instanceof $Located || e instanceof $Abort ? e : new $Located(e, at); }
 function $report(e) { console.error("実行時エラー: " + (e?.message ?? String(e)) + (e instanceof $Located ? "（" + e.at + "）" : "")); }
+function $failed(e) { $report(e); if (globalThis.process) process.exitCode = 1; }
 // 書き換えられる参照
 class $Ref { constructor(v) { this.v = v; } }
 function $d(c, f) { return { $c: c, $f: f }; }
@@ -88,7 +89,20 @@ function $spawn(f) {
   $h = h;
   return t;
 }
-function $then(t, g) { t.p.then(() => { if (t.s === 1) g(t.v); }); }
+let $mainFailed = false, $thenFailed = false;
+function $then(t, g) {
+  t.p.then(() => {
+    if (t.s !== 1) return;
+    try { g(t.v); } catch (e) {
+      if ($thenFailed) return;
+      $thenFailed = true;
+      // 残りの仕事が終わってから、最初の失敗を報告する。
+      const finish = () => { if (!$mainFailed) $failed(e); };
+      if (globalThis.process?.once) process.once("beforeExit", finish);
+      else setTimeout(finish, 0);
+    }
+  });
+}
 class $Abort { constructor(h, v) { this.h = h; this.v = v; } }
 // 要求の呼び出し。一番内側の with の腕を、その with より外の並びで呼ぶ。腕の値が #resume なら呼んだ所の値、それ以外は with を抜ける
 function $find(op) {
@@ -270,7 +284,7 @@ pub fn emit(prog: &Program, info: &crate::typeck::Info) -> String {
     }
     // import は ES モジュールの先頭に置く
     let mut out = imports + &out;
-    out += &format!("(async () => {{ try {{ await {}(); }} catch (e) {{ $report(e); if (globalThis.process) process.exitCode = 1; }} }})();\n", ident("f_", "main"));
+    out += &format!("(async () => {{ try {{ await {}(); }} catch (e) {{ $mainFailed = true; $failed(e); }} }})();\n", ident("f_", "main"));
     out
 }
 
