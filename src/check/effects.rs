@@ -291,17 +291,38 @@ pub(super) fn async_t_effect() -> V {
     V::DataT(Rc::new(("Async".into(), vec![])))
 }
 
-// 効果の型の値を、関数の宣言に書く形の式に戻す。戻せない形（関数型・細分化型など）は None
-// ponytail: 関数型と細分化型を引数に持つ効果は宣言に戻せず、推論から落ちる（本当の検査でその効果のエラーになる）。戻すには Pi と Refine も式に戻す
-fn quote_type(v: &V) -> Option<Expr> {
+// 推論した要求を宣言の式に戻す。細分化の条件では束縛変数の番号 0 を生成名に戻す。
+// ponytail: 評価器が式を保持しない不透明な項は復元できない。その場合は要求の明示が必要。
+fn quote_value(v: &V) -> Option<Expr> {
+    let values = |vs: &[V]| vs.iter().map(quote_value).collect::<Option<Vec<_>>>();
+    let boxed = |v| quote_value(v).map(Box::new);
+    let bound_name = || Name::temporary("refine_bound", 0);
     Some(match v {
+        V::Int(n) => Expr::Int(*n),
+        V::Num(n) => Expr::Num(*n),
+        V::Bool(b) => Expr::Bool(*b),
+        V::Str(s) => Expr::Str(s.to_string()),
+        V::Type => Expr::Var("Type".into()),
         V::Prim(p) => Expr::Var(Name::from(*p)),
         V::DataT(d) if d.1.is_empty() => Expr::Var(d.0.clone()),
-        V::DataT(d) => Expr::Call(d.0.clone(), d.1.iter().map(quote_type).collect::<Option<_>>()?),
-        V::VecT(a) => Expr::Call(Name::from("Vec"), vec![quote_type(a)?]),
+        V::Data(d) | V::DataT(d) => Expr::Call(d.0.clone(), values(&d.1)?),
+        V::Arr(xs) => Expr::Array(values(xs)?),
+        V::VecT(a) => Expr::Call("Vec".into(), vec![quote_value(a)?]),
+        V::Pi(p) => Expr::Pi(
+            values(&p.doms)?.into_iter().map(|t| ("_".into(), t)).collect(),
+            boxed(&p.cod)?,
+            values(&p.effs)?,
+        ),
+        V::Refine(r) => Expr::Refine(boxed(&r.0)?, bound_name(), boxed(&r.1)?),
         V::Neu(n) => match &**n {
+            Term::Var(0, _) => Expr::Var(bound_name()),
             Term::Var(_, name) => Expr::Var(name.clone()),
-            _ => return None,
+            Term::Un(op, x) => Expr::Unary(op, boxed(x)?),
+            Term::Bin(op, a, b) => Expr::Binary(op, boxed(a)?, boxed(b)?),
+            Term::Call(f, args) => Expr::Call(f.clone(), values(args)?),
+            Term::Proj(v, field) => Expr::Field(boxed(v)?, field.clone()),
+            Term::Num(v) => Expr::Call("#num".into(), vec![quote_value(v)?]),
+            Term::Opaque(_) => return None,
         },
         _ => return None,
     })
@@ -309,7 +330,7 @@ fn quote_type(v: &V) -> Option<Expr> {
 
 // with を省いた非公開関数の効果を、本体から推論して宣言に書き込む。
 // 本体の複製を検査して起きた効果を集め、変わらなくなるまで繰り返す（再帰と相互再帰の不動点）。
-// ponytail: 毎回すべての対象を検査し直し、回数は 8 回まで。遅くなれば呼び出しの依存の順に、変わった関数の呼び出し元だけを検査する
+// ponytail: 毎回すべての対象を検査し直す。遅くなれば変わった関数の呼び出し元だけを検査する
 pub(super) fn infer_effects(ck: &mut Ck, prog: &mut Program) -> R<()> {
     let targets: Vec<usize> = (0..prog.fns.len())
         .filter(|&i| {
@@ -331,21 +352,16 @@ pub(super) fn infer_effects(ck: &mut Ck, prog: &mut Program) -> R<()> {
             if g.name == "main" && ck.avail.iter().any(|(k, v)| k == "Async" && v.is_some()) {
                 found.push(async_t_effect());
             }
-            let mut effs: Vec<(String, Expr)> = Vec::new();
-            for v in flat(&found) {
-                let key = show(&v);
-                if let Some(e) = quote_type(&v)
-                    && !effs.iter().any(|(k, _)| *k == key)
-                {
-                    effs.push((key, e));
-                }
-            }
+            let mut effs: Vec<_> = flat(&found)
+                .iter()
+                .filter_map(quote_value)
+                .map(|e| (format!("{e:?}"), e))
+                .collect();
             effs.sort_by(|a, b| a.0.cmp(&b.0));
-            let shown = |es: &[Expr]| es.iter().map(|e| format!("{e:?}")).collect::<Vec<_>>();
-            let effs: Vec<Expr> = effs.into_iter().map(|(_, e)| e).collect();
-            if shown(&effs) != shown(&prog.fns[i].effects) {
+            effs.dedup_by(|a, b| a.0 == b.0);
+            if effs.iter().map(|(key, _)| key.clone()).ne(prog.fns[i].effects.iter().map(|e| format!("{e:?}"))) {
                 changed = true;
-                prog.fns[i].effects = effs;
+                prog.fns[i].effects = effs.into_iter().map(|(_, e)| e).collect();
                 ck.norm.fns.insert(prog.fns[i].name.clone(), prog.fns[i].clone());
             }
         }

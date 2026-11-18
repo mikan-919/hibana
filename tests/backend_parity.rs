@@ -271,6 +271,42 @@ fn main() {
 }
 
 #[test]
+fn inferred_requirements_preserve_function_and_refinement_types() {
+    let source = r#"
+use std -> *
+type Mapper = (int) -> String with Async
+type Digit = int[d -> 0 <= d && d <= 9]
+trait DigitSource<T> { fn fetch_digit(self) -> T }
+trait Source<T> { fn take_value(self) -> T }
+
+fn make_mapper() -> Mapper MAPPER_REQUIREMENT {
+    let f: Mapper = take_value()
+    f
+}
+fn mapped(n: int) -> String MAPPED_REQUIREMENTS {
+    let f = make_mapper()
+    f(n).await
+}
+fn declared_digit() -> Digit with DigitSource<Digit> { fetch_digit() }
+fn get_digit() -> Digit DIGIT_REQUIREMENT { declared_digit() }
+fn next_digit() -> int DIGIT_REQUIREMENT { get_digit() + 1 }
+fn to_label(n: int) -> String with Async { n.to_string() }
+fn main() with Async {
+    put(with Source(fn() { to_label }) { mapped(42).await })
+    put(with DigitSource(fn() { 8 }) { next_digit() })
+}
+"#;
+    for explicit in [false, true] {
+        let source = source
+            .replace("MAPPER_REQUIREMENT", if explicit { "with Source<Mapper>" } else { "" })
+            .replace("MAPPED_REQUIREMENTS", if explicit { "with Source<Mapper>, Async" } else { "" })
+            .replace("DIGIT_REQUIREMENT", if explicit { "with DigitSource<Digit>" } else { "" });
+        let name = if explicit { "requirements-explicit" } else { "requirements-inferred" };
+        check_backends(name, &source, success("42\n9\n"));
+    }
+}
+
+#[test]
 fn nested_string_display() {
     let source = r#"
 fn main() {

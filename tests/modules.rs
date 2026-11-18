@@ -104,6 +104,38 @@ fn private_inference_stops_at_explicit_public_effects() {
 }
 
 #[test]
+fn inferred_requirements_still_require_matching_providers() {
+    let declarations = r#"
+pub type Digit = int[d -> 0 <= d && d <= 9]
+pub type Convert = (int) -> String with Async
+pub trait Source<T> { fn value(self) -> T with {} }
+fn declared_digit() -> Digit with Source<Digit> { value() }
+fn digit() -> Digit { declared_digit() }
+fn forward_digit() -> Digit { digit() }
+fn convert() -> Convert {
+    let f: Convert = value()
+    f
+}
+fn forward_convert() -> Convert { convert() }
+"#;
+    for (export, expected) in [
+        ("pub fn entry() -> Digit with {} { forward_digit() }", "with dep.Source<int["),
+        ("pub fn entry() -> Digit with Source<int> { forward_digit() }", "が必要だが"),
+        ("pub fn entry() -> Convert with {} { forward_convert() }", "with dep.Source<(int) -> String with Async>"),
+        ("pub fn entry() -> Convert with Source<(int) -> String> { forward_convert() }", "が必要だが"),
+    ] {
+        let dependency = format!("{declarations}\n{export}");
+        let files = Files::new("inferred-provider", &[("dep.hb", &dependency)]);
+        let mut program = files.parse("use dep\nfn main() {}").unwrap();
+        let error = hibana::typeck::check(&mut program).unwrap_err();
+        assert!(error.msg.contains(expected), "{export}: {error}");
+        let source = error.source.unwrap();
+        assert!(source.name.ends_with("dep.hb"));
+        assert!(error.span.unwrap().0 >= declarations.len());
+    }
+}
+
+#[test]
 fn explicit_empty_effects_also_stop_lambda_inference() {
     for body in [
         "let f = fn() with {} { log('entry') }",
