@@ -3,8 +3,39 @@ use crate::parser::Name;
 // 局所変数（引数・let・無名関数の引数・match の束縛・for の変数）は書き換えない
 use crate::parser::{Block, Expr, Program, Stmt, Use, qual};
 use std::collections::{HashMap, HashSet};
+use crate::error::{Error, R};
+use crate::lexer::Span;
 
-pub fn resolve(prog: &mut Program, uses: &HashMap<String, Vec<Use>>, known: &HashSet<Name>) {
+// 構築子とトレイトから生成した名前も、元の宣言の公開範囲を持つ
+fn visibility(prog: &Program) -> HashMap<Name, (String, bool)> {
+    let mut names: HashMap<_, _> = prog.fns.iter()
+        .map(|f| (f.name.clone(), (f.module.clone(), f.public))).collect();
+    for data in &prog.datas {
+        names.insert(data.name.clone(), (data.module.clone(), data.public));
+        for ctor in &data.ctors {
+            names.insert(ctor.name.clone(), (data.module.clone(), data.public));
+        }
+    }
+    names
+}
+
+pub fn resolve(prog: &mut Program, uses: &HashMap<String, Vec<Use>>, known: &HashSet<Name>) -> R<()> {
+    let visibility = visibility(prog);
+    for (module, imports) in uses {
+        for import in imports {
+            if let crate::parser::UseNames::List(names) = &import.names {
+                for name in names {
+                    let qualified = qual(&import.module, name);
+                    if let Some((owner, false)) = visibility.get(&qualified)
+                        && owner != module
+                    {
+                        let error = Error::from(format!("{qualified} は非公開（宣言に pub を付ける）"));
+                        return Err(match import.span { Some(span) => error.at(span), None => error });
+                    }
+                }
+            }
+        }
+    }
     let ctors: HashMap<Name, Name> = prog.datas.iter().flat_map(|data| {
         data.ctors.iter().map(move |ctor| (Name::associated(data.name.clone(), ctor.name.local().clone()), ctor.name.clone()))
     }).collect();
@@ -16,6 +47,9 @@ pub fn resolve(prog: &mut Program, uses: &HashMap<String, Vec<Use>>, known: &Has
             known,
             ctors,
             locals: vec![Vec::new()],
+            visibility: &visibility,
+            span: f.span,
+            error: None,
         };
         for (n, t) in &mut f.params {
             r.expr(t);
@@ -28,6 +62,7 @@ pub fn resolve(prog: &mut Program, uses: &HashMap<String, Vec<Use>>, known: &Has
             r.expr(t);
         }
         r.block(&mut f.body);
+        if let Some(error) = r.error { return Err(error); }
     }
     for d in &mut prog.datas {
         let mut r = Resolver {
@@ -36,6 +71,9 @@ pub fn resolve(prog: &mut Program, uses: &HashMap<String, Vec<Use>>, known: &Has
             known,
             ctors,
             locals: vec![Vec::new()],
+            visibility: &visibility,
+            span: d.span,
+            error: None,
         };
         for (n, t) in &mut d.params {
             r.expr(t);
@@ -49,7 +87,9 @@ pub fn resolve(prog: &mut Program, uses: &HashMap<String, Vec<Use>>, known: &Has
             }
             r.locals.pop();
         }
+        if let Some(error) = r.error { return Err(error); }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -57,7 +97,7 @@ mod tests {
     #[test]
     fn local_values_shadow_module_names() {
         let mut modules = crate::parser::ModuleSet::from("use tools\nstruct Data { x: int }\nfn main() { put(tools.x())\n let tools = Data { x: 3 }\n put(tools.x) }");
-        let mut tools = crate::parser::ModuleSet::from("fn x() -> int { 7 }").modules.remove(0);
+        let mut tools = crate::parser::ModuleSet::from("pub fn x() -> int with {} { 7 }").modules.remove(0);
         tools.name = "tools".into();
         tools.source.id = crate::frontend::source::SourceId(1);
         modules.modules.push(tools);
@@ -75,15 +115,21 @@ pub(crate) fn resolve_macro(
     params: Vec<Name>,
     uses: &HashMap<String, Vec<Use>>,
     known: &HashSet<Name>,
-) {
+    prog: &Program,
+) -> R<()> {
+    let visibility = visibility(prog);
     let mut r = Resolver {
         module: module.into(),
         uses,
         known,
         ctors: &HashMap::new(),
         locals: vec![params],
+        visibility: &visibility,
+        span: None,
+        error: None,
     };
     r.block(block);
+    match r.error { Some(error) => Err(error), None => Ok(()) }
 }
 
 struct Resolver<'a> {
@@ -92,20 +138,37 @@ struct Resolver<'a> {
     known: &'a HashSet<Name>,
     ctors: &'a HashMap<Name, Name>,
     locals: Vec<Vec<Name>>,
+    visibility: &'a HashMap<Name, (String, bool)>,
+    span: Option<Span>,
+    error: Option<Error>,
 }
 
 impl Resolver<'_> {
     // 自分のモジュール、use で取り込んだ名前の順に探す。利用者のファイル（module が ""）では、自分の名前は修飾しない形のまま
-    fn name(&self, name: &mut Name) {
+    fn name(&mut self, name: &mut Name) {
         if self.locals.iter().any(|scope| scope.contains(name)) { return; }
         let mut candidates = vec![qual(&self.module, &*name)];
         for import in self.uses.get(&self.module).into_iter().flatten() {
             if import.names.takes(name) { candidates.push(qual(&import.module, &*name)); }
         }
         candidates.push(name.clone());
+        let mut private = None;
         for candidate in candidates {
             let resolved = self.ctors.get(&candidate).unwrap_or(&candidate);
-            if self.known.contains(resolved) { *name = resolved.clone(); return; }
+            if self.known.contains(resolved) || self.visibility.contains_key(resolved) {
+                if let Some((owner, false)) = self.visibility.get(resolved)
+                    && *owner != self.module
+                {
+                    private = Some(resolved.clone());
+                    continue;
+                }
+                *name = resolved.clone();
+                return;
+            }
+        }
+        if let Some(private) = private && self.error.is_none() {
+            let error = Error::from(format!("{private} は非公開（宣言に pub を付ける）"));
+            self.error = Some(match self.span { Some(span) => error.at(span), None => error });
         }
     }
 
@@ -165,7 +228,12 @@ impl Resolver<'_> {
                 self.name(n);
                 self.exprs(args);
             }
-            Expr::At(_, x) | Expr::Id(_, x)
+            Expr::At(span, x) => {
+                let previous = self.span.replace(*span);
+                self.expr(x);
+                self.span = previous;
+            }
+            Expr::Id(_, x)
             | Expr::Unary(_, x)
             | Expr::Field(x, _)
             | Expr::Assign(_, x)

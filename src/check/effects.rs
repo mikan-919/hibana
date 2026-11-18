@@ -307,14 +307,15 @@ fn quote_type(v: &V) -> Option<Expr> {
     })
 }
 
-// 効果の節（! と with の効果）を省いた関数の効果を、本体から推論して宣言に書き込む。
+// with を省いた非公開関数の効果を、本体から推論して宣言に書き込む。
 // 本体の複製を検査して起きた効果を集め、変わらなくなるまで繰り返す（再帰と相互再帰の不動点）。
 // ponytail: 毎回すべての対象を検査し直し、回数は 8 回まで。遅くなれば呼び出しの依存の順に、変わった関数の呼び出し元だけを検査する
 pub(super) fn infer_effects(ck: &mut Ck, prog: &mut Program) {
     let targets: Vec<usize> = (0..prog.fns.len())
         .filter(|&i| {
             let f = &prog.fns[i];
-            f.effects.is_empty() && f.op.is_none() && f.js.is_none() && !f.alias && !is_impl(&f.name)
+            !f.public && !f.effects_explicit && f.effects.is_empty()
+                && f.op.is_none() && f.js.is_none() && !f.alias && !is_impl(&f.name)
         })
         .collect();
     ck.inferring = true;

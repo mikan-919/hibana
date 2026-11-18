@@ -72,7 +72,7 @@ fn module_names_qualify_only_under_a_plain_use() {
 
 #[test]
 fn string_hibana_imports_are_rejected_before_reading() {
-    let files = Files::new("removed-hibana-imports", &[("util.hb", "fn value() -> int { 42 }")]);
+    let files = Files::new("removed-hibana-imports", &[("util.hb", "pub fn value() -> int with {} { 42 }")]);
     for path in ["./util.hb", "util.hb", "./util", "../util", "./missing.hb", "./missing", "./util.hb/../util.hb"] {
         for selection in ["", " -> {value}", " -> *"] {
             let source = format!("use '{path}'{selection}\nfn main() {{}}");
@@ -115,9 +115,9 @@ fn typescript_import_forms_remain_available() {
 #[test]
 fn named_imports_resolve_nested_paths_and_file_local_dependencies() {
     let files = Files::new("named-imports", &[
-        ("util.hb", "fn twice(n: int) -> int { n * 2 }"),
-        ("tools/calc.hb", "use helper\nfn answer() -> int { helper.base() + 1 }"),
-        ("tools/helper.hb", "fn base() -> int { 41 }"),
+        ("util.hb", "pub fn twice(n: int) -> int with {} { n * 2 }"),
+        ("tools/calc.hb", "use helper\npub fn answer() -> int with {} { helper.base() + 1 }"),
+        ("tools/helper.hb", "pub fn base() -> int with {} { 41 }"),
     ]);
     for (selection, call) in [("", "calc.answer()"), (" -> {answer}", "answer()"), (" -> *", "answer()"), ("\n -> {answer}", "answer()"), ("", "calc::answer()") ] {
         let source = format!("use util\nuse tools::calc{selection}\nuse tools::helper\nfn main() {{ put(util.twice({call})) }}");
@@ -142,7 +142,7 @@ fn builtin_imports_take_precedence_over_local_files() {
 
 #[test]
 fn named_files_with_the_same_module_name_are_rejected() {
-    let files = Files::new("named-collision", &[("left/item.hb", "fn value() {}"), ("right/item.hb", "fn value() {}")]);
+    let files = Files::new("named-collision", &[("left/item.hb", "pub fn value() with {} {}"), ("right/item.hb", "pub fn value() with {} {}")]);
     let source = "use left::item\nuse right::item\nfn main() {}";
     let error = files.parse(source).unwrap_err();
     assert!(error.msg.contains("モジュール名 item"));
@@ -155,8 +155,8 @@ fn cyclic_and_repeated_named_imports_share_modules() {
     let files = Files::new(
         "cycles",
         &[
-            ("a.hb", "use b\nfn answer() -> int { b.base() }"),
-            ("b.hb", "use a\nfn base() -> int { 42 }"),
+            ("a.hb", "use b\npub fn answer() -> int with {} { b.base() }"),
+            ("b.hb", "use a\npub fn base() -> int with {} { 42 }"),
         ],
     );
     let mut program = files
@@ -176,10 +176,10 @@ fn imported_macros_and_types_share_declarations_without_source_concatenation() {
     let files = Files::new(
         "declarations",
         &[
-            ("types.hb", "struct Point { x: int }"),
+            ("types.hb", "pub struct Point { x: int }"),
             (
                 "math.hb",
-                "use types -> *\nfn value(p: Point) -> int { p.x }",
+                "use types -> *\npub fn value(p: Point) -> int with {} { p.x }",
             ),
             (
                 "macros.hb",
@@ -199,9 +199,9 @@ fn imported_macros_and_types_share_declarations_without_source_concatenation() {
 #[test]
 fn imported_parse_and_type_errors_keep_their_file_and_local_offsets() {
     for (name, text, expected) in [
-        ("lex", "fn value() -> int { /*", "/*"),
-        ("parse", "fn value() -> int { @ }", "@"),
-        ("type", "fn value() -> int {\n false\n}", "false"),
+        ("lex", "pub fn value() -> int with {} { /*", "/*"),
+        ("parse", "pub fn value() -> int with {} { @ }", "@"),
+        ("type", "pub fn value() -> int with {} {\n false\n}", "false"),
     ] {
         let files = Files::new(name, &[("dep.hb", text)]);
         let result = files
@@ -217,7 +217,7 @@ fn imported_parse_and_type_errors_keep_their_file_and_local_offsets() {
 
 #[test]
 fn imported_runtime_errors_keep_their_file() {
-    let text = "fn value() -> int {\n panic('stop')\n}";
+    let text = "pub fn value() -> int with {} {\n panic('stop')\n}";
     let files = Files::new("runtime", &[("dep.hb", text)]);
     let mut program = files
         .parse("use dep\nfn main() { put(dep.value()) }")
@@ -233,8 +233,8 @@ fn same_named_constructors_resolve_through_their_type_and_module() {
     let files = Files::new(
         "constructors",
         &[
-            ("one.hb", "enum Shape { Node(value: int) }"),
-            ("two.hb", "enum Shape { Node(left: int, right: int) }"),
+            ("one.hb", "pub enum Shape { Node(value: int) }"),
+            ("two.hb", "pub enum Shape { Node(left: int, right: int) }"),
         ],
     );
     let mut program = files.parse("use one\nuse two\nfn main() { put(one.Shape::Node(3))\n put(two.Shape::Node(4, 5)) }").unwrap();
@@ -246,7 +246,7 @@ fn same_named_constructors_resolve_through_their_type_and_module() {
 
 #[test]
 fn effect_diagnostics_keep_the_call_and_operation_in_their_own_files() {
-    let dependency = "trait Log { fn log(self, message: String) }\nfn trigger() with Log { log('entry') }";
+    let dependency = "pub trait Log { fn log(self, message: String) with {} }\npub fn trigger() with Log { log('entry') }";
     let files = Files::new("effect-origin", &[("dep.hb", dependency)]);
     let mut program = files
         .parse("use dep\nfn main() { dep.trigger() }")
@@ -267,7 +267,7 @@ fn declaration_macros_keep_generated_names_in_imported_modules() {
         "generated-declarations",
         &[(
             "generated.hb",
-            "macro install('install') -> Decl { let exported = ident('answer')\n quote { fn hidden() -> int { 42 }\n fn $exported() -> int { hidden() } } }\ninstall",
+            "macro install('install') -> Decl { let exported = ident('answer')\n quote { fn hidden() -> int { 42 }\n pub fn $exported() -> int with {} { hidden() } } }\ninstall",
         )],
     );
     let mut program = files
@@ -284,8 +284,8 @@ fn module_names_stay_in_the_file_that_uses_them() {
     let files = Files::new(
         "file-scope",
         &[
-            ("a.hb", "use b\nfn answer() -> int { b.base() }"),
-            ("b.hb", "fn base() -> int { 42 }"),
+            ("a.hb", "use b\npub fn answer() -> int with {} { b.base() }"),
+            ("b.hb", "pub fn base() -> int with {} { 42 }"),
         ],
     );
     // a.hb は b を修飾して使えるが、b を use していない main からは使えない

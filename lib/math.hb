@@ -1,3 +1,3 @@
 // 数値の関数。use std::math で読み込む
-fn floor(x: number) -> int { num_floor(x) }
-fn sqrt(x: number) -> number { num_sqrt(x) }
+pub fn floor(x: number) -> int with {} { num_floor(x) }
+pub fn sqrt(x: number) -> number with {} { num_sqrt(x) }

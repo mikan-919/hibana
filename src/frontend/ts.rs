@@ -294,7 +294,7 @@ impl P {
             .map(|(n, t)| format!("{n}: {}", self.hib(t)))
             .collect();
         self.structs
-            .push(format!("struct {name} {{ {} }}\n", fs.join(", ")));
+            .push(format!("pub struct {name} {{ {} }}\n", fs.join(", ")));
     }
 
     fn function(&mut self) {
@@ -328,9 +328,9 @@ impl P {
             .map(|(i, p)| format!("a{i}: {}", self.hib(p)))
             .collect();
         let ret = self.hib(&ret);
-        let eff = if is_async { " with Async" } else { "" };
+        let eff = if is_async { " with Async" } else { " with {}" };
         self.fns
-            .push(format!("    fn {name}({}) -> {ret}{eff}\n", ps.join(", ")));
+            .push(format!("    pub fn {name}({}) -> {ret}{eff}\n", ps.join(", ")));
     }
 }
 
@@ -385,7 +385,7 @@ pub fn module_text(src: &str, path: &str) -> R<String> {
                     Some(Ty::Obj(fs)) => p.struct_decl(&name, &fs),
                     Some(t) => {
                         let t = p.hib(&t);
-                        p.structs.push(format!("type {name} = {t}\n"));
+                        p.structs.push(format!("pub type {name} = {t}\n"));
                     }
                     None => {}
                 }

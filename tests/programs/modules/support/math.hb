@@ -1,5 +1,5 @@
 use numbers
 
-fn double(n: int) -> int {
+pub fn double(n: int) -> int with {} {
     n * numbers.factor()
 }

@@ -1196,7 +1196,8 @@ impl Parser<'_> {
             field_kinds(&m.pat).into_iter().map(|(n, _)| Name::from(n)).collect(),
             &self.uses,
             &self.known,
-        );
+            &self.helpers,
+        )?;
         let rules: HashMap<String, Kinds> = self
             .g
             .rules

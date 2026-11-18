@@ -74,6 +74,25 @@ test 'json int boundaries' {
     assert(match parse_json('-9007199254740992') { None -> true _ -> false })
 }
 
+test 'json numbers' {
+    assert(match parse_json('0.1') { Some(v) -> match v { JNum(n) -> n == 0.1 _ -> false } None -> false })
+    assert(match parse_json('-12.5') { Some(v) -> match v { JNum(n) -> n == -12.5 _ -> false } None -> false })
+    assert(match parse_json('1e3') { Some(v) -> match v { JNum(n) -> n == 1000.0 _ -> false } None -> false })
+    assert(match parse_json('1.25E+2') { Some(v) -> match v { JNum(n) -> n == 125.0 _ -> false } None -> false })
+    assert(match parse_json('-25e-2') { Some(v) -> match v { JNum(n) -> n == -0.25 _ -> false } None -> false })
+    assert(match parse_json('9007199254740992.0') { Some(v) -> match v { JNum(n) -> n == 9007199254740992.0 _ -> false } None -> false })
+    assert(match parse_json('0e999999999999999999999') { Some(v) -> match v { JNum(n) -> n == 0.0 _ -> false } None -> false })
+    assert(match parse_json('1e-999999999999999999999') { Some(v) -> match v { JNum(n) -> n == 0.0 _ -> false } None -> false })
+    assert_eq(stringify(JNum(1.0)), '1.0')
+    assert_eq(stringify(JNum(-0.0)), '-0.0')
+    assert(match parse_json(stringify(JNum(12.0))) { Some(v) -> match v { JNum(n) -> n == 12.0 _ -> false } None -> false })
+    assert(match parse_json('-0e-999999999999999999999') { Some(v) -> match v { JNum(n) -> stringify(JNum(n)) == '-0.0' _ -> false } None -> false })
+    assert_eq(stringify(parse_json('[1, 2.5, {"n": -3e1}]').unwrap()), '[1,2.5,{"n":-30.0}]')
+    for s in ['00', '01', '-01', '01.0', '00e1', '.5', '-.5', '1.', '1e', '1e+', '1e-', '1e1.2', '+1', 'NaN', 'Infinity', '1e309', '-1e309', '1e999999999999999999999', '[1.e2]', '{"n":2e}'] {
+        assert(match parse_json(s) { None -> true _ -> false })
+    }
+}
+
 test 'parse int' {
     for n in [0, 7, -12, 9007199254740991, -9007199254740991] {
         assert(match parse_int(n.to_string()) { Ok(parsed) -> parsed == n Err(_) -> false })

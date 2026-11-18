@@ -152,6 +152,9 @@ pub struct Block {
 
 #[derive(Debug, Clone)]
 pub struct Fn {
+    pub public: bool,
+    // 空の with {} も、省略と区別して推論を止める
+    pub effects_explicit: bool,
     // 宣言の位置（fn 名 まで）。利用者が書いた関数だけ Some。展開で作った関数は呼び出し位置
     pub span: Option<Span>,
     pub name: Name,
@@ -223,6 +226,7 @@ pub use crate::error::R;
 // data 宣言。
 #[derive(Debug, Clone)]
 pub struct Data {
+    pub public: bool,
     // 宣言の位置（キーワードから名前まで）。型検査の誤りに行番号を付けるのに使う
     pub span: Option<Span>,
     pub name: Name,
@@ -323,6 +327,7 @@ impl UseNames {
 
 #[derive(Debug, Clone)]
 pub struct Use {
+    pub span: Option<Span>,
     pub module: String,
     pub names: UseNames,
 }
@@ -557,6 +562,9 @@ fn parse_modules_tokens(
         // 1周目は宣言の名前を集める
         loop {
             let cur = p.module.clone();
+            if p.eat("pub") && !matches!(p.peek(), Tok::Punct("fn" | "type" | "struct" | "enum" | "trait")) {
+                return p.err("pub の後には fn・type・struct・enum・trait を書く");
+            }
             match p.peek() {
                 Tok::Eof => break,
                 Tok::Punct("use") => {
@@ -661,6 +669,7 @@ fn parse_modules_tokens(
     for module in &loaded.modules {
         if module.name != "std" {
             uses.entry(module.name.clone()).or_default().push(Use {
+                span: None,
                 module: "std".into(),
                 names: UseNames::List(PRELUDE_NAMES.iter().map(|name| Name::from(*name)).collect()),
             });
@@ -754,7 +763,7 @@ fn parse_modules_tokens(
     }
     loop {
         let mut helpers = prog.clone();
-        crate::resolve::resolve(&mut helpers, &uses, &known);
+        crate::resolve::resolve(&mut helpers, &uses, &known)?;
         let helpers = Rc::new(helpers);
         for p in &mut parsers {
             p.helpers = helpers.clone();
@@ -817,6 +826,8 @@ fn parse_modules_tokens(
         let name = qual(&module, Name::temporary("test", k));
         prog.tests.push((label, name.clone()));
         prog.fns.push(Fn {
+            public: false,
+            effects_explicit: false,
             span: Some(span),
             name,
             params: vec![],
@@ -832,7 +843,7 @@ fn parse_modules_tokens(
             insts: 0,
         });
     }
-    crate::resolve::resolve(&mut prog, &uses, &known);
+    crate::resolve::resolve(&mut prog, &uses, &known)?;
     prog.modules = loaded
         .modules
         .iter()
@@ -1070,6 +1081,7 @@ impl Parser<'_> {
 
     // use 名前、use 名前 -> *、use 名前 -> {a, b}、use "file.ts"
     fn use_decl(&mut self) -> R<Use> {
+        let start = self.pos;
         self.expect("use")?;
         let module = match self.next() {
             Tok::Ident(n) => n.rsplit("::").next().unwrap().to_string(),
@@ -1099,7 +1111,7 @@ impl Parser<'_> {
         } else {
             UseNames::Qualified
         };
-        Ok(Use { module, names })
+        Ok(Use { span: Some(self.span_of(start)), module, names })
     }
 
     // fn f() -> T { の T。続く { は本体
@@ -1121,6 +1133,11 @@ impl Parser<'_> {
                 return self.err("関数の本体が無い");
             }
         }
+        // with {} は効果の宣言で、本体は次の { から始まる
+        if self.pos >= 2 && matches!(&self.toks[self.pos - 2].tok, Tok::Ident(n) if n == "with") {
+            self.expect("}")?;
+            self.expect("{")?;
+        }
         let mut depth = 1;
         while depth > 0 {
             match self.next() {
@@ -1135,6 +1152,7 @@ impl Parser<'_> {
 
     fn func(&mut self) -> R<Fn> {
         let start = self.pos;
+        let public = start > 0 && self.toks[start - 1].tok == Tok::Punct("pub");
         self.expect("fn")?;
         let module = self.cur_module();
         let name = qual(&module, &self.ident()?);
@@ -1163,6 +1181,10 @@ impl Parser<'_> {
         } else {
             None
         };
+        let effects_explicit = matches!(self.peek(), Tok::Ident(n) if n == "with");
+        if public && !effects_explicit {
+            return Err(Error::from(format!("公開関数 {name} には with を明示する（効果がなければ with {{}}）")).at(span));
+        }
         let (effects, named) = self.requirements(true)?;
         self.expect("{")?;
         let n_insts = insts.len();
@@ -1173,6 +1195,8 @@ impl Parser<'_> {
             body.stmts.insert(0, Stmt::Let { name: local, mutable: false, ty: None, init: Expr::Call(Name::from("#named"), vec![eff]) });
         }
         Ok(Fn {
+            public,
+            effects_explicit,
             span: Some(span),
             name,
             params,
@@ -1207,6 +1231,10 @@ impl Parser<'_> {
             return Ok((effects, names));
         }
         self.pos += 1;
+        if self.eat("{") {
+            self.expect("}")?;
+            return Ok((effects, names));
+        }
         loop {
             let name = self.ident()?;
             let mut args = Vec::new();
@@ -1263,6 +1291,7 @@ impl Parser<'_> {
     // ponytail: メソッドは自分のジェネリック引数を持てない。持たせるならメソッドの関数型を依存関数型にする
     fn trait_decl(&mut self) -> R<(Vec<Data>, Vec<Fn>, Trait)> {
         let start = self.pos;
+        let public = start > 0 && self.toks[start - 1].tok == Tok::Punct("pub");
         self.expect("trait")?;
         let module = self.cur_module();
         let name = qual(&module, &self.ident()?);
@@ -1320,10 +1349,16 @@ impl Parser<'_> {
             } else {
                 Expr::Var("unit".into())
             };
+            let effects_explicit = matches!(self.peek(), Tok::Ident(n) if n == "with");
+            if public && !effects_explicit {
+                return Err(Error::from(format!("公開トレイトのメソッド {m} には with を明示する（効果がなければ with {{}}）")).at(mspan));
+            }
             let (effects, _) = self.requirements(false)?;
             let vars: Vec<Expr> = ps.iter().map(|p| Expr::Var(p.0.clone())).collect();
             let field = Expr::Field(Box::new(Expr::Var(Name::instance(0))), m.clone());
             let mk = |name: Name, body: Block| Fn {
+                public,
+                effects_explicit,
                 span: Some(mspan),
                 name,
                 params: with_inst(&ps),
@@ -1364,6 +1399,8 @@ impl Parser<'_> {
                 let mut ops_params = params[1..].to_vec();
                 ops_params.extend(ps[1..].iter().cloned());
                 fns.push(Fn {
+                    public,
+                    effects_explicit: true,
                     span: Some(mspan),
                     name: Name::associated(name.clone(), m.clone()),
                     params: ops_params,
@@ -1385,6 +1422,8 @@ impl Parser<'_> {
             self.eat(",");
         }
         fns.push(Fn {
+            public,
+            effects_explicit: true,
             span: Some(span),
             name: Name::trait_accessor(name.clone()),
             params: with_inst(&[]),
@@ -1406,10 +1445,11 @@ impl Parser<'_> {
             name: Name::structure(name.clone()),
             fields,
         };
-        let requirement = Data { span: Some(span), name: Name::requirement(name.clone()), module: module.clone(), params: params[1..].to_vec(), ctors: vec![] };
+        let requirement = Data { public, span: Some(span), name: Name::requirement(name.clone()), module: module.clone(), params: params[1..].to_vec(), ctors: vec![] };
         Ok((
             vec![
                 Data {
+                    public,
                     span: Some(span),
                     name,
                     module,
@@ -1511,6 +1551,8 @@ impl Parser<'_> {
         let mut params = generics.clone();
         params.extend(cons.iter().cloned());
         fns.push(Fn {
+            public: false,
+            effects_explicit: true,
             span: Some(span),
             name: base,
             params,
@@ -1545,6 +1587,7 @@ impl Parser<'_> {
         let mut fns = Vec::new();
         while !self.eat("}") {
             let start = self.pos;
+            let public = self.eat("pub");
             self.expect("fn")?;
             let module = self.cur_module();
             let name = qual(&module, &self.ident()?);
@@ -1556,12 +1599,18 @@ impl Parser<'_> {
             } else {
                 None
             };
+            let effects_explicit = matches!(self.peek(), Tok::Ident(n) if n == "with");
+            if public && !effects_explicit {
+                return Err(Error::from(format!("公開関数 {name} には with を明示する（効果がなければ with {{}}）")).at(span));
+            }
             let (effects, _) = self.requirements(false)?;
             let body = Block { id: Default::default(),
                 stmts: vec![],
                 tail: None,
             };
             fns.push(Fn {
+                public,
+                effects_explicit,
                 span: Some(span),
                 name,
                 params,
@@ -1659,6 +1708,7 @@ impl Parser<'_> {
     // type Name<引数> = 式 は別名か型を計算する関数で、実行時には消える
     fn type_decl(&mut self) -> R<TypeDecl> {
         let start = self.pos;
+        let public = start > 0 && self.toks[start - 1].tok == Tok::Punct("pub");
         let kw = self.next();
         let module = self.cur_module();
         let name = qual(&module, &self.ident()?);
@@ -1707,6 +1757,7 @@ impl Parser<'_> {
                 self.eat(",");
             }
             return Ok(TypeDecl::Data(Data {
+                public,
                 span: Some(span),
                 name,
                 module,
@@ -1754,6 +1805,7 @@ impl Parser<'_> {
                 fields,
             };
             return Ok(TypeDecl::Data(Data {
+                public,
                 span: Some(span),
                 name,
                 module,
@@ -1772,6 +1824,8 @@ impl Parser<'_> {
             };
             let ret = Some(Expr::Var("Type".into()));
             return Ok(TypeDecl::Alias(Fn {
+                public,
+                effects_explicit: true,
                 span: Some(span),
                 name,
                 params,
@@ -1799,7 +1853,7 @@ impl Parser<'_> {
                 Tok::Punct("|") if depth == 0 => return true,
                 Tok::Punct(
                     "fn" | "type" | "syntax" | "macro" | "use" | "module" | "extern"
-                    | "trait" | "impl" | "struct" | "enum",
+                    | "trait" | "impl" | "struct" | "enum" | "pub",
                 )
                 | Tok::Eof
                     if depth == 0 =>
@@ -1823,7 +1877,7 @@ impl Parser<'_> {
                 Tok::Punct(")" | "]" | "}") => depth -= 1,
                 Tok::Punct(
                     "fn" | "type" | "syntax" | "macro" | "use" | "module" | "extern"
-                    | "trait" | "impl" | "struct" | "enum",
+                    | "trait" | "impl" | "struct" | "enum" | "pub",
                 ) if depth == 0 => {
                     return;
                 }

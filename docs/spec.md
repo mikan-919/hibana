@@ -503,13 +503,14 @@ macro unless('unless' expr:Expr block:Block) {
 | `some(xs, f)` `every(xs, f)` `find(xs, f)` | 一つでも・すべてが条件を満たすか、最初の要素（`Option`）。`f` の要求をそのまま要求する。`all` は並行実行の組み込みなので `every` と呼ぶ |
 | `xs.join(sep)` `repeat(s, n)` `trim(s)` `replace(s, from, to)` `lines(s)` `ends_with(s, w)` `includes(s, w)` | 文字列の操作 |
 | `Map<V>`、`empty()` `get(m, k)` `set(m, k, v)` `keys(m)` | 文字列のキーから値への表。`set` は新しい `Map` を返す。線形探索 |
-| `Json` = `JNull` \| `JBool` \| `JInt` \| `JStr` \| `JArr(Vec<Json>)` \| `JObj(Vec<Field>)`、`Field { key, value }` | JSON の値 |
+| `Json` = `JNull` \| `JBool` \| `JInt(n: int)` \| `JNum(n: number)` \| `JStr` \| `JArr(Vec<Json>)` \| `JObj(Vec<Field>)`、`Field { key, value }` | JSON の値 |
 | `stringify(j)` `quote_str(s)` | JSON の文字列にする |
 | `parse_json(s)`、`field(j, key)` `str_or(o, d)` `int_or(o, d)` | JSON を読む（`Option<Json>`、読めなければ `None`）。フィールドと値を取り出す |
 
 - `式?` は式を一度評価し、`Ok` の値を取り出します。`Err` の場合はそのエラーを包んで関数から返します。`Ok` と `Err` は名前を取り込む必要があり、関数の戻り値の型はエラーを受け取れる `Result` にします。
 - `empty()` の型引数は引数から決まらないので、`let e: Map<int> = empty()` のように期待する型を書きます。
-- JSON の数は整数だけを読み、`\uXXXX` のエスケープは読めません。
+- JSON の数は `-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?` の形で読みます。小数点も指数も無い表記は `JInt`、それ以外は `JNum` です。`JInt` の範囲外と、有限な `number` に収まらない値は `None` になります。`JNum` は最近接・偶数丸め（等距離なら仮数の最下位ビットが0の側を選ぶ丸め方）で変換し、表現できる最小値より小さい数は負の0を含む0へ丸めます。`stringify` は `JNum` が整数値でも小数点か指数を付け、読み直した時も `JNum` にします。
+- JSON の文字列は `\uXXXX` と、サロゲートペア（2個の Unicode エスケープで1文字を表す形）を読みます。
 
 ## 11. 実行方式
 

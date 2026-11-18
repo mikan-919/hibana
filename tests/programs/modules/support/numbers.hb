@@ -1,1 +1,1 @@
-fn factor() -> int { 2 }
+pub fn factor() -> int with {} { 2 }
