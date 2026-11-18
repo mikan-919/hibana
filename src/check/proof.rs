@@ -214,17 +214,33 @@ impl Ck {
     // 実行時の検査を通常の if と構築子へ展開し、成功する枝で細分化条件を証明する。
     // ponytail: 基本型の条件式だけを扱う。データ型は条件式の再構築と証明の対応を足してから対応する。
     pub(super) fn refine_value(&mut self, e: &mut Expr) -> R<V> {
-        fn predicate(v: &V, name: &Name) -> R<Expr> {
+        // 条件の値を実行時の式にする。Var(0) は検査する値。ほかの変数は、その値を持つ見えている変数を探し、
+        // 値を検査する前に let で写した名前（captures）を使う。値の式が mut の変数を書き換えても、条件は型を評価した時点の値で検査する
+        fn predicate(v: &V, name: &Name, vars: &HashMap<(bool, usize), Name>, captures: &mut Vec<(Name, Name)>) -> R<Expr> {
+            let mut go = |v: &V| predicate(v, name, vars, captures);
             Ok(match v {
                 V::Int(n) => Expr::Int(*n), V::Num(n) => Expr::Num(*n), V::Bool(b) => Expr::Bool(*b), V::Str(s) => Expr::Str(s.to_string()),
                 V::Neu(n) => match &**n {
                     Term::Var(0, _) => Expr::Var(name.into()),
-                    Term::Num(v) => predicate(v, name)?,
-                    Term::Un(op, v) => Expr::Unary(op, Box::new(predicate(v, name)?)),
-                    Term::Bin(op, a, b) => Expr::Binary(op, Box::new(predicate(a, name)?), Box::new(predicate(b, name)?)),
-                    Term::Call(f, args) => Expr::Call(f.clone(), args.iter().map(|v| predicate(v, name)).collect::<R<_>>()?),
-                    Term::Proj(v, field) => Expr::Field(Box::new(predicate(v, name)?), field.clone()),
-                    _ => return Err("refine の条件を実行時の式に変換できない".into()),
+                    Term::Var(..) | Term::Opaque(_) => match vars.get(&match &**n { Term::Opaque(k) => (true, *k), Term::Var(id, _) => (false, *id), _ => unreachable!() }) {
+                        Some(var) => {
+                            let capture = match captures.iter().find(|c| c.1 == *var) {
+                                Some(c) => c.0.clone(),
+                                None => {
+                                    let c = Name::temporary("refine_capture", NodeId::default().raw() as usize);
+                                    captures.push((c.clone(), var.clone()));
+                                    c
+                                }
+                            };
+                            Expr::Var(capture)
+                        }
+                        None => return Err("refine の条件の変数が見えない（実行時の式に変換できない）".into()),
+                    },
+                    Term::Num(v) => go(v)?,
+                    Term::Un(op, v) => Expr::Unary(op, Box::new(go(v)?)),
+                    Term::Bin(op, a, b) => { let a = go(a)?; Expr::Binary(op, Box::new(a), Box::new(go(b)?)) }
+                    Term::Call(f, args) => Expr::Call(f.clone(), args.iter().map(go).collect::<R<_>>()?),
+                    Term::Proj(v, field) => Expr::Field(Box::new(go(v)?), field.clone()),
                 },
                 _ => return Err("refine の条件を実行時の式に変換できない".into()),
             })
@@ -235,8 +251,22 @@ impl Ck {
         let (base, conditions) = split(&target);
         let V::Prim(kind @ ("int" | "number" | "String" | "bool")) = base else { return Err("refine は int・number・String・bool の細分化型に使う".into()) };
         let name = Name::temporary("refine", self.norm.fresh());
+        // 変数の値の項から、その値を持つ見えている変数の名前。内側の宣言を優先する
+        let mut vars = HashMap::new();
+        for scope in &self.scopes {
+            for (n, entry) in &scope.vars {
+                if let V::Neu(t) = &entry.val {
+                    match &**t {
+                        Term::Var(id, _) => { vars.insert((false, *id), n.clone()); }
+                        Term::Opaque(k) => { vars.insert((true, *k), n.clone()); }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let mut captures = Vec::new();
         let mut condition = Expr::Bool(true);
-        for p in conditions { condition = Expr::Binary("&&", Box::new(condition), Box::new(predicate(&p, &name)?)); }
+        for p in conditions { condition = Expr::Binary("&&", Box::new(condition), Box::new(predicate(&p, &name, &vars, &mut captures)?)); }
         let input_ty = self.expr(&mut args[1].clone())?;
         let narrowing = kind == "int" && super::base(&input_ty) == prim("number");
         let input_name = Name::temporary("refine_input", self.norm.fresh());
@@ -259,6 +289,10 @@ impl Ck {
                 stmts: vec![Stmt::Let { name: input_name, mutable: false, ty: Some(Expr::Var("number".into())), init: input }],
                 tail: Some(Box::new(Expr::If(Box::new(guard), leaf(expanded), Some(Box::new(Expr::Block(leaf(Expr::Call("std.Err".into(), vec![Expr::Str("安全整数の範囲外か整数でない".into())])))))))),
             });
+        }
+        if !captures.is_empty() {
+            let stmts = captures.into_iter().map(|(c, var)| Stmt::Let { name: c, mutable: false, ty: None, init: Expr::Var(var) }).collect();
+            expanded = Expr::Block(Block { id: Default::default(), stmts, tail: Some(Box::new(expanded)) });
         }
         self.check(&mut expanded, &expected)?;
         *e = expanded;

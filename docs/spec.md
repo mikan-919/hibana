@@ -472,7 +472,7 @@ macro unless('unless' expr:Expr block:Block) {
 |---|---|
 | `put(x)` | 任意の値を表示する |
 | `input()` | 標準入力から1行読み、行末の改行を除いた `String` を返す。入力終了時は空文字列。読み取りの失敗と不正な UTF-8 は実行時エラー。WASM ではホストの読み取り関数を使う |
-| `refine<T>(value)` | `Result<T, String>`。`int`・`number`・`String`・`bool` の細分化型 `T` の条件を実行時に検査する。`refine<int>` とその細分化型には `number` も渡せ、整数性と安全整数の範囲を検査してから追加条件を検査する。`value` は一度だけ評価し、条件を満たせば `Ok`、満たさなければ `Err` を返す。検査は通常の分岐に展開し、成功する枝で条件を証明する。データ型の細分化条件は未対応 |
+| `refine<T>(value)` | `Result<T, String>`。`int`・`number`・`String`・`bool` の細分化型 `T` の条件を実行時に検査する。`refine<int>` とその細分化型には `number` も渡せ、整数性と安全整数の範囲を検査してから追加条件を検査する。`value` は一度だけ評価し、条件を満たせば `Ok`、満たさなければ `Err` を返す。検査は通常の分岐に展開し、成功する枝で条件を証明する。条件には見えている変数（引数・`let`・`for` の変数）を使え、`value` を評価する前にその値を写して検査する。データ型の細分化条件は未対応 |
 | `num_floor(x)` `num_sqrt(x)` | `std::math` の実装用の組み込み関数。`number -> int` と `number -> number` |
 | `len(v)` | `Vec<T>` か `String` の長さ。`mut` の変数は、初期値と `push`・`set_at` の代入から長さを追う（ループと分岐の後は分からなくなる） |
 | `x.to_string()` | 任意の値を文字列にする（3.7 節） |

@@ -240,7 +240,7 @@ mod tests {
 
     #[test]
     fn runtime_refinements() {
-        assert_eq!(out(include_str!("../../tests/programs/types/runtime_refine.hb")).unwrap(), "std.Ok(3)\nstd.Err(\"安全整数の範囲外か整数でない\")\nstd.Err(\"安全整数の範囲外か整数でない\")\nstd.Err(\"安全整数の範囲外か整数でない\")\nstd.Ok(0)\nstd.Ok(3)\nstd.Err(\"細分化型の条件を満たさない\")\nok:ok\nbad\nbad\nok\n1\ntrue\n1.5\n3\n");
+        assert_eq!(out(include_str!("../../tests/programs/types/runtime_refine.hb")).unwrap(), "std.Ok(3)\nstd.Err(\"安全整数の範囲外か整数でない\")\nstd.Err(\"安全整数の範囲外か整数でない\")\nstd.Err(\"安全整数の範囲外か整数でない\")\nstd.Ok(0)\nstd.Ok(3)\nstd.Err(\"細分化型の条件を満たさない\")\nok:ok\nbad\nbad\nok\n1\ntrue\n1.5\n3\nstd.Ok(5)\nstd.Err(\"細分化型の条件を満たさない\")\nstd.Ok(5)\n0\n3\n-1\n");
         assert!(out("type Title = String[s -> len(s) > 0]\nfn main() { let t: Title = '' }").is_err());
     }
 
