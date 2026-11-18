@@ -229,7 +229,8 @@ fn on_click() {                              // Async を持たない
 - `t.peek()` は、終わっていれば `Some(結果)`、まだなら `None` を返します。
 - `t.wait()` は終わるまでブロックして結果を返します。ネイティブでだけ使えます。JavaScript と WASM の出力は、呼び出しの位置を付けてエラーにします。
 - JavaScript では、`spawn` が Promise を走らせ始め、状態（未完了・値・失敗）を持つオブジェクトを返します。`spawn` した処理の失敗は `console.error` に出し、`then` の関数は呼びません。
-- インタプリタ・WASM・ネイティブでは、`spawn` の時点で最後まで実行します（`peek` はいつも `Some`、`then` の関数はその場で呼ぶ）。そのため、`spawn` した処理の出力の順が JavaScript と異なることがあります。
+- WASM・ネイティブは、JavaScript の Promise とマイクロタスク（Promise の続きを順に動かす仕事の並び）と同じ順で動きます。async 関数（`Async` を要求する関数、async にする無名関数、要求の多相な関数の async 版）はコルーチン（途中で止めて、後で続きから動かせる関数）にし、最初の `.await` まで動いて Promise を返します。`.await`・`all`・`spawn`・`then` は、JavaScript と同じ数の段を経て仕事の並びに続きを積みます。`main` が戻った後、仕事の並びが空になるまで動かします。`wait()` は、終わるまで仕事の並びを動かします。`spawn` した処理が `with` を抜けずに中断すると、標準エラーに書いて続けます。
+- インタプリタは、`spawn` の時点で最後まで実行します（`peek` はいつも `Some`、`then` の関数はその場で呼ぶ）。そのため、`spawn` した処理の出力の順が、ほかの実行方式と異なることがあります。
 - `then`・`peek` は std のメソッドで、組み込みの `task_then`・`task_done`・`task_value` を呼びます。`spawn` を使うファイルは std を読み込みます。
 
 実装:
@@ -238,7 +239,7 @@ fn on_click() {                              // Async を持たない
 |---|---|---|---|
 | インタプリタ | 処理中の with の並びから、一番内側の腕（提供した関数）を呼ぶ | 抜け出す理由（`Flow::Abort`）として with まで戻す | `Async<T>` は引数を閉じ込めた関数で、`.await` で呼ぶ（順に実行する） |
 | JavaScript | `$op` が同じように腕を呼ぶ。メソッドの宣言に `with Async` があれば `$aop` で腕を待つ | 例外（`$Abort`）で with の `try` まで戻す | `Async` を持つ関数を `async function` にする。`Async<T>` は Promise を返す引数なしの関数で、`.await` は `await v()` |
-| WASM・ネイティブ（IR） | ランタイムの `__perform` が同じように腕を呼ぶ | 中断の印（`__exit`）を置き、要求を持つ関数・関数の値の呼び出しの後で調べて 1 段ずつ戻す。with の本体は `Catch` で抜ける | インタプリタと同じ（`all` は順に実行する） |
+| WASM・ネイティブ（IR） | ランタイムの `__perform` が同じように腕を呼ぶ | 中断の印（`__exit`）を置き、要求を持つ関数・関数の値の呼び出しの後で調べて 1 段ずつ戻す。with の本体は `Catch` で抜ける。async 関数の中断は Promise の失敗として待つ所まで運ぶ | async 関数はコルーチン（`src/backend/ir/coroutine.rs`）。Promise と仕事の並びは `runtime.hb` にあり、JavaScript と同じ順で動く |
 | 目標（未実装）: WASM・ネイティブ | | | `Async` の関数を `poll` で進めるステートマシンに変換し、`all`・`join`・`spawn` を本当に並行に動かす |
 
 型検査は、`.await` の直下の呼び出しをそのまま待つ呼び出しに、それ以外の `Async<T>` を作る呼び出しを「引数を一時変数に置き、その呼び出しを本体にした引数なしの無名関数」に、それ以外の `.await` をその値の呼び出しに書き換えます。出力側はこの書き換えの結果だけを扱います。

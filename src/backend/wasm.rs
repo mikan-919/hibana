@@ -12,8 +12,8 @@ use wasm_encoder::{
 
 const STATIC: i64 = 8;
 const FAIL_AT: i64 = 24;
-// __static は 152 バイト（runtime.hb の先頭）。文字列定数はその後ろに置く
-const LITERALS: u32 = STATIC as u32 + 152;
+// __static は 176 バイト（runtime.hb の先頭）。文字列定数はその後ろに置く
+const LITERALS: u32 = STATIC as u32 + 176;
 // シャドースタックの大きさ。局所変数 1 つに 16 バイト使う
 // ponytail: 固定の 4 MB。再帰が深いと __frame_push が止める。足りなければヒープから大きい区画を取り直す
 const SHADOW: u64 = 4 << 20;
@@ -254,7 +254,7 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
         }
         code.function(&f);
         functions.function(types.get(0, 0));
-        // シャドースタックを空にし、GC の状態（+88 から +104、+120 から +136）を 0 に戻す。シャドースタックと標準入力の区画の位置、+112 は変わらない
+        // シャドースタックを空にし、GC の状態（+88 から +104、+120 から +136）と非同期の仕事の並び（+152 から +168）を 0 に戻す。シャドースタックと標準入力の区画の位置、+112 は変わらない
         let mut reset = vec![
             I::I32Const(STATIC as i32),
             I::I64Const(heap as i64),
@@ -267,7 +267,7 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
             I::I64Store(mem(0, 3)),
         ];
         reset.extend([I::I32Const(STATIC as i32 + 64), I::I64Const(shadow as i64), I::I64Store(mem(0, 3))]);
-        for k in [88, 96, 104, 120, 128, 136] {
+        for k in [88, 96, 104, 120, 128, 136, 152, 160, 168] {
             reset.extend([I::I32Const(STATIC as i32 + k), I::I64Const(0), I::I64Store(mem(0, 3))]);
         }
         reset.push(I::End);
@@ -291,7 +291,7 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
     init.extend((pages * 65536).to_le_bytes());
     // 実行時エラーの文字列、中断、処理中の with、シャドースタック、GC の状態は 0 から始める。+112 は文字列定数の終わり
     init.extend([0u8; 48]);
-    for v in [shadow, shadow, shadow + SHADOW, 0, 0, 0, heap, 0, 0, 0, input] {
+    for v in [shadow, shadow, shadow + SHADOW, 0, 0, 0, heap, 0, 0, 0, input, 0, 0, 0] {
         init.extend(v.to_le_bytes());
     }
     init.extend(data);

@@ -3,7 +3,7 @@
 // __load などの __ で始まる組み込みは、IR の命令に直接変換する（src/backend/ir.rs の prim）。
 //
 // 値の型の番号: 0 unit, 1 int, 2 bool, 3 String, 4 Vec, 5 type の値・構造体, 6 関数, 7 型, 8 Ref, 9 number（中身は f64 のビット列）
-// 10 は GC の根に置く with の記録の並び（ランタイムの中だけで使う）
+// 10 は with の記録の並び（ランタイムの中だけで使う）、11 は Promise（非同期。下の __promise_new）
 // ヒープ上の形（各欄は 8 バイト、値は型の番号と中身の 16 バイト）:
 //   String: [長さ][UTF-8 のバイト列]
 //   Vec: [要素数][値...]。位置の直前に [容量][所有の印] を置く（__arr_new）
@@ -18,7 +18,7 @@
 // GC は利用者の関数の入口とループの先頭（ir.rs の安全な位置）でだけ動く。ランタイムの関数の中の生の位置は、
 // GC の間に生きていない。ランタイムの関数から利用者の関数を呼ぶ所（__all・__perform）は、持っている値をシャドースタックに置く
 
-// ランタイムの状態は __static() から 152 バイト:
+// ランタイムの状態は __static() から 176 バイト:
 //   +0 確保の次の位置、+8 区画の終わり、+16 実行時エラーの文字列（WASM だけ使う）
 //   +24 中断の行き先（with の番号。0 は中断していない）、+32 中断で with に渡す値
 //   +48 処理中のいちばん内側の with、+56 最後に付けた with の番号
@@ -28,6 +28,7 @@
 //   +120 空き区画の並びの表（1024 バイトまでは 16 バイトごと、それより大きい区画は 2 のべきごとの 128 本）
 //   +128 印を付ける作業の並び、+136 その容量
 //   +144 標準入力の区画（__input）
+//   +152 非同期の仕事の並びの先頭（値）、+168 その末尾（__enqueue）
 fn __alloc(n: int) -> int {
     let st = __static()
     if __load(st + 120) == 0 {
@@ -144,7 +145,7 @@ fn __frame_push(n: int) -> int {
 // 値 v が指す区画に印を付け、作業の並びに積む。文字列定数と、中身が位置でない値は飛ばす
 fn __gc_mark(v: int) {
     let tag = __tag(v)
-    if tag < 3 || tag == 9 || tag > 10 {
+    if tag < 3 || tag == 9 || tag > 11 {
         return
     }
     let mut b = __payload(v)
@@ -201,6 +202,7 @@ fn __gc() {
     __store(__load(st + 128), 0)
     __gc_values(__load(st + 72), (__load(st + 64) - __load(st + 72)) / 16)
     __gc_mark(__getv(st + 32))
+    __gc_mark(__getv(st + 152))
     if __load(st + 48) != 0 {
         __gc_push(__load(st + 48))
     }
@@ -1180,30 +1182,6 @@ fn __set_at_own(v: int, i: int, x: int) -> int {
     w
 }
 
-// 並行に動かす処理が無いので、順に呼ぶ
-fn __all(fs: int) -> int {
-    let p = __payload(fs)
-    let n = __load(p)
-    let q = __arr_new(n)
-    // 利用者の関数を呼ぶ間、fs と作りかけの q を GC の根に置く。q の要素は 0（unit）で埋めておく
-    __zero(q + 8, n * 16)
-    let roots = __frame_push(2)
-    __setv(roots, fs)
-    __setv(roots + 16, __mkv(4, q))
-    let mut i = 0
-    while i < n {
-        let f = __getv(p + 8 + i * 16)
-        __setv(q + 8 + i * 16, f())
-        if __aborting() {
-            __store(__static() + 64, roots)
-            return
-        }
-        i = i + 1
-    }
-    __store(__static() + 64, roots)
-    __mkv(4, q)
-}
-
 // Ref
 
 fn __new_ref(x: int) -> int {
@@ -1220,26 +1198,309 @@ fn __write(r: int, x: int) {
     __setv(__payload(r), x)
 }
 
-// spawn。その場で最後まで実行し、Task<T> は結果の値そのものにする
-// ponytail: 実行の待ち行列を持たないので、spawn した処理が JavaScript より先に走る。poll で進めるステートマシンに変換すれば並行に動かせる
-fn __spawn(f: int) -> int {
-    f()
+// 非同期（Async）。JavaScript の Promise とマイクロタスクと同じ順で動かす（js.rs の async 関数・await・$all・$spawn・$then・$aop）。
+// Promise は型の番号 11 の値で、構造体と同じ形 [状態][3][値][反応の先頭][反応の末尾]。状態は 0 未完了・1 値・2 失敗。
+// 反応と仕事は構造体 [種類][6][次][a][b][c][結果の状態][結果の値]。Promise が決まると反応を仕事の並び（+152 から）の末尾に移す。
+// 失敗の値は、with を抜ける中断 [-3][2][行き先の with の番号][値]。
+// 仕事の種類: 1 コルーチンの再開、2 thenable（Promise で解決した Promise）、3 a を同じ結果で解決、4 all の 1 要素、
+// 5 $all の await の続き（with の並びを b に戻して a を解決）、6 spawn の終わり、7 then、8 $aop の await の続き
+// コルーチンの区画は関数の値 [関数][数][Promise][状態の番号][再開の状態][再開の値][局所変数...]（ir.rs の Ctx::coroutine）
+
+fn __promise_new() -> int {
+    __mkv(11, __data_new(0, 3))
 }
 
-fn __task_then(t: int, f: int) {
-    f(t)
+fn __job_new(kind: int, a: int, b: int, c: int) -> int {
+    let p = __data_new(kind, 6)
+    __zero(p + 16, 96)
+    __setv(p + 32, a)
+    __setv(p + 48, b)
+    __setv(p + 64, c)
+    p
 }
 
-fn __task_done(t: int) -> bool {
+// 仕事の並びの末尾に足す
+fn __enqueue(node: int) {
+    let st = __static()
+    __setv(node + 16, __mkv(0, 0))
+    let tail = __load(st + 168)
+    if tail == 0 {
+        __setv(st + 152, __mkv(5, node))
+    } else {
+        __setv(tail + 16, __mkv(5, node))
+    }
+    __store(st + 168, node)
+}
+
+// 結果の決まった反応を仕事にする
+fn __enqueue_with(node: int, status: int, v: int) {
+    __setv(node + 80, __mkv(1, status))
+    __setv(node + 96, v)
+    __enqueue(node)
+}
+
+// Promise を状態 status と値 v で決める。決まっていれば何もしない
+fn __settle(pv: int, status: int, v: int) {
+    let p = __payload(pv)
+    if __load(p) != 0 {
+        return
+    }
+    __store(p, status)
+    __setv(p + 16, v)
+    let mut r = __getv(p + 32)
+    __setv(p + 32, __mkv(0, 0))
+    __setv(p + 48, __mkv(0, 0))
+    while __tag(r) == 5 {
+        let node = __payload(r)
+        r = __getv(node + 16)
+        __enqueue_with(node, status, v)
+    }
+}
+
+// resolve 関数。値が Promise なら、その Promise の then を仕事にする（NewPromiseResolveThenableJob）
+fn __resolve(pv: int, v: int) {
+    if __tag(v) == 11 {
+        __enqueue(__job_new(2, pv, v, __mkv(0, 0)))
+        return
+    }
+    __settle(pv, 1, v)
+}
+
+// PromiseResolve(v).then(反応)。決まっていれば仕事にし、未完了なら反応の末尾に足す
+fn __react(v: int, node: int) {
+    if __tag(v) != 11 {
+        __enqueue_with(node, 1, v)
+        return
+    }
+    let p = __payload(v)
+    if __load(p) != 0 {
+        __enqueue_with(node, __load(p), __getv(p + 16))
+        return
+    }
+    __setv(node + 16, __mkv(0, 0))
+    if __tag(__getv(p + 32)) == 5 {
+        __setv(__payload(__getv(p + 48)) + 16, __mkv(5, node))
+    } else {
+        __setv(p + 32, __mkv(5, node))
+    }
+    __setv(p + 48, __mkv(5, node))
+}
+
+// 中断中なら、その中断を失敗の値にして消す
+fn __abort_info() -> int {
+    let st = __static()
+    let info = __data_new(0 - 3, 2)
+    __setv(info + 16, __mkv(1, __load(st + 24)))
+    __setv(info + 32, __getv(st + 32))
+    __store(st + 24, 0)
+    __mkv(5, info)
+}
+
+// 失敗の値の中断を置き直す
+fn __abort_again(info: int) {
+    let st = __static()
+    let p = __payload(info)
+    __store(st + 24, __payload(__getv(p + 16)))
+    __setv(st + 32, __getv(p + 32))
+}
+
+// コルーチンの区画。局所変数 n 個の分を含む
+fn __co_new(code: int, n: int) -> int {
+    let p = __fn_new(code, 4 + n)
+    __zero(p + 16, (4 + n) * 16)
+    __setv(p + 16, __promise_new())
+    __setv(p + 32, __mkv(1, 0))
+    __mkv(6, p)
+}
+
+fn __co_promise(frame: int) -> int {
+    __getv(__payload(frame) + 16)
+}
+
+// await。v が決まったら、コルーチンを再開する仕事を足す
+fn __await(frame: int, v: int) {
+    __react(v, __job_new(1, frame, __mkv(0, 0), __mkv(0, 0)))
+}
+
+// 再開した所で待った値を受け取る。失敗なら中断を置き直す（呼んだ後の中断の検査で抜ける）
+fn __co_resume(frame: int) -> int {
+    let p = __payload(frame)
+    if __payload(__getv(p + 48)) == 2 {
+        __abort_again(__getv(p + 64))
+        return __mkv(0, 0)
+    }
+    __getv(p + 64)
+}
+
+// async 関数から戻る。中断中なら失敗にする
+fn __co_return(frame: int, v: int) {
+    let pv = __co_promise(frame)
+    if __aborting() {
+        __settle(pv, 2, __abort_info())
+        return
+    }
+    __resolve(pv, v)
+}
+
+// 仕事を 1 つ動かす。仕事が無ければ false
+// ponytail: 仕事の中の実行時エラー（__die）はその場で終える。JavaScript は失敗を出して残りの仕事を続ける。続けるには __die を Promise の失敗にする
+fn __run_job() -> bool {
+    let st = __static()
+    let head = __getv(st + 152)
+    if __tag(head) != 5 {
+        return false
+    }
+    let node = __payload(head)
+    let next = __getv(node + 16)
+    __setv(st + 152, next)
+    if __tag(next) != 5 {
+        __store(st + 168, 0)
+    }
+    let kind = __load(node)
+    let a = __getv(node + 32)
+    let b = __getv(node + 48)
+    let c = __getv(node + 64)
+    let status = __payload(__getv(node + 80))
+    let v = __getv(node + 96)
+    if kind == 1 {
+        let p = __payload(a)
+        __setv(p + 48, __mkv(1, status))
+        __setv(p + 64, v)
+        a()
+    } else if kind == 2 {
+        __react(b, __job_new(3, a, __mkv(0, 0), __mkv(0, 0)))
+    } else if kind == 3 {
+        if status == 1 {
+            __resolve(a, v)
+        } else {
+            __settle(a, status, v)
+        }
+    } else if kind == 4 {
+        if status == 2 {
+            __settle(a, 2, v)
+        } else {
+            let state = __payload(b)
+            __setv(__payload(__getv(state + 32)) + 8 + __payload(c) * 16, v)
+            let left = __payload(__getv(state + 16)) - 1
+            __setv(state + 16, __mkv(1, left))
+            if left == 0 {
+                __resolve(a, __getv(state + 32))
+            }
+        }
+    } else if kind == 5 {
+        __store(st + 48, __payload(b))
+        if status == 1 {
+            __resolve(a, v)
+        } else {
+            __settle(a, status, v)
+        }
+    } else if kind == 6 {
+        let task = __payload(a)
+        __setv(task + 16, __mkv(1, status))
+        if status == 1 {
+            __setv(task + 32, v)
+        } else {
+            __write_str(2, '実行時エラー: spawn した処理が with を抜けずに中断した\n')
+        }
+        __resolve(b, __mkv(0, 0))
+    } else if kind == 7 {
+        let task = __payload(a)
+        if __payload(__getv(task + 16)) == 1 {
+            b(__getv(task + 32))
+        }
+    } else if kind == 8 {
+        __store(st + 48, __payload(b))
+        if status == 2 {
+            __settle(a, 2, v)
+        } else if __tag(v) == 5 && __load(__payload(v)) == 0 - 1 {
+            __resolve(a, __getv(__payload(v) + 16))
+        } else {
+            let info = __data_new(0 - 3, 2)
+            __setv(info + 16, __mkv(1, __load(__payload(c) + 8)))
+            __setv(info + 32, v)
+            __settle(a, 2, __mkv(5, info))
+        }
+    }
     true
 }
 
-fn __task_wait(t: int) -> int {
-    t
+// 仕事が無くなるまで動かす（main の後。JavaScript のマイクロタスクを空にするのと同じ）
+fn __run_jobs() {
+    while __run_job() {
+    }
+}
+
+// all。$all と同じく、すべての関数を呼んでから Promise.all にし、それを待つ async 関数の Promise を返す
+fn __all(fs: int) -> int {
+    let st = __static()
+    let h = __load(st + 48)
+    let p = __payload(fs)
+    let n = __load(p)
+    let outer = __promise_new()
+    let ps = __arr_new(n)
+    __zero(ps + 8, n * 16)
+    // 利用者の関数を呼ぶ間、fs と結果の並びを GC の根に置く
+    let roots = __frame_push(2)
+    __setv(roots, fs)
+    __setv(roots + 16, __mkv(4, ps))
+    let mut i = 0
+    while i < n {
+        let f = __getv(p + 8 + i * 16)
+        __store(st + 48, h)
+        __setv(ps + 8 + i * 16, f())
+        i = i + 1
+    }
+    __store(st + 64, roots)
+    let all = __promise_new()
+    let results = __arr_new(n)
+    __zero(results + 8, n * 16)
+    let state = __data_new(0, 2)
+    __setv(state + 16, __mkv(1, n))
+    __setv(state + 32, __mkv(4, results))
+    if n == 0 {
+        __resolve(all, __mkv(4, results))
+    }
+    i = 0
+    while i < n {
+        __react(__getv(ps + 8 + i * 16), __job_new(4, all, __mkv(5, state), __mkv(1, i)))
+        i = i + 1
+    }
+    __react(all, __job_new(5, outer, __mkv(10, h), __mkv(0, 0)))
+    outer
+}
+
+// spawn。Async<T> の値を走らせ始め、Task [-2][3][状態][値][then を付ける Promise] を返す
+fn __spawn(f: int) -> int {
+    let st = __static()
+    let h = __load(st + 48)
+    let p = f()
+    let task = __data_new(0 - 2, 3)
+    __setv(task + 16, __mkv(1, 0))
+    __setv(task + 32, __mkv(0, 0))
+    let next = __promise_new()
+    __setv(task + 48, next)
+    __react(p, __job_new(6, __mkv(5, task), next, __mkv(0, 0)))
+    __store(st + 48, h)
+    __mkv(5, task)
+}
+
+fn __task_then(t: int, f: int) {
+    __react(__getv(__payload(t) + 48), __job_new(7, t, f, __mkv(0, 0)))
+}
+
+fn __task_done(t: int) -> bool {
+    __payload(__getv(__payload(t) + 16)) == 1
 }
 
 fn __task_value(t: int) -> int {
-    t
+    __getv(__payload(t) + 32)
+}
+
+// wait。終わるまで仕事を動かす（ネイティブだけ）
+fn __task_wait(t: int) -> int {
+    while __payload(__getv(__payload(t) + 16)) == 0 && __run_job() {
+    }
+    __getv(__payload(t) + 32)
 }
 
 // 構築子と関数の値
@@ -1471,6 +1732,36 @@ fn __perform(name: String, args: int) -> int {
                 __store(st + 24, __load(h + 8))
                 __setv(st + 32, r)
                 return
+            }
+            k = k + 1
+        }
+        h = __load(h)
+    }
+    __die('要求を提供する with が無い')
+}
+
+// メソッドの宣言に with Async がある要求の呼び出し（js.rs の $aop）。腕は async な無名関数で、その Promise を待つ async 関数の Promise を返す。
+// 待つ間、with の並びは見つけた with より外のまま（$aop の finally は待った後で戻す）
+fn __aperform(name: String, args: int) -> int {
+    let st = __static()
+    let mut h = __load(st + 48)
+    while h != 0 {
+        let ops = __payload(__getv(h + 16))
+        let n = __load(ops)
+        let mut k = 0
+        while k < n {
+            if __str_eq(__payload(__getv(ops + 8 + k * 16)), __payload(name)) {
+                let arm = __getv(__payload(__getv(h + 32)) + 8 + k * 16)
+                let saved = __load(st + 48)
+                __store(st + 48, __load(h))
+                let outer = __promise_new()
+                let roots = __frame_push(2)
+                __setv(roots, __mkv(10, saved))
+                __setv(roots + 16, outer)
+                let p = arm(args)
+                __store(st + 64, roots)
+                __react(p, __job_new(8, outer, __mkv(10, saved), __mkv(10, h)))
+                return outer
             }
             k = k + 1
         }

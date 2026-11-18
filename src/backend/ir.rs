@@ -20,8 +20,13 @@ pub const DATA: i64 = 5;
 pub const FN: i64 = 6;
 pub const TY: i64 = 7;
 pub const NUM: i64 = 9;
+// with の記録の並び（runtime.hb の __handle_push）と Promise。ランタイムの中と非同期の変換だけで使う
+pub const HANDLERS: i64 = 10;
+pub const PROMISE: i64 = 11;
 
 const RUNTIME: &str = include_str!("runtime.hb");
+
+mod coroutine;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
@@ -403,14 +408,16 @@ struct Ctx<'a> {
     // 変換の途中で作った関数（無名関数）
     made: Vec<Function>,
     lambdas: usize,
+    // 型検査が記録した、JavaScript で待つ呼び出しと async にする本体（js.rs と同じ所で待つ）
+    info: &'a crate::typeck::Info,
 }
 
 pub fn lower(p: &parser::Program) -> R<Program> {
-    lower_selected(p, None)
+    lower_selected(p, None, &crate::typeck::Info::default())
 }
 
 /// exports から辿れる関数だけを変換する。None はすべての関数を変換する。
-pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>) -> R<Program> {
+pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>, info: &crate::typeck::Info) -> R<Program> {
     let runtime = parser::parse(RUNTIME)?;
     let mut sources = HashMap::new();
     for f in &runtime.fns {
@@ -442,6 +449,7 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>) -> R<Prog
         sources,
         made: Vec::new(),
         lambdas: 0,
+        info,
     };
     if exports.is_none() && (!p.datas.is_empty() || !p.tests.is_empty()) {
         return Err("IR は型宣言とテスト宣言に未対応".into());
@@ -472,75 +480,97 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>) -> R<Prog
     let mut functions = Vec::new();
     let mut imports = Vec::new();
     let mut descs = HashMap::new();
-    while let Some(name) = pending.pop() {
-        if !visited.insert(name.clone()) {
-            continue;
-        }
-        let js = cx
-            .sources
-            .get(name.as_str())
-            .map(|s| s.f)
-            .filter(|f| f.js.is_some());
-        let mut function = match js {
-            Some(f) => {
-                let (param_types, result_type) = cx.boundary(f, &mut descs);
-                if param_types.iter().chain([&result_type]).any(|t| *t == ValueType::Value) {
-                    pending.extend(["__val_in".to_string(), "__val_out".to_string()]);
-                }
-                if param_types.contains(&ValueType::Int) || result_type == ValueType::Int { pending.push("__int_in".into()); }
-                if param_types.contains(&ValueType::Number) || result_type == ValueType::Number {
-                    pending.push("__num_checked".into());
-                }
-                if exported(&name) {
-                    return Err("外部関数を直接公開できない".into());
-                }
-                // WASM の境界は int・number・String・bool・unit と、それらの Vec と構造体（BoundaryType）
-                if !param_types
-                    .iter()
-                    .chain([&result_type])
-                    .all(|t| boundary(*t))
-                {
-                    return Err(format!("IR は関数 {} の境界の型に未対応", f.name).into());
-                }
-                if param_types.iter().chain([&result_type]).any(|t| matches!(t, ValueType::Str)) {
-                    pending.extend(["__str_in".to_string(), "__str_out".to_string()]);
-                }
-                imports.push(Import {
-                    name: f.name.to_string(),
-                    param_types,
-                    result_type,
-                });
+    let mut wrapped = false;
+    loop {
+        while let Some(name) = pending.pop() {
+            if !visited.insert(name.clone()) {
                 continue;
             }
-            None if cx.sources.contains_key(name.as_str()) => cx.function(&name)?,
-            None => cx.generated(&name)?,
-        };
-        if exported(&name) {
-            if let Some(f) = cx.sources.get(name.as_str()).map(|s| s.f)
-                && f.implicit == 0
-            {
-                let (param_types, result_type) = cx.boundary(f, &mut descs);
-                if param_types.iter().chain([&result_type]).any(|t| *t == ValueType::Value) {
-                    pending.extend(["__val_in".to_string(), "__val_out".to_string()]);
+            let js = cx
+                .sources
+                .get(name.as_str())
+                .map(|s| s.f)
+                .filter(|f| f.js.is_some());
+            let mut function = match js {
+                Some(f) => {
+                    let (param_types, result_type) = cx.boundary(f, &mut descs);
+                    if param_types.iter().chain([&result_type]).any(|t| *t == ValueType::Value) {
+                        pending.extend(["__val_in".to_string(), "__val_out".to_string()]);
+                    }
+                    if param_types.contains(&ValueType::Int) || result_type == ValueType::Int { pending.push("__int_in".into()); }
+                    if param_types.contains(&ValueType::Number) || result_type == ValueType::Number {
+                        pending.push("__num_checked".into());
+                    }
+                    if exported(&name) {
+                        return Err("外部関数を直接公開できない".into());
+                    }
+                    // WASM の境界は int・number・String・bool・unit と、それらの Vec と構造体（BoundaryType）
+                    if !param_types
+                        .iter()
+                        .chain([&result_type])
+                        .all(|t| boundary(*t))
+                    {
+                        return Err(format!("IR は関数 {} の境界の型に未対応", f.name).into());
+                    }
+                    if param_types.iter().chain([&result_type]).any(|t| matches!(t, ValueType::Str)) {
+                        pending.extend(["__str_in".to_string(), "__str_out".to_string()]);
+                    }
+                    imports.push(Import {
+                        name: f.name.to_string(),
+                        param_types,
+                        result_type,
+                    });
+                    continue;
                 }
-                function.param_types = param_types;
-                function.result_type = result_type;
+                None if cx.sources.contains_key(name.as_str()) => cx.function(&name)?,
+                None => cx.generated(&name)?,
+            };
+            if exported(&name) {
+                if let Some(f) = cx.sources.get(name.as_str()).map(|s| s.f)
+                    && f.implicit == 0
+                {
+                    let (param_types, result_type) = cx.boundary(f, &mut descs);
+                    if param_types.iter().chain([&result_type]).any(|t| *t == ValueType::Value) {
+                        pending.extend(["__val_in".to_string(), "__val_out".to_string()]);
+                    }
+                    function.param_types = param_types;
+                    function.result_type = result_type;
+                }
+                if !function.boundary() {
+                    return Err(format!("IR は関数 {} の境界の型に未対応", function.name).into());
+                }
+                if function.param_types.iter().chain([&function.result_type]).any(|t| matches!(t, ValueType::Str))
+                {
+                    pending.extend(["__str_in".to_string(), "__str_out".to_string()]);
+                }
             }
-            if !function.boundary() {
-                return Err(format!("IR は関数 {} の境界の型に未対応", function.name).into());
+            pending.extend(function.calls().into_iter().map(String::from));
+            for f in std::mem::take(&mut cx.made) {
+                pending.extend(f.calls().into_iter().map(String::from));
+                visited.insert(f.name.clone());
+                functions.push(f);
             }
-            if function.param_types.iter().chain([&function.result_type]).any(|t| matches!(t, ValueType::Str))
-            {
-                pending.extend(["__str_in".to_string(), "__str_out".to_string()]);
-            }
+            functions.push(function);
         }
-        pending.extend(function.calls().into_iter().map(String::from));
-        for f in std::mem::take(&mut cx.made) {
-            pending.extend(f.calls().into_iter().map(String::from));
-            visited.insert(f.name.clone());
-            functions.push(f);
+        // 非同期を使う main は、本体（main$impl）の後で仕事の並びを空にする（js.rs の main の呼び出しの後のマイクロタスク）
+        let asyncs = ["__co_new", "__spawn", "__all", "__aperform"].iter().any(|n| visited.contains(*n));
+        if wrapped || !asyncs {
+            break;
         }
-        functions.push(function);
+        wrapped = true;
+        let Some(main) = functions.iter_mut().find(|f| f.name == "main") else { break };
+        main.name = "main$impl".into();
+        let wrapper = Function {
+            name: "main".into(),
+            params: main.params,
+            param_types: main.param_types.clone(),
+            result_type: main.result_type,
+            locals: 0,
+            body: vec![Stmt::Eval(call("main$impl", vec![])), Stmt::Eval(call("__run_jobs", vec![])), Stmt::Return(unit())],
+        };
+        visited.insert("main$impl".into());
+        pending.extend(wrapper.calls().into_iter().map(String::from));
+        functions.push(wrapper);
     }
     // 宣言の順（ランタイム、利用者の関数）に並べ、出力を決まった形にする
     let order: HashMap<&str, usize> = runtime
@@ -566,7 +596,12 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>) -> R<Prog
 impl<'a> Ctx<'a> {
     fn function(&mut self, name: &str) -> R<Function> {
         let src = &self.sources[name];
-        let (f, runtime) = (src.f, src.runtime);
+        self.lower_fn(src.f, src.runtime, name, false)
+    }
+
+    // 関数 f を name として変換する。variant は要求の多相な関数の async 版（js.rs の f$a）。
+    // async 関数（Async を要求する関数と async 版）はコルーチンにし、入口の関数を返す（Ctx::coroutine）
+    fn lower_fn(&mut self, f: &'a parser::Fn, runtime: bool, name: &str, variant: bool) -> R<Function> {
         if f.op.is_some() {
             return Err(format!("IR は要求の操作 {} に未対応", f.name).into());
         }
@@ -578,6 +613,7 @@ impl<'a> Ctx<'a> {
             handles: Vec::new(),
             loop_handle_depth: None,
             muts: HashSet::new(),
+            variant,
         };
         for (n, _) in &f.params {
             let i = l.local();
@@ -588,13 +624,16 @@ impl<'a> Ctx<'a> {
         let mut body = b.stmts;
         body.push(Stmt::Return(b.value));
         let mut function = Function {
-            name: f.name.to_string(),
+            name: name.to_string(),
             params: f.params.len() as u32,
             param_types: f.params.iter().map(|(_, t)| value_type(t)).collect(),
             result_type: ret_type(f),
             locals,
             body,
         };
+        if !runtime && (variant || has_async(&f.effects)) {
+            return Ok(self.coroutine(function));
+        }
         if !runtime {
             self.shadow(&mut function);
         }
@@ -658,6 +697,13 @@ impl<'a> Ctx<'a> {
                 vec![Expr::Str(format!("フィールド {field} が無い"))],
             )));
             return Ok(f);
+        }
+        // 要求の多相な関数の async 版（js.rs の f$a）。要求の変数を通した呼び出しを待つコルーチンにする
+        if let Some(base) = name.strip_suffix("$a")
+            && let Some(src) = self.sources.get(base).filter(|s| !s.runtime)
+        {
+            let f = src.f;
+            return self.lower_fn(f, false, name, true);
         }
         // 名前の付いた関数を値として使う時の入口
         if let Some(target) = name.strip_prefix("__w_") {
@@ -891,6 +937,31 @@ impl Shadow<'_, '_> {
     }
 }
 
+// 式に付いた識別子（いちばん内側の Expr::Id）。型検査は待つ呼び出しをこの識別子で記録する
+fn node_id(mut e: &Ast) -> Option<parser::NodeId> {
+    let mut id = None;
+    loop {
+        match e {
+            Ast::At(_, x) | Ast::InModule(_, x) => e = x,
+            Ast::Id(i, x) => {
+                id = Some(*i);
+                e = x;
+            }
+            _ => return id,
+        }
+    }
+}
+
+// Async を要求する関数か（js.rs の is_async）
+fn has_async(effs: &[Ast]) -> bool {
+    effs.iter().any(|e| matches!(e.peel(), Ast::Var(n) if n == "Async"))
+}
+
+// 要求の変数（<E: Effect>）を持つ関数（js.rs の is_poly）
+fn is_poly(f: &parser::Fn) -> bool {
+    f.params[..f.implicit].iter().any(|(_, t)| matches!(t.peel(), Ast::Var(k) if k == "Effect"))
+}
+
 fn if_return(cond: Expr, v: Expr) -> Stmt {
     Stmt::Eval(Expr::If(
         Box::new(cond),
@@ -913,6 +984,8 @@ struct Lower<'c, 'a> {
     loop_handle_depth: Option<usize>,
     // mut で宣言した変数。値を読んで他へ渡す時は __share で Vec の所有の印を消す
     muts: HashSet<Name>,
+    // 要求の多相な関数の async 版（js.rs の variant）を変換している
+    variant: bool,
 }
 
 // 値を捨てる。unit の塊は中の文を並べ直す
@@ -1086,6 +1159,26 @@ impl Lower<'_, '_> {
         Ok(())
     }
 
+    // JavaScript で待つ呼び出しか、async にする無名関数の本体か（js.rs の Gen::waits）
+    fn waits(&self, id: Option<parser::NodeId>) -> bool {
+        id.is_some_and(|id| self.cx.info.awaits.contains(&id) || (self.variant && self.cx.info.var_awaits.contains(&id)))
+    }
+
+    // await。js.rs の $k($h, await e) と同じく、待つ前の with の並びを覚え、再開した後で戻す。
+    // #await はコルーチンの変換（Ctx::coroutine）が中断と再開に書き換える
+    fn await_(&mut self, e: Expr) -> Expr {
+        let (h, t) = (self.local(), self.local());
+        let handlers = add(prim(Prim::Static, vec![]), int(48));
+        block(
+            vec![
+                Stmt::Set(h, mkv(HANDLERS, prim(Prim::Load, vec![handlers.clone()]))),
+                Stmt::Set(t, call("#await", vec![e])),
+                Stmt::Eval(prim(Prim::Store, vec![handlers, prim(Prim::Payload, vec![Expr::Local(h)])])),
+            ],
+            Expr::Local(t),
+        )
+    }
+
     // 局所変数 n（番号 i）の値。mut の変数は他へ渡すので、Vec の所有の印を消す
     fn shared(&self, n: &Name, i: u32) -> Expr {
         if !self.muts.contains(n) {
@@ -1121,6 +1214,7 @@ impl Lower<'_, '_> {
     }
 
     fn expr(&mut self, e: &Ast) -> R<Expr> {
+        let id = node_id(e);
         Ok(match e.peel() {
             Ast::Int(n) => int(*n),
             Ast::Num(n) => Expr::Const(NUM, n.to_bits() as i64),
@@ -1194,11 +1288,13 @@ impl Lower<'_, '_> {
                 let v = call(if p == Prim::Add { "__add" } else { "__eq" }, vec![a, b]);
                 if p == Prim::Ne { prim(Prim::Not, vec![v]) } else { v }
             }
-            Ast::Call(n, args) => self.call(n, args)?,
+            Ast::Call(n, args) => self.call(n, args, id)?,
             Ast::Apply(f, args) => {
                 let f = self.expr(f)?;
                 let args = self.args(args)?;
-                self.checked(Expr::CallIndirect(Box::new(f), args))
+                let c = Expr::CallIndirect(Box::new(f), args);
+                let c = if self.waits(id) { self.await_(c) } else { c };
+                self.checked(c)
             }
             Ast::Field(x, f) => call(&format!("__field_{f}"), vec![self.expr(x)?]),
             Ast::Index(v, i) => {
@@ -1284,11 +1380,13 @@ impl Lower<'_, '_> {
         })
     }
 
-    fn call(&mut self, n: &Name, args: &[Ast]) -> R<Expr> {
+    fn call(&mut self, n: &Name, args: &[Ast], id: Option<parser::NodeId>) -> R<Expr> {
         if let Some(i) = self.vars.get(n) {
             let i = *i;
             let args = self.args(args)?;
-            return Ok(self.checked(Expr::CallIndirect(Box::new(Expr::Local(i)), args)));
+            let c = Expr::CallIndirect(Box::new(Expr::Local(i)), args);
+            let c = if self.waits(id) { self.await_(c) } else { c };
+            return Ok(self.checked(c));
         }
         // len は読むだけなので、変数の所有の印を残す
         let mut args = if n == "len" && !self.cx.sources.contains_key("len") {
@@ -1329,6 +1427,11 @@ impl Lower<'_, '_> {
                 let items = args.split_off(k);
                 let new = call("__arr_new", vec![int(items.len() as i64)]);
                 let items = self.object(ARR, new, 8, items);
+                // メソッドの宣言に with Async があれば、腕の Promise を待つ（js.rs の $aop）
+                if has_async(&f.effects) {
+                    let c = self.await_(call("__aperform", vec![Expr::Str(n.to_string()), items]));
+                    return Ok(self.checked(c));
+                }
                 return Ok(self.checked(call("__perform", vec![Expr::Str(n.to_string()), items])));
             }
             // 推論したジェネリック引数は実行時には要らないので unit で埋める
@@ -1337,9 +1440,19 @@ impl Lower<'_, '_> {
                 full.append(&mut args);
                 args = full;
             }
-            // 効果の無い関数は中断しない
+            // 効果の無い関数は中断しない。async 関数は呼んで待つ。要求の多相な関数を Async で使う所は、async 版を呼んで待つ（js.rs と同じ）
             let effects = !f.effects.is_empty();
+            let poly = !src.runtime
+                && id.is_some_and(|id| self.cx.info.async_inst.contains(&id) || (self.variant && is_poly(f) && self.cx.info.var_awaits.contains(&id)));
+            if poly {
+                let c = self.await_(call(&format!("{n}$a"), args));
+                return Ok(self.checked(c));
+            }
             let c = call(n, args);
+            if !src.runtime && has_async(&f.effects) {
+                let c = self.await_(c);
+                return Ok(self.checked(c));
+            }
             return Ok(if effects { self.checked(c) } else { c });
         }
         if matches!(n.as_str(), "Vec" | "Type" | "Ref" | "Async") || self.cx.types.contains(n.as_str()) {
@@ -1353,7 +1466,8 @@ impl Lower<'_, '_> {
                 args.push(unit());
             }
             let c = Expr::Call(rt, args);
-            return Ok(if n == "all" { self.checked(c) } else { c });
+            // all は Promise.all を待つ async 関数（js.rs の $all）
+            return Ok(if n == "all" && !self.raw { let c = self.await_(c); self.checked(c) } else { c });
         }
         // 変換の中で作る関数（__ctor_name など）。無ければ作る時に誤りにする
         if self.raw && n.starts_with("__") {
@@ -1362,10 +1476,20 @@ impl Lower<'_, '_> {
         Err(format!("IR は関数 {n} の呼び出しに未対応").into())
     }
 
-    // 無名関数。見えている局所変数をすべて写し取り、別の関数にする
+    // 無名関数。本体が使う局所変数（exit の行き先を含む）を写し取り、別の関数にする
     // unpack は handle の腕の束縛。腕は引数の Vec を 1 つ受け取り、そこから取り出す
     fn lambda(&mut self, params: &[Name], unpack: &[Name], body: &parser::Block) -> R<Expr> {
-        let mut caps: Vec<(Name, u32)> = self.vars.iter().map(|(n, i)| (n.clone(), *i)).collect();
+        let mut used = HashSet::new();
+        crate::typeck::walk(&Ast::Block(body.clone()), &mut |e| match e {
+            Ast::Var(n) | Ast::Call(n, _) | Ast::Assign(n, _) => {
+                used.insert(n.clone());
+            }
+            Ast::Exit(Some(t), _) => {
+                used.insert(exit_name(*t));
+            }
+            _ => {}
+        });
+        let mut caps: Vec<(Name, u32)> = self.vars.iter().filter(|(n, _)| used.contains(*n)).map(|(n, i)| (n.clone(), *i)).collect();
         caps.sort();
         self.cx.lambdas += 1;
         let name = format!("__lam{}", self.cx.lambdas);
@@ -1377,6 +1501,7 @@ impl Lower<'_, '_> {
             handles: Vec::new(),
             loop_handle_depth: None,
             muts: HashSet::new(),
+            variant: self.variant,
         };
         let mut stmts = Vec::new();
         // 引数は 1 番から並べる。名前は写し取った変数より後に入れて、外の同じ名前を隠す
@@ -1414,10 +1539,15 @@ impl Lower<'_, '_> {
             locals,
             body: stmts,
         };
-        if !self.raw {
-            self.cx.shadow(&mut function);
+        if !self.raw && self.waits(Some(body.id)) {
+            let entry = self.cx.coroutine(function);
+            self.cx.made.push(entry);
+        } else {
+            if !self.raw {
+                self.cx.shadow(&mut function);
+            }
+            self.cx.made.push(function);
         }
-        self.cx.made.push(function);
         let new = call("__fn_new", vec![Expr::Func(name), int(caps.len() as i64)]);
         let items = caps.into_iter().map(|(n, i)| self.shared(&n, i)).collect();
         Ok(self.object(FN, new, 16, items))
@@ -1432,9 +1562,10 @@ impl Lower<'_, '_> {
         let mut fns = Vec::new();
         for a in arms {
             ops.push(Expr::Str(a.ctor.to_string()));
-            let b = parser::Block { id: Default::default(),
-                stmts: vec![],
-                tail: Some(Box::new(a.body.clone())),
+            // 本体のブロックの識別子は残す（async な腕かを型検査が記録している）
+            let b = match &a.body {
+                Ast::Block(b) => b.clone(),
+                body => parser::Block { id: Default::default(), stmts: vec![], tail: Some(Box::new(body.clone())) },
             };
             fns.push(self.lambda(&[Name::from("#args")], &a.binds, &b)?);
         }

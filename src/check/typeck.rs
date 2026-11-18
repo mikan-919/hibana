@@ -538,6 +538,7 @@ pub(crate) fn callees(f: &Fn) -> Vec<Name> {
 }
 
 // 型検査の結果のうち、出力に使うもの
+#[derive(Default)]
 pub struct Info {
     // JavaScript で待つ呼び出しの式と、async にする無名関数の本体（節点の識別子）
     pub awaits: std::collections::HashSet<NodeId>,

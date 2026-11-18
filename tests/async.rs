@@ -134,3 +134,222 @@ fn runtime_integer_refinement_evaluates_an_async_argument_once() {
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert_eq!(output.stdout, b"std.Ok(3)\n");
 }
+
+// WASM とネイティブの非同期は、JavaScript の Promise とマイクロタスクと同じ順で動く（src/backend/ir/coroutine.rs）。
+// インタプリタは spawn をその場で最後まで動かすので、ここでは JavaScript と比べる
+fn ir_matches_javascript(name: &str, source: &str) {
+    let dir = std::env::temp_dir().join(format!("hibana-async-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let js = dir.join("main.cjs");
+    std::fs::write(&js, hibana::to_js(source).unwrap()).unwrap();
+    let want = Command::new("node").arg(&js).output().unwrap();
+    assert!(want.status.success(), "{}", String::from_utf8_lossy(&want.stderr));
+    let web = hibana::to_web(source, &["main".into()]).unwrap();
+    std::fs::write(dir.join("main.wasm"), web.wasm).unwrap();
+    std::fs::write(dir.join("glue.mjs"), web.javascript).unwrap();
+    let runner = dir.join("run.mjs");
+    std::fs::write(&runner, "import {readFileSync} from 'node:fs'; import {instantiate} from './glue.mjs'; const api = await instantiate(readFileSync(new URL('./main.wasm', import.meta.url))); api.main();").unwrap();
+    let wasm = Command::new("node").arg(&runner).output().unwrap();
+    assert!(wasm.status.success(), "{}", String::from_utf8_lossy(&wasm.stderr));
+    assert_eq!(String::from_utf8_lossy(&wasm.stdout), String::from_utf8_lossy(&want.stdout), "WASM: {name}");
+    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let exe = dir.join("main");
+        std::fs::write(&exe, hibana::to_native(source).unwrap()).unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let native = Command::new(&exe).output().unwrap();
+        assert!(native.status.success(), "{}", String::from_utf8_lossy(&native.stderr));
+        assert_eq!(String::from_utf8_lossy(&native.stdout), String::from_utf8_lossy(&want.stdout), "ネイティブ: {name}");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+// spawn した処理・then・all・要求の async な腕・with を抜ける失敗が、JavaScript と同じ順で出力する
+#[test]
+fn ir_async_order_matches_javascript() {
+    ir_matches_javascript("order", r#"
+use std -> *
+
+fn step(name: String, n: int) -> int with Async {
+    put(name + ' ' + n.to_string())
+    n
+}
+
+fn chain(name: String) -> int with Async {
+    let a = step(name, 1).await
+    let b = step(name, 2).await
+    a + b
+}
+
+trait Fetch {
+    fn fetch(self, k: int) -> int with Async
+}
+
+fn use_fetch() -> int with Async, Fetch {
+    fetch(1).await + fetch(2).await
+}
+
+fn main() with Async {
+    spawn(chain('a')).then(fn(v) { put('then a ' + v.to_string()) })
+    let t = spawn(chain('b'))
+    put('main 1')
+    put(t.peek())
+    put(step('main', 3).await)
+    put(all([chain('c'), chain('d')]).await)
+    put(t.peek())
+    put(map([1, 2], fn(x) { step('m', x).await * 10 }))
+    let r = with Fetch(fn(k) { step('f', k).await }) {
+        use_fetch().await
+    }
+    put(r)
+    let e = with Fail(fn(m) { exit m }) {
+        all([ok_later(), fail_later()]).await.to_string()
+    }
+    put(e)
+    put('main end')
+}
+
+fn fail_later() -> int with Async, Fail<String> {
+    step('y', 1).await
+    fail('boom')
+}
+
+fn ok_later() -> int with Async, Fail<String> {
+    step('x', 1).await
+}
+"#);
+}
+
+// await を含むループ・分岐・早い return・再帰・入れ子の with を抜ける中断・要求の多相な関数の async 版・join
+#[test]
+fn ir_async_control_flow_matches_javascript() {
+    ir_matches_javascript("control", r#"
+use std -> *
+
+fn tick(name: String, n: int) -> int with Async {
+    put(name + n.to_string())
+    n
+}
+
+fn loop_sum(name: String, n: int) -> int with Async {
+    let mut s = 0
+    let mut i = 0
+    while i < n {
+        i = i + 1
+        if i == 2 { continue }
+        if i == 5 { break }
+        s = s + tick(name, i).await
+    }
+    for x in [10, 20] {
+        if x > 15 { s = s + tick(name, x).await } else { s = s - tick(name, x).await }
+    }
+    s
+}
+
+fn early(n: int) -> int with Async {
+    let mut i = 0
+    while true {
+        i = i + tick('e', i).await
+        if i > n { return i * 100 }
+        i = i + 1
+    }
+    0
+}
+
+fn fib(n: int) -> int with Async {
+    if n < 2 { tick('f', n).await } else { fib(n - 1).await + fib(n - 2).await }
+}
+
+trait Fail2 {
+    fn bail(self, m: String) -> int
+}
+
+fn risky(n: int) -> int with Async, Fail2 {
+    let a = tick('r', n).await
+    if a > 1 { bail('too big ' + a.to_string()) } else { a }
+}
+
+fn guarded(n: int) -> String with Async {
+    with Fail2(fn(m) { exit m }) {
+        let v = risky(n).await
+        'ok ' + v.to_string()
+    }
+}
+
+fn nested_exit() -> int with Async {
+    let outer = with Fail2(fn(m) { exit 1000 }) {
+        let inner = with Fail2(fn(m) { exit len(m) }) {
+            tick('n', 1).await
+            bail('xyz')
+        }
+        tick('n', inner).await + bail('q')
+    }
+    outer
+}
+
+fn main() with Async {
+    let t1 = spawn(loop_sum('a', 10))
+    let t2 = spawn(early(3))
+    t1.then(fn(v) { put('t1 ' + v.to_string()) })
+    put('start')
+    put(fib(4).await)
+    put(guarded(1).await)
+    put(guarded(5).await)
+    put(nested_exit().await)
+    put(filter([1, 2, 3, 4], fn(x) { tick('p', x).await % 2 == 0 }))
+    put(fold([1, 2, 3], 0, fn(acc, x) { acc + tick('s', x).await }))
+    let p = join(tick('j', 1), tick('k', 2)).await
+    put(p.first + p.second)
+    put(all([loop_sum('b', 3), early(1), fib(2)]).await)
+    t2.then(fn(v) { put('t2 ' + v.to_string()) })
+    spawn(tick('z', 9)).then(fn(v) {
+        spawn(tick('w', v + 1)).then(fn(u) { put('inner ' + u.to_string()) })
+    })
+    put(t1.peek())
+    let mut total = 0
+    for i in 0..3 {
+        total = total + len(all([tick('l', i), tick('m', i * 2)]).await)
+    }
+    put(total)
+    put('end')
+}
+"#);
+}
+
+// 待っている間のコルーチンの区画は、Promise の反応と仕事の並びから辿れるので GC に回収されない
+#[test]
+fn ir_async_survives_gc() {
+    ir_matches_javascript("gc", &r#"
+use std -> *
+
+fn piece(i: int) -> String with Async {
+    'p' + i.to_string() + [i, i].to_string()
+}
+
+fn work(i: int) -> int with Async {
+    let mut s = ''
+    for k in 0..5 {
+        s = s + piece(i * 10 + k).await
+    }
+    len(s)
+}
+
+fn main() with Async {
+    let total = new_ref(0)
+    let mut tasks: Vec<Task<int>> = []
+    for i in 0..3000 {
+        let t = spawn(work(i))
+        t.then(fn(v) { write(total, read(total) + v) })
+        tasks = push(tasks, t)
+    }
+    let mut sum = 0
+    for i in 0..200 {
+        sum = sum + len(all([work(i), work(i + 1)]).await)
+    }
+    put(sum)
+    put(len(tasks))
+    spawn(piece(0)).then(fn(s) { put(read(total)) })
+}
+"#.replace("0..3000", "0..20000"));
+}

@@ -96,7 +96,7 @@ pub fn emit(program: &Program) -> R<Vec<u8>> {
         syscall: n,
     };
     // ランタイムの状態（runtime.hb の __static）。最初の確保で mmap する
-    g.datas.push(vec![0; 152]);
+    g.datas.push(vec![0; 176]);
     for s in ["実行時エラー: ", "\n"] {
         g.literal(s);
     }
@@ -230,7 +230,7 @@ fn import(b: &mut FunctionBuilder, index: u32, params: usize, results: usize) ->
 struct Body<'a, 'f> {
     b: FunctionBuilder<'f>,
     vars: Vec<Variable>,
-    funcs: HashMap<u32, FuncRef>,
+    funcs: HashMap<(u32, usize), FuncRef>,
     indices: &'a HashMap<String, u32>,
     literals: &'a HashMap<String, u32>,
     syscall: u32,
@@ -241,11 +241,12 @@ struct Body<'a, 'f> {
 
 impl Body<'_, '_> {
     fn func(&mut self, index: u32, params: usize, results: usize) -> FuncRef {
-        if let Some(f) = self.funcs.get(&index) {
+        // 同じ関数でも、番地だけを取る所（Expr::Func）と呼ぶ所で引数の数が違うので、数ごとに分ける
+        if let Some(f) = self.funcs.get(&(index, params)) {
             return *f;
         }
         let f = import(&mut self.b, index, params, results);
-        self.funcs.insert(index, f);
+        self.funcs.insert((index, params), f);
         f
     }
 

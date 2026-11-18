@@ -45,7 +45,7 @@ pub fn check(mut program: parser::Program, kind: Kind) -> R<Checked> {
 
 /// 公開する関数から辿れる関数を IR に変換する。None はすべての関数を変換する。
 pub fn lower(checked: &Checked, exports: Option<&[String]>) -> R<ir::Program> {
-    ir::lower_selected(&checked.program, exports)
+    ir::lower_selected(&checked.program, exports, &checked.info)
 }
 
 /// IR から公開関数とその呼び出し先を選ぶ。
