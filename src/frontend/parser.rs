@@ -80,6 +80,8 @@ pub enum Expr {
     At(Span, Box<Expr>),
     // 型検査後も式と一緒に移動する識別子。
     Id(NodeId, Box<Expr>),
+    // マクロの quote に書いた式。中の名前の公開範囲は、そのマクロを定義したモジュールの権限で判定する
+    InModule(String, Box<Expr>),
 }
 
 impl Expr {
@@ -112,7 +114,7 @@ impl Expr {
 
     pub fn peel(&self) -> &Expr {
         match self {
-            Expr::At(_, e) | Expr::Id(_, e) => e.peel(),
+            Expr::At(_, e) | Expr::Id(_, e) | Expr::InModule(_, e) => e.peel(),
             e => e,
         }
     }
@@ -120,7 +122,7 @@ impl Expr {
     // 位置の包みを外す（可変）
     pub fn peel_mut(&mut self) -> &mut Expr {
         match self {
-            Expr::At(_, e) | Expr::Id(_, e) => e.peel_mut(),
+            Expr::At(_, e) | Expr::Id(_, e) | Expr::InModule(_, e) => e.peel_mut(),
             e => e,
         }
     }
@@ -211,6 +213,8 @@ pub struct Parser<'s> {
     pub known: Rc<HashSet<Name>>,
     // トレイトの名前（修飾した形）から、その構造体のフィールドの並び
     pub traits: Rc<HashMap<Name, Trait>>,
+    // 今読んでいる式の名前を判定するモジュール。None は self.module
+    pub perm: Option<String>,
 }
 
 // trait 宣言。トレイトは構造体の型 Name<A> = { super#親: 親<A>, メソッド: 関数型 } にする
@@ -444,6 +448,7 @@ fn parse_modules_tokens(
             modules: Rc::default(),
             known: Rc::default(),
             traits: Rc::default(),
+            perm: None,
         })
         .collect();
     let mut g = Grammar::new(&loaded.modules);
@@ -1049,6 +1054,7 @@ impl Parser<'_> {
             modules: self.modules.clone(),
             known: self.known.clone(),
             traits: self.traits.clone(),
+            perm: None,
         };
         if p.peek() == &Tok::Eof {
             return p.err("文字列の中の { } に式が無い");
@@ -2085,6 +2091,18 @@ impl Parser<'_> {
         if let Some(e) = self.try_macros(false)? {
             return Ok(e);
         }
+        // 名前で始まる式は、そのトークンを書いたモジュールの権限で判定する。権限が今と違えば InModule で包む
+        let token = &self.toks[self.pos];
+        if matches!(token.tok, Tok::Ident(_) | Tok::Template(..)) {
+            let origin = token.origin.clone().unwrap_or_else(|| self.cur_module());
+            if origin != self.perm.clone().unwrap_or_else(|| self.cur_module()) {
+                let outer = self.perm.replace(origin.clone());
+                let e = self.primary();
+                self.perm = outer;
+                return Ok(Expr::InModule(origin, Box::new(e?)));
+            }
+        }
+        let origin = self.toks[self.pos].origin.clone();
         self.qualify_here();
         let mut e = match self.next() {
             Tok::Int(n) => Expr::Int(n),
@@ -2096,7 +2114,10 @@ impl Parser<'_> {
                 for part in parts {
                     let e = match part {
                         TPart::Lit(s) => Expr::Str(s),
-                        TPart::Code(toks) => Expr::Call("to_str".into(), vec![self.sub_expr(toks)?]),
+                        TPart::Code(toks) => {
+                            let toks = toks.into_iter().map(|t| Token { origin: origin.clone(), ..t }).collect();
+                            Expr::Call("to_str".into(), vec![self.sub_expr(toks)?])
+                        }
                     };
                     acc = Expr::Binary("+", Box::new(acc), Box::new(e));
                 }
@@ -2130,7 +2151,7 @@ impl Parser<'_> {
                     let info = self.traits[&tr].clone();
                     let ops: Vec<&(Name, Vec<Name>, bool)> = info.methods.iter().filter(|m| info.ops.contains(&m.0)).collect();
                     let mut lam = &value;
-                    while let Expr::At(_, x) | Expr::Id(_, x) = lam {
+                    while let Expr::At(_, x) | Expr::Id(_, x) | Expr::InModule(_, x) = lam {
                         lam = x;
                     }
                     if let Expr::Lam(params, ret, effs, body) = lam {

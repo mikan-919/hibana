@@ -494,3 +494,26 @@ fn public_declarations_cannot_expose_private_types() {
         assert!(error.msg.contains(&format!("公開宣言 {declaration} に非公開型")), "{dependency}: {error}");
     }
 }
+
+#[test]
+fn macros_use_private_names_with_the_permissions_of_their_module() {
+    let library = "fn helper(x: int) -> int { x * 10 }\nstruct Secret { v: int }\nmacro boxed('boxed' x:Expr) { quote { helper(Secret { v: $x }.v) + { let s = Secret { v: 1 }\n s.v } } }";
+    let files = Files::new("macro-permission", &[("lib.hb", library)]);
+    let checked = pipeline::check(files.parse("use lib\nfn main() { let v = 2\n put(boxed v) }").unwrap(), pipeline::Kind::Executable).unwrap();
+    let mut output = Vec::new();
+    hibana::eval::run(checked.program(), &mut output).unwrap();
+    assert_eq!(output, b"21\n");
+    let js = files.0.join("main.cjs");
+    std::fs::write(&js, pipeline::emit_js(&checked).unwrap()).unwrap();
+    let node = std::process::Command::new("node").arg(&js).output().unwrap();
+    assert_eq!(node.stdout, b"21\n", "{}", String::from_utf8_lossy(&node.stderr));
+    pipeline::lower(&checked, Some(&["main".into()])).unwrap();
+    // 差し込んだ呼び出し側の式は、呼び出し側の権限のまま
+    for source in [
+        "use lib\nfn main() { put(boxed lib.helper(1)) }",
+        "use lib\nfn main() { put(lib.helper(1)) }",
+    ] {
+        let error = files.parse(source).unwrap_err();
+        assert!(error.msg.contains("lib.helper は非公開"), "{source}: {error}");
+    }
+}

@@ -441,7 +441,7 @@ pub(crate) fn walk(e: &Expr, f: &mut dyn FnMut(&Expr)) {
         }
     };
     match e {
-        Expr::At(_, x) | Expr::Id(_, x)
+        Expr::At(_, x) | Expr::Id(_, x) | Expr::InModule(_, x)
         | Expr::Await(x)
         | Expr::Unary(_, x)
         | Expr::Field(x, _)
@@ -931,6 +931,12 @@ impl Ck {
         if let Expr::Id(_, inner) = e {
             return self.check(inner, expected);
         }
+        if let Expr::InModule(module, inner) = e {
+            let outer = std::mem::replace(&mut self.module, module.clone());
+            let r = self.check(inner, expected);
+            self.module = outer;
+            return r;
+        }
         self.requirement_call(e)?;
         match e {
             Expr::If(c, then, Some(els)) => {
@@ -1051,6 +1057,12 @@ impl Ck {
             let t = self.expr_inner(inner, id)?;
             self.delay(id, inner);
             return Ok(t);
+        }
+        if let Expr::InModule(module, inner) = e {
+            let outer = std::mem::replace(&mut self.module, module.clone());
+            let r = self.expr(inner);
+            self.module = outer;
+            return r;
         }
         if matches!(e, Expr::Call(n, _) if n == "refine") { return self.refine_value(e); }
         // 長い a + b + ... は左に深く再帰するので、大きな expr_inner のフレームを通らずに検査する
@@ -1343,6 +1355,7 @@ impl Ck {
         match e {
             Expr::At(span, inner) => return self.expr(inner).map_err(|error| error.at(*span)),
             Expr::Id(id, inner) => return self.expr_inner(inner, *id),
+            Expr::InModule(..) => return self.expr(e),
             Expr::Binary(..) => return self.binary(e),
             _ => {}
         }
@@ -1357,7 +1370,7 @@ impl Ck {
         let int = prim("int");
         let boolean = prim("bool");
         Ok(match &mut *e {
-            Expr::At(..) | Expr::Id(..) => unreachable!("先頭で外している"),
+            Expr::At(..) | Expr::Id(..) | Expr::InModule(..) => unreachable!("先頭で外している"),
             Expr::Method(..) => unreachable!("expr_inner の先頭で分けている"),
             Expr::Int(n) => {
                 if !(MIN_SAFE_INT..=MAX_SAFE_INT).contains(n) { return Err("整数リテラルが53ビット安全整数の範囲外".into()); }

@@ -68,6 +68,8 @@ pub struct Token {
     pub nl_before: bool,
     // マクロの展開で作ったトークンの呼び出し位置。展開したコードのノードはこの位置を指す
     pub site: Option<Span>,
+    // quote に書いたトークンなら、そのマクロを定義したモジュール。名前の公開範囲をそのモジュールの権限で判定する
+    pub origin: Option<String>,
 }
 
 pub const KEYWORDS: &[&str] = &[
@@ -236,6 +238,7 @@ fn lex_from(lx: &mut Lx, nested: bool) -> R<Vec<Token>> {
                 gap_before: gap,
                 nl_before: nl,
                 site: None,
+                origin: None,
             });
             return Ok(paths(out));
         }
@@ -249,6 +252,7 @@ fn lex_from(lx: &mut Lx, nested: bool) -> R<Vec<Token>> {
                 gap_before: gap,
                 nl_before: nl,
                 site: None,
+                origin: None,
             });
             return Ok(paths(out));
         };
@@ -320,6 +324,7 @@ fn lex_from(lx: &mut Lx, nested: bool) -> R<Vec<Token>> {
             gap_before: gap,
             nl_before: nl,
             site: None,
+            origin: None,
         });
     }
 }

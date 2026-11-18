@@ -588,6 +588,7 @@ impl Gen<'_> {
                 v
             }
             Expr::Id(id, inner) => self.expr_with_id(inner, Some(*id)),
+            Expr::InModule(_, inner) => self.expr_with_id(inner, id),
             _ => {
                 if let Some(p) = self.position.filter(|_| self.risky(e)) {
                     let t = self.tmp();
@@ -633,7 +634,7 @@ impl Gen<'_> {
     #[inline(never)]
     fn expr_inner(&mut self, e: &Expr, id: Option<crate::parser::NodeId>) -> String {
         match e {
-            Expr::At(..) | Expr::Id(..) => unreachable!("expr で外している"),
+            Expr::At(..) | Expr::Id(..) | Expr::InModule(..) => unreachable!("expr で外している"),
             Expr::Int(n) => n.to_string(),
             Expr::Num(n) => format!("{n:?}"),
             Expr::Bool(b) => b.to_string(),

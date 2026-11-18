@@ -535,9 +535,9 @@ impl Eval {
 
     pub(super) fn eval(&mut self, e: &Expr, env: &mut Env) -> H<V> {
         let mut e = e;
-        while let Expr::Id(_, inner) = e { e = inner; }
+        while let Expr::Id(_, inner) | Expr::InModule(_, inner) = e { e = inner; }
         Ok(match e {
-            Expr::At(_, x) | Expr::Id(_, x) => self.eval(x, env)?,
+            Expr::At(_, x) | Expr::Id(_, x) | Expr::InModule(_, x) => self.eval(x, env)?,
             Expr::Int(n) => V::Int(*n),
             Expr::Num(n) => V::Num(*n),
             Expr::Bool(b) => V::Bool(*b),

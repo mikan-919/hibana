@@ -314,6 +314,7 @@ impl Interp<'_> {
                     tok: Tok::Ident(s.to_string().into()),
                     span: Span::default(),
                     site: None,
+                    origin: None,
                     gap_before: true,
                     nl_before: false,
                 };
@@ -505,9 +506,9 @@ impl Interp<'_> {
 
     fn expr(&mut self, e: &Expr, env: &mut Vec<HashMap<Name, Value>>) -> R<Value> {
         let mut e = e;
-        while let Expr::Id(_, inner) = e { e = inner; }
+        while let Expr::Id(_, inner) | Expr::InModule(_, inner) = e { e = inner; }
         Ok(match e {
-            Expr::Id(..) => unreachable!(),
+            Expr::Id(..) | Expr::InModule(..) => unreachable!(),
             Expr::At(sp, x) => {
                 let r = self.expr(x, env);
                 if matches!(r, Err(Flow::Error(_))) && self.err_at.is_none() {

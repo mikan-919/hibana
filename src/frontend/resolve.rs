@@ -301,6 +301,11 @@ impl Resolver<'_> {
                 self.expr(x);
                 self.span = previous;
             }
+            Expr::InModule(module, x) => {
+                let outer = std::mem::replace(&mut self.module, module.clone());
+                self.expr(x);
+                self.module = outer;
+            }
             Expr::Id(_, x)
             | Expr::Unary(_, x)
             | Expr::Field(x, _)

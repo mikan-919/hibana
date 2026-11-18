@@ -491,8 +491,10 @@ fn bound_names(q: &[Q]) -> HashSet<Name> {
 
 // quote に直接書いた名前を、展開ごとに固有の名前 名前#番号 にする（利用者は # を書けないので衝突しない）。
 // 大域の名前と、. の後のフィールド名はそのまま。ただし束縛された名前（bound_names）は大域の名前でも改名する。
-// $x で差し込んだ呼び出し側のトークンはここを通らない
+// $x で差し込んだ呼び出し側のトークンはここを通らない。通ったトークンには定義元のモジュール（origin）を記す
 fn hygienic(t: &Token, prev: Option<&Token>, bound: &HashSet<Name>) -> Token {
+    let origin = HYGIENE.with(|h| h.borrow().as_ref().map(|h| h.2.clone()));
+    let t = &Token { origin: origin.or_else(|| t.origin.clone()), ..t.clone() };
     HYGIENE.with(|h| match (&*h.borrow(), &t.tok) {
         _ if matches!(prev.map(|p| &p.tok), Some(Tok::Punct(".")))
             || t.tok == Tok::Ident("_".into()) =>
@@ -1183,7 +1185,8 @@ impl Parser<'_> {
     pub fn expand_declaration(&self, k: usize, rec: Node, site: Span) -> R<Vec<Token>> {
         let m = &self.g.macros[k];
         if m.body.is_none() { return Err("宣言マクロに展開コードが無い".into()); }
-        self.expand_toks(m, rec, site)
+        // 作った宣言は呼び出したモジュールのものなので、定義元の権限（origin）は持たせない
+        Ok(self.expand_toks(m, rec, site)?.into_iter().map(|t| Token { origin: None, ..t }).collect())
     }
 
     // pred に合うマクロを照合する。一つだけ合えば、その番号と照合結果を返し、self.pos を直後に進める
@@ -1278,6 +1281,7 @@ impl Parser<'_> {
             modules: self.modules.clone(),
             known: self.known.clone(),
             traits: self.traits.clone(),
+            perm: None,
         };
         let wrap = |e: &str| format!("マクロ {}: {e}", m.name);
         let mut b = p.block().ctx(wrap)?;
@@ -1336,6 +1340,7 @@ impl Parser<'_> {
             modules: self.modules.clone(),
             known: self.known.clone(),
             traits: self.traits.clone(),
+            perm: None,
         };
         // 一度だけ読み、式が1つならその式、文の並びならブロックにする。
         p.toks.extend([Token { tok: Tok::Punct("}"), nl_before: true, ..end }, eof]);
