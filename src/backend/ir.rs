@@ -785,7 +785,7 @@ impl<'a> Ctx<'a> {
 }
 
 // 利用者の関数を呼ぶランタイムの関数。中で GC が動きうる
-const CALLBACKS: &[&str] = &["__all", "__perform", "__spawn", "__task_then", "__task_wait", "__co_step"];
+const CALLBACKS: &[&str] = &["__all", "__perform", "__spawn", "__task_then", "__co_step"];
 
 // 前回の GC の後に確保したバイト数が上限を超えていれば GC を動かす。安全な位置（関数の入口とループの先頭）に置く
 fn poll() -> Stmt {
@@ -1469,7 +1469,7 @@ impl Lower<'_, '_> {
                     let c = self.await_(c);
                     self.checked(c)
                 }
-                "panic" | "task_wait" if self.cx.panic_checks => self.checked(c),
+                "panic" if self.cx.panic_checks => self.checked(c),
                 _ => c,
             });
         }

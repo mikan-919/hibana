@@ -314,23 +314,16 @@ mod tests {
         assert!(e.contains("要求 Log"), "{e}");
     }
 
-    // wait() はネイティブでだけ使える。JavaScript と WASM は呼び出しの位置を付けて拒む
     #[test]
-    fn task_wait_is_native_only() {
-        let src = "fn work(n: int) -> int with Async { n + 1 }\nfn main() {\n    let t = spawn(work(1))\n    put(t.wait())\n}";
-        assert_eq!(out(src).unwrap(), "2\n");
-        for e in [super::to_js(src).unwrap_err(), crate::to_wasm(src).unwrap_err()] {
-            let e = e.to_string();
-            assert!(e.contains("ネイティブでだけ使える") && e.contains("行 4"), "{e}");
-        }
-        #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let exe = std::env::temp_dir().join(format!("hibana-wait-{}", std::process::id()));
-            std::fs::write(&exe, crate::to_native(src).unwrap()).unwrap();
-            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
-            assert_eq!(native_output(&exe).unwrap().stdout, b"2\n");
-            std::fs::remove_file(exe).unwrap();
+    fn task_wait_is_rejected_by_the_shared_type_checker() {
+        for form in ["t.wait()", "spawn(work(1)).wait()"] {
+            let src = format!("fn work(n: int) -> int with Async {{ n + 1 }}\nfn main() {{\n    let t = spawn(work(1))\n    put({form})\n}}");
+            let error = crate::run(&src, &mut Vec::new()).unwrap_err();
+            assert!(error.to_string().contains("Task.wait() は廃止された"));
+            assert!(error.to_string().contains("行 4:"));
+            assert_eq!(error, super::to_js(&src).unwrap_err());
+            assert_eq!(error, crate::to_wasm(&src).unwrap_err());
+            assert_eq!(error, crate::to_native(&src).unwrap_err());
         }
     }
 
@@ -506,7 +499,7 @@ mod tests {
             ("fn main() { put(1)\n put(2.0 ** 1024.0) }", "number の演算結果が有限でない"),
             ("use std::math\nfn main() { put(1)\n put(math::sqrt(-1)) }", "sqrt の引数が負"),
             ("use std::math\nfn main() { put(1)\n put(math::floor(9007199254740992.0)) }", "floor の結果が int の範囲外"),
-            ("fn main() { put(1)\n put(2.0 ** 0.5) }", "number の小数の指数は未対応"),
+            ("fn main() { put(1)\n put(2.0 ** 0.5) }", "** の指数は整数値に限る"),
         ];
         for (i, (src, msg)) in cases.iter().enumerate() {
             let exe = tmp.join(format!("e{i}"));

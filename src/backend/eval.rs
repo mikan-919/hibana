@@ -226,8 +226,8 @@ fn arith(op: &str, a: i64, b: i64) -> Option<i64> {
 }
 
 // 整数の指数は各出力先で乗算の順序もそろえる。
-pub(crate) fn num_pow(a: f64, b: f64) -> f64 {
-    if b.fract() != 0.0 { return a.powf(b); }
+pub(crate) fn num_pow(a: f64, b: f64) -> Option<f64> {
+    if b.fract() != 0.0 { return None; }
     let mut n = b.abs();
     let mut factor = if b < 0.0 { 1.0 / a } else { a };
     let mut result = 1.0;
@@ -236,7 +236,7 @@ pub(crate) fn num_pow(a: f64, b: f64) -> f64 {
         n = (n / 2.0).trunc();
         if n != 0.0 { factor *= factor; }
     }
-    result
+    Some(result)
 }
 
 impl<'a> Interp<'a> {
@@ -348,18 +348,6 @@ impl<'a> Interp<'a> {
                 child.runtime.callback_error.borrow_mut().get_or_insert(e);
             }
         });
-    }
-
-    fn task_wait(&self, task: &Task) -> R<Value> {
-        let jobs = self.jobs();
-        loop {
-            if let Some(result) = task.0.result() {
-                return result;
-            }
-            if !jobs.step() {
-                return error("非同期処理が完了しなかった".into());
-            }
-        }
     }
 
     // マクロ本体用の組み込み関数。該当しなければ None
@@ -705,7 +693,7 @@ impl<'a> Interp<'a> {
                 self.all(fs).await?
             } else if name == "spawn" && !self.runtime.fns.contains_key(name.as_str()) {
                 self.spawn(vs.remove(0))
-            } else if matches!(name.as_str(), "task_then" | "task_done" | "task_value" | "task_wait")
+            } else if matches!(name.as_str(), "task_then" | "task_done" | "task_value")
                 && !self.runtime.fns.contains_key(name.as_str())
             {
                 let Value::Task(task) = vs.remove(0) else { unreachable!("型検査済み") };
@@ -716,7 +704,7 @@ impl<'a> Interp<'a> {
                     }
                     "task_done" => Value::Bool(matches!(task.0.result(), Some(Ok(_)))),
                     "task_value" => task.0.result().and_then(Result::ok).unwrap_or(Value::Unit),
-                    _ => self.task_wait(&task)?,
+                    _ => unreachable!("型検査済み"),
                 }
             } else if name == "new_ref" && !self.runtime.fns.contains_key(name.as_str()) {
                 Value::Ref(Rc::new(std::cell::RefCell::new(vs.pop().unwrap())))
@@ -812,7 +800,15 @@ impl<'a> Interp<'a> {
                         "<" => Ok(Value::Bool(x < y)), "<=" => Ok(Value::Bool(x <= y)), ">" => Ok(Value::Bool(x > y)), ">=" => Ok(Value::Bool(x >= y)),
                         "/" | "%" if y == 0.0 => error("0 で除算した".into()),
                         op => {
-                            let n = match op { "+" => x + y, "-" => x - y, "*" => x * y, "/" => x / y, "%" => x % y, "**" => num_pow(x, y), _ => unreachable!("型検査済み") };
+                            let n = match op {
+                                "+" => x + y,
+                                "-" => x - y,
+                                "*" => x * y,
+                                "/" => x / y,
+                                "%" => x % y,
+                                "**" => num_pow(x, y).ok_or_else(|| Flow::Error("** の指数は整数値に限る".into(), None))?,
+                                _ => unreachable!("型検査済み"),
+                            };
                             if !n.is_finite() { return error("number の演算結果が有限でない".into()); }
                             Ok(Value::Num(n))
                         }

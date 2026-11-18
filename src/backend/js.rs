@@ -23,7 +23,7 @@ function $fmul(a, b) { return $fchk(a * b); }
 function $fdiv(a, b) { if (b === 0) throw new Error("0 で除算した"); return $fchk(a / b); }
 function $frem(a, b) { if (b === 0) throw new Error("0 で除算した"); return $fchk(a % b); }
 function $fpow(a, b) {
-  if (!Number.isInteger(b)) return $fchk(a ** b);
+  if (!Number.isInteger(b)) throw new Error("** の指数は整数値に限る");
   let n = Math.abs(b), factor = b < 0 ? $fchk(1 / a) : a, result = 1;
   while (n !== 0) { if (n % 2 !== 0) result = $fchk(result * factor); n = Math.trunc(n / 2); if (n !== 0) factor = $fchk(factor * factor); }
   return result;
@@ -715,7 +715,7 @@ impl Gen<'_> {
                     "spawn" => format!("$spawn({})", vs[0]),
                     "task_then" => format!("$then({}, {})", vs[0], vs[1]),
                     "task_done" => format!("({}.s === 1)", vs[0]),
-                    "task_value" | "task_wait" => format!("{}.v", vs[0]),
+                    "task_value" => format!("{}.v", vs[0]),
                     "put" => format!("$print({})", vs[0]),
                     "input" => "$input()".into(),
                     "to_str" => format!("$str({})", vs[0]),

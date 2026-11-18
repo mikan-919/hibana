@@ -1,6 +1,7 @@
 use std::fs;
 use std::process::Command;
 
+#[derive(Clone, Copy)]
 struct Expected<'a> {
     success: bool,
     stdout: &'a str,
@@ -70,12 +71,31 @@ fn reported<'a>(success: bool, stdout: &'a str, report: &'a str) -> Expected<'a>
 
 #[test]
 fn fractional_exponent() {
-    check_backends("fractional-exponent", "fn main() { put(2.0 ** 0.5) }", [
-        success("1.4142135623730951\n"),
-        success("1.4142135623730951\n"),
-        reported(false, "", "unreachable"),
-        reported(false, "", "実行時エラー: number の小数の指数は未対応"),
-    ]);
+    for (name, expression) in [("literal", "2.0 ** 0.5"), ("computed", "2 ** (1.0 / 2)")] {
+        check_backends(
+            name,
+            &format!("fn main() {{ let result = {expression} }}"),
+            [reported(false, "", "実行時エラー: ** の指数は整数値に限る"); 4],
+        );
+    }
+}
+
+#[test]
+fn wait_and_exponent_migration() {
+    let source = r#"
+use std -> *
+use std::math
+fn work(n: int) -> int with Async { n + 1 }
+fn main() with Async {
+    let work_to_run = work(1)
+    put(work_to_run.await)
+    spawn(work(2)).then(fn(n) { put(n) })
+    put(math::sqrt(2.0))
+    put(2.0 ** -3.0)
+    put(2 ** 3)
+}
+"#;
+    check_backends("migration", source, [success("2\n1.4142135623730951\n0.125\n8\n3\n"); 4]);
 }
 
 #[test]
@@ -99,7 +119,7 @@ fn main() {
     check_backends("spawned-division", source, [
         reported(true, "main\n42\n", message),
         reported(true, "main\n42\n", message),
-        reported(false, "main\n", "unreachable"),
+        reported(false, "main\n", message),
         reported(false, "main\n", message),
     ]);
 }
@@ -120,7 +140,7 @@ fn main() {
     check_backends("failing-then", source, [
         reported(false, "main\n42\n", message),
         reported(false, "main\n42\n", "then の失敗"),
-        reported(false, "main\n", "unreachable"),
+        reported(false, "main\n", message),
         reported(false, "main\n", message),
     ]);
 }

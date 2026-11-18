@@ -415,12 +415,11 @@ fn __num_sqrt(value: number) -> number {
     __num_checked(__f_sqrt(v))
 }
 
-// ponytail: number の指数は整数のみ。小数の指数には対数・指数関数の実装が必要
 fn __value_pow(left: int, right: int) -> int {
     if __tag(left) != 9 && __tag(right) != 9 { return __pow(left, right) }
     let a = __num(left)
     let b = __num(right)
-    if !__f_eq(__f_floor(b), b) { __die('number の小数の指数は未対応') }
+    if !__f_eq(__f_floor(b), b) { __die('** の指数は整数値に限る') }
     let mut n = b
     let mut factor = a
     if __f_lt(n, 0.0) {
@@ -1428,7 +1427,7 @@ fn __run_job() -> bool {
     } else if kind == 7 {
         let task = __payload(a)
         if __payload(__getv(task + 16)) == 1 {
-            // then は同期関数。wait() がコルーチン内から仕事を進める時も同じ
+            // then は同期関数
             let saved = __load(st + 176)
             __store(st + 176, 0)
             b(__getv(task + 32))
@@ -1536,25 +1535,6 @@ fn __task_done(t: int) -> bool {
 fn __task_value(t: int) -> int {
     if __task_done(t) { return __getv(__payload(t) + 32) }
     __mkv(0, 0)
-}
-
-// wait。終わるまで仕事を動かす（ネイティブだけ）
-fn __task_wait(t: int) -> int {
-    let st = __static()
-    let h = __load(st + 48)
-    let roots = __frame_push(2)
-    __setv(roots, t)
-    __setv(roots + 16, __mkv(10, h))
-    let task = __payload(t)
-    while __payload(__getv(task + 16)) == 0 && __run_job() {
-    }
-    __store(st + 64, roots)
-    __store(st + 48, h)
-    if __payload(__getv(task + 16)) == 2 {
-        let info = __getv(task + 32)
-        if __is_panic(info) { __panic(__panic_message(info)) }
-    }
-    __task_value(t)
 }
 
 // 構築子と関数の値

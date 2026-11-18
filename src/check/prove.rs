@@ -327,7 +327,7 @@ pub(super) fn bin(op: &'static str, a: V, b: V) -> V {
     let r = match (op, &a, &b) {
         (op, Num(x), Num(y)) => match op {
             "+" => Some(Num(x + y)), "-" => Some(Num(x - y)), "*" => Some(Num(x * y)),
-            "/" if *y != 0.0 => Some(Num(x / y)), "%" if *y != 0.0 => Some(Num(x % y)), "**" => Some(Num(crate::eval::num_pow(*x, *y))),
+            "/" if *y != 0.0 => Some(Num(x / y)), "%" if *y != 0.0 => Some(Num(x % y)), "**" => crate::eval::num_pow(*x, *y).map(Num),
             "<" => Some(Bool(x < y)), "<=" => Some(Bool(x <= y)), ">" => Some(Bool(x > y)), ">=" => Some(Bool(x >= y)),
             "==" => Some(Bool(x == y)), "!=" => Some(Bool(x != y)), _ => None,
         },
@@ -715,7 +715,7 @@ mod tests {
         eval.fns = prog.fns.into_iter().map(|f| (f.name.clone(), f)).collect();
         for name in [
             "read", "input", "now_ms", "new_ref", "write", "put", "panic", "all",
-            "spawn", "task_then", "task_done", "task_value", "task_wait", "runtime",
+            "spawn", "task_then", "task_done", "task_value", "runtime",
             "delayed", "unknown",
         ] {
             let args = vec![bound()];
