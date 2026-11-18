@@ -57,7 +57,8 @@ pub enum Expr {
     Lam(
         Vec<(Name, Option<Expr>)>,
         Option<Box<Expr>>,
-        Vec<Expr>,
+        // None は with の省略、Some([]) は with {}
+        Option<Vec<Expr>>,
         Block,
     ),
     // 関数型 (x: A, ...) -> B with 要求。名前の無い引数は "_"。要求は効果の型の式（トレイトの要求・Async・効果の変数）
@@ -525,6 +526,7 @@ fn parse_modules_tokens(
         "task_wait",
         "Vec",
         "Type",
+        "with",
     ]
     .map(Name::from)
     .into();
@@ -1128,15 +1130,18 @@ impl Parser<'_> {
     }
 
     fn skip_fn(&mut self) -> R<()> {
-        while !self.eat("{") {
-            if self.next() == Tok::Eof {
-                return self.err("関数の本体が無い");
+        loop {
+            while !self.eat("{") {
+                if self.next() == Tok::Eof {
+                    return self.err("関数の本体が無い");
+                }
             }
-        }
-        // with {} は効果の宣言で、本体は次の { から始まる
-        if self.pos >= 2 && matches!(&self.toks[self.pos - 2].tok, Tok::Ident(n) if n == "with") {
-            self.expect("}")?;
-            self.expect("{")?;
+            // 引数や戻り値の関数型に書いた with {} も、本体と区別する
+            if self.pos >= 2 && matches!(&self.toks[self.pos - 2].tok, Tok::Ident(n) if n == "with") {
+                self.expect("}")?;
+            } else {
+                break;
+            }
         }
         let mut depth = 1;
         while depth > 0 {
@@ -1236,6 +1241,7 @@ impl Parser<'_> {
             return Ok((effects, names));
         }
         loop {
+            self.qualify_here();
             let name = self.ident()?;
             let mut args = Vec::new();
             if self.eat("<") {
@@ -1544,7 +1550,7 @@ impl Parser<'_> {
             args.push(Expr::Lam(
                 ps.iter().map(|p| (p.clone(), None)).collect(),
                 None,
-                vec![],
+                None,
                 body,
             ));
         }
@@ -1586,8 +1592,8 @@ impl Parser<'_> {
         self.expect("{")?;
         let mut fns = Vec::new();
         while !self.eat("}") {
-            let start = self.pos;
             let public = self.eat("pub");
+            let start = self.pos;
             self.expect("fn")?;
             let module = self.cur_module();
             let name = qual(&module, &self.ident()?);
@@ -2109,6 +2115,7 @@ impl Parser<'_> {
                 let mut arms = Vec::new();
                 loop {
                     let astart = self.pos;
+                    self.qualify_here();
                     let trait_name = self.ident()?;
                     let Some(tr) = self.trait_name(&trait_name) else {
                         self.pos -= 1;
@@ -2139,7 +2146,7 @@ impl Parser<'_> {
                             self.pos = astart;
                             return self.err_at(format!("無名関数で提供できるのは、メソッドが 1 つのトレイトだけ（{trait_name} は {} 個）", info.methods.len()));
                         }
-                        if !effs.is_empty() {
+                        if effs.is_some() {
                             self.pos = astart;
                             return self.err_at("提供する無名関数には with を書かない（使える要求はトレイトのメソッドの宣言で決まる）".into());
                         }
@@ -2331,9 +2338,10 @@ impl Parser<'_> {
                 } else {
                     None
                 };
+                let explicit = matches!(self.peek(), Tok::Ident(n) if n == "with");
                 let (effs, _) = self.requirements(false)?;
                 self.expect("{")?;
-                Expr::Lam(params, ret, effs, self.block()?)
+                Expr::Lam(params, ret, explicit.then_some(effs), self.block()?)
             }
             Tok::Punct("{") => Expr::Block(self.block()?),
             Tok::Punct("if") => self.if_rest()?,

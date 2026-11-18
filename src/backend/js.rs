@@ -849,7 +849,7 @@ impl Gen<'_> {
                             Expr::Block(b) => b.clone(),
                             e => Block { id: Default::default(), stmts: vec![], tail: Some(Box::new(e.clone())) },
                         };
-                        let f = self.expr(&Expr::Lam(params, None, vec![], body));
+                        let f = self.expr(&Expr::Lam(params, None, None, body));
                         format!("{}: {f}", lit(&a.ctor))
                     })
                     .collect();

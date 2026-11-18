@@ -28,6 +28,108 @@ impl Drop for Files {
 }
 
 #[test]
+fn public_declarations_are_the_module_boundary() {
+    let dependency = "fn hidden() -> int { 41 }\nstruct Secret { value: int }\ntype Hidden = int\nenum Private { PrivateValue }\ntrait Internal { fn value(self) -> int }\npub type Count = int\npub struct Point { value: Count }\npub enum Choice { Chosen(value: int) }\npub fn answer() -> int with {} { hidden() + 1 }";
+    let files = Files::new("public-boundary", &[("dep.hb", dependency)]);
+    let mut program = files.parse("use dep\nfn main() { let p = dep.Point { value: dep.answer() }\n put(p.value)\n put(dep.Chosen(3)) }").unwrap();
+    hibana::typeck::check(&mut program).unwrap();
+    let mut output = Vec::new();
+    hibana::eval::run(&program, &mut output).unwrap();
+    assert_eq!(output, b"42\ndep.Chosen(3)\n");
+    for (name, expression) in [
+        ("hidden", "hidden()"),
+        ("Secret", "Secret { value: 1 }"),
+        ("Hidden", "fn(n: Hidden) { n }"),
+        ("PrivateValue", "PrivateValue"),
+        ("Private", "fn(n: Private) { n }"),
+        ("Internal", "fn(n: Internal<int>) { n }"),
+    ] {
+        for (selection, expression) in [
+            (String::new(), expression.replacen(name, &format!("dep.{name}"), 1)),
+            (" -> *".into(), expression.into()),
+            (format!(" -> {{{name}}}"), "0".into()),
+        ] {
+            let source = format!("use dep{selection}\nfn main() {{ let x = {expression} }}");
+            let error = files.parse(&source).unwrap_err();
+            assert!(error.msg.contains("非公開"), "{source}: {error}");
+            assert_eq!(error.source_id.0, 0);
+        }
+    }
+    let error = files.parse("use dep -> {Private::PrivateValue}\nfn main() {}").unwrap_err();
+    assert!(error.msg.contains("非公開"), "{error}");
+}
+
+#[test]
+fn public_functions_require_explicit_effects() {
+    for source in [
+        "pub fn value() -> int { 1 }",
+        "pub fn value() {}",
+        "extern { pub fn value() -> int }",
+        "pub trait Value { fn value(self) -> int }",
+    ] {
+        let error = pipeline::parse(source).unwrap_err();
+        assert!(error.msg.contains("with を明示"), "{source}: {error}");
+        assert_eq!(error.span.unwrap().0, source.find("fn").unwrap());
+    }
+    let program = pipeline::parse("pub fn value() -> int with {} { 1 }").unwrap();
+    let value = &program.fns[0];
+    assert!(value.public && value.effects_explicit && value.effects.is_empty());
+    let mut program = pipeline::parse("pub fn apply(f: () -> int with {}) -> int with {} { f() }\nfn main() { put(apply(fn() -> int { 1 })) }").unwrap();
+    hibana::typeck::check(&mut program).unwrap();
+}
+
+#[test]
+fn private_inference_stops_at_explicit_public_effects() {
+    for visibility in ["", "pub "] {
+        let dependency = format!("pub trait Log {{ fn log(self, message: String) with {{}} }}\nfn leaf() {{ log('entry') }}\nfn middle() {{ leaf() }}\n{visibility}fn exported() with {{}} {{ middle() }}");
+        let files = Files::new(&format!("explicit-effects-{}", visibility.len()), &[("dep.hb", &dependency)]);
+        let source = "use dep\nfn main() {}";
+        let mut program = files.parse(source).unwrap();
+        let error = hibana::typeck::check(&mut program).err().unwrap();
+        assert!(error.msg.contains("with"), "{error}");
+        assert!(error.source.unwrap().name.ends_with("dep.hb"));
+        assert_eq!(error.span.unwrap().0, dependency.rfind("middle()").unwrap());
+    }
+    let dependency = "pub trait Log { fn log(self, message: String) with {} }\nfn leaf() { log('entry') }\nfn middle() { leaf() }\npub fn exported() with Log { middle() }";
+    let files = Files::new("private-inference", &[("dep.hb", dependency)]);
+    let mut program = files.parse("use dep\nfn main() { with dep.Log(fn(message) { put(message) }) { dep.exported() } }").unwrap();
+    hibana::typeck::check(&mut program).unwrap();
+    for name in ["dep.leaf", "dep.middle", "dep.exported"] {
+        let function = program.fns.iter().find(|f| f.name == name).unwrap();
+        assert_eq!(function.effects.len(), 1, "{name}");
+    }
+    let mut output = Vec::new();
+    hibana::eval::run(&program, &mut output).unwrap();
+    assert_eq!(output, b"entry\n");
+}
+
+#[test]
+fn explicit_empty_effects_also_stop_lambda_inference() {
+    for body in [
+        "let f = fn() with {} { log('entry') }",
+        "let f: () -> unit with Log = fn() with {} { log('entry') }",
+        "consume(fn() with {} { log('entry') })",
+    ] {
+        let source = format!("trait Log {{ fn log(self, message: String) }}\nfn consume<R: Effect>(f: () -> unit with R) with R {{ f() }}\nfn main() {{ with Log(fn(message) {{ put(message) }}) {{ {body} }} }}");
+        let error = pipeline::parse(source.as_str()).and_then(|mut program| hibana::typeck::check(&mut program).map(|_| ())).unwrap_err();
+        assert!(error.msg.contains("with Log"), "{source}: {error}");
+    }
+}
+
+#[test]
+fn method_syntax_cannot_call_private_functions() {
+    let dependency = "pub struct Item { value: int }\nfn Item::hidden(self: Item) -> int { self.value }\npub fn Item::get(self: Item) -> int with {} { self.hidden() }";
+    let files = Files::new("private-methods", &[("dep.hb", dependency)]);
+    for call in ["item.hidden()", "dep.Item::hidden(item)"] {
+        let source = format!("use dep\nfn main() {{ let item = dep.Item {{ value: 1 }}\n put({call}) }}");
+        let error = files.parse(&source).and_then(|mut program| hibana::typeck::check(&mut program).map(|_| ())).unwrap_err();
+        assert!(error.msg.contains("非公開"), "{source}: {error}");
+    }
+    let mut program = files.parse("use dep\nfn main() { put(dep.Item { value: 1 }.get()) }").unwrap();
+    hibana::typeck::check(&mut program).unwrap();
+}
+
+#[test]
 fn distinct_files_with_the_same_module_name_are_rejected() {
     let files = Files::new(
         "collision",

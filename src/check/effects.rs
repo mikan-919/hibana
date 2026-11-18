@@ -266,7 +266,7 @@ impl Ck {
         };
         let body = Block { id: NodeId::default(), stmts: vec![], tail: Some(Box::new(Expr::Id(id, Box::new(call)))) };
         self.awaits.insert(body.id);
-        let thunk = Expr::Lam(vec![], None, vec![], body);
+        let thunk = Expr::Lam(vec![], None, None, body);
         *e = Expr::Block(Block { id: NodeId::default(), stmts, tail: Some(Box::new(thunk)) });
     }
 

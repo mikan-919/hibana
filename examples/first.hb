@@ -24,9 +24,9 @@ macro TaggedBlock(ann:Annotation block:Block) {
 // 2. 細分化型 (type で部分型 / struct でNewtype)
 // ==========================================
 
-type Digit = int[x -> 0 <= x && x < 10]
-type NonZero = int[x -> x != 0]
-type Positive = number[x -> x > 0]
+pub type Digit = int[x -> 0 <= x && x < 10]
+pub type NonZero = int[x -> x != 0]
+pub type Positive = number[x -> x > 0]
 
 // 別型として厳密に区別したいものは struct で包む
 struct UserId(int[x -> x > 0])
@@ -35,12 +35,12 @@ struct UserId(int[x -> x > 0])
 // 3. データ型 (struct & enum)
 // ==========================================
 
-struct Point {
+pub struct Point {
     x: number
     y: number
 }
 
-enum Shape {
+pub enum Shape {
     Circle(Point, Positive)
     Rect(Point, Point)
     Empty
@@ -67,8 +67,8 @@ impl Display for UserId {
     }
 }
 
-trait Logger {
-    fn log(self, msg: String)
+pub trait Logger {
+    fn log(self, msg: String) with {}
 }
 
 struct SimpleLogger {}
@@ -91,13 +91,13 @@ impl Logger for PrefixLogger {
 // 5. ロジック (Z3検証 & with による依存注入)
 // ==========================================
 
-// with なしの純粋関数。Z3によりゼロ除算が起きないことが静的に保証される
-fn safe_div(a: int, b: NonZero) -> int {
+// 公開関数は with を明示する。with {} は要求が無いことを表す。Z3によりゼロ除算が起きないことが静的に保証される
+pub fn safe_div(a: int, b: NonZero) -> int with {} {
     a / b
 }
 
 // Logger コンテキストを要求する関数
-fn describe_shape(shape: Shape)
+pub fn describe_shape(shape: Shape)
 with Logger(logger) {
     match shape {
         Shape::Circle(center, r) -> {
@@ -118,7 +118,7 @@ with Logger(logger) {
 // ==========================================
 
 // 実行時にしか分からない失敗は Result で返す
-fn parse_digit(s: String) -> Result<Digit, String> {
+pub fn parse_digit(s: String) -> Result<Digit, String> with {} {
     let n = parse_int(s)?
     if 0 <= n && n < 10 {
         // この中では n が Digit だと証明できる

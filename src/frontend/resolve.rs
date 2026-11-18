@@ -21,12 +21,18 @@ fn visibility(prog: &Program) -> HashMap<Name, (String, bool)> {
 
 pub fn resolve(prog: &mut Program, uses: &HashMap<String, Vec<Use>>, known: &HashSet<Name>) -> R<()> {
     let visibility = visibility(prog);
-    for (module, imports) in uses {
+    let ctors: HashMap<Name, Name> = prog.datas.iter().flat_map(|data| {
+        data.ctors.iter().map(move |ctor| (Name::associated(data.name.clone(), ctor.name.local().clone()), ctor.name.clone()))
+    }).collect();
+    let mut imports: Vec<_> = uses.iter().collect();
+    imports.sort_by_key(|(module, _)| *module);
+    for (module, imports) in imports {
         for import in imports {
             if let crate::parser::UseNames::List(names) = &import.names {
                 for name in names {
                     let qualified = qual(&import.module, name);
-                    if let Some((owner, false)) = visibility.get(&qualified)
+                    let resolved = ctors.get(&qualified).unwrap_or(&qualified);
+                    if let Some((owner, false)) = visibility.get(resolved)
                         && owner != module
                     {
                         let error = Error::from(format!("{qualified} は非公開（宣言に pub を付ける）"));
@@ -36,9 +42,6 @@ pub fn resolve(prog: &mut Program, uses: &HashMap<String, Vec<Use>>, known: &Has
             }
         }
     }
-    let ctors: HashMap<Name, Name> = prog.datas.iter().flat_map(|data| {
-        data.ctors.iter().map(move |ctor| (Name::associated(data.name.clone(), ctor.name.local().clone()), ctor.name.clone()))
-    }).collect();
     let ctors = &ctors;
     for f in &mut prog.fns {
         let mut r = Resolver {
@@ -302,7 +305,7 @@ impl Resolver<'_> {
                 if let Some(t) = ret {
                     self.expr(t);
                 }
-                self.exprs(effs);
+                if let Some(effs) = effs { self.exprs(effs); }
                 self.block(body);
                 self.locals.pop();
             }

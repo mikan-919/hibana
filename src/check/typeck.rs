@@ -315,6 +315,7 @@ struct Scope {
 
 // ponytail: 行番号は式（Expr::At）と宣言・腕（Fn・Data・Arm の span）に付く。特定の場所が無い誤り（main 関数が無い、など）には付かない
 struct Ck {
+    module: String,
     norm: Eval,
     scopes: Vec<Scope>,
     ret: V,
@@ -562,6 +563,7 @@ fn at_opt(e: Error, s: Option<Span>) -> Error {
 
 fn check_prog(prog: &mut Program, require_main: bool) -> R<Info> {
     let mut ck = Ck {
+        module: String::new(),
         norm: Eval::new(),
         scopes: Vec::new(),
         ret: V::Unit,
@@ -626,7 +628,10 @@ fn check_prog(prog: &mut Program, require_main: bool) -> R<Info> {
     for f in &prog.fns {
         ck.norm.fns.insert(f.name.clone(), f.clone());
     }
-    for d in &prog.datas { ck.data_level(d).map_err(|e| at_opt(e, d.span))?; }
+    for d in &prog.datas {
+        ck.module = d.module.clone();
+        ck.data_level(d).map_err(|e| at_opt(e, d.span))?;
+    }
     if require_main {
         match ck.norm.fns.get(&Name::from("main")) {
             Some(f) if f.params.is_empty() => {}
@@ -646,6 +651,7 @@ fn check_prog(prog: &mut Program, require_main: bool) -> R<Info> {
 
 // 関数 1 つを検査する
 fn check_fn(ck: &mut Ck, f: &mut Fn) -> R<()> {
+    ck.module = f.module.clone();
     let r = |e: &str| format!("関数 {}: {e}", f.name);
     ck.exits = Vec::new();
     ck.scopes = vec![Scope::default()];
@@ -734,7 +740,17 @@ pub fn check_macro(
     rules: &HashMap<String, Kinds>,
     prog: &Program,
 ) -> R<()> {
-    check_macro_body(b, params, rules, prog).map_err(Error::with_line)
+    check_macro_in(b, params, rules, prog, "")
+}
+
+pub(crate) fn check_macro_in(
+    b: &mut Block,
+    params: &Kinds,
+    rules: &HashMap<String, Kinds>,
+    prog: &Program,
+    module: &str,
+) -> R<()> {
+    check_macro_body(b, params, rules, prog, module).map_err(Error::with_line)
 }
 
 fn check_macro_body(
@@ -742,8 +758,10 @@ fn check_macro_body(
     params: &Kinds,
     rules: &HashMap<String, Kinds>,
     prog: &Program,
+    module: &str,
 ) -> R<()> {
     let mut ck = Ck {
+        module: module.into(),
         norm: Eval::new(),
         scopes: vec![Scope::default()],
         ret: prim("syn"),
@@ -793,6 +811,7 @@ fn check_macro_body(
     }
     ck.scopes = vec![Scope::default()];
     ck.ret = prim("syn");
+    ck.module = module.into();
     for (p, k) in params {
         let v = ck.norm.opaque();
         ck.bind(&Name::from(p.as_str()), syn_of(k), v, false)?;
@@ -959,7 +978,8 @@ impl Ck {
                     unreachable!()
                 };
                 // 書いた効果は、期待する関数型の効果に含まれていなければならない
-                for e in effs {
+                let mut declared = Vec::new();
+                for e in effs.iter().flatten() {
                     let mut env = self.val_env();
                     for v in self.effect_inst(e, &mut env)? {
                         if !flat(&p.effs).contains(&v) {
@@ -970,9 +990,14 @@ impl Ck {
                             )
                             .into());
                         }
+                        declared.push(v);
                     }
                 }
-                self.lam_check(params, ret, body, &p)
+                if effs.is_some() {
+                    self.lam_check(params, ret, body, &PiV { doms: p.doms.clone(), cod: p.cod.clone(), effs: declared })
+                } else {
+                    self.lam_check(params, ret, body, &p)
+                }
             }
             Expr::Call(n, args) if self.norm.ctors.contains_key(n) => {
                 let t = self.ctor_call(n, args, Some(expected))?;
@@ -1151,7 +1176,9 @@ impl Ck {
             && !self.norm.fns.contains_key(&name)
             && !matches!(ty.kind, crate::parser::NameKind::Qualified(..))
         {
-            if let Some(k) = self.norm.fns.keys().filter(|candidate| candidate.local() == &name).min() {
+            if let Some(k) = self.norm.fns.iter()
+                .filter(|(candidate, f)| candidate.local() == &name && (f.public || f.module == self.module))
+                .map(|(candidate, _)| candidate).min() {
                 name = k.clone();
             }
         }
@@ -1162,7 +1189,8 @@ impl Ck {
                 .datas
                 .values()
                 .filter(|d| {
-                    matches!(d.ctors.as_slice(), [c] if c.name.structure_owner() == Some(d.name.clone())
+                    (d.public || d.module == self.module)
+                        && matches!(d.ctors.as_slice(), [c] if c.name.structure_owner() == Some(d.name.clone())
                         && c.fields.iter().any(|(n, _)| *n == f))
                 })
                 .map(|d| (d.name.clone(), Name::trait_method(d.name.clone(), f.clone())))
@@ -1231,6 +1259,7 @@ impl Ck {
             .norm
             .fns
             .values()
+            .filter(|g| g.public || g.module == self.module)
             .filter(|g| op_method(&g.name) == Some(n.local()))
             .filter_map(|g| Some((g.op.clone()?, g.name.clone())))
             .collect();
@@ -1242,7 +1271,10 @@ impl Ck {
         match pick.as_slice() {
             // 要求の操作でなければ、トレイトのメソッドの関数（self の無い fn value() -> Self など）
             [] => {
-                let mut ms = self.norm.fns.keys().filter(|g| matches!(&g.local().kind, crate::parser::NameKind::TraitMethod(_, m) if **m == *n.local()));
+                let mut ms = self.norm.fns.iter()
+                    .filter(|(_, g)| g.public || g.module == self.module)
+                    .map(|(name, _)| name)
+                    .filter(|g| matches!(&g.local().kind, crate::parser::NameKind::TraitMethod(_, m) if **m == *n.local()));
                 if let (Some(m), None) = (ms.next(), ms.next()) {
                     *n = m.clone();
                 }
@@ -1802,6 +1834,11 @@ impl Ck {
     // トップレベルの関数の呼び出し。ジェネリック引数を省いた時は、メタ変数にして引数と期待する型から求める
     fn call_fn(&mut self, name: &Name, args: &mut Vec<Expr>, expected: Option<&V>, addr: NodeId) -> R<V> {
         let f = self.norm.fns[name].clone();
+        if !f.public && f.module != self.module
+            && !matches!(f.name.local().kind, crate::parser::NameKind::Implementation(..) | crate::parser::NameKind::ImplementationMethod(..))
+        {
+            return Err(format!("{name} は非公開（宣言に pub を付ける）").into());
+        }
         // 宣言に Async を書いた関数の呼び出しは、効果を起こさずに Async<T> の値になる（.await で待つ）。
         // 効果の変数を通して Async が入る呼び出しは、今までどおりその場で待つ
         let delayed = f.effects.iter().any(|e| matches!(e.peel(), Expr::Var(n) if n == "Async"));
@@ -1881,7 +1918,7 @@ impl Ck {
                     && !p.doms.iter().any(open)
                 {
                     // 引数の型が決まっていれば、無名関数の引数の型を省ける。戻り値の型と効果は本体から求める
-                    let collect = effs.is_empty() && p.effs.iter().any(open);
+                    let collect = effs.is_none() && p.effs.iter().any(open);
                     self.lam_infer(ps, ret, effs, body, Some((&p, collect)))
                         .ctx(r)?
                 } else {
@@ -2127,10 +2164,12 @@ impl Ck {
         &mut self,
         params: &[(Name, Option<Expr>)],
         ret: &Option<Box<Expr>>,
-        effs: &[Expr],
+        effs: &Option<Vec<Expr>>,
         body: &mut Block,
         hint: Option<(&PiV, bool)>,
     ) -> R<V> {
+        let explicit = effs.is_some();
+        let effs = effs.as_deref().unwrap_or(&[]);
         if let Some((p, _)) = hint
             && p.doms.len() != params.len()
         {
@@ -2178,8 +2217,8 @@ impl Ck {
                     es.push(v);
                 }
             }
-            let collect = matches!(hint, Some((_, true))) || (hint.is_none() && effs.is_empty());
-            if let (Some((p, false)), true) = (hint, effs.is_empty()) {
+            let collect = !explicit && (matches!(hint, Some((_, true))) || hint.is_none());
+            if let (Some((p, false)), false) = (hint, explicit) {
                 for e in &p.effs {
                     for e in flat(&[e.clone()]) {
                         self.note_body(&e, body);
