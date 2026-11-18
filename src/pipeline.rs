@@ -270,7 +270,11 @@ export async function instantiate(bytes, imports = {}) {
     read: (fd, ptr, len) => {
       const target = new Uint8Array(instance.exports.memory.buffer, Number(ptr), Number(len));
       if (imports.hibana?.read) return BigInt(imports.hibana.read(Number(fd), target));
-      if (typeof process !== "undefined" && process.getBuiltinModule) return BigInt(process.getBuiltinModule("node:fs").readSync(Number(fd), target, 0, target.length, null));
+      if (typeof process !== "undefined" && process.getBuiltinModule) {
+        const fs = process.getBuiltinModule("node:fs");
+        try { return BigInt(fs.readSync(Number(fd), target, 0, target.length, null)); }
+        catch { return -1n; }
+      }
       throw new Error("標準入力には imports.hibana.read が必要です");
     },
   };
