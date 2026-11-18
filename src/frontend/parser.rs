@@ -26,7 +26,6 @@ impl Default for NodeId {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Field と Method の中身は型検査が対応するまで読まれない
 pub enum Expr {
     Int(i64),
     Num(f64),
@@ -36,7 +35,7 @@ pub enum Expr {
     Unary(&'static str, Box<Expr>),
     Binary(&'static str, Box<Expr>, Box<Expr>),
     Call(Name, Vec<Expr>),
-    // 式.名前 と 式.名前(引数)。構文のみで型検査は未対応
+    // 式.名前 と 式.名前(引数)
     Field(Box<Expr>, Name),
     Method(Box<Expr>, Name, Vec<Expr>),
     Assign(Name, Box<Expr>),

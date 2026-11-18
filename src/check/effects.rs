@@ -310,7 +310,7 @@ fn quote_type(v: &V) -> Option<Expr> {
 // with を省いた非公開関数の効果を、本体から推論して宣言に書き込む。
 // 本体の複製を検査して起きた効果を集め、変わらなくなるまで繰り返す（再帰と相互再帰の不動点）。
 // ponytail: 毎回すべての対象を検査し直し、回数は 8 回まで。遅くなれば呼び出しの依存の順に、変わった関数の呼び出し元だけを検査する
-pub(super) fn infer_effects(ck: &mut Ck, prog: &mut Program) {
+pub(super) fn infer_effects(ck: &mut Ck, prog: &mut Program) -> R<()> {
     let targets: Vec<usize> = (0..prog.fns.len())
         .filter(|&i| {
             let f = &prog.fns[i];
@@ -319,7 +319,10 @@ pub(super) fn infer_effects(ck: &mut Ck, prog: &mut Program) {
         })
         .collect();
     ck.inferring = true;
-    for _ in 0..8 {
+    // 1 回の反復で、要求は呼び出しの連鎖を少なくとも 1 段伝わる。連鎖は対象の関数の数より長くならない
+    let limit = targets.len().max(1) + 4;
+    let mut converged = false;
+    for _ in 0..limit {
         let mut changed = false;
         for &i in &targets {
             let mut g = prog.fns[i].clone();
@@ -347,6 +350,7 @@ pub(super) fn infer_effects(ck: &mut Ck, prog: &mut Program) {
             }
         }
         if !changed {
+            converged = true;
             break;
         }
     }
@@ -357,6 +361,10 @@ pub(super) fn infer_effects(ck: &mut Ck, prog: &mut Program) {
     ck.var_awaits.clear();
     ck.async_inst.clear();
     ck.async_calls.clear();
+    if !converged {
+        return Err(format!("非公開関数の要求の推論が {limit} 回で収束しない（with を明示する）").into());
+    }
+    Ok(())
 }
 
 // 効果の節に Async を書いたか

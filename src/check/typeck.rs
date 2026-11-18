@@ -641,7 +641,7 @@ fn check_prog(prog: &mut Program, require_main: bool) -> R<Info> {
             _ => return Err("引数なしの main 関数が必要".into()),
         }
     }
-    infer_effects(&mut ck, prog);
+    infer_effects(&mut ck, prog)?;
     for f in &mut prog.fns {
         check_fn(&mut ck, f).map_err(|e| at_opt(e, f.span))?;
     }
