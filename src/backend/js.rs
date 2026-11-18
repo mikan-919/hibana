@@ -44,7 +44,7 @@ function $d(c, f) { return { $c: c, $f: f }; }
 function $field(x, f) { return x.$f[$fi[x.$c][f]]; }
 function $eq(a, b) {
   if (a === b) return true;
-  if (a instanceof $Ref) return false;
+  if (a instanceof $Ref || b instanceof $Ref || a instanceof $Task || b instanceof $Task) return false;
   if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((x, i) => $eq(x, b[i]));
   if (a && b && typeof a === "object" && typeof b === "object") return a.$c === b.$c && $eq(a.$f, b.$f);
   return false;

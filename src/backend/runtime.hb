@@ -770,7 +770,9 @@ fn __eq(a: int, b: int) -> bool {
         return true
     }
     if t == 5 {
-        if __load(pa) != __load(pb) {
+        let ctor = __load(pa)
+        // Task は同じアドレスの場合だけ等しい。
+        if ctor == 0 - 2 || ctor != __load(pb) {
             return false
         }
         let n = __load(pa + 8)

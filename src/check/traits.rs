@@ -4,8 +4,68 @@ use super::*;
 // impl から作った、実装の値を作る関数（Show#impl0。メソッドの Show#impl0#show は除く）
 pub(super) fn is_impl(name: &Name) -> bool { name.is_implementation() }
 
+fn check_equality_type(t: &V) -> R<()> {
+    if matches!(t, V::Pi(_) | V::Prim("syn") | V::Syn(_))
+        || matches!(t, V::DataT(d) if d.0 == "Async" && !d.1.is_empty())
+    {
+        return Err(format!("{} は比較できない", show(t)).into());
+    }
+    Ok(())
+}
+
+fn check_eq_goal(t: &V) -> R<()> {
+    if let V::DataT(d) = t
+        && d.0 == "std.Eq"
+        && let [target] = d.1.as_slice()
+    {
+        check_equality_type(&base(target))?;
+    }
+    Ok(())
+}
 
 impl Ck {
+    // 組み込みの比較はフィールドや配列要素の Eq を呼ばない。
+    pub(super) fn check_builtin_equality(&mut self, t: &V, visiting: &mut Vec<V>) -> R<()> {
+        let t = base(t);
+        check_equality_type(&t)?;
+        match &t {
+            V::Neu(_) => Err(format!(
+                "型 {} の組み込みの比較を決められない（比較する型に Eq の実装が必要）",
+                show(&t)
+            )
+            .into()),
+            V::VecT(element) => self.check_builtin_equality(element, visiting),
+            V::DataT(d) if d.0 != "Ref" && d.0 != "Task" => {
+                if visiting.contains(&t) {
+                    return Ok(());
+                }
+                let Some(data) = self.norm.datas.get(&d.0).cloned() else {
+                    return Ok(());
+                };
+                // ponytail: 型引数が変わり続ける再帰は64段で止める。扱うならフィールドが使う型引数を別に解析する。
+                if visiting.len() >= 64 {
+                    return Err("組み込みの比較でフィールドの型をたどる深さが上限を超えた".into());
+                }
+                visiting.push(t.clone());
+                for ctor in &data.ctors {
+                    let mut env = vec![data.params.iter()
+                        .map(|(n, _)| n.clone())
+                        .zip(d.1.iter().cloned())
+                        .collect()];
+                    for (field, ty) in &ctor.fields {
+                        let ty = self.norm.eval_or_opaque(ty, &mut env)?;
+                        self.check_builtin_equality(&ty, visiting)
+                            .ctx(|e| format!("{} のフィールド {field}: {e}", ctor.name))?;
+                        env[0].insert(field.clone(), self.norm.opaque());
+                    }
+                }
+                visiting.pop();
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
     // == と to_str・put は、std の Eq・Show の実装がある型ならその実装を使う（無ければ組み込みの比較と文字列化）
     // プリミティブの型は組み込みのまま（細分化型の検査が int の == を直接扱うため）
     pub(super) fn trait_inst(&mut self, method: &str, t: &V) -> R<Option<Expr>> {
@@ -30,6 +90,7 @@ impl Ck {
 
     // goal の中のメタ変数 metas は、実装に合わせて決めてよい（トレイトの型引数が分からない時のメソッドの探索）。見つけた実装の型も返す
     pub(super) fn resolve_in(&mut self, goal: &V, depth: usize, metas: &[usize]) -> R<(Expr, V)> {
+        check_eq_goal(goal)?;
         if depth > 16 {
             return Err(format!("{} の実装を探すのが終わらない", show(goal)).into());
         }
@@ -44,7 +105,7 @@ impl Ck {
         while i < cands.len() {
             let mut c = cands[i].clone();
             let t = self.expr(&mut c)?;
-            if self.unify(&t, goal, metas, &mut HashMap::new())? {
+            if self.unify(&t, goal, metas, &mut HashMap::new())? && check_eq_goal(&t).is_ok() {
                 return Ok((c, t));
             }
             if let V::DataT(d) = base(&t)
@@ -80,13 +141,16 @@ impl Ck {
                     fenv[0].insert(p.clone(), v);
                 }
             }
+            let rt = self.apply(&sol, &rt)?;
+            if check_eq_goal(&rt).is_err() {
+                continue;
+            }
             let mut subs = Vec::new();
             for (_, pt) in &f.params[f.implicit..] {
                 let t = self.norm.eval_or_opaque(pt, &mut fenv)?;
                 let t = self.apply(&sol, &t)?;
                 subs.push(self.resolve_inst(&t, depth + 1)?);
             }
-            let rt = self.apply(&sol, &rt)?;
             return Ok((Expr::Call(f.name.clone(), subs), rt));
         }
         Err(format!("{} の実装が無い（impl で書く）", show(goal)).into())
