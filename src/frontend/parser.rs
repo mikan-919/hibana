@@ -216,6 +216,8 @@ pub struct Parser<'s> {
     pub traits: Rc<HashMap<Name, Trait>>,
     // 今読んでいる式の名前を判定するモジュール。None は self.module
     pub perm: Option<String>,
+    // フィールドの無い構築子（修飾した形）。パターンの中の名前を、構築子か束縛かに分ける
+    pub nullary: Rc<HashSet<Name>>,
 }
 
 // trait 宣言。トレイトは構造体の型 Name<A> = { super#親: 親<A>, メソッド: 関数型 } にする
@@ -450,6 +452,7 @@ fn parse_modules_tokens(
             known: Rc::default(),
             traits: Rc::default(),
             perm: None,
+            nullary: Rc::default(),
         })
         .collect();
     let mut g = Grammar::new(&loaded.modules);
@@ -746,10 +749,16 @@ fn parse_modules_tokens(
             })
             .collect(),
     );
+    let nullary: Rc<HashSet<Name>> = Rc::new(
+        prog.datas.iter()
+            .flat_map(|d| d.ctors.iter().filter(|c| c.fields.is_empty()).flat_map(move |c| [c.name.clone(), Name::associated(d.name.clone(), c.name.local().clone())]))
+            .collect(),
+    );
     let mut deferred = Vec::new();
     let mut implementation = 0;
     for (unit, (p, plan)) in parsers.iter_mut().zip(&plans).enumerate() {
         p.structs = structs.clone();
+        p.nullary = nullary.clone();
         p.traits = Rc::new(traits.clone());
         for &start in &plan.fn_starts {
             p.pos = start;
@@ -938,7 +947,7 @@ impl Parser<'_> {
         Err(Error::from(msg).at(self.toks[self.pos].span))
     }
     // 次のトークンが前のトークンと別の行にあるか
-    fn at_newline(&self) -> bool {
+    pub(super) fn at_newline(&self) -> bool {
         self.toks[self.pos].nl_before
     }
     // 文の区切り: ";"、改行、"}" の直前のいずれか
@@ -980,7 +989,7 @@ impl Parser<'_> {
 
     // 今のトークンが名前なら、修飾した名前に書き換える。web.ok は1個の名前にし、型名は今のモジュールから見た名前にする
     // （構造体の値と <> の判定に使う。それ以外の名前は resolve で局所変数と区別してから解決する）
-    fn qualify_here(&mut self) {
+    pub(super) fn qualify_here(&mut self) {
         let Tok::Ident(n) = self.peek().clone() else {
             return;
         };
@@ -1056,6 +1065,7 @@ impl Parser<'_> {
             known: self.known.clone(),
             traits: self.traits.clone(),
             perm: None,
+            nullary: self.nullary.clone(),
         };
         if p.peek() == &Tok::Eof {
             return p.err("文字列の中の { } に式が無い");
@@ -1899,9 +1909,28 @@ impl Parser<'_> {
         }
     }
 
-    fn let_stmt(&mut self) -> R<Stmt> {
+    // let 名前 = 式 と、構造体を分解する let パターン = 式（フィールドごとの let にする）
+    fn let_stmt(&mut self) -> R<Vec<Stmt>> {
         self.expect("let")?;
         let mutable = self.eat("mut");
+        if !mutable
+            && matches!(self.peek(), Tok::Ident(_))
+            && matches!(self.toks.get(self.pos + 1).map(|t| &t.tok), Some(Tok::Punct("{" | "(")))
+            && !self.toks[self.pos + 1].nl_before
+        {
+            let start = self.pos;
+            let pattern = self.value_pattern(true)?;
+            self.expect("=")?;
+            let init = self.expr()?;
+            self.end_stmt()?;
+            let t = Name::pattern("□", NodeId::default().raw() as usize);
+            let mut stmts = vec![Stmt::Let { name: t.clone(), mutable: false, ty: None, init }];
+            let end = self.pos;
+            self.pos = start;
+            self.destructure(pattern, t, &mut stmts)?;
+            self.pos = end;
+            return Ok(stmts);
+        }
         let name = self.ident()?;
         let ty = if self.eat(":") {
             Some(self.ty()?)
@@ -1911,12 +1940,12 @@ impl Parser<'_> {
         self.expect("=")?;
         let init = self.expr()?;
         self.end_stmt()?;
-        Ok(Stmt::Let {
+        Ok(vec![Stmt::Let {
             name,
             mutable,
             ty,
             init,
-        })
+        }])
     }
 
     // マクロのパターンの Stmt 用
@@ -1926,7 +1955,11 @@ impl Parser<'_> {
             return Ok(Stmt::Expr(e));
         }
         if self.peek() == &Tok::Punct("let") {
-            return self.let_stmt();
+            let mut stmts = self.let_stmt()?;
+            if stmts.len() != 1 {
+                return self.err("マクロの文には let の分解を書けない");
+            }
+            return Ok(stmts.remove(0));
         }
         let e = self.expr()?;
         self.eat(";");
@@ -1980,7 +2013,7 @@ impl Parser<'_> {
                 self.end_stmt()?;
                 setup.push(Stmt::Expr(e));
             } else if self.peek() == &Tok::Punct("let") {
-                setup.push(self.let_stmt()?);
+                setup.extend(self.let_stmt()?);
             } else {
                 setup.push(Stmt::Expr(self.expr()?));
                 if !self.eat(";") {
@@ -2007,7 +2040,7 @@ impl Parser<'_> {
                 continue;
             }
             if self.peek() == &Tok::Punct("let") {
-                stmts.push(self.let_stmt()?);
+                stmts.extend(self.let_stmt()?);
                 continue;
             }
             let e = self.expr()?;
@@ -2052,7 +2085,7 @@ impl Parser<'_> {
         Ok(lhs)
     }
 
-    fn wrap(&self, start: usize, e: Expr) -> Expr {
+    pub(super) fn wrap(&self, start: usize, e: Expr) -> Expr {
         Expr::At(self.span_of(start), Box::new(e))
     }
 
@@ -2387,66 +2420,15 @@ impl Parser<'_> {
                 let s = self.expr()?;
                 self.expect("{")?;
                 let mut arms = Vec::new();
-                // 文字列・整数のパターンの腕（値, 本体）
-                let mut lits = Vec::new();
                 while !self.eat("}") {
                     let astart = self.pos;
-                    if let Tok::Str(_) | Tok::Int(_) = self.peek() {
-                        let v = match self.next() {
-                            Tok::Str(s) => Expr::Str(s),
-                            Tok::Int(n) => Expr::Int(n),
-                            _ => unreachable!(),
-                        };
-                        let v = self.wrap(astart, v);
-                        self.expect("->")?;
-                        lits.push((v, self.expr()?));
-                        self.eat(",");
-                        continue;
-                    }
-                    let ctor = self.ident()?;
-                    let mut binds = Vec::new();
-                    if self.eat("(") {
-                        while !self.eat(")") {
-                            binds.push(self.ident()?);
-                            if !self.eat(",") {
-                                self.expect(")")?;
-                                break;
-                            }
-                        }
-                    }
+                    let pattern = self.value_pattern(true)?;
                     let span = Some(self.span_of(astart));
                     self.expect("->")?;
-                    let body = self.expr()?;
-                    arms.push(Arm {
-                        span,
-                        ctor,
-                        binds,
-                        body,
-                    });
+                    arms.push((span, pattern, self.expr()?));
                     self.eat(",");
                 }
-                if lits.is_empty() {
-                    Expr::Match(Box::new(s), arms)
-                } else {
-                    // { let match#k = 対象; if match#k == 値 { 本体 } else if ... else { _ の本体 } } にする
-                    let [Arm { ctor, binds, body, .. }] = arms.as_slice() else {
-                        return self.err_at("文字列・整数の match には、_ の腕を1つだけ置く".into());
-                    };
-                    if ctor != "_" || !binds.is_empty() {
-                        return self.err_at("文字列・整数のパターンと構築子のパターンは混ぜられない".into());
-                    }
-                    let name = Name::temporary("match", self.pos);
-                    let leaf = |e: Expr| Block { id: Default::default(), stmts: vec![], tail: Some(Box::new(e)) };
-                    let mut acc = Expr::Block(leaf(body.clone()));
-                    for (v, body) in lits.into_iter().rev() {
-                        let cond = Expr::Binary("==", Box::new(Expr::Var(name.clone())), Box::new(v));
-                        acc = Expr::If(Box::new(cond), leaf(body), Some(Box::new(acc)));
-                    }
-                    Expr::Block(Block { id: Default::default(),
-                        stmts: vec![Stmt::Let { name: name, mutable: false, ty: None, init: s }],
-                        tail: Some(Box::new(acc)),
-                    })
-                }
+                self.compile_match(s, arms)?
             }
             Tok::Punct("quote") => {
                 self.expect("{")?;

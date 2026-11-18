@@ -867,6 +867,22 @@ fn main() {
         }
     }
 
+    // 入れ子のパターンの網羅されていない場合は、元のパターンの形の例で示す。let は構造体の分解だけを受け付ける
+    #[test]
+    fn nested_patterns_report_missing_cases() {
+        for (src, want) in [
+            ("use std -> *\nfn f(j: Option<Json>) -> int { match j { Some(JInt(n)) -> n\n None -> 0 } }\nfn main() {}", "（例: Some(JNull)）"),
+            ("use std -> *\nfn f(o: Option<Option<int>>) -> int { match o { Some(Some(1)) -> 1\n None -> 0 } }\nfn main() {}", "match に Some(Some(_)) の場合が無い"),
+            ("fn f(s: String) -> int { match s { 'a' -> 1 } }\nfn main() {}", "match に _ の場合が無い"),
+            ("use std -> *\nfn main() { let Some(x) = Some(1)\n put(x) }", "let のパターンには構造体の分解だけを書ける"),
+            ("struct P { x: int }\nfn main() { let P { z } = P { x: 1 }\n put(z) }", "構造体 P にフィールド z は無い"),
+            ("use std -> *\nfn f(o: Option<int>) -> int { match o { Some('a') -> 1\n Some(None) -> 2\n _ -> 0 } }\nfn main() {}", "構築子とリテラルのパターンは混ぜられない"),
+        ] {
+            let e = out(src).unwrap_err();
+            assert!(e.msg.contains(want), "{src}: {}", e.msg);
+        }
+    }
+
     // mut の Vec も、初期値と push・set_at から長さが分かる
     #[test]
     fn mutable_vec_length() {

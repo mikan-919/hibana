@@ -1282,6 +1282,7 @@ impl Parser<'_> {
             known: self.known.clone(),
             traits: self.traits.clone(),
             perm: None,
+            nullary: self.nullary.clone(),
         };
         let wrap = |e: &str| format!("マクロ {}: {e}", m.name);
         let mut b = p.block().ctx(wrap)?;
@@ -1341,6 +1342,7 @@ impl Parser<'_> {
             known: self.known.clone(),
             traits: self.traits.clone(),
             perm: None,
+            nullary: self.nullary.clone(),
         };
         // 一度だけ読み、式が1つならその式、文の並びならブロックにする。
         p.toks.extend([Token { tok: Tok::Punct("}"), nl_before: true, ..end }, eof]);

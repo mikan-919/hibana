@@ -2519,6 +2519,15 @@ impl Ck {
                 if covered.contains(&c.name) {
                     continue;
                 }
+                // パターンを分けて作った match なら、元のパターンの形で例を示す（frontend/pattern.rs）
+                if let Expr::Var(v) = s.peel()
+                    && let crate::parser::NameKind::Pattern(shape, _) = &v.kind
+                {
+                    let holes = vec!["_"; c.fields.len()].join(", ");
+                    let label = c.name.structure_owner().unwrap_or_else(|| c.name.clone()).local().clone();
+                    let example = if c.fields.is_empty() { label.to_string() } else { format!("{label}({holes})") };
+                    return Err(format!("match に {} の場合が無い（例: {}）", c.name, shape.replacen('□', &example, 1)).into());
+                }
                 return Err(format!("match に {} の場合が無い", c.name).into());
             }
         }
