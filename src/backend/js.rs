@@ -39,6 +39,7 @@ function $report(e) { console.error("実行時エラー: " + (e?.message ?? Stri
 function $failed(e) { $report(e); if (globalThis.process) process.exitCode = 1; }
 // 書き換えられる参照
 class $Ref { constructor(v) { this.v = v; } }
+class $Task { constructor() { this.s = 0; this.v = undefined; this.p = null; } }
 function $d(c, f) { return { $c: c, $f: f }; }
 function $field(x, f) { return x.$f[$fi[x.$c][f]]; }
 function $eq(a, b) {
@@ -61,10 +62,11 @@ function $numstr(v) {
 function $show(v) {
   if (typeof v === "number") return $numstr(v);
   if (typeof v === "boolean") return String(v);
-  if (typeof v === "string") return JSON.stringify(v);
+  if (typeof v === "string") return JSON.stringify(v).replace(/[\u007f-\u009f]/g, c => "\\u00" + c.charCodeAt(0).toString(16));
   if (v === undefined) return "()";
   if (typeof v === "function") return "<fn>";
   if (v instanceof $Ref) return "<ref>";
+  if (v instanceof $Task) return "<task>";
   if (Array.isArray(v)) return "[" + v.map($show).join(", ") + "]";
   const [name, style] = $constructors[v.$c] ?? [v.$c, 0];
   if (style === 2) return name + "(" + v.$f.map($show).join(", ") + ")";
@@ -84,7 +86,7 @@ async function $all(fs) {
 // spawn。Async<T> の値を走らせ始め、状態（s: 0 未完了・1 値・2 失敗）を持つ Task を返す。失敗は console.error に出す
 function $spawn(f) {
   const h = $h;
-  const t = { s: 0, v: undefined, p: null };
+  const t = new $Task();
   t.p = f().then((v) => { t.s = 1; t.v = v; }, (e) => { t.s = 2; $report(e); });
   $h = h;
   return t;

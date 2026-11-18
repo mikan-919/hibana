@@ -786,41 +786,61 @@ fn __eq(a: int, b: int) -> bool {
     false
 }
 
-// 文字列の中の値として表示する。インタプリタ（Rust の {:?}）と同じ記号を逃がす
-fn __quote(s: String) -> String {
-    let p = __payload(s)
-    let n = __load(p)
-    let mut out = '"'
-    let mut start = 0
+// dst が 0 なら長さを数え、それ以外なら引用符の内側を dst に書く
+fn __quote_contents(src: int, len: int, dst: int) -> int {
+    let mut size = 0
     let mut i = 0
-    while i < n {
-        let c = __load8(p + 8 + i)
-        let mut esc = ''
-        if c == 34 {
-            esc = '\\"'
+    while i < len {
+        let mut c = __load8(src + i)
+        let mut width = 1
+        // U+0080〜U+009F の UTF-8 は C2 80〜C2 9F
+        if c == 194 && i + 1 < len {
+            let next = __load8(src + i + 1)
+            if next >= 128 && next <= 159 {
+                c = next
+                width = 2
+            }
         }
-        if c == 92 {
-            esc = '\\\\'
+        let escaped = if c == 34 { '\\"' }
+        else if c == 92 { '\\\\' }
+        else if c == 8 { '\\b' }
+        else if c == 9 { '\\t' }
+        else if c == 10 { '\\n' }
+        else if c == 12 { '\\f' }
+        else if c == 13 { '\\r' }
+        else { '' }
+        let bytes = if __load(__payload(escaped)) != 0 { 2 }
+        else if c < 32 || c == 127 || width == 2 { 6 }
+        else { 1 }
+        if dst != 0 {
+            let at = dst + size
+            if bytes == 1 {
+                __store8(at, c)
+            } else if bytes == 2 {
+                __copy(at, __payload(escaped) + 8, 2)
+            } else {
+                let hex = __payload('0123456789abcdef') + 8
+                __copy(at, __payload('\\u00') + 8, 4)
+                __store8(at + 4, __load8(hex + c / 16))
+                __store8(at + 5, __load8(hex + c % 16))
+            }
         }
-        if c == 10 {
-            esc = '\\n'
-        }
-        if c == 9 {
-            esc = '\\t'
-        }
-        if c == 13 {
-            esc = '\\r'
-        }
-        if c == 0 {
-            esc = '\\0'
-        }
-        if __load(__payload(esc)) != 0 {
-            out = __cat(__cat(out, __bytes(p + 8 + start, i - start)), esc)
-            start = i + 1
-        }
-        i = i + 1
+        size = size + bytes
+        i = i + width
     }
-    __cat(__cat(out, __bytes(p + 8 + start, n - start)), '"')
+    size
+}
+
+fn __quote(s: String) -> String {
+    let src = __payload(s)
+    let len = __load(src)
+    let size = __quote_contents(src + 8, len, 0)
+    let out = __alloc(10 + size)
+    __store(out, size + 2)
+    __store8(out + 8, 34)
+    __quote_contents(src + 8, len, out + 9)
+    __store8(out + 9 + size, 34)
+    __mkv(3, out)
 }
 
 fn __join_shown(p: int, n: int) -> String {
@@ -872,6 +892,7 @@ fn __show(v: int) -> String {
 
 fn __show_data(p: int) -> String {
     let ctor = __load(p)
+    if ctor == 0 - 2 { return '<task>' }
     let n = __load(p + 8)
     let name = __ctor_name(ctor)
     let kind = __ctor_kind(ctor)

@@ -6,6 +6,7 @@ use crate::meta::{self, Node, Syn};
 use crate::parser::{Block, Expr, Fn, NodeId, Program, Stmt};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::future::Future;
 use std::io::Write;
 use std::pin::Pin;
@@ -145,13 +146,33 @@ fn finish(jobs: &Jobs<'_>, promise: &Promise, runtime: &Runtime<'_>) -> R<Value>
     }
 }
 
+fn quote_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str(r#"\""#),
+            '\\' => out.push_str(r"\\"),
+            '\u{8}' => out.push_str(r"\b"),
+            '\t' => out.push_str(r"\t"),
+            '\n' => out.push_str(r"\n"),
+            '\u{c}' => out.push_str(r"\f"),
+            '\r' => out.push_str(r"\r"),
+            '\0'..='\u{1f}' | '\u{7f}'..='\u{9f}' => write!(out, r"\u{:04x}", c as u32).unwrap(),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 fn show(v: &Value) -> String {
     match v {
         Value::Arr(xs) => format!("[{}]", xs.iter().map(show).collect::<Vec<_>>().join(", ")),
         Value::Int(n) => n.to_string(),
         Value::Num(n) => n.to_string(),
         Value::Bool(b) => b.to_string(),
-        Value::Str(s) => format!("{s:?}"),
+        Value::Str(s) => quote_string(s),
         Value::Ty(t) => t.to_string(),
         Value::Unit => "()".into(),
         Value::Syn(s) => format!("{:?}", s.node.strip()),
