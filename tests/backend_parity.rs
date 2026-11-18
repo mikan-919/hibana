@@ -228,6 +228,39 @@ fn main() {
 }
 
 #[test]
+fn number_display_and_json_round_trip() {
+    let source = r#"
+use std -> *
+fn main() {
+    for n in [1000000000000000.25, -1000000000000000.25, 1000000000000000.75, -0.0, 100000000000000000000000.0] {
+        put(n)
+        put(n.to_string())
+        let json = stringify(JNum(n))
+        put(json)
+        match parse_json(json) {
+            Some(JNum(parsed)) -> {
+                put(parsed == n)
+                put([parsed])
+            }
+            _ -> panic('JNum が必要')
+        }
+    }
+}
+"#;
+    check_backends(
+        "number_display",
+        source,
+        success(concat!(
+            "1000000000000000.2\n1000000000000000.2\n1000000000000000.2\ntrue\n[1000000000000000.2]\n",
+            "-1000000000000000.2\n-1000000000000000.2\n-1000000000000000.2\ntrue\n[-1000000000000000.2]\n",
+            "1000000000000000.8\n1000000000000000.8\n1000000000000000.8\ntrue\n[1000000000000000.8]\n",
+            "-0\n-0\n-0.0\ntrue\n[-0]\n",
+            "100000000000000000000000\n100000000000000000000000\n100000000000000000000000.0\ntrue\n[100000000000000000000000]\n",
+        )),
+    );
+}
+
+#[test]
 fn equality_by_identity() {
     let source = r#"
 use std -> *
