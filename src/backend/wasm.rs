@@ -12,7 +12,11 @@ use wasm_encoder::{
 
 const STATIC: i64 = 8;
 const FAIL_AT: i64 = 24;
-const LITERALS: u32 = 72;
+// __static は 144 バイト（runtime.hb の先頭）。文字列定数はその後ろに置く
+const LITERALS: u32 = STATIC as u32 + 144;
+// シャドースタックの大きさ。局所変数 1 つに 16 バイト使う
+// ponytail: 固定の 4 MB。再帰が深いと __frame_push が止める。足りなければヒープから大きい区画を取り直す
+const SHADOW: u64 = 4 << 20;
 
 pub fn emit(program: &Program) -> Vec<u8> {
     emit_selected(program, None)
@@ -79,7 +83,9 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
     while data.len() % 8 != 0 {
         data.push(0);
     }
-    let heap = LITERALS as u64 + data.len() as u64;
+    // 文字列定数の後ろにシャドースタック（runtime.hb の __frame_push）の区画を置き、その後ろをヒープにする
+    let shadow = LITERALS as u64 + data.len() as u64;
+    let heap = shadow + SHADOW;
     let pages = heap.div_ceil(65536).max(1);
     let exported: Vec<&ir::Function> = program
         .functions
@@ -241,7 +247,8 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
         }
         code.function(&f);
         functions.function(types.get(0, 0));
-        let reset = [
+        // シャドースタックを空にし、GC の状態（+88 から +104、+120 から +136）を 0 に戻す。区画の位置と +112 は変わらない
+        let mut reset = vec![
             I::I32Const(STATIC as i32),
             I::I64Const(heap as i64),
             I::I64Store(mem(0, 3)),
@@ -251,8 +258,12 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
             I::I64Const(16),
             I::I64Shl,
             I::I64Store(mem(0, 3)),
-            I::End,
         ];
+        reset.extend([I::I32Const(STATIC as i32 + 64), I::I64Const(shadow as i64), I::I64Store(mem(0, 3))]);
+        for k in [88, 96, 104, 120, 128, 136] {
+            reset.extend([I::I32Const(STATIC as i32 + k), I::I64Const(0), I::I64Store(mem(0, 3))]);
+        }
+        reset.push(I::End);
         code.function(&function(&[], &reset));
         exports.export("__hibana_alloc", ExportKind::Func, alloc);
         exports.export("__hibana_reset", ExportKind::Func, alloc + 1);
@@ -271,8 +282,11 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
     let mut init = Vec::new();
     init.extend(heap.to_le_bytes());
     init.extend((pages * 65536).to_le_bytes());
-    // 実行時エラーの文字列、中断、処理中の with は 0 から始める
+    // 実行時エラーの文字列、中断、処理中の with、シャドースタック、GC の状態は 0 から始める。+112 は文字列定数の終わり
     init.extend([0u8; 48]);
+    for v in [shadow, shadow, shadow + SHADOW, 0, 0, 0, heap, 0, 0, 0] {
+        init.extend(v.to_le_bytes());
+    }
     init.extend(data);
     let mut datas = DataSection::new();
     datas.active(0, &ConstExpr::i32_const(STATIC as i32), init);

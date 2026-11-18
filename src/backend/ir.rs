@@ -5,6 +5,7 @@ use crate::parser::Name;
 // 文字列の連結・比較・表示などはランタイム（runtime.hb）の関数を呼ぶ。ランタイムも同じ変換で IR にする。
 // with（Handle）は、中断の印を置いて呼び出しの後で調べ、1 段ずつ戻って抜ける（Lower::checked）。腕の値は #resume で呼んだ所へ返し、exit で with を抜ける
 // mut の変数が所有する Vec への push・set_at はその場で書き換える（runtime.hb の __push_own・__set_at_own）
+// 利用者の関数には GC のシャドースタックを付ける（Ctx::shadow。仕組みは runtime.hb の先頭）
 use crate::error::R;
 use crate::parser::{self, Expr as Ast, Stmt as AstStmt};
 use std::collections::{HashMap, HashSet};
@@ -525,14 +526,18 @@ impl<'a> Ctx<'a> {
         let locals = l.locals;
         let mut body = b.stmts;
         body.push(Stmt::Return(b.value));
-        Ok(Function {
+        let mut function = Function {
             name: f.name.to_string(),
             params: f.params.len() as u32,
             param_types: f.params.iter().map(|(_, t)| value_type(t)).collect(),
             result_type: ret_type(f),
             locals,
             body,
-        })
+        };
+        if !runtime {
+            self.shadow(&mut function);
+        }
+        Ok(function)
     }
 
     // 変換の中で名前だけを決めて呼ぶ関数を作る
@@ -608,6 +613,179 @@ impl<'a> Ctx<'a> {
             return Ok(f);
         }
         Err(format!("IR に関数 {name} が無い").into())
+    }
+
+    // GC が動かない呼び出し先。ランタイムの関数のうち利用者の関数を呼ばないものと、変換の中で作る関数
+    fn quiet(&self, n: &str) -> bool {
+        let runtime = self.sources.get(n).is_some_and(|s| s.runtime);
+        (runtime && !CALLBACKS.contains(&n)) || n.starts_with("__field_") || n.starts_with("__ctor_")
+    }
+
+    // 利用者の関数（ランタイム以外）に GC のシャドースタックを付ける（runtime.hb の先頭の説明）
+    fn shadow(&self, f: &mut Function) {
+        let mut s = Shadow { cx: self, next: f.locals, fp: 0, ret: 0, size: 0 };
+        let body = s.spill_stmts(std::mem::take(&mut f.body));
+        s.size = s.next;
+        s.fp = s.next;
+        s.ret = s.next + 1;
+        let mut out = vec![Stmt::Set(s.fp, call("__frame_push", vec![int(s.size as i64)]))];
+        for i in 0..f.params {
+            out.extend(setv(s.slot(i), Expr::Local(i)));
+        }
+        out.push(poll());
+        out.extend(s.frame_stmts(body));
+        f.body = out;
+        f.locals = s.next + 2;
+    }
+}
+
+// 利用者の関数を呼ぶランタイムの関数。中で GC が動きうる
+const CALLBACKS: &[&str] = &["__all", "__perform", "__spawn", "__task_then"];
+
+// 前回の GC の後に確保したバイト数が上限を超えていれば GC を動かす。安全な位置（関数の入口とループの先頭）に置く
+fn poll() -> Stmt {
+    let st = |k: i64| prim(Prim::Load, vec![add(prim(Prim::Static, vec![]), int(k))]);
+    Stmt::Eval(Expr::If(
+        Box::new(prim(Prim::Gt, vec![st(96), st(104)])),
+        Box::new(Block { stmts: vec![Stmt::Eval(call("__gc", vec![]))], value: unit() }),
+        leaf(unit()),
+    ))
+}
+
+// シャドースタックを付ける変換。局所変数 0..size が区画に写す変数で、fp は区画の位置、ret は戻り値を置く変数
+struct Shadow<'c, 'a> {
+    cx: &'c Ctx<'a>,
+    next: u32,
+    fp: u32,
+    ret: u32,
+    size: u32,
+}
+
+impl Shadow<'_, '_> {
+    fn slot(&self, i: u32) -> Expr {
+        add(Expr::Local(self.fp), int(16 * i as i64))
+    }
+
+    fn may_gc(&self, e: &Expr) -> bool {
+        match e {
+            Expr::Call(n, args) => !self.cx.quiet(n) || args.iter().any(|a| self.may_gc(a)),
+            Expr::CallIndirect(..) => true,
+            Expr::Prim(_, args) => args.iter().any(|a| self.may_gc(a)),
+            Expr::If(c, t, e) => self.may_gc(c) || self.block_may_gc(t) || self.block_may_gc(e),
+            Expr::Block(b) | Expr::Catch(b) => self.block_may_gc(b),
+            Expr::Const(..) | Expr::Str(_) | Expr::Local(_) | Expr::Func(_) => false,
+        }
+    }
+
+    fn block_may_gc(&self, b: &Block) -> bool {
+        self.may_gc(&b.value)
+            || b.stmts.iter().any(|s| match s {
+                Stmt::Set(_, e) | Stmt::Eval(e) | Stmt::Return(e) => self.may_gc(e),
+                Stmt::While(..) => true,
+                Stmt::Break | Stmt::Continue | Stmt::Escape => false,
+            })
+    }
+
+    // 引数の評価の途中で GC が動くと、評価済みの引数は局所変数に無いので根にならない。
+    // 後の引数が GC を起こしうるなら、前の引数を局所変数に移す（評価の順は変えない）
+    fn spill_args(&mut self, mut args: Vec<Expr>) -> (Vec<Stmt>, Vec<Expr>) {
+        let mut pre = Vec::new();
+        for i in 0..args.len() {
+            let constant = matches!(args[i], Expr::Const(..) | Expr::Str(_) | Expr::Func(_));
+            if !constant && args[i + 1..].iter().any(|a| self.may_gc(a)) {
+                let t = self.next;
+                self.next += 1;
+                pre.push(Stmt::Set(t, std::mem::replace(&mut args[i], Expr::Local(t))));
+            }
+        }
+        (pre, args)
+    }
+
+    fn spill(&mut self, e: Expr) -> Expr {
+        let wrap = |pre: Vec<Stmt>, e: Expr| if pre.is_empty() { e } else { block(pre, e) };
+        match e {
+            Expr::Call(n, args) => {
+                let args = args.into_iter().map(|a| self.spill(a)).collect();
+                let (pre, args) = self.spill_args(args);
+                wrap(pre, Expr::Call(n, args))
+            }
+            Expr::Prim(p, args) => {
+                let args = args.into_iter().map(|a| self.spill(a)).collect();
+                let (pre, args) = self.spill_args(args);
+                wrap(pre, Expr::Prim(p, args))
+            }
+            Expr::CallIndirect(f, args) => {
+                let mut all = vec![self.spill(*f)];
+                all.extend(args.into_iter().map(|a| self.spill(a)));
+                let (pre, mut all) = self.spill_args(all);
+                let f = all.remove(0);
+                wrap(pre, Expr::CallIndirect(Box::new(f), all))
+            }
+            Expr::If(c, t, e) => Expr::If(Box::new(self.spill(*c)), Box::new(self.spill_block(*t)), Box::new(self.spill_block(*e))),
+            Expr::Block(b) => Expr::Block(Box::new(self.spill_block(*b))),
+            Expr::Catch(b) => Expr::Catch(Box::new(self.spill_block(*b))),
+            e => e,
+        }
+    }
+
+    fn spill_block(&mut self, b: Block) -> Block {
+        Block { stmts: self.spill_stmts(b.stmts), value: self.spill(b.value) }
+    }
+
+    fn spill_stmts(&mut self, ss: Vec<Stmt>) -> Vec<Stmt> {
+        ss.into_iter()
+            .map(|s| match s {
+                Stmt::Set(i, e) => Stmt::Set(i, self.spill(e)),
+                Stmt::Eval(e) => Stmt::Eval(self.spill(e)),
+                Stmt::Return(e) => Stmt::Return(self.spill(e)),
+                Stmt::While(c, body) => Stmt::While(self.spill(c), self.spill_stmts(body)),
+                s => s,
+            })
+            .collect()
+    }
+
+    // 局所変数への代入を区画にも書き、ループの先頭で GC を確かめ、戻る前に区画を外す
+    fn frame(&self, e: Expr) -> Expr {
+        match e {
+            Expr::Call(n, args) => Expr::Call(n, args.into_iter().map(|a| self.frame(a)).collect()),
+            Expr::Prim(p, args) => Expr::Prim(p, args.into_iter().map(|a| self.frame(a)).collect()),
+            Expr::CallIndirect(f, args) => Expr::CallIndirect(Box::new(self.frame(*f)), args.into_iter().map(|a| self.frame(a)).collect()),
+            Expr::If(c, t, e) => Expr::If(Box::new(self.frame(*c)), Box::new(self.frame_block(*t)), Box::new(self.frame_block(*e))),
+            Expr::Block(b) => Expr::Block(Box::new(self.frame_block(*b))),
+            Expr::Catch(b) => Expr::Catch(Box::new(self.frame_block(*b))),
+            e => e,
+        }
+    }
+
+    fn frame_block(&self, b: Block) -> Block {
+        Block { stmts: self.frame_stmts(b.stmts), value: self.frame(b.value) }
+    }
+
+    fn frame_stmts(&self, ss: Vec<Stmt>) -> Vec<Stmt> {
+        let mut out = Vec::new();
+        for s in ss {
+            match s {
+                Stmt::Set(i, e) => {
+                    out.push(Stmt::Set(i, self.frame(e)));
+                    if i < self.size {
+                        out.extend(setv(self.slot(i), Expr::Local(i)));
+                    }
+                }
+                Stmt::Eval(e) => out.push(Stmt::Eval(self.frame(e))),
+                Stmt::While(c, body) => {
+                    let mut stmts = vec![poll()];
+                    stmts.extend(self.frame_stmts(body));
+                    out.push(Stmt::While(self.frame(c), stmts));
+                }
+                Stmt::Return(e) => {
+                    out.push(Stmt::Set(self.ret, self.frame(e)));
+                    out.push(Stmt::Eval(prim(Prim::Store, vec![add(prim(Prim::Static, vec![]), int(64)), Expr::Local(self.fp)])));
+                    out.push(Stmt::Return(Expr::Local(self.ret)));
+                }
+                s => out.push(s),
+            }
+        }
+        out
     }
 }
 
@@ -827,13 +1005,14 @@ impl Lower<'_, '_> {
         args.iter().map(|a| self.expr(a)).collect()
     }
 
-    // 値を並べて確保した領域に書き、型の番号を付ける
+    // 値を並べて確保した領域に書き、型の番号を付ける。値を先にすべて局所変数に置いてから確保する。
+    // 確保した位置は型の番号の無い整数なので、値の評価の途中で GC が動くと回収されてしまう
     fn object(&mut self, tag: i64, new: Expr, header: i64, items: Vec<Expr>) -> Expr {
         let mut stmts = Vec::new();
+        let items: Vec<Expr> = items.into_iter().map(|item| self.temp(item, &mut stmts)).collect();
         let t = self.local();
         stmts.push(Stmt::Set(t, new));
         for (k, item) in items.into_iter().enumerate() {
-            let item = self.temp(item, &mut stmts);
             stmts.extend(setv(add(Expr::Local(t), int(header + 16 * k as i64)), item));
         }
         block(stmts, mkv(tag, Expr::Local(t)))
@@ -1125,14 +1304,18 @@ impl Lower<'_, '_> {
         stmts.extend(b.stmts);
         stmts.push(Stmt::Return(b.value));
         let locals = l.locals;
-        self.cx.made.push(Function {
+        let mut function = Function {
             name: name.clone(),
             params: 1 + params.len() as u32,
             param_types: vec![],
             result_type: ValueType::Other,
             locals,
             body: stmts,
-        });
+        };
+        if !self.raw {
+            self.cx.shadow(&mut function);
+        }
+        self.cx.made.push(function);
         let new = call("__fn_new", vec![Expr::Func(name), int(caps.len() as i64)]);
         let items = caps.into_iter().map(|(n, i)| self.shared(&n, i)).collect();
         Ok(self.object(FN, new, 16, items))
@@ -1291,7 +1474,8 @@ mod tests {
         let ir = crate::to_ir(src).unwrap();
         assert_eq!(
             ir,
-            "fn add(%0, %1) {\n  return (call __isub %0 %1)\n}\nfn main() {\n  %0 = (call add 1 2)\n  %1 = (call __imul %0 3)\n  (Div %1 4)\n  return ()\n}\n"
+            // 局所変数は入口で確保したシャドースタックの区画（%2）にも書き、戻る前に区画を外す
+            "fn add(%0, %1) {\n  %2 = (call __frame_push 2)\n  (Store (Add %2 0) (Tag %0))\n  (Store (Add (Add %2 0) 8) (Payload %0))\n  (Store (Add %2 16) (Tag %1))\n  (Store (Add (Add %2 16) 8) (Payload %1))\n  (if (Gt (Load (Add (Static) 96)) (Load (Add (Static) 104))) {\n    (call __gc)\n    () } ())\n  %3 = (call __isub %0 %1)\n  (Store (Add (Static) 64) %2)\n  return %3\n}\nfn main() {\n  %2 = (call __frame_push 2)\n  (if (Gt (Load (Add (Static) 96)) (Load (Add (Static) 104))) {\n    (call __gc)\n    () } ())\n  %0 = (call add 1 2)\n  (Store (Add %2 0) (Tag %0))\n  (Store (Add (Add %2 0) 8) (Payload %0))\n  %1 = (call __imul %0 3)\n  (Store (Add %2 16) (Tag %1))\n  (Store (Add (Add %2 16) 8) (Payload %1))\n  (Div %1 4)\n  %3 = ()\n  (Store (Add (Static) 64) %2)\n  return %3\n}\n"
         );
     }
 

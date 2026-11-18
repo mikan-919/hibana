@@ -474,6 +474,19 @@ mod tests {
         assert!(memory < 64 << 20, "WASM のメモリ {memory} バイト");
     }
 
+    // 30 万回のループで数百 MB を確保しても、GC が回収してメモリが増え続けない
+    #[test]
+    fn ir_gc_bounds_memory() {
+        let src = include_str!("../../tests/programs/basics/gc.hb").replace("0..5000", "0..300000");
+        let want = "0\n44850000\n3\n75000\nitem 12 [12, 13, 14]\n";
+        let (native, wasm, memory) = ir_run(&src, 131072);
+        #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+        assert_eq!(native, want);
+        let _ = native;
+        assert_eq!(wasm, want);
+        assert!(memory < 48 << 20, "WASM のメモリ {memory} バイト");
+    }
+
     // 範囲外と 0 による除算は、ネイティブでもメッセージを出して終了コード 1 で終わる
     #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
     #[test]

@@ -3,6 +3,7 @@
 // __load などの __ で始まる組み込みは、IR の命令に直接変換する（src/backend/ir.rs の prim）。
 //
 // 値の型の番号: 0 unit, 1 int, 2 bool, 3 String, 4 Vec, 5 type の値・構造体, 6 関数, 7 型, 8 Ref, 9 number（中身は f64 のビット列）
+// 10 は GC の根に置く with の記録の並び（ランタイムの中だけで使う）
 // ヒープ上の形（各欄は 8 バイト、値は型の番号と中身の 16 バイト）:
 //   String: [長さ][UTF-8 のバイト列]
 //   Vec: [要素数][値...]。位置の直前に [容量][所有の印] を置く（__arr_new）
@@ -11,13 +12,81 @@
 //   Ref: [値]
 //   型: 中身は型の名前の String
 //
-// ponytail: 確保した領域を回収しない（GC が無い）。長く動くプログラムでは、ここにシャドースタックを使う GC を足す
+// メモリの回収（GC）。__alloc で確保した区画は、その直前に [次の区画][大きさ << 8 | 種類 << 1 | 印] の 16 バイトを置き、
+// すべての区画を 1 本の並び（+88）でつなぐ。種類は 0 中に値を持たない、1 Vec、2 構造体と関数、3 Ref、4 with の記録。
+// 根は、シャドースタック（ir.rs が利用者の関数の局所変数を写す区画）と、中断の値（+32）と処理中の with（+48）。
+// GC は利用者の関数の入口とループの先頭（ir.rs の安全な位置）でだけ動く。ランタイムの関数の中の生の位置は、
+// GC の間に生きていない。ランタイムの関数から利用者の関数を呼ぶ所（__all・__perform）は、持っている値をシャドースタックに置く
 
-// ランタイムの状態は __static() から 64 バイト:
+// ランタイムの状態は __static() から 144 バイト:
 //   +0 確保の次の位置、+8 区画の終わり、+16 実行時エラーの文字列（WASM だけ使う）
 //   +24 中断の行き先（with の番号。0 は中断していない）、+32 中断で with に渡す値
 //   +48 処理中のいちばん内側の with、+56 最後に付けた with の番号
+//   +64 シャドースタックの先頭、+72 その始まり、+80 その終わり
+//   +88 確保した区画の並び、+96 前回の GC の後に確保したバイト数、+104 GC を始めるバイト数
+//   +112 これより前の位置は文字列定数（WASM は接続コードが書く。0 なら __static() の位置）
+//   +120 空き区画の並びの表（1024 バイトまでは 16 バイトごと、それより大きい区画は 2 のべきごとの 128 本）
+//   +128 印を付ける作業の並び、+136 その容量
 fn __alloc(n: int) -> int {
+    let st = __static()
+    if __load(st + 120) == 0 {
+        __gc_init()
+    }
+    // 1024 バイトまでは 16 バイトごと、それ以上は 2 のべきに切り上げ、同じ大きさの空き区画を使う
+    // ponytail: 区画を分けたりつないだりしない。大きい区画は最大で 2 倍の無駄がある
+    let mut size = (n + 15) / 16 * 16
+    if size == 0 {
+        size = 16
+    }
+    if size > 1024 {
+        let mut s = 1024
+        while s < size {
+            s = s * 2
+        }
+        size = s
+    }
+    let slot = __load(st + 120) + __size_class(size) * 8
+    let mut b = __load(slot)
+    if b == 0 {
+        b = __bump(size + 16) + 16
+    } else {
+        __store(slot, __load(b - 16))
+        __zero(b, size)
+    }
+    __store(b - 8, __shl(size, 8))
+    __store(b - 16, __load(st + 88))
+    __store(st + 88, b)
+    __store(st + 96, __load(st + 96) + size + 16)
+    b
+}
+
+// 空き区画の並びの表の番号。__alloc で切り上げた大きさを渡す
+fn __size_class(size: int) -> int {
+    if size <= 1024 {
+        return size / 16
+    }
+    let mut c = 64
+    let mut s = 1024
+    while s < size {
+        s = s * 2
+        c = c + 1
+    }
+    c
+}
+
+fn __gc_init() {
+    let st = __static()
+    let table = __bump(1024)
+    __zero(table, 1024)
+    __store(st + 120, table)
+    __store(st + 104, 4194304)
+    if __load(st + 112) == 0 {
+        __store(st + 112, st)
+    }
+}
+
+// 区画から n バイトを切り出す。足りなければページを足す
+fn __bump(n: int) -> int {
     let st = __static()
     let size = (n + 7) / 8 * 8
     let mut p = __load(st)
@@ -36,6 +105,159 @@ fn __alloc(n: int) -> int {
     }
     __store(st, p + size)
     p
+}
+
+fn __zero(p: int, n: int) {
+    let mut i = 0
+    while i < n {
+        __store(p + i, 0)
+        i = i + 8
+    }
+}
+
+// 区画の種類を付ける（__alloc の直後に呼ぶ）
+fn __gc_kind(p: int, kind: int) -> int {
+    __store(p - 8, __or(__load(p - 8), __shl(kind, 1)))
+    p
+}
+
+// 利用者の関数の局所変数 n 個を置くシャドースタックの区画。0 で埋める。戻る時に ir.rs が +64 を戻す
+fn __frame_push(n: int) -> int {
+    let st = __static()
+    let mut sp = __load(st + 64)
+    if sp == 0 {
+        let size = 16777216
+        sp = __bump(size)
+        __store(st + 72, sp)
+        __store(st + 80, sp + size)
+    }
+    let size = n * 16
+    if sp + size > __load(st + 80) {
+        __die('関数の呼び出しが深すぎる')
+    }
+    __zero(sp, size)
+    __store(st + 64, sp + size)
+    sp
+}
+
+// 値 v が指す区画に印を付け、作業の並びに積む。文字列定数と、中身が位置でない値は飛ばす
+fn __gc_mark(v: int) {
+    let tag = __tag(v)
+    if tag < 3 || tag == 9 || tag > 10 {
+        return
+    }
+    let mut b = __payload(v)
+    if tag == 4 {
+        b = b - 16
+    }
+    if b < __load(__static() + 112) {
+        return
+    }
+    __gc_push(b)
+}
+
+fn __gc_push(b: int) {
+    let h = __load(b - 8)
+    if __and(h, 1) == 1 {
+        return
+    }
+    __store(b - 8, __or(h, 1))
+    if __and(__shr(h, 1), 127) == 0 {
+        return
+    }
+    let st = __static()
+    let mut list = __load(st + 128)
+    let n = __load(list)
+    if n + 1 >= __load(st + 136) {
+        // 作業の並びを 2 倍にする。古い並びは捨てる
+        // ponytail: 古い並びは回収しない（GC の並びの外）。大きくなる回数は少ない
+        let cap = __load(st + 136) * 2
+        let q = __bump(cap * 8)
+        __copy(q, list, (n + 1) * 8)
+        __store(st + 128, q)
+        __store(st + 136, cap)
+        list = q
+    }
+    __store(list + 8 + n * 8, b)
+    __store(list, n + 1)
+}
+
+// 値の並び（p から n 個）に印を付ける
+fn __gc_values(p: int, n: int) {
+    let mut i = 0
+    while i < n {
+        __gc_mark(__getv(p + i * 16))
+        i = i + 1
+    }
+}
+
+fn __gc() {
+    let st = __static()
+    if __load(st + 128) == 0 {
+        __store(st + 128, __bump(65536))
+        __store(st + 136, 8191)
+    }
+    __store(__load(st + 128), 0)
+    __gc_values(__load(st + 72), (__load(st + 64) - __load(st + 72)) / 16)
+    __gc_mark(__getv(st + 32))
+    if __load(st + 48) != 0 {
+        __gc_push(__load(st + 48))
+    }
+    // 作業の並びは __gc_push が大きくすると移るので、毎回 +128 から読む
+    while __load(__load(st + 128)) > 0 {
+        let list = __load(st + 128)
+        let n = __load(list) - 1
+        __store(list, n)
+        let b = __load(list + 8 + n * 8)
+        let kind = __and(__shr(__load(b - 8), 1), 127)
+        if kind == 1 {
+            __gc_values(b + 24, __load(b + 16))
+        }
+        if kind == 2 {
+            __gc_values(b + 16, __load(b + 8))
+        }
+        if kind == 3 {
+            __gc_values(b, 1)
+        }
+        if kind == 4 {
+            if __load(b) != 0 {
+                __gc_push(__load(b))
+            }
+            __gc_values(b + 16, 2)
+        }
+    }
+    // 印の無い区画を空きの並びに戻す
+    let table = __load(st + 120)
+    let mut live = 0
+    let mut prev = 0
+    let mut b = __load(st + 88)
+    while b != 0 {
+        let next = __load(b - 16)
+        let h = __load(b - 8)
+        let size = __shr(h, 8)
+        if __and(h, 1) == 1 {
+            __store(b - 8, h - 1)
+            live = live + size + 16
+            prev = b
+        } else {
+            if prev == 0 {
+                __store(st + 88, next)
+            } else {
+                __store(prev - 16, next)
+            }
+            __store(b - 8, __shl(size, 8))
+            let slot = table + __size_class(size) * 8
+            __store(b - 16, __load(slot))
+            __store(slot, b)
+        }
+        b = next
+    }
+    __store(st + 96, 0)
+    let mut limit = 4194304
+    if live > limit {
+        limit = live
+    }
+    __store(st + 104, limit)
 }
 
 fn __die(msg: String) {
@@ -866,7 +1088,7 @@ fn __now_ms() -> int {
 // 所有の印が 1 の Vec は 1 つの mut 変数だけが指していて、__push_own・__set_at_own がその場で書き換える。
 // 変数の値を読んで他へ渡す時は、ir.rs が __share で印を消す
 fn __arr_new(n: int) -> int {
-    let p = __alloc(24 + n * 16) + 16
+    let p = __gc_kind(__alloc(24 + n * 16), 1) + 16
     __store(p - 16, n)
     __store(p - 8, 0)
     __store(p, n)
@@ -894,7 +1116,7 @@ fn __arr_push_own(p: int, x: int) -> int {
     if cap < 4 {
         cap = 4
     }
-    let q = __alloc(24 + cap * 16) + 16
+    let q = __gc_kind(__alloc(24 + cap * 16), 1) + 16
     __store(q - 16, cap)
     __store(q - 8, 1)
     __store(q, n + 1)
@@ -944,22 +1166,29 @@ fn __all(fs: int) -> int {
     let p = __payload(fs)
     let n = __load(p)
     let q = __arr_new(n)
+    // 利用者の関数を呼ぶ間、fs と作りかけの q を GC の根に置く。q の要素は 0（unit）で埋めておく
+    __zero(q + 8, n * 16)
+    let roots = __frame_push(2)
+    __setv(roots, fs)
+    __setv(roots + 16, __mkv(4, q))
     let mut i = 0
     while i < n {
         let f = __getv(p + 8 + i * 16)
         __setv(q + 8 + i * 16, f())
         if __aborting() {
+            __store(__static() + 64, roots)
             return
         }
         i = i + 1
     }
+    __store(__static() + 64, roots)
     __mkv(4, q)
 }
 
 // Ref
 
 fn __new_ref(x: int) -> int {
-    let p = __alloc(16)
+    let p = __gc_kind(__alloc(16), 3)
     __setv(p, x)
     __mkv(8, p)
 }
@@ -997,14 +1226,14 @@ fn __task_value(t: int) -> int {
 // 構築子と関数の値
 
 fn __data_new(ctor: int, n: int) -> int {
-    let p = __alloc(16 + n * 16)
+    let p = __gc_kind(__alloc(16 + n * 16), 2)
     __store(p, ctor)
     __store(p + 8, n)
     p
 }
 
 fn __fn_new(code: int, n: int) -> int {
-    let p = __alloc(16 + n * 16)
+    let p = __gc_kind(__alloc(16 + n * 16), 2)
     __store(p, code)
     __store(p + 8, n)
     p
@@ -1038,7 +1267,7 @@ fn __handle_id() -> int {
 // 処理中の with: [外側の with][番号][操作の名前の Vec][腕の Vec]
 fn __handle_push(id: int, ops: int, arms: int) -> int {
     let st = __static()
-    let h = __alloc(48)
+    let h = __gc_kind(__alloc(48), 4)
     __store(h, __load(st + 48))
     __store(h + 8, id)
     __setv(h + 16, ops)
@@ -1086,7 +1315,12 @@ fn __perform(name: String, args: int) -> int {
                 let arm = __getv(__payload(__getv(h + 32)) + 8 + k * 16)
                 let saved = __load(st + 48)
                 __store(st + 48, __load(h))
+                // 腕を動かす間、外した with の記録と引数を GC の根に置く
+                let roots = __frame_push(2)
+                __setv(roots, __mkv(10, saved))
+                __setv(roots + 16, args)
                 let r = arm(args)
+                __store(st + 64, roots)
                 __store(st + 48, saved)
                 if __aborting() {
                     return
