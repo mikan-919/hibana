@@ -478,11 +478,20 @@ impl Gen<'_> {
     }
 
     // 関数の本体を、別の文の並びとして出力する
-    fn function(&mut self, params: &[String], body: &Block, is_async: bool) -> String {
+    fn function(
+        &mut self,
+        params: &[String],
+        body: &Block,
+        is_async: bool,
+        captures: &[(String, String)],
+    ) -> String {
         let saved = std::mem::take(&mut self.lines);
         let saved_loop = self.loop_label.take();
         self.scopes.push(HashMap::new());
         let ps: Vec<String> = params.iter().map(|p| self.bind(p, false)).collect();
+        for (binding, snapshot) in captures {
+            self.push(format!("let {binding} = {snapshot};"));
+        }
         let r = self.block(body);
         self.push(format!("return {r};"));
         self.scopes.pop();
@@ -538,7 +547,7 @@ impl Gen<'_> {
         let mut s = format!(
             "const {} = {};\n",
             ident("f_", &f.name),
-            self.function(&params, &f.body, is_async(f))
+            self.function(&params, &f.body, is_async(f), &[])
         );
         // 効果の多相な関数は、効果の変数に Async が入った時に呼ぶ async 版も出力する（効果の変数を通した呼び出しを待つ）
         if is_poly(f) {
@@ -546,7 +555,7 @@ impl Gen<'_> {
             s += &format!(
                 "const {}$a = {};\n",
                 ident("f_", &f.name),
-                self.function(&params, &f.body, true)
+                self.function(&params, &f.body, true, &[])
             );
             self.variant = false;
         }
@@ -875,19 +884,26 @@ impl Gen<'_> {
                 "undefined".into()
             }
             Expr::Lam(params, _, _, body) => {
-                // 作った時の可変な変数の値を写し取る（インタプリタと同じ意味にする）
-                let muts: Vec<String> = self
+                // 作成時の値を保存し、呼び出すたびに可変な局所変数へ写す
+                let mut muts: Vec<String> = self
                     .scopes
                     .iter()
                     .flat_map(|s| s.values())
                     .filter(|(_, m)| *m)
                     .map(|(js, _)| js.clone())
                     .collect();
+                muts.sort_unstable();
+                let captures: Vec<_> = muts
+                    .into_iter()
+                    .map(|binding| {
+                        let snapshot = self.let_(format!("$sh({binding})"));
+                        (binding, snapshot)
+                    })
+                    .collect();
                 let params: Vec<String> = params.iter().map(|p| p.0.to_string()).collect();
                 let a = self.waits(body.id);
-                let f = self.function(&params, body, a);
-                let shared: Vec<String> = muts.iter().map(|m| format!("$sh({m})")).collect();
-                self.let_(format!("(({}) => {f})({})", muts.join(", "), shared.join(", ")))
+                let f = self.function(&params, body, a, &captures);
+                self.let_(f)
             }
             Expr::Handle(node, body, arms) => {
                 // 腕は無名関数にする。本体はその場に書き、exit した腕の値を例外で受け取る

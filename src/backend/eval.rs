@@ -166,11 +166,42 @@ fn quote_string(s: &str) -> String {
     out
 }
 
+fn show_number(n: f64) -> String {
+    // JSON の数値変換で最少桁と等距離での偶数丸めを得て、小数点の位置を調整する。
+    let Some(number) = serde_json::Number::from_f64(n) else {
+        return n.to_string();
+    };
+    let mut text = number.to_string();
+    let Some((mantissa, exponent)) = text.split_once('e') else {
+        if text.ends_with(".0") {
+            text.truncate(text.len() - 2);
+        }
+        return text;
+    };
+
+    let (sign, mantissa) = mantissa.strip_prefix('-').map_or(("", mantissa), |m| ("-", m));
+    let exponent: i32 = exponent.parse().expect("JSON の指数は整数");
+    let point = mantissa.find('.').unwrap_or(mantissa.len()) as i32 + exponent;
+    let digits = mantissa.replace('.', "");
+    let digits = digits.trim_end_matches('0');
+    if point <= 0 {
+        format!("{sign}0.{}{digits}", "0".repeat((-point) as usize))
+    } else {
+        let point = point as usize;
+        if point >= digits.len() {
+            format!("{sign}{digits}{}", "0".repeat(point - digits.len()))
+        } else {
+            let (whole, fraction) = digits.split_at(point);
+            format!("{sign}{whole}.{fraction}")
+        }
+    }
+}
+
 fn show(v: &Value) -> String {
     match v {
         Value::Arr(xs) => format!("[{}]", xs.iter().map(show).collect::<Vec<_>>().join(", ")),
         Value::Int(n) => n.to_string(),
-        Value::Num(n) => n.to_string(),
+        Value::Num(n) => show_number(*n),
         Value::Bool(b) => b.to_string(),
         Value::Str(s) => quote_string(s),
         Value::Ty(t) => t.to_string(),
@@ -789,16 +820,8 @@ impl<'a> Interp<'a> {
                 v
             } else if name == "put" {
                 let s = match &vs[0] {
-                    Value::Int(n) => n.to_string(),
-                    Value::Num(n) => n.to_string(),
-                    Value::Bool(b) => b.to_string(),
-                    Value::Unit => "()".into(),
                     Value::Str(s) => s.to_string(),
-                    Value::Ty(t) => t.to_string(),
-                    Value::Arr(_) | Value::Data(_) | Value::Fn(_) | Value::Ref(_) | Value::Task(_) => {
-                        self.show(&vs[0])
-                    }
-                    Value::Syn(s) => format!("{:?}", s.node.strip()),
+                    v => self.show(v),
                 };
                 writeln!(self.runtime.out.borrow_mut(), "{s}").map_err(|e| Flow::Error(e.to_string(), None))?;
                 Value::Unit

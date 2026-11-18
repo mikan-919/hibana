@@ -103,6 +103,40 @@ fn reported<'a>(success: bool, stdout: &'a str, report: &'a str) -> Expected<'a>
 }
 
 #[test]
+fn closure_assignments() {
+    let source = r#"
+fn main() {
+    let mut n = 0
+    let mut values = [0]
+    let mut shared = new_ref(0)
+    let original = shared
+    let next = fn() {
+        n = n + 1
+        values = push(values, n)
+        write(shared, read(shared) + 1)
+        put(n)
+        put(values)
+        put(read(shared))
+    }
+    n = 10
+    values = push(values, n)
+    shared = new_ref(10)
+    next()
+    next()
+    put(n)
+    put(values)
+    put(read(shared))
+    put(read(original))
+}
+"#;
+    check_backends(
+        "closure-assignments",
+        source,
+        success("1\n[0, 1]\n1\n1\n[0, 1]\n2\n10\n[0, 10]\n10\n2\n"),
+    );
+}
+
+#[test]
 fn fractional_exponent() {
     for (name, expression) in [("literal", "2.0 ** 0.5"), ("computed", "2 ** (1.0 / 2)")] {
         check_backends(
@@ -225,6 +259,39 @@ fn main() {
     let quoted = r#"[["日本語🍵\u0000\u0001\b\t\n\u000b\f\r\u001f\"\\\u007f\u0080\u009f"#;
     let output = format!("{quoted}\u{a0}\"]]\n\t\n");
     check_backends("nested-string-display", source, success(&output));
+}
+
+#[test]
+fn number_display_and_json_round_trip() {
+    let source = r#"
+use std -> *
+fn main() {
+    for n in [1000000000000000.25, -1000000000000000.25, 1000000000000000.75, -0.0, 100000000000000000000000.0] {
+        put(n)
+        put(n.to_string())
+        let json = stringify(JNum(n))
+        put(json)
+        match parse_json(json) {
+            Some(JNum(parsed)) -> {
+                put(parsed == n)
+                put([parsed])
+            }
+            _ -> panic('JNum が必要')
+        }
+    }
+}
+"#;
+    check_backends(
+        "number_display",
+        source,
+        success(concat!(
+            "1000000000000000.2\n1000000000000000.2\n1000000000000000.2\ntrue\n[1000000000000000.2]\n",
+            "-1000000000000000.2\n-1000000000000000.2\n-1000000000000000.2\ntrue\n[-1000000000000000.2]\n",
+            "1000000000000000.8\n1000000000000000.8\n1000000000000000.8\ntrue\n[1000000000000000.8]\n",
+            "-0\n-0\n-0.0\ntrue\n[-0]\n",
+            "100000000000000000000000\n100000000000000000000000\n100000000000000000000000.0\ntrue\n[100000000000000000000000]\n",
+        )),
+    );
 }
 
 #[test]
