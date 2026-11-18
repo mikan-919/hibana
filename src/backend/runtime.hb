@@ -18,9 +18,9 @@
 // GC は利用者の関数の入口とループの先頭（ir.rs の安全な位置）でだけ動く。ランタイムの関数の中の生の位置は、
 // GC の間に生きていない。ランタイムの関数から利用者の関数を呼ぶ所（__all・__perform）は、持っている値をシャドースタックに置く
 
-// ランタイムの状態は __static() から 176 バイト:
+// ランタイムの状態は __static() から 184 バイト:
 //   +0 確保の次の位置、+8 区画の終わり、+16 実行時エラーの文字列（WASM だけ使う）
-//   +24 中断の行き先（with の番号。0 は中断していない）、+32 中断で with に渡す値
+//   +24 中断の行き先（with の番号。0 は中断していない、-1 は panic）、+32 中断で運ぶ値
 //   +48 処理中のいちばん内側の with、+56 最後に付けた with の番号
 //   +64 シャドースタックの先頭、+72 その始まり、+80 その終わり
 //   +88 確保した区画の並び、+96 前回の GC の後に確保したバイト数、+104 GC を始めるバイト数
@@ -29,6 +29,7 @@
 //   +128 印を付ける作業の並び、+136 その容量
 //   +144 標準入力の区画（__input）
 //   +152 非同期の仕事の並びの先頭（値）、+168 その末尾（__enqueue）
+//   +176 コルーチンを実行中なら 1（panic を Promise の失敗にする）
 fn __alloc(n: int) -> int {
     let st = __static()
     if __load(st + 120) == 0 {
@@ -944,6 +945,10 @@ fn __put(v: int) {
 }
 
 fn __panic(msg: String) {
+    if __load(__static() + 176) != 0 {
+        __exit(0 - 1, msg)
+        return
+    }
     __die(msg)
 }
 
@@ -1201,7 +1206,7 @@ fn __write(r: int, x: int) {
 // 非同期（Async）。JavaScript の Promise とマイクロタスクと同じ順で動かす（js.rs の async 関数・await・$all・$spawn・$then・$aop）。
 // Promise は型の番号 11 の値で、構造体と同じ形 [状態][3][値][反応の先頭][反応の末尾]。状態は 0 未完了・1 値・2 失敗。
 // 反応と仕事は構造体 [種類][6][次][a][b][c][結果の状態][結果の値]。Promise が決まると反応を仕事の並び（+152 から）の末尾に移す。
-// 失敗の値は、with を抜ける中断 [-3][2][行き先の with の番号][値]。
+// 失敗の値は中断 [-3][2][行き先の番号][値]。panic は行き先 -1 とメッセージを持つ。
 // 仕事の種類: 1 コルーチンの再開、2 thenable（Promise で解決した Promise）、3 a を同じ結果で解決、4 all の 1 要素、
 // 5 $all の await の続き（with の並びを b に戻して a を解決）、6 spawn の終わり、7 then、8 $aop の await の続き
 // コルーチンの区画は関数の値 [関数][数][Promise][状態の番号][再開の状態][再開の値][局所変数...]（ir.rs の Ctx::coroutine）
@@ -1304,6 +1309,14 @@ fn __abort_again(info: int) {
     __setv(st + 32, __getv(p + 32))
 }
 
+fn __is_panic(info: int) -> bool {
+    __payload(__getv(__payload(info) + 16)) == 0 - 1
+}
+
+fn __panic_message(info: int) -> String {
+    __getv(__payload(info) + 32)
+}
+
 // コルーチンの区画。局所変数 n 個の分を含む
 fn __co_new(code: int, n: int) -> int {
     let p = __fn_new(code, 4 + n)
@@ -1315,6 +1328,15 @@ fn __co_new(code: int, n: int) -> int {
 
 fn __co_promise(frame: int) -> int {
     __getv(__payload(frame) + 16)
+}
+
+// 最初の実行と再開は同じ入口を通し、その間の panic を失敗として運ぶ
+fn __co_step(frame: int) {
+    let at = __static() + 176
+    let saved = __load(at)
+    __store(at, 1)
+    frame()
+    __store(at, saved)
 }
 
 // await。v が決まったら、コルーチンを再開する仕事を足す
@@ -1343,7 +1365,7 @@ fn __co_return(frame: int, v: int) {
 }
 
 // 仕事を 1 つ動かす。仕事が無ければ false
-// ponytail: 仕事の中の実行時エラー（__die）はその場で終える。JavaScript は失敗を出して残りの仕事を続ける。続けるには __die を Promise の失敗にする
+// ponytail: 算術などの __die はその場で終える。続けるには、そのエラーも中断として呼び出し元に伝える
 fn __run_job() -> bool {
     let st = __static()
     let head = __getv(st + 152)
@@ -1366,7 +1388,7 @@ fn __run_job() -> bool {
         let p = __payload(a)
         __setv(p + 48, __mkv(1, status))
         __setv(p + 64, v)
-        a()
+        __co_step(a)
     } else if kind == 2 {
         __react(b, __job_new(3, a, __mkv(0, 0), __mkv(0, 0)))
     } else if kind == 3 {
@@ -1397,16 +1419,20 @@ fn __run_job() -> bool {
     } else if kind == 6 {
         let task = __payload(a)
         __setv(task + 16, __mkv(1, status))
-        if status == 1 {
-            __setv(task + 32, v)
-        } else {
-            __write_str(2, '実行時エラー: spawn した処理が with を抜けずに中断した\n')
+        __setv(task + 32, v)
+        if status == 2 {
+            let message = if __is_panic(v) { __panic_message(v) } else { 'spawn した処理が with を抜けずに中断した' }
+            __write_str(2, __cat(__cat('実行時エラー: ', message), '\n'))
         }
         __resolve(b, __mkv(0, 0))
     } else if kind == 7 {
         let task = __payload(a)
         if __payload(__getv(task + 16)) == 1 {
+            // then は同期関数。wait() がコルーチン内から仕事を進める時も同じ
+            let saved = __load(st + 176)
+            __store(st + 176, 0)
             b(__getv(task + 32))
+            __store(st + 176, saved)
         }
     } else if kind == 8 {
         __store(st + 48, __payload(b))
@@ -1435,7 +1461,11 @@ fn __finish_entry(v: int) -> int {
         let p = __payload(v)
         let status = __load(p)
         if status == 0 { __die('非同期処理が完了しなかった') }
-        if status == 2 { __die('非同期処理が中断した') }
+        if status == 2 {
+            let info = __getv(p + 16)
+            if __is_panic(info) { __die(__panic_message(info)) }
+            __die('非同期処理が中断した')
+        }
         return __getv(p + 16)
     }
     v
@@ -1504,14 +1534,27 @@ fn __task_done(t: int) -> bool {
 }
 
 fn __task_value(t: int) -> int {
-    __getv(__payload(t) + 32)
+    if __task_done(t) { return __getv(__payload(t) + 32) }
+    __mkv(0, 0)
 }
 
 // wait。終わるまで仕事を動かす（ネイティブだけ）
 fn __task_wait(t: int) -> int {
-    while __payload(__getv(__payload(t) + 16)) == 0 && __run_job() {
+    let st = __static()
+    let h = __load(st + 48)
+    let roots = __frame_push(2)
+    __setv(roots, t)
+    __setv(roots + 16, __mkv(10, h))
+    let task = __payload(t)
+    while __payload(__getv(task + 16)) == 0 && __run_job() {
     }
-    __getv(__payload(t) + 32)
+    __store(st + 64, roots)
+    __store(st + 48, h)
+    if __payload(__getv(task + 16)) == 2 {
+        let info = __getv(task + 32)
+        if __is_panic(info) { __panic(__panic_message(info)) }
+    }
+    __task_value(t)
 }
 
 // 構築子と関数の値

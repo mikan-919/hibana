@@ -136,13 +136,14 @@ fn runtime_integer_refinement_evaluates_an_async_argument_once() {
 }
 
 // WASM とネイティブの非同期は、JavaScript の Promise とマイクロタスクと同じ順で動く（src/backend/ir/coroutine.rs）。
-fn ir_matches_javascript(name: &str, source: &str) -> Vec<u8> {
+fn ir_matches_javascript(name: &str, source: &str, panic: Option<&str>) -> Vec<u8> {
     let dir = std::env::temp_dir().join(format!("hibana-async-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let js = dir.join("main.cjs");
     std::fs::write(&js, hibana::to_js(source).unwrap()).unwrap();
     let want = Command::new("node").arg(&js).output().unwrap();
     assert!(want.status.success(), "{}", String::from_utf8_lossy(&want.stderr));
+    assert_panic_report(&want.stderr, panic, "JavaScript");
     let web = hibana::to_web(source, &["main".into()]).unwrap();
     std::fs::write(dir.join("main.wasm"), web.wasm).unwrap();
     std::fs::write(dir.join("glue.mjs"), web.javascript).unwrap();
@@ -151,6 +152,7 @@ fn ir_matches_javascript(name: &str, source: &str) -> Vec<u8> {
     let wasm = Command::new("node").arg(&runner).output().unwrap();
     assert!(wasm.status.success(), "{}", String::from_utf8_lossy(&wasm.stderr));
     assert_eq!(String::from_utf8_lossy(&wasm.stdout), String::from_utf8_lossy(&want.stdout), "WASM: {name}");
+    assert_panic_report(&wasm.stderr, panic, "WASM");
     #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -160,16 +162,70 @@ fn ir_matches_javascript(name: &str, source: &str) -> Vec<u8> {
         let native = Command::new(&exe).output().unwrap();
         assert!(native.status.success(), "{}", String::from_utf8_lossy(&native.stderr));
         assert_eq!(String::from_utf8_lossy(&native.stdout), String::from_utf8_lossy(&want.stdout), "ネイティブ: {name}");
+        assert_panic_report(&native.stderr, panic, "ネイティブ");
     }
     std::fs::remove_dir_all(dir).unwrap();
     want.stdout
 }
 
+fn assert_panic_report(stderr: &[u8], panic: Option<&str>, backend: &str) {
+    let stderr = String::from_utf8_lossy(stderr);
+    let lines: Vec<_> = stderr.lines().collect();
+    if let Some(message) = panic {
+        assert_eq!(lines.len(), 1, "{backend}: {stderr}");
+        let expected = format!("実行時エラー: {message}");
+        assert_eq!(lines[0].split('（').next(), Some(expected.as_str()), "{backend}");
+    } else {
+        assert!(lines.is_empty(), "{backend}: {stderr}");
+    }
+}
+
 fn all_backends_match_javascript(name: &str, source: &str) {
-    let want = ir_matches_javascript(name, source);
+    let want = ir_matches_javascript(name, source, None);
     let mut output = Vec::new();
     hibana::run(source, &mut output).unwrap();
     assert_eq!(String::from_utf8_lossy(&output), String::from_utf8_lossy(&want), "インタプリタ: {name}");
+}
+
+#[test]
+fn spawned_panic_reports_once_and_other_tasks_continue() {
+    let source = r#"
+use std -> *
+
+fn step() -> int with Async { 42 }
+fn fail_in_helper() -> int { panic('タスクの失敗') }
+fn fail_later() -> int with Async {
+    step().await
+    fail_in_helper()
+}
+trait Answer {
+    fn answer(self) -> int
+}
+fn bad() -> int with Async {
+    let n = with Answer(fn() { 1 }) {
+        fail_later().await + answer()
+    }
+    put('失敗後の本体')
+    n
+}
+fn good() -> int with Async { step().await }
+
+fn main() {
+    spawn(bad()).then(fn(n) { put(n) })
+    spawn(good()).then(fn(n) { put(n) })
+    put('main')
+}
+"#;
+    let want = ir_matches_javascript("panic", source, Some("タスクの失敗"));
+    assert_eq!(want, b"main\n42\n");
+
+    let path = std::env::temp_dir().join(format!("hibana-async-panic-{}.hb", std::process::id()));
+    std::fs::write(&path, source).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_hibana")).arg(&path).output().unwrap();
+    std::fs::remove_file(path).unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(output.stdout, want);
+    assert_panic_report(&output.stderr, Some("タスクの失敗"), "インタプリタ");
 }
 
 #[test]
@@ -381,5 +437,5 @@ fn main() with Async {
     put(len(tasks))
     spawn(piece(0)).then(fn(s) { put(read(total)) })
 }
-"#.replace("0..3000", "0..20000"));
+"#.replace("0..3000", "0..20000"), None);
 }

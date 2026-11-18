@@ -28,6 +28,9 @@ const RUNTIME: &str = include_str!("runtime.hb");
 
 mod coroutine;
 
+// runtime.hb の __static の大きさ
+pub(crate) const STATIC_BYTES: usize = 184;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub(crate) functions: Vec<Function>,
@@ -413,6 +416,8 @@ struct Ctx<'a> {
     lambdas: usize,
     // 型検査が記録した、JavaScript で待つ呼び出しと async にする本体（js.rs と同じ所で待つ）
     info: &'a crate::typeck::Info,
+    // コルーチンに panic を伝えるため、要求のない関数の呼び出しも検査する
+    panic_checks: bool,
 }
 
 pub fn lower(p: &parser::Program) -> R<Program> {
@@ -453,6 +458,7 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>, info: &cr
         made: Vec::new(),
         lambdas: 0,
         info,
+        panic_checks: !info.awaits.is_empty() || p.fns.iter().any(|f| has_async(&f.effects)),
     };
     if exports.is_none() && (!p.datas.is_empty() || !p.tests.is_empty()) {
         return Err("IR は型宣言とテスト宣言に未対応".into());
@@ -779,7 +785,7 @@ impl<'a> Ctx<'a> {
 }
 
 // 利用者の関数を呼ぶランタイムの関数。中で GC が動きうる
-const CALLBACKS: &[&str] = &["__all", "__perform", "__spawn", "__task_then"];
+const CALLBACKS: &[&str] = &["__all", "__perform", "__spawn", "__task_then", "__task_wait", "__co_step"];
 
 // 前回の GC の後に確保したバイト数が上限を超えていれば GC を動かす。安全な位置（関数の入口とループの先頭）に置く
 fn poll() -> Stmt {
@@ -1431,8 +1437,7 @@ impl Lower<'_, '_> {
                 full.append(&mut args);
                 args = full;
             }
-            // 効果の無い関数は中断しない。async 関数は呼んで待つ。要求の多相な関数を Async で使う所は、async 版を呼んで待つ（js.rs と同じ）
-            let effects = !f.effects.is_empty();
+            // async 関数は呼んで待つ。要求の多相な関数を Async で使う所は、async 版を呼んで待つ（js.rs と同じ）
             let poly = !src.runtime
                 && id.is_some_and(|id| self.cx.info.async_inst.contains(&id) || (self.variant && is_poly(f) && self.cx.info.var_awaits.contains(&id)));
             if poly {
@@ -1444,7 +1449,8 @@ impl Lower<'_, '_> {
                 let c = self.await_(c);
                 return Ok(self.checked(c));
             }
-            return Ok(if effects { self.checked(c) } else { c });
+            // ponytail: 非同期処理があるプログラムでは、要求の無い関数の呼び出しも検査する。負荷があれば、中断しうる関数を呼び出しの関係から絞る
+            return Ok(if self.cx.panic_checks || !f.effects.is_empty() { self.checked(c) } else { c });
         }
         if matches!(n.as_str(), "Vec" | "Type" | "Ref" | "Async") || self.cx.types.contains(n.as_str()) {
             return Ok(mkv(TY, Expr::Str(n.to_string())));
@@ -1458,7 +1464,14 @@ impl Lower<'_, '_> {
             }
             let c = Expr::Call(rt, args);
             // all は Promise.all を待つ async 関数（js.rs の $all）
-            return Ok(if n == "all" && !self.raw { let c = self.await_(c); self.checked(c) } else { c });
+            return Ok(match n.as_str() {
+                "all" if !self.raw => {
+                    let c = self.await_(c);
+                    self.checked(c)
+                }
+                "panic" | "task_wait" if self.cx.panic_checks => self.checked(c),
+                _ => c,
+            });
         }
         // 変換の中で作る関数（__ctor_name など）。無ければ作る時に誤りにする
         if self.raw && n.starts_with("__") {

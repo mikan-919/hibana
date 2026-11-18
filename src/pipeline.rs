@@ -258,10 +258,14 @@ export async function instantiate(bytes, imports = {}) {
     if (typeof callback !== "function") throw new TypeError("外部関数が必要: " + name);
     host[name] = (...args) => encode(callback(...args.map((value, i) => decode(value, params[i]))), result);
   }
-  // put の 1 行と現在時刻。1 行は imports.hibana.print（無ければ console.log）に渡す
+  // 標準出力と標準エラーは別の関数に渡す
   const print = imports.hibana?.print ?? console.log;
+  const error = imports.hibana?.error ?? console.error;
   const hibana = {
-    write: (fd, ptr, len) => print(decoder.decode(new Uint8Array(instance.exports.memory.buffer, Number(ptr), Number(len))).replace(/\n$/, "")),
+    write: (fd, ptr, len) => {
+      const output = Number(fd) === 2 ? error : print;
+      output(decoder.decode(new Uint8Array(instance.exports.memory.buffer, Number(ptr), Number(len))).replace(/\n$/, ""));
+    },
     now_ms: () => BigInt(Date.now()),
     read: (fd, ptr, len) => {
       const target = new Uint8Array(instance.exports.memory.buffer, Number(ptr), Number(len));

@@ -369,7 +369,7 @@ impl Ctx<'_> {
         for i in 0..f.params {
             body.extend(setv(cap(frame, 4 + i), Expr::Local(i)));
         }
-        body.push(Stmt::Eval(call(&step_name, vec![Expr::Local(frame)])));
+        body.push(Stmt::Eval(call("__co_step", vec![Expr::Local(frame)])));
         body.push(Stmt::Return(call("__co_promise", vec![Expr::Local(frame)])));
         let mut entry = Function { locals: f.params + 1, body, ..f };
         self.shadow(&mut entry);

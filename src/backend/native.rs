@@ -108,7 +108,7 @@ pub fn emit(program: &Program) -> R<Vec<u8>> {
         syscall: n,
     };
     // ランタイムの状態（runtime.hb の __static）。最初の確保で mmap する
-    g.datas.push(vec![0; 176]);
+    g.datas.push(vec![0; ir::STATIC_BYTES]);
     for s in ["実行時エラー: ", "\n"] {
         g.literal(s);
     }

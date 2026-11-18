@@ -12,8 +12,8 @@ use wasm_encoder::{
 
 const STATIC: i64 = 8;
 const FAIL_AT: i64 = 24;
-// __static は 176 バイト（runtime.hb の先頭）。文字列定数はその後ろに置く
-const LITERALS: u32 = STATIC as u32 + 176;
+// 文字列定数は __static の後ろに置く
+const LITERALS: u32 = STATIC as u32 + ir::STATIC_BYTES as u32;
 // シャドースタックの大きさ。局所変数 1 つに 16 バイト使う
 // ponytail: 固定の 4 MB。再帰が深いと __frame_push が止める。足りなければヒープから大きい区画を取り直す
 const SHADOW: u64 = 4 << 20;
@@ -274,7 +274,7 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
             I::I64Store(mem(0, 3)),
         ];
         reset.extend([I::I32Const(STATIC as i32 + 64), I::I64Const(shadow as i64), I::I64Store(mem(0, 3))]);
-        for k in [24, 32, 40, 48, 56, 88, 96, 104, 120, 128, 136, 152, 160, 168] {
+        for k in [24, 32, 40, 48, 56, 88, 96, 104, 120, 128, 136, 152, 160, 168, 176] {
             reset.extend([I::I32Const(STATIC as i32 + k), I::I64Const(0), I::I64Store(mem(0, 3))]);
         }
         reset.push(I::End);
@@ -297,9 +297,10 @@ pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> 
     init.extend((pages * 65536).to_le_bytes());
     // 実行時エラーの文字列、中断、処理中の with、シャドースタック、GC の状態は 0 から始める。+112 は文字列定数の終わり
     init.extend([0u8; 48]);
-    for v in [shadow, shadow, shadow + SHADOW, 0, 0, 0, heap, 0, 0, 0, input, 0, 0, 0] {
+    for v in [shadow, shadow, shadow + SHADOW, 0, 0, 0, heap, 0, 0, 0, input, 0, 0, 0, 0] {
         init.extend(v.to_le_bytes());
     }
+    debug_assert_eq!(init.len(), ir::STATIC_BYTES);
     init.extend(data);
     let mut datas = DataSection::new();
     datas.active(0, &ConstExpr::i32_const(STATIC as i32), init);
@@ -867,6 +868,8 @@ process.stdout.write(Buffer.from(x.memory.buffer, p + 8, n));
             ("fn f(a: int, b: int) -> int { a + b } fn main() { put(f(9007199254740991, 1)) }", "オーバーフロー"),
             ("fn f(a: int, b: int) -> int { a ** b } fn main() { put(f(2, -1)) }", "負の指数"),
             ("fn f(a: int, b: int) -> int { a ** b } fn main() { put(f(2, 63)) }", "オーバーフロー"),
+            ("fn main() { panic('同期の失敗') }", "同期の失敗"),
+            ("fn work() with Async { panic('非同期の失敗') } fn main() with Async { work().await }", "非同期の失敗"),
         ] {
             let result = node(&crate::to_wasm(src).unwrap(), script);
             assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
