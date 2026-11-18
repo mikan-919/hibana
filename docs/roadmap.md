@@ -4,11 +4,9 @@
 
 同期の `main` が `spawn`（非同期処理を開始する関数）で処理を始めてから失敗した場合も、開始済みの処理と `then`（成功後に呼ぶ関数の登録）を実行します。4つの実行方式で `42` と `43` を出力し、`then` の関数も失敗したときは `main` の失敗を1回報告して終了することを確認しました。WebAssembly の接続コードは出力後に例外を投げ、同じインスタンスで次の呼び出しを実行できます。[非同期の仕様](spec.md#非同期) [比較テスト](../tests/backend_parity.rs) [WebAssembly のテスト](../tests/web.rs)
 
-## 外部関数から受け取る真偽値と文字列を検査する
+## 完了：外部関数から受け取る真偽値と文字列を検査する
 
-`extern`（外部関数の宣言）で `bool` を返すと宣言した関数から JavaScript の数値 `1` を返すと、JavaScript 出力は `1` を表示し、WebAssembly の接続コードは「真偽値が必要」で停止します。`String` を返すと宣言した関数から数値 `7` を返す場合も、JavaScript 出力は処理を続け、WebAssembly は「文字列が必要」で停止します。[JavaScript / TypeScript との連携](spec.md#34-javascript--typescript-のモジュール) [WebAssembly の接続](wasm.md#javascript-との接続)
-
-JavaScript 出力でも、外部関数の戻り値と、外部関数から hibana の関数を呼ぶときの引数を宣言どおりに検査します。真偽値・文字列と、それらを含む配列の要素や構造体のフィールドを対象にします。JavaScript と WebAssembly で、同じ不正な戻り値を拒否し、正常な値では処理が続くことを確かめます。JavaScript の非同期の戻り値と、外部関数に渡した hibana の関数の引数もテストし、境界の規則を仕様に記載します。[JavaScript の変換](../src/backend/js.rs) [WebAssembly のテスト](../tests/web.rs)
+JavaScript 出力で、`extern`（外部関数の宣言）が指定した真偽値と文字列を検査します。単独の値、配列の要素、構造体のフィールドについて、JavaScript と WebAssembly で型の異なる戻り値を拒否し、宣言どおりの値を受け取ると処理が続くことを確認しました。JavaScript の非同期の戻り値と、外部関数に渡した hibana の関数の引数も検査します。[JavaScript / TypeScript との連携](spec.md#34-javascript--typescript-のモジュール) [境界のテスト](../tests/web.rs)
 
 ## 関数型と細分化型を含む要求を推論する
 

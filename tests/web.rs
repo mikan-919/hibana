@@ -295,3 +295,100 @@ assert.throws(() => api.flip({ x: 1, y: Infinity }), TypeError);
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn host_return_types_match_in_javascript_and_wasm() {
+    let source = r#"
+struct Value { labels: Vec<String>, enabled: bool }
+extern '' {
+    fn flag() -> bool
+    fn label() -> String
+    fn value() -> Value
+}
+fn main() {
+    put(flag())
+    put(label())
+    let v = value()
+    put(v.labels)
+    put(v.enabled)
+}
+"#;
+    let js = hibana::to_js(source).unwrap();
+    let web = hibana::to_web(source, &["main".into()]).unwrap();
+    let dir = std::env::temp_dir().join(format!("hibana-web-host-types-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("web.wasm"), web.wasm).unwrap();
+    std::fs::write(dir.join("web.mjs"), web.javascript).unwrap();
+    let web_runner = r#"
+import { readFileSync } from 'node:fs';
+import { instantiate } from './web.mjs';
+const api = await instantiate(readFileSync('web.wasm'), { hibana_host: { flag, label, value } });
+try { api.main(); } catch (e) { console.error(e.message); process.exitCode = 1; }
+"#;
+    for (flag, label, value, expected, error) in [
+        ("false", "'ねこ'", "{ labels: ['a', ''], enabled: true }", "false\nねこ\n[\"a\", \"\"]\ntrue\n", None),
+        ("1", "'ねこ'", "null", "", Some("真偽値が必要")),
+        ("false", "7", "null", "false\n", Some("文字列が必要")),
+        ("false", "'ねこ'", "{ labels: ['a', 7], enabled: true }", "false\nねこ\n", Some("文字列が必要")),
+        ("false", "'ねこ'", "{ labels: [], enabled: 'true' }", "false\nねこ\n", Some("真偽値が必要")),
+        ("false", "'ねこ'", "{ labels: 'a', enabled: true }", "false\nねこ\n", Some("配列が必要")),
+    ] {
+        let host = format!("globalThis.flag = () => {flag}; globalThis.label = () => {label}; globalThis.value = () => ({value});");
+        for runner in [&js, web_runner] {
+            let output = Command::new("node")
+                .args(["--input-type=module", "-e", &format!("{host}\n{runner}")])
+                .current_dir(&dir)
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(output.status.success(), error.is_none(), "{host}: {stderr}");
+            assert_eq!(output.stdout, expected.as_bytes(), "{host}");
+            if let Some(error) = error {
+                assert!(stderr.contains(error), "{host}: {stderr}");
+            } else {
+                assert!(stderr.is_empty(), "{host}: {stderr}");
+            }
+        }
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn javascript_checks_callback_arguments_and_async_host_results() {
+    let source = r#"
+type Label = String
+struct Payload { enabled: bool, labels: Vec<Label> }
+extern '' {
+    fn invoke(f: (Payload) -> String) -> String
+    fn invoke_async(f: (bool) -> String with Async) -> String with Async
+}
+fn label(p: Payload) -> String { if p.enabled && len(p.labels) > 0 { p.labels[0] } else { 'off' } }
+fn status(ok: bool) -> String with Async { if ok { 'on' } else { 'off' } }
+fn main() with Async {
+    put(invoke(label))
+    put(invoke_async(status).await)
+}
+"#;
+    let js = hibana::to_js(source).unwrap();
+    for (payload, async_call, expected, error) in [
+        ("{ enabled: true, labels: ['ok'] }", "f(false)", "ok\noff\n", None),
+        ("{ enabled: 1, labels: [] }", "f(false)", "", Some("真偽値が必要")),
+        ("{ enabled: false, labels: [7] }", "f(false)", "", Some("文字列が必要")),
+        ("{ enabled: true, labels: ['ok'] }", "f(1)", "ok\n", Some("真偽値が必要")),
+        ("{ enabled: true, labels: ['ok'] }", "7", "ok\n", Some("文字列が必要")),
+    ] {
+        let host = format!("globalThis.invoke = f => f({payload}, '余分な引数'); globalThis.invoke_async = async f => {async_call};");
+        let output = Command::new("node")
+            .args(["-e", &format!("{host}\n{js}")])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.success(), error.is_none(), "{host}: {stderr}");
+        assert_eq!(output.stdout, expected.as_bytes(), "{host}");
+        if let Some(error) = error {
+            assert!(stderr.contains(error), "{host}: {stderr}");
+        } else {
+            assert!(stderr.is_empty(), "{host}: {stderr}");
+        }
+    }
+}

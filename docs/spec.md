@@ -125,8 +125,9 @@ fn main() {
 | TypeScript の型 | hibana の型 | 境界での変換 |
 |---|---|---|
 | `number` | `number` | 有限な JavaScript の number（非有限な値は実行時エラー） |
-| `string` `boolean` `void` | `String` `bool` `unit` | そのまま |
-| `T[]` `Array<T>` | `Vec<T>` | 要素ごと |
+| `string` `boolean` | `String` `bool` | JavaScript の文字列と真偽値 |
+| `void` | `unit` | 戻り値を捨てる |
+| `T[]` `Array<T>` | `Vec<T>` | JavaScript の配列を要素ごとに変換 |
 | `(x: A) => B` | `(A) -> B` | 引数と戻り値を変換するよう包む |
 | `interface P { ... }`、`type P = { ... }`、オブジェクト型 | 構造体 | 同じフィールド名のオブジェクト |
 | `Promise<T>`（戻り値） | `T` と `with Async`（3.5 節） | 呼ぶと `Async<T>` の値になり、`.await` で Promise を待つ |
@@ -135,6 +136,7 @@ fn main() {
 
 - ジェネリクスや可変長引数を持つ関数、メソッドは読めないので無視します。
 - 内部では、型宣言から `extern '経路' { fn 名前(引数) -> 型 }` の宣言を作って使います。型宣言の無いモジュールには、この `extern` を直接書くこともできます。
+- JavaScript から受け取る `bool` と `String` は、宣言した型と異なる場合に実行時エラーになります。配列の要素と構造体のフィールドも検査します。この規則は外部関数の戻り値、Promise が返す値、外部関数から呼び出す hibana の関数への引数に適用します。
 
 ### 3.5 要求と提供（with）
 
