@@ -452,6 +452,37 @@ fn typescript_import_forms_remain_available() {
 }
 
 #[test]
+fn text_macro_preserves_apostrophes() {
+    let macros = r#"
+macro Label ('<' ~ 'label' '>' body:Text '</' ~ 'label' ~ '>') {
+    quote { ${str_of(body)} }
+}
+macro Literal ('literal' ~ value:String) {
+    quote { $value }
+}
+"#;
+    let files = Files::new("text-apostrophes", &[("labels.hb", macros)]);
+    let source = r#"use labels
+fn main() {
+    put(<label>Don't use this</label>)
+    put(literal'普通の文字列')
+    put('Don\'t')
+}
+"#;
+    assert_eq!(hibana::fmt::format(source).unwrap(), source);
+    let program = files.parse(source).unwrap();
+    let checked = pipeline::check(program, pipeline::Kind::Executable).unwrap();
+    let mut output = Vec::new();
+    hibana::eval::run(checked.program(), &mut output).unwrap();
+    assert_eq!(
+        String::from_utf8(output).unwrap(),
+        "Don't use this\n普通の文字列\nDon't\n"
+    );
+    let error = files.parse("fn main() { put('closed')\n put('unclosed) }").unwrap_err();
+    assert!(error.msg.contains("リテラルが閉じていない"), "{error}");
+}
+
+#[test]
 fn named_imports_resolve_nested_paths_and_file_local_dependencies() {
     let files = Files::new("named-imports", &[
         ("util.hb", "pub fn twice(n: int) -> int with {} { n * 2 }"),

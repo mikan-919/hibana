@@ -83,11 +83,14 @@ const PUNCTS: &[&str] = &[
     ";", ":", ".", "=", "<", ">", "+", "-", "*", "/", "%", "!", "@", "$", "~", "|", "?",
 ];
 
+#[derive(Clone, Copy)]
 struct Lx<'a> {
     src: &'a str,
     i: usize,
     line: usize,
     col: usize,
+    text_apostrophes: bool,
+    recovered_apostrophe: bool,
 }
 
 impl Lx<'_> {
@@ -207,16 +210,55 @@ impl Lx<'_> {
             Some(c) => Ok(c),
         }
     }
+
+    fn string(&mut self, quote: char) -> R<Tok> {
+        self.bump();
+        let mut value = String::new();
+        while self.peek() != Some(quote) {
+            value.push(self.quoted_char()?);
+        }
+        self.bump();
+        Ok(Tok::Str(value))
+    }
+
+    fn string_or_apostrophe(&mut self, quote: char) -> R<Tok> {
+        let mut end = *self;
+        let literal = end.string(quote);
+        // Text の本文にある Don't のような綴りを、別の語の先頭まで続く文字列として読まない。
+        if self.text_apostrophes
+            && quote == '\''
+            && self.src[..self.i].ends_with(char::is_alphanumeric)
+            && (literal.is_err() || end.peek().is_some_and(char::is_alphanumeric))
+        {
+            self.bump();
+            self.recovered_apostrophe = true;
+            return Ok(Tok::Raw(quote));
+        }
+        *self = end;
+        literal
+    }
 }
 
 pub fn lex(src: &str) -> R<Vec<Token>> {
+    lex_with_apostrophes(src, false).map(|(tokens, _)| tokens)
+}
+
+pub(crate) fn lex_text_apostrophes(src: &str) -> Option<Vec<Token>> {
+    let (tokens, recovered) = lex_with_apostrophes(src, true).ok()?;
+    recovered.then_some(tokens)
+}
+
+fn lex_with_apostrophes(src: &str, text_apostrophes: bool) -> R<(Vec<Token>, bool)> {
     let mut lx = Lx {
         src,
         i: 0,
         line: 1,
         col: 1,
+        text_apostrophes,
+        recovered_apostrophe: false,
     };
-    lex_from(&mut lx, false)
+    let tokens = lex_from(&mut lx, false)?;
+    Ok((tokens, lx.recovered_apostrophe))
 }
 
 // nested なら `...{式}...` の { の後から読み、対応する } で止まる
@@ -271,13 +313,7 @@ fn lex_from(lx: &mut Lx, nested: bool) -> R<Vec<Token>> {
                 None => Tok::Ident(w.to_string().into()),
             }
         } else if c == '\'' || c == '"' {
-            lx.bump();
-            let mut s = String::new();
-            while lx.peek() != Some(c) {
-                s.push(lx.quoted_char()?);
-            }
-            lx.bump();
-            Tok::Str(s)
+            lx.string_or_apostrophe(c)?
         } else if c == '`' {
             lx.bump();
             let mut parts = Vec::new();
