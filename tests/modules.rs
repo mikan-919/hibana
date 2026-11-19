@@ -185,6 +185,86 @@ fn trait_impl_overlaps_are_detected_across_modules() {
 }
 
 #[test]
+fn constrained_trait_impls_are_selected_independently_of_declaration_order() {
+    let traits = "trait Eligible { fn eligible(self) -> bool }\ntrait Describe { fn describe(self) -> String }";
+    let generic = "impl<A: Eligible> Describe for Vec<A> { fn describe(self) -> String { 'generic' } }";
+    let concrete = "impl Describe for Vec<int> { fn describe(self) -> String { 'int' } }";
+    let eligible = "impl Eligible for int { fn eligible(self) -> bool { true } }";
+    let call = "fn call<A: Describe>(x: A) -> String { x.describe() }";
+
+    for (first, second) in [(generic, concrete), (concrete, generic)] {
+        let source = format!("{traits}\n{first}\n{second}\n{call}\nfn main() {{ put(call([1]))\nput([1].describe()) }}");
+        let mut output = Vec::new();
+        hibana::run(&source, &mut output).unwrap();
+        assert_eq!(output, b"int\nint\n");
+
+        for invocation in ["call([1])", "[1].describe()"] {
+            let source = format!("{traits}\n{eligible}\n{first}\n{second}\n{call}\nfn main() {{ put({invocation}) }}");
+            let error = hibana::run(&source, &mut Vec::new()).unwrap_err();
+            assert!(error.msg.contains("トレイト実装が曖昧"), "{error}");
+            assert_eq!(error.span.unwrap().0, source.rfind(invocation).unwrap());
+            assert_eq!(error.related.len(), 2);
+            for candidate in [generic, concrete] {
+                let site = error.related.iter().find(|site| {
+                    site.span.start.offset == source.find(candidate).unwrap()
+                }).unwrap();
+                assert_eq!(site.source.as_ref().unwrap().id, error.source_id);
+            }
+        }
+    }
+}
+
+#[test]
+fn ambiguous_trait_impls_report_the_call_and_both_modules() {
+    let source = "use api\nuse generic\nuse concrete\nfn main() { put([1].describe()) }";
+    let files = Files::new("ambiguous-trait-impls", &[
+        ("api.hb", "pub trait Eligible { fn eligible(self) -> bool with {} }\npub trait Describe { fn describe(self) -> String with {} }\nimpl Eligible for int { fn eligible(self) -> bool { true } }"),
+        ("generic.hb", "use api -> {Eligible, Describe}\nimpl<A: Eligible> Describe for Vec<A> { fn describe(self) -> String { 'generic' } }"),
+        ("concrete.hb", "use api -> {Describe}\nimpl Describe for Vec<int> { fn describe(self) -> String { 'int' } }"),
+        ("main.hb", source),
+    ]);
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_hibana"))
+        .arg(files.0.join("main.hb"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1));
+    for expected in ["トレイト実装が曖昧", "main.hb", "generic.hb", "concrete.hb"] {
+        assert!(stderr.contains(expected), "{stderr}");
+    }
+}
+
+#[test]
+fn ambiguous_equality_is_reported_instead_of_using_builtin_equality() {
+    let source = "
+use std -> {Eq}
+impl Eq for Vec<int> { fn eq(self, other: Vec<int>) -> bool { false } }
+fn main() { put([1] == [1]) }
+";
+    let error = hibana::run(source, &mut Vec::new()).unwrap_err();
+    assert!(error.msg.contains("トレイト実装が曖昧"), "{error}");
+    assert_eq!(error.related.len(), 2);
+}
+
+#[test]
+fn the_expected_return_type_can_pick_a_trait_impl() {
+    let source = "
+trait Convert<T> { fn convert(self) -> T }
+impl Convert<String> for int { fn convert(self) -> String { 'text' } }
+impl Convert<bool> for int { fn convert(self) -> bool { true } }
+fn main() {
+    let text: String = 1.convert()
+    let flag: bool = 1.convert()
+    put(text)
+    put(flag)
+}
+";
+    let mut output = Vec::new();
+    hibana::run(source, &mut output).unwrap();
+    assert_eq!(output, b"text\ntrue\n");
+}
+
+#[test]
 fn disjoint_trait_impls_are_usable_together() {
     let source = r#"
 trait Mark<T> { fn mark(self) -> int }

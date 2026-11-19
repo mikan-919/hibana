@@ -5,7 +5,7 @@ mod effects;
 #[path = "proof.rs"]
 mod proof;
 use effects::{eff_key, flat, infer_effects, op_site};
-use traits::is_impl;
+use traits::{ImplLookup, is_impl};
 
 // 型検査。型別名と細分化型の条件を評価して比べる
 use crate::meta::{Kinds, Q};
@@ -931,6 +931,11 @@ impl Ck {
         if let Expr::At(sp, inner) = e {
             return self.check(inner, expected).map_err(|err| err.at(*sp));
         }
+        if matches!(e, Expr::Method(..))
+            || matches!(e, Expr::Id(_, inner) if matches!(**inner, Expr::Method(..)))
+        {
+            return self.check_method(e, expected);
+        }
         if let Expr::Id(_, inner) = e {
             return self.check(inner, expected);
         }
@@ -1051,6 +1056,15 @@ impl Ck {
         }
     }
 
+    // 深い式を検査する check のスタックに、メソッドの検査で使う値を置かない。
+    #[inline(never)]
+    fn check_method(&mut self, e: &mut Expr, expected: &V) -> R<()> {
+        let (id, expression) = e.identified();
+        let t = self.method(expression, id, Some(expected))?;
+        self.delay(id, expression);
+        self.subsume(e, &t, expected)
+    }
+
     fn expr(&mut self, e: &mut Expr) -> R<V> {
         if let Expr::At(sp, inner) = e {
             return self.expr(inner).map_err(|err| err.at(*sp));
@@ -1155,7 +1169,7 @@ impl Ck {
     }
 
     // x.f(a) は、x の型 T に属する関数 T::f を T::f(x, a) と呼ぶ
-    fn method(&mut self, e: &mut Expr, addr: NodeId) -> R<V> {
+    fn method(&mut self, e: &mut Expr, addr: NodeId, expected: Option<&V>) -> R<V> {
         let Expr::Method(mut x, f, xs) = std::mem::replace(e, Expr::Int(0)) else {
             unreachable!()
         };
@@ -1182,7 +1196,7 @@ impl Ck {
             self.bind(&tmp, t, v, false)?;
             *e = Expr::Method(Box::new(Expr::Var(tmp.clone())), f, xs);
             let (id, expression) = e.identified();
-            let r = self.method(expression, id)?;
+            let r = self.method(expression, id, expected)?;
             self.delay(id, expression);
             let inner = std::mem::replace(e, Expr::Int(0));
             *e = Expr::Block(Block { id: Default::default(),
@@ -1211,6 +1225,7 @@ impl Ck {
             }
         }
         // T::f が無ければ、f をメソッドに持つトレイトのうち、x の型に実装があるもの
+        let mut ambiguous = false;
         if !self.norm.fns.contains_key(&name) {
             let mut traits: Vec<(Name, Name)> = self
                 .norm
@@ -1226,15 +1241,22 @@ impl Ck {
                 .collect();
             traits.sort();
             // Self 以外の型引数（trait Fail<E> の E）は、実装に合わせて決める
-            let has_impl = traits.iter().find(|(tr, _)| {
+            let mut has_impl = None;
+            for (tr, method) in &traits {
                 let metas: Vec<usize> = (1..self.norm.datas[tr].params.len()).map(|_| self.norm.fresh()).collect();
                 let mut args = vec![base(&t)];
                 args.extend(metas.iter().map(|id| neu(Term::Var(*id, "?".into()))));
                 let goal = V::DataT(Rc::new((tr.clone(), args)));
-                self.resolve_in(&goal, 0, &metas).is_ok()
-            });
+                let lookup = self.resolve_in(&goal, 0, &metas)?;
+                // 複数の候補があれば、呼び出しの引数と戻り値の型で絞る。
+                if !matches!(lookup, ImplLookup::Missing(_)) {
+                    ambiguous = matches!(lookup, ImplLookup::Ambiguous(_));
+                    has_impl = Some(method);
+                    break;
+                }
+            }
             match (has_impl, traits.first()) {
-                (Some((_, m)), _) => name = m.clone(),
+                (Some(m), _) => name = m.clone(),
                 // 実装が無ければ組み込みの文字列化（std.Display の実装があればそれを使う）
                 _ if f == "to_string" && xs.is_empty() => {
                     *e = Expr::Call("to_str".into(), vec![*x]);
@@ -1258,7 +1280,7 @@ impl Ck {
         let mut args = Vec::with_capacity(xs.len() + 1);
         args.push(*x);
         args.extend(xs);
-        let r = self.call_fn(&name, &mut args, None, addr);
+        let r = self.call_fn(&name, &mut args, expected.filter(|_| ambiguous), addr);
         *e = Expr::Call(name, args);
         r
     }
@@ -1359,7 +1381,7 @@ impl Ck {
             _ => {}
         }
         if matches!(e, Expr::Method(..)) {
-            return self.method(e, addr);
+            return self.method(e, addr, None);
         }
         self.requirement_call(e)?;
         if matches!(e, Expr::Call(n, _) if n == "to_str") {
@@ -1980,15 +2002,20 @@ impl Ck {
             fenv[0].insert(pn.clone(), v);
         }
         // 引数から決まらない型引数（trait Convert<T> の T）は、制約の実装から決める
+        let mut ambiguous = Vec::new();
         if infer && omit && ids.iter().any(|id| !sol.contains_key(id)) {
             for (_, pt) in &f.params[f.params.len() - f.insts..] {
                 let t = self.norm.eval_or_opaque(pt, &mut fenv.clone())?;
                 let t = self.apply(&sol, &t)?;
                 let open: Vec<usize> = ids.iter().copied().filter(|id| !sol.contains_key(id) && mentions(&t, *id)).collect();
-                if !open.is_empty()
-                    && let Ok((_, it)) = self.resolve_in(&t, 0, &open)
-                {
-                    self.unify(&t, &it, &ids, &mut sol)?;
+                if !open.is_empty() {
+                    match self.resolve_in(&t, 0, &open)? {
+                        ImplLookup::Found(_, it) => {
+                            self.unify(&t, &it, &ids, &mut sol)?;
+                        }
+                        ImplLookup::Missing(_) => {}
+                        ImplLookup::Ambiguous(error) => ambiguous.push((open, error)),
+                    }
                 }
             }
         }
@@ -2004,6 +2031,9 @@ impl Ck {
                     // 効果の変数が決まらなければ、効果は無い
                     None if is_eff => V::Arr(Rc::new(vec![])),
                     None => {
+                        if let Some((_, error)) = ambiguous.into_iter().find(|(open, _)| open.contains(id)) {
+                            return Err(error);
+                        }
                         return Err(format!(
                             "関数 {name} の型引数 {p} を推論できない。{name}<...>(...) で明示する"
                         )
@@ -2022,7 +2052,7 @@ impl Ck {
             for (pn, pt) in &f.params[f.params.len() - f.insts..] {
                 let t = self.norm.eval_or_opaque(pt, &mut fenv)?;
                 let t = self.apply(&sol, &t)?;
-                add.push(self.resolve_inst(&t, 0)?);
+                add.push(self.resolve_inst(&t)?);
                 let v = self.norm.opaque();
                 fenv[0].insert(pn.clone(), v.clone());
                 vals.push(v);
