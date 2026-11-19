@@ -578,6 +578,7 @@ fn parse_modules_tokens(
         "task_done",
         "task_value",
         "compile_file",
+        "compile_web_file",
         "write_bytes",
         "Vec",
         "Type",

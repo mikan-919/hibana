@@ -2,21 +2,19 @@
 
 当面の WASM ターゲットは、型検査した関数を JavaScript から呼ぶためのライブラリです。`main` は不要です。既存のインタプリタ・JavaScript ターゲットも引き続き使えます。
 
-## Rust API で生成する
+## hibana のビルドスクリプトで生成する
 
-```rust
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let source = std::fs::read_to_string("tests/programs/wasm/wasm_web.hb")?;
-    let exports = vec!["echo".into(), "answer".into(), "greet".into()];
-    let output = hibana::to_web(&source, &exports)?;
-    std::fs::create_dir_all("dist")?;
-    std::fs::write("dist/wasm_web.wasm", output.wasm)?;
-    std::fs::write("dist/wasm_web.mjs", output.javascript)?;
-    Ok(())
+```
+fn main() {
+    let source = 'tests/programs/wasm/wasm_web.hb'
+    let exports = ['echo', 'answer', 'greet']
+    write_bytes('dist/wasm_web.wasm', compile_web_file(source, 'wasm', exports))
+    write_bytes('dist/wasm_web.mjs', compile_web_file(source, 'js', exports))
+    write_bytes('dist/wasm_web.d.mts', compile_web_file(source, 'ts', exports))
 }
 ```
 
-Hibana を依存に追加した Rust プログラムから実行すると、WASM と JavaScript の接続コードを生成できます。ファイルの保存は呼び出し側で行います。公開関数とそこから辿れる関数だけを WASM に含めます。ただしソース全体を型検査します。未対応の構文が呼び出し先に含まれる場合はエラーになります。
+上のコードを `build.hb` に保存し、リポジトリのルートで `hibana build.hb` を実行します。`compile_web_file` は公開する関数名を受け取り、`'wasm'` で WebAssembly ライブラリ、`'js'` で JavaScript の接続コード、`'ts'` で TypeScript の型宣言のバイト列を返します。`write_bytes` が保存先のディレクトリを作って書き込みます。WASM には公開関数とそこから辿れる関数が含まれます。ソース全体の型検査を行い、呼び出し先に未対応の構文が含まれるとエラーになります。
 
 ルートディレクトリを HTTP サーバーで配信し、`tests/programs/wasm/wasm_web.html` をブラウザで開くと、文字列を渡してブラウザ側の関数を呼べます。`file://` ではなく HTTP を使います。
 
@@ -62,7 +60,7 @@ console.log(api.greet("hibana"));
 
 文字列の一時領域はバンプアロケータで確保します。呼び出し終了後は再利用されますが、増えた WASM メモリは縮みません。JS に返した文字列はコピーされ、次の呼び出し後も使えます。生の WASM 関数やポインタを直接呼ぶのではなく、生成された接続コードを使ってください。
 
-## 関連する API と実行コマンド
+## Rust から使う API
 
 `hibana::to_web(source, &exports)` は一度の型検査と IR 変換から `WebOutput { wasm, javascript }` を返します。ファイルの保存は呼び出し側で行います。
 

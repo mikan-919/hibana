@@ -233,20 +233,40 @@ fn str_val(v: Value) -> Rc<str> {
     }
 }
 
-// compile_file の本体。use はコンパイルするファイルのディレクトリから探す
-fn compile_file(path: &str, target: &str) -> Result<Vec<u8>, String> {
+// use はコンパイルするファイルのディレクトリから探す。
+fn compile_source_file(
+    path: &str,
+    compile: impl FnOnce(&str) -> crate::error::R<Vec<u8>>,
+) -> Result<Vec<u8>, String> {
     let src = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
     let outer = crate::parser::base_dir();
     let dir = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("."));
     crate::parser::set_base_dir(dir);
-    let r = match target {
-        "js" => crate::to_js(&src).map(String::into_bytes),
-        "wasm" => crate::to_wasm(&src),
-        "native" => crate::to_native(&src),
-        _ => Err(format!("compile_file の出力先 {target} は未対応（js・wasm・native）").into()),
-    };
+    let r = compile(&src);
     crate::parser::set_base_dir(&outer);
     r.map_err(|e| format!("{path}: {e}"))
+}
+
+fn compile_file(path: &str, target: &str) -> Result<Vec<u8>, String> {
+    compile_source_file(path, |src| match target {
+        "js" => crate::to_js(src).map(String::into_bytes),
+        "wasm" => crate::to_wasm(src),
+        "native" => crate::to_native(src),
+        _ => Err(format!("compile_file の出力先 {target} は未対応（js・wasm・native）").into()),
+    })
+}
+
+fn compile_web_file(path: &str, target: &str, exports: &[String]) -> Result<Vec<u8>, String> {
+    compile_source_file(path, |src| match target {
+        "wasm" => crate::to_web(src, exports).map(|output| output.wasm),
+        "js" => crate::to_js_glue(src, exports).map(String::into_bytes),
+        "ts" => crate::to_ts_declarations(src, exports).map(String::into_bytes),
+        _ => Err(format!("compile_web_file の出力先 {target} は未対応（wasm・js・ts）").into()),
+    })
+}
+
+fn byte_values(bytes: Vec<u8>) -> Value {
+    Value::Arr(Rc::new(bytes.into_iter().map(|byte| Value::Int(i64::from(byte))).collect()))
 }
 
 fn error<T>(msg: String) -> R<T> {
@@ -835,7 +855,13 @@ impl<'a> Interp<'a> {
             } else if name == "compile_file" {
                 let (target, path) = (str_val(vs.pop().unwrap()), str_val(vs.pop().unwrap()));
                 let bytes = compile_file(&path, &target).map_err(|e| Flow::Error(e, None))?;
-                Value::Arr(Rc::new(bytes.into_iter().map(|b| Value::Int(b as i64)).collect()))
+                byte_values(bytes)
+            } else if name == "compile_web_file" {
+                let Value::Arr(exports) = vs.pop().unwrap() else { unreachable!("型検査済み") };
+                let (target, path) = (str_val(vs.pop().unwrap()), str_val(vs.pop().unwrap()));
+                let exports: Vec<String> = exports.iter().cloned().map(|v| str_val(v).to_string()).collect();
+                let bytes = compile_web_file(&path, &target, &exports).map_err(|e| Flow::Error(e, None))?;
+                byte_values(bytes)
             } else if name == "write_bytes" {
                 let Value::Arr(xs) = vs.pop().unwrap() else { unreachable!("型検査済み") };
                 let path = str_val(vs.pop().unwrap());

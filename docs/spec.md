@@ -521,6 +521,7 @@ macro unless('unless' expr:Expr block:Block) {
 | `spawn(x)` | `(Async<T>) -> Task<T>`。要求を使わない。`x` は `Async` のほかの要求を持てない（3.5 節） |
 | `task_then(t, f)` `task_done(t)` `task_value(t)` | std の `Task::then`・`Task::peek` の実装用の組み込み関数 |
 | `compile_file(path, target)` | `(String, String) -> Vec<int>`。ファイルを `target`（`'js'`・`'wasm'`・`'native'`）にコンパイルしたバイト列。`path` は作業ディレクトリから数え、ファイルの中の `use` はそのファイルのディレクトリから探す。インタプリタでだけ使える（11.1 節） |
+| `compile_web_file(path, target, exports)` | `(String, String, Vec<String>) -> Vec<int>`。指定した関数を公開する WASM ライブラリ（`'wasm'`）、JavaScript の接続コード（`'js'`）、TypeScript の型宣言（`'ts'`）のバイト列。経路の規則は `compile_file` と同じ。インタプリタでだけ使える（11.1 節） |
 | `write_bytes(path, bytes)` | `(String, Vec<int>) -> unit`。親ディレクトリを作ってファイルに書く。各要素は 0〜255。インタプリタでだけ使える |
 
 `input()` は行末の改行（LF）と、その直前にある復帰（CR）を除きます。改行のない最終行は末尾の復帰も含めて返します。空行や、入力が終わって読み取るバイトがないときは空文字列を返します。行は UTF-8（文字の符号化方式）として読み、先頭の U+FEFF も文字列に含めます。
@@ -572,7 +573,7 @@ macro unless('unless' expr:Expr block:Block) {
 
 ### 11.1 コマンドとコード生成 API
 
-ファイルを指定した実行は `hibana <ファイル>` で行います。JavaScript・WASM・ネイティブの出力は、インタプリタで実行するビルドスクリプトから `compile_file` と `write_bytes`（9 章）で書き出すか、Rust API から利用します。
+ファイルを指定した実行は `hibana <ファイル>` で行います。JavaScript・WASM・ネイティブの生成物は、インタプリタで実行するビルドスクリプトから `compile_file`・`compile_web_file`・`write_bytes`（9 章）で書き出せます。Rust API からも利用できます。
 
 | コマンド | 出力 | 用途 |
 |---|---|---|
@@ -580,7 +581,7 @@ macro unless('unless' expr:Expr block:Block) {
 | `hibana fmt <ファイル>` | ファイルを整形して書き戻す | 整形。トークンの並びと改行の位置は変えず、字下げ（空白4つ）・行内の空白（`,` の後、`=` `==` `&&` `->` などの前後、`{ }` の内側。`->` の前に揃えるための空白が2つ以上あれば残す）・空行（続く空行は1行、括弧の直後と閉じ括弧の前は無し）・コメントの位置を整える。設定は無い。マクロで定義した JSX 形式の要素（`<tag ...>` から `</tag>` まで）と `$( )` `${ }` の中は元のまま（`Text` 規則では空白も文字列になるため）。`+ - * /` の前後は元の空白のまま。行の長さで改行の位置は変えない |
 | `hibana test <ファイル...>` | `test` をインタプリタで実行し、成功した数を表示する。失敗があれば終了コード 1。ファイルを引数で指定する | テスト（3.8 節） |
 
-ビルドスクリプトは普通の hibana のプログラムです。出力先と書き出す場所はスクリプトに書き、CLI のフラグでは選びません。`compile_file` と `write_bytes` を JavaScript・WASM・ネイティブの出力から辿れるとコンパイルエラーです。
+ビルドスクリプトは普通の hibana のプログラムです。生成する形式と書き出す場所はスクリプトに書きます。`compile_file`・`compile_web_file`・`write_bytes` を JavaScript・WASM・ネイティブの出力から辿れるとコンパイルエラーです。
 
 ```
 fn main() {
@@ -590,7 +591,7 @@ fn main() {
 }
 ```
 
-`hibana build.hb` で実行します。`wasm` は `main` を持つ実行用の WASM（`to_wasm` と同じ）、`native` は実行属性の無いファイルなので `chmod +x` してから実行します。公開関数を選ぶ WASM ライブラリと接続コードは Rust API で作ります。
+`hibana build.hb` で実行します。`compile_file` の `wasm` は `main` を持つ実行用の WASM（`to_wasm` と同じ）です。`native` で生成したファイルを実行するには `chmod +x` を使います。公開関数を選ぶ WASM ライブラリ、接続コード、TypeScript の型宣言は、同じ関数名の並びを `compile_web_file` に渡して作ります。[WebAssembly の生成例](wasm.md)
 
 WASM 出力は関数を名前で公開します。`int` と `number` は `f64` と JavaScript の `Number` で渡します。`int` は安全整数の範囲と整数性、`number` は有限性を入口で検査します。`int` の負の0は正の0へ正規化します。`put` は取り込み `hibana.write(fd, 位置, 長さ)`、`input` は `hibana.read(fd, 位置, 長さ) -> 読み取ったバイト数`、`now_ms` は `hibana.now_ms()` を呼びます。JavaScript の接続コードは、出力を `imports.hibana.print`（無ければ `console.log`）に渡します。読み取りは `imports.hibana.read(fd, Uint8Array) -> バイト数` を使い、指定が無ければ Node.js の標準入力を読みます。入力終了は0、失敗は負の値です。実行時エラーでは、メッセージの文字列の位置を memory の24番地に書いて WASM の実行を停止します。JavaScript の接続コードは、メモリを参照できる場合、その文字列を例外のメッセージとして呼び出し元に返します。
 

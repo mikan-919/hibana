@@ -110,6 +110,7 @@ const BUILTINS: &[&str] = &[
     "task_done",
     "task_value",
     "compile_file",
+    "compile_web_file",
     "write_bytes",
 ];
 
@@ -131,11 +132,12 @@ const STR_FNS: &[(&str, &[&str], &str)] = &[
     ("panic", &["String"], "never"),
     // スクリプト専用（SCRIPT_FNS）。ファイルを JS・WASM・ネイティブにコンパイルしたバイト列と、その書き込み
     ("compile_file", &["String", "String"], "Vec<int>"),
+    ("compile_web_file", &["String", "String", "Vec<String>"], "Vec<int>"),
     ("write_bytes", &["String", "Vec<int>"], "unit"),
 ];
 
 // インタプリタで実行するスクリプトでだけ使える組み込み関数。ほかのバックエンドの出力から辿れるとエラー
-pub(crate) const SCRIPT_FNS: &[&str] = &["compile_file", "write_bytes"];
+pub(crate) const SCRIPT_FNS: &[&str] = &["compile_file", "compile_web_file", "write_bytes"];
 
 // 組み込み関数の表の型の綴りを型にする
 fn table_type(s: &str) -> V {

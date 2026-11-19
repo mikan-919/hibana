@@ -59,7 +59,7 @@ nix develop -c cargo run -q -- tests/programs/types/refine.hb
 | 整形 | `hibana fmt <ファイル>` |
 | テスト | `hibana test <ファイル...>` |
 
-コード生成はRustのAPI（プログラムから呼び出す関数群）を使います。生成物のファイル保存と実行は呼び出し側が行います。
+コード生成は hibana のビルドスクリプトか、Rust の API（プログラムから呼び出す関数群）を使います。生成物のファイル保存と実行は呼び出し側が行います。
 
 | 実行方式 | Rustの入口 | 対応範囲・制約 |
 |---|---|---|
@@ -120,6 +120,6 @@ WASMとネイティブが共通のIRを使います。インタプリタとJavaS
 <details>
 <summary>WASMを生成するには、どの入口を使うか？</summary>
 
-Rustから `hibana::to_wasm` や `hibana::to_web` を呼びます。コマンドラインの操作は実行・整形・テストです。
+hibana のビルドスクリプトでは、`compile_file` で実行用、`compile_web_file` でライブラリ用の WASM を生成します。スクリプトは `hibana <ファイル>` で実行します。Rust からは `hibana::to_wasm` や `hibana::to_web` を呼びます。
 
 </details>
