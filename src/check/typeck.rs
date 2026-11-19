@@ -110,7 +110,7 @@ const BUILTINS: &[&str] = &[
     "task_done",
     "task_value",
     "compile_file",
-    "compile_web_file",
+    "compile_wasm_file",
     "write_bytes",
 ];
 
@@ -132,18 +132,22 @@ const STR_FNS: &[(&str, &[&str], &str)] = &[
     ("panic", &["String"], "never"),
     // スクリプト専用（SCRIPT_FNS）。ファイルを JS・WASM・ネイティブにコンパイルしたバイト列と、その書き込み
     ("compile_file", &["String", "String"], "Vec<int>"),
-    ("compile_web_file", &["String", "String", "Vec<String>"], "Vec<int>"),
+    ("compile_wasm_file", &["String", "Vec<String>"], "Pair<Vec<int>, String>"),
     ("write_bytes", &["String", "Vec<int>"], "unit"),
 ];
 
 // インタプリタで実行するスクリプトでだけ使える組み込み関数。ほかのバックエンドの出力から辿れるとエラー
-pub(crate) const SCRIPT_FNS: &[&str] = &["compile_file", "compile_web_file", "write_bytes"];
+pub(crate) const SCRIPT_FNS: &[&str] = &["compile_file", "compile_wasm_file", "write_bytes"];
 
 // 組み込み関数の表の型の綴りを型にする
 fn table_type(s: &str) -> V {
     match s {
         "Vec<String>" => V::VecT(Rc::new(prim("String"))),
         "Vec<int>" => V::VecT(Rc::new(prim("int"))),
+        "Pair<Vec<int>, String>" => V::DataT(Rc::new((
+            crate::parser::qual("std", "Pair"),
+            vec![table_type("Vec<int>"), prim("String")],
+        ))),
         _ => prim(s),
     }
 }

@@ -5,16 +5,19 @@
 ## hibana のビルドスクリプトで生成する
 
 ```
+use std::wasm_web
+
 fn main() {
     let source = 'tests/programs/wasm/wasm_web.hb'
-    let exports = ['echo', 'answer', 'greet']
-    write_bytes('dist/wasm_web.wasm', compile_web_file(source, 'wasm', exports))
-    write_bytes('dist/wasm_web.mjs', compile_web_file(source, 'js', exports))
-    write_bytes('dist/wasm_web.d.mts', compile_web_file(source, 'ts', exports))
+    let compiled = compile_wasm_file(source, ['echo', 'answer', 'greet'])
+    let abi = compiled.second
+    write_bytes('dist/wasm_web.wasm', compiled.first)
+    write_bytes('dist/wasm_web.mjs', wasm_web.utf8(wasm_web.javascript(abi)))
+    write_bytes('dist/wasm_web.d.mts', wasm_web.utf8(wasm_web.typescript(abi)))
 }
 ```
 
-上のコードを `build.hb` に保存し、リポジトリのルートで `hibana build.hb` を実行します。`compile_web_file` は公開する関数名を受け取り、`'wasm'` で WebAssembly ライブラリ、`'js'` で JavaScript の接続コード、`'ts'` で TypeScript の型宣言のバイト列を返します。`write_bytes` が保存先のディレクトリを作って書き込みます。WASM には公開関数とそこから辿れる関数が含まれます。ソース全体の型検査を行い、呼び出し先に未対応の構文が含まれるとエラーになります。
+上のコードを `build.hb` に保存し、リポジトリのルートで `hibana build.hb` を実行します。`compile_wasm_file` は一度のコンパイルで WASM のバイト列と受け渡し規約（ABI）の JSON を返します。`std::wasm_web` はその規約から JavaScript の接続コードと TypeScript の型宣言を生成します。スクリプトが保存先を指定して `write_bytes` で書き込みます。WASM には公開関数とそこから辿れる関数が含まれます。
 
 ルートディレクトリを HTTP サーバーで配信し、`tests/programs/wasm/wasm_web.html` をブラウザで開くと、文字列を渡してブラウザ側の関数を呼べます。`file://` ではなく HTTP を使います。
 
@@ -60,12 +63,13 @@ console.log(api.greet("hibana"));
 
 文字列の一時領域はバンプアロケータで確保します。呼び出し終了後は再利用されますが、増えた WASM メモリは縮みません。JS に返した文字列はコピーされ、次の呼び出し後も使えます。生の WASM 関数やポインタを直接呼ぶのではなく、生成された接続コードを使ってください。
 
-## Rust から使う API
+## WASM の受け渡し規約
 
-`hibana::to_web(source, &exports)` は一度の型検査と IR 変換から `WebOutput { wasm, javascript }` を返します。ファイルの保存は呼び出し側で行います。
+接続コードを書くライブラリは、`compile_wasm_file` が返す JSON の `exports` と `imports` を使います。各関数は `[名前, 引数の型の並び, 戻り値の型]` です。取り込み先のモジュール名は外部関数が `hibana_host`、標準入出力と時刻が `hibana` です。
 
-WASM 単体は `hibana::to_wasm_library(source, &exports)`、接続コード単体は `hibana::to_js_glue(source, &exports)` で生成できます。
+- 基本型は `int`、`number`、`String`、`bool`、`unit` の文字列です。`int` と `number` は WASM の `f64`、`bool` は `i64` の 0 または 1 です。`unit` の戻り値はありません。
+- `Vec` は `{ "vec": 要素型 }`、構造体は `{ "ctor": 構築子番号, "fields": [[名前, 型], ...] }`、`Result` は `{ "result": [[成功の構築子番号, 型], [失敗の構築子番号, 型]] }` です。
+- `String` と複合値は `i64` の上位32ビットにバイト数、下位32ビットに `memory` 内の位置を入れます。書き込み先は `__hibana_alloc` で確保します。複合値はリトルエンディアン（下位バイトを先に置く順序）の64ビット語の並びです。`unit` は `[0]`、`int`・`bool`・`number` は `[1]`・`[2]`・`[9]` と値の語、`String` は `[3, バイト数]` と8バイト境界に揃えた UTF-8、`Vec` は `[4, 要素数]` と要素の並び、構造体と `Result` は `[5, 構築子番号, 項目数]` と項目の並びです。
+- 実行時エラーで WASM が停止した場合、`memory` の `failure_offset` にメッセージの位置が入ります。0 はメッセージ無しを表します。メッセージの位置には64ビットの長さがあり、続けて UTF-8 の本文があります。呼び出し後に `__hibana_reset` が公開されていれば、状態と一時メモリを初期化できます。
 
-`hibana::to_ts_declarations(source, &exports)` は、同じ公開関数を指定した接続コードに対応する TypeScript の型宣言を文字列で返します。`wasm_web.mjs` と組み合わせる場合は `wasm_web.d.mts` に保存します。公開関数、戻り値、呼び出しに必要なホスト関数の型が宣言に含まれます。`Result` の戻り値は `ok` の真偽に応じて `value` と `error` の型が決まります。
-
-型検査と IR 変換を済ませている場合は、同じ IR と公開関数名を `pipeline::emit_ts_declarations` に渡せます。
+Rust から生成する場合は `hibana::compile_wasm_library(source, &exports)` がバイト列と受け渡し規約を返します。変換済みの IR があれば `pipeline::emit_wasm` と `pipeline::wasm_abi` を使えます。

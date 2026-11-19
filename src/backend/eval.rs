@@ -234,10 +234,10 @@ fn str_val(v: Value) -> Rc<str> {
 }
 
 // use はコンパイルするファイルのディレクトリから探す。
-fn compile_source_file(
+fn compile_source_file<T>(
     path: &str,
-    compile: impl FnOnce(&str) -> crate::error::R<Vec<u8>>,
-) -> Result<Vec<u8>, String> {
+    compile: impl FnOnce(&str) -> crate::error::R<T>,
+) -> Result<T, String> {
     let src = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
     let outer = crate::parser::base_dir();
     let dir = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("."));
@@ -253,15 +253,6 @@ fn compile_file(path: &str, target: &str) -> Result<Vec<u8>, String> {
         "wasm" => crate::to_wasm(src),
         "native" => crate::to_native(src),
         _ => Err(format!("compile_file の出力先 {target} は未対応（js・wasm・native）").into()),
-    })
-}
-
-fn compile_web_file(path: &str, target: &str, exports: &[String]) -> Result<Vec<u8>, String> {
-    compile_source_file(path, |src| match target {
-        "wasm" => crate::to_web(src, exports).map(|output| output.wasm),
-        "js" => crate::to_js_glue(src, exports).map(String::into_bytes),
-        "ts" => crate::to_ts_declarations(src, exports).map(String::into_bytes),
-        _ => Err(format!("compile_web_file の出力先 {target} は未対応（wasm・js・ts）").into()),
     })
 }
 
@@ -856,12 +847,14 @@ impl<'a> Interp<'a> {
                 let (target, path) = (str_val(vs.pop().unwrap()), str_val(vs.pop().unwrap()));
                 let bytes = compile_file(&path, &target).map_err(|e| Flow::Error(e, None))?;
                 byte_values(bytes)
-            } else if name == "compile_web_file" {
+            } else if name == "compile_wasm_file" {
                 let Value::Arr(exports) = vs.pop().unwrap() else { unreachable!("型検査済み") };
-                let (target, path) = (str_val(vs.pop().unwrap()), str_val(vs.pop().unwrap()));
+                let path = str_val(vs.pop().unwrap());
                 let exports: Vec<String> = exports.iter().cloned().map(|v| str_val(v).to_string()).collect();
-                let bytes = compile_web_file(&path, &target, &exports).map_err(|e| Flow::Error(e, None))?;
-                byte_values(bytes)
+                let (wasm, abi) = compile_source_file(&path, |src| crate::compile_wasm_library(src, &exports))
+                    .map_err(|e| Flow::Error(e, None))?;
+                let ctor = Name::structure(crate::parser::qual("std", "Pair"));
+                Value::Data(Rc::new((ctor, vec![byte_values(wasm), Value::Str(abi.into())])))
             } else if name == "write_bytes" {
                 let Value::Arr(xs) = vs.pop().unwrap() else { unreachable!("型検査済み") };
                 let path = str_val(vs.pop().unwrap());

@@ -521,7 +521,7 @@ macro unless('unless' expr:Expr block:Block) {
 | `spawn(x)` | `(Async<T>) -> Task<T>`。要求を使わない。`x` は `Async` のほかの要求を持てない（3.5 節） |
 | `task_then(t, f)` `task_done(t)` `task_value(t)` | std の `Task::then`・`Task::peek` の実装用の組み込み関数 |
 | `compile_file(path, target)` | `(String, String) -> Vec<int>`。ファイルを `target`（`'js'`・`'wasm'`・`'native'`）にコンパイルしたバイト列。`path` は作業ディレクトリから数え、ファイルの中の `use` はそのファイルのディレクトリから探す。インタプリタでだけ使える（11.1 節） |
-| `compile_web_file(path, target, exports)` | `(String, String, Vec<String>) -> Vec<int>`。指定した関数を公開する WASM ライブラリ（`'wasm'`）、JavaScript の接続コード（`'js'`）、TypeScript の型宣言（`'ts'`）のバイト列。経路の規則は `compile_file` と同じ。インタプリタでだけ使える（11.1 節） |
+| `compile_wasm_file(path, exports)` | `(String, Vec<String>) -> std.Pair<Vec<int>, String>`。指定した関数を公開する WASM ライブラリのバイト列と受け渡し規約の JSON を、一度のコンパイルで返す。経路の規則は `compile_file` と同じ。インタプリタでだけ使える（11.1 節） |
 | `write_bytes(path, bytes)` | `(String, Vec<int>) -> unit`。親ディレクトリを作ってファイルに書く。各要素は 0〜255。インタプリタでだけ使える |
 
 `input()` は行末の改行（LF）と、その直前にある復帰（CR）を除きます。改行のない最終行は末尾の復帰も含めて返します。空行や、入力が終わって読み取るバイトがないときは空文字列を返します。行は UTF-8（文字の符号化方式）として読み、先頭の U+FEFF も文字列に含めます。
@@ -573,7 +573,7 @@ macro unless('unless' expr:Expr block:Block) {
 
 ### 11.1 コマンドとコード生成 API
 
-ファイルを指定した実行は `hibana <ファイル>` で行います。JavaScript・WASM・ネイティブの生成物は、インタプリタで実行するビルドスクリプトから `compile_file`・`compile_web_file`・`write_bytes`（9 章）で書き出せます。Rust API からも利用できます。
+ファイルを指定した実行は `hibana <ファイル>` で行います。JavaScript・WASM・ネイティブの生成物は、インタプリタで実行するビルドスクリプトから `compile_file`・`compile_wasm_file`・`write_bytes`（9 章）で書き出せます。Rust API からも利用できます。
 
 | コマンド | 出力 | 用途 |
 |---|---|---|
@@ -581,7 +581,7 @@ macro unless('unless' expr:Expr block:Block) {
 | `hibana fmt <ファイル>` | ファイルを整形して書き戻す | 整形。トークンの並びと改行の位置は変えず、字下げ（空白4つ）・行内の空白（`,` の後、`=` `==` `&&` `->` などの前後、`{ }` の内側。`->` の前に揃えるための空白が2つ以上あれば残す）・空行（続く空行は1行、括弧の直後と閉じ括弧の前は無し）・コメントの位置を整える。設定は無い。マクロで定義した JSX 形式の要素（`<tag ...>` から `</tag>` まで）と `$( )` `${ }` の中は元のまま（`Text` 規則では空白も文字列になるため）。`+ - * /` の前後は元の空白のまま。行の長さで改行の位置は変えない |
 | `hibana test <ファイル...>` | `test` をインタプリタで実行し、成功した数を表示する。失敗があれば終了コード 1。ファイルを引数で指定する | テスト（3.8 節） |
 
-ビルドスクリプトは普通の hibana のプログラムです。生成する形式と書き出す場所はスクリプトに書きます。`compile_file`・`compile_web_file`・`write_bytes` を JavaScript・WASM・ネイティブの出力から辿れるとコンパイルエラーです。
+ビルドスクリプトは普通の hibana のプログラムです。生成する形式と書き出す場所はスクリプトに書きます。`compile_file`・`compile_wasm_file`・`write_bytes` を JavaScript・WASM・ネイティブの出力から辿れるとコンパイルエラーです。
 
 ```
 fn main() {
@@ -591,7 +591,7 @@ fn main() {
 }
 ```
 
-`hibana build.hb` で実行します。`compile_file` の `wasm` は `main` を持つ実行用の WASM（`to_wasm` と同じ）です。`native` で生成したファイルを実行するには `chmod +x` を使います。公開関数を選ぶ WASM ライブラリ、接続コード、TypeScript の型宣言は、同じ関数名の並びを `compile_web_file` に渡して作ります。[WebAssembly の生成例](wasm.md)
+`hibana build.hb` で実行します。`compile_file` の `wasm` は `main` を持つ実行用の WASM（`to_wasm` と同じ）です。`native` で生成したファイルを実行するには `chmod +x` を使います。`compile_wasm_file` に公開関数名を渡すと WASM ライブラリと受け渡し規約を取得できます。`std::wasm_web` はその規約から JavaScript の接続コードと TypeScript の型宣言を生成します。[WebAssembly の生成例](wasm.md)
 
 WASM 出力は関数を名前で公開します。`int` と `number` は `f64` と JavaScript の `Number` で渡します。`int` は安全整数の範囲と整数性、`number` は有限性を入口で検査します。`int` の負の0は正の0へ正規化します。`put` は取り込み `hibana.write(fd, 位置, 長さ)`、`input` は `hibana.read(fd, 位置, 長さ) -> 読み取ったバイト数`、`now_ms` は `hibana.now_ms()` を呼びます。JavaScript の接続コードは、出力を `imports.hibana.print`（無ければ `console.log`）に渡します。読み取りは `imports.hibana.read(fd, Uint8Array) -> バイト数` を使い、指定が無ければ Node.js の標準入力を読みます。入力終了は0、失敗は負の値です。実行時エラーでは、メッセージの文字列の位置を memory の24番地に書いて WASM の実行を停止します。JavaScript の接続コードは、メモリを参照できる場合、その文字列を例外のメッセージとして呼び出し元に返します。
 
@@ -599,35 +599,15 @@ WASM 出力は関数を名前で公開します。`int` と `number` は `f64` �
 
 WASM の公開関数の引数と、外部関数の戻り値に細分化型を指定するとコンパイルエラーになります。配列の要素と構造体のフィールドにも同じ規則が適用されます。公開関数を自動で選ぶ場合、細分化型を受け取る関数は内部関数として扱います。
 
-WASM の公開関数は標準ライブラリの `Result<T, E>` を戻り値にできます。JavaScript の接続コードは `Ok(value)` を `{ ok: true, value }`、`Err(error)` を `{ ok: false, error }` に変換します。`T` と `E` は境界から返せる型です。
+WASM の公開関数は標準ライブラリの `Result<T, E>` を戻り値にできます。`T` と `E` は境界から返せる型です。`std::wasm_web` が生成する接続コードは `Ok(value)` を `{ ok: true, value }`、`Err(error)` を `{ ok: false, error }` に変換します。
 
 `with Async` の公開関数は、仕事の並びが空になるまで WASM 内で処理を進め、完了した値を境界の型に変換して同期で返します。
 
-JavaScript の接続コードは `hibana::to_js_glue(source, &exports)`、WASM と接続コードの同時生成は `hibana::to_web(source, &exports)` で行えます。`instantiate` の引数には WASM のバイト列と必要な外部関数を渡します。公開関数・外部関数の整数は JavaScript の `number` で受け渡し、`BigInt` は受理しません。接続コードと WASM の入口の両方で安全整数を検査します。文字列の内部パックと入出力用の内部呼び出しには64ビット整数を維持します。文字列やホスト関数を使う Web 向けライブラリの例は [WebAssembly](wasm.md) を参照してください。
-
-同じ公開関数を指定した接続コード用の TypeScript 宣言は `hibana::to_ts_declarations(source, &exports)` で取得できます。IR を使う場合は `pipeline::emit_ts_declarations` が宣言を返します。
+`std::wasm_web` の接続コードは `instantiate` に WASM のバイト列と必要な外部関数を受け取ります。公開関数・外部関数の整数は JavaScript の `number` で受け渡し、接続コードと WASM の入口で安全整数を検査します。文字列の受け渡しと入出力用の内部呼び出しには64ビット整数を使います。型情報の形式と接続コードの生成例は [WebAssembly](wasm.md) を参照してください。
 
 JavaScript、IR、実行用 WASM、ネイティブの実行ファイルは、それぞれ `hibana::to_js`、`hibana::to_ir`、`hibana::to_wasm`、`hibana::to_native` で生成します。API は文字列やバイト列を返し、ファイルへの保存は呼び出し側で行います。`to_wasm` と `to_native` は `main` から辿れる関数だけを含めます。
 
-Rust のライブラリからは、`hibana::pipeline` の各関数を組み合わせられます。`load` は `use` のファイルを読み、ファイルごとの本文と識別子を持つ `ModuleSet` を返します。`parse` はファイルごとに構文解析し、宣言とマクロの情報を共有した構文木とモジュール表を作ります。エラーの位置はファイル内の位置です。同じモジュール名が異なるファイルを指す場合はエラーです。`check` は型検査し、`lower` は IR を作り、`link` は IR から公開関数とその呼び出し先を選びます。`emit_wasm` と `emit_js_glue` はそれぞれバイト列と文字列を返すため、書き込みや外部ツールの起動は呼び出し側で決められます。
-
-```rust
-use hibana::pipeline::{self, Kind};
-use std::path::Path;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let source = "fn twice(n: int) -> int { n + n }";
-    let loaded = pipeline::load(source, Path::new("."))?;
-    let parsed = pipeline::parse(loaded)?;
-    let checked = pipeline::check(parsed, Kind::Library)?;
-    let ir = pipeline::lower(&checked, None)?;
-    let exports = vec!["twice".to_string()];
-    let linked = pipeline::link(&ir, &exports)?;
-    let wasm = pipeline::emit_wasm(&linked, Some(&exports))?;
-    let glue = pipeline::emit_js_glue(&linked, &exports)?;
-    Ok(())
-}
-```
+Rust の `hibana::compile_wasm_library(source, &exports)` も、同じ型検査結果から WASM のバイト列と受け渡し規約を返します。`hibana::pipeline` の `load` は `use` のファイルを読み、`parse` はファイルごとに構文解析します。`check` は型検査し、`lower` は IR を作り、`link` は IR から公開関数とその呼び出し先を選びます。`emit_wasm` は WASM のバイト列、`wasm_abi` は受け渡し規約の JSON を返します。
 
 IR は WASM とネイティブの共通の中間表現です。制御フローは WASM と同じ入れ子の形（`if`・`while`・`break`・`continue`・`return`）で持ちます。値は型の番号と中身の2つの64ビット整数で表し、`number` の中身には浮動小数点数のビット列を置きます。文字列の連結・比較・表示や組み込み関数は、hibana の構文で書いたランタイム（`src/backend/runtime.hb`）にあり、同じ変換で IR にします。ランタイムは型検査を通さず、`__load` などの組み込みを IR の命令に直接変換します。`with` ブロックは、`exit` と抜けた腕の中断の印を呼び出しの後で調べ、1段ずつ戻って抜けます。`lower(&checked, Some(&exports))` に公開関数を渡すと、使う関数だけを変換できます。WASM の境界は `int`・`number`・`String`・`bool`・`unit` と、それらの `Vec` と型引数の無い構造体に対応します（`docs/wasm.md`）。WASM モジュール同士のリンクは未対応です。
 

@@ -1,3 +1,6 @@
+#[path = "common/wasm_web.rs"]
+mod wasm_web;
+
 use std::process::Command;
 
 fn literal(n: f64) -> String {
@@ -39,7 +42,7 @@ fn compiled_numbers_match_interpreter_at_float_boundaries() {
     assert_eq!(String::from_utf8(interpreted).unwrap(), expected);
     let dir = std::env::temp_dir().join(format!("hibana-numeric-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let web = hibana::to_web(&source, &["main".into()]).unwrap();
+    let web = wasm_web::build(&source, &["main".into()]).unwrap();
     std::fs::write(dir.join("numeric.wasm"), web.wasm).unwrap();
     std::fs::write(dir.join("glue.mjs"), web.javascript).unwrap();
     let script = dir.join("run.mjs");
@@ -69,10 +72,10 @@ fn wasm_num_boundary_checks_arguments_and_host_results() {
     let source = "use std::math\nextern 'host' { fn twice(x: number) -> number }\nfn identity(x: number) -> number { x }\nfn calculate(x: number) -> number { twice(x) + 0.25 }\nfn floor(x: number) -> int { math::floor(x) }\nfn touch() { twice(1.0) }";
     let dir = std::env::temp_dir().join(format!("hibana-numeric-boundary-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let web = hibana::to_web(source, &["identity".into(), "calculate".into(), "floor".into()]).unwrap();
+    let web = wasm_web::build(source, &["identity".into(), "calculate".into(), "floor".into()]).unwrap();
     std::fs::write(dir.join("api.wasm"), web.wasm).unwrap();
     std::fs::write(dir.join("glue.mjs"), web.javascript).unwrap();
-    let only_import = hibana::to_web(source, &["touch".into()]).unwrap();
+    let only_import = wasm_web::build(source, &["touch".into()]).unwrap();
     std::fs::write(dir.join("touch.wasm"), only_import.wasm).unwrap();
     std::fs::write(dir.join("touch.mjs"), only_import.javascript).unwrap();
     let script = dir.join("check.mjs");
@@ -168,7 +171,7 @@ fn safe_integer_traps_match_all_backends() {
         assert_eq!(interpreted, b"1\n");
         let js = hibana::to_js(&source).unwrap();
         assert!(!js.contains("BigInt") && !js.contains("bigint"));
-        let web = hibana::to_web(&source, &["main".into()]).unwrap();
+        let web = wasm_web::build(&source, &["main".into()]).unwrap();
         std::fs::write(dir.join("error.wasm"), web.wasm).unwrap();
         std::fs::write(dir.join("glue.mjs"), web.javascript).unwrap();
         let runner = dir.join("error.mjs");
@@ -197,7 +200,7 @@ fn safe_integer_traps_match_all_backends() {
 #[test]
 fn integer_boundaries_use_numbers_and_normalize_zero() {
     let source = "extern 'host' { fn echo(x: int) -> int }\nfn identity(x: int) -> int { x }\nfn from_host(x: int) -> int { echo(x) }";
-    let web = hibana::to_web(source, &["identity".into(), "from_host".into()]).unwrap();
+    let web = wasm_web::build(source, &["identity".into(), "from_host".into()]).unwrap();
     let dir = std::env::temp_dir().join(format!("hibana-int-boundary-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("api.wasm"), web.wasm).unwrap();

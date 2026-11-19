@@ -1,3 +1,6 @@
+#[path = "common/wasm_web.rs"]
+mod wasm_web;
+
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -8,7 +11,7 @@ fn first_example_matches_all_backends() {
     std::fs::create_dir_all(&dir).unwrap();
     let js = dir.join("first.cjs");
     std::fs::write(&js, hibana::to_js(source).unwrap()).unwrap();
-    let wasm = hibana::to_web(source, &["main".into()]).unwrap();
+    let wasm = wasm_web::build(source, &["main".into()]).unwrap();
     std::fs::write(dir.join("first.wasm"), wasm.wasm).unwrap();
     std::fs::write(dir.join("first-glue.mjs"), wasm.javascript).unwrap();
     let wasm_runner = dir.join("first-wasm.mjs");

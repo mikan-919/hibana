@@ -56,14 +56,6 @@ impl Types {
 
 // 公開する関数は selected、None なら境界で渡せる利用者の関数すべて
 pub fn emit_selected(program: &Program, selected: Option<&[String]>) -> Vec<u8> {
-    emit_module(program, selected, false)
-}
-
-pub(crate) fn emit_with_glue(program: &Program, exports: &[String]) -> Vec<u8> {
-    emit_module(program, Some(exports), true)
-}
-
-fn emit_module(program: &Program, selected: Option<&[String]>, with_glue: bool) -> Vec<u8> {
     // 文字列のリテラルを並べる。[長さ][バイト列] を 8 バイト境界に置く
     let mut literals: HashMap<String, i64> = HashMap::new();
     let mut data = Vec::new();
@@ -85,7 +77,7 @@ fn emit_module(program: &Program, selected: Option<&[String]>, with_glue: bool) 
             Node::Expr(Expr::Prim(Prim::Write, _)) => writes = true,
             Node::Expr(Expr::Prim(Prim::Now, _)) => now = true,
             Node::Expr(Expr::Prim(Prim::Read, _)) => reads = true,
-            Node::Expr(Expr::Prim(Prim::Fail, _)) if with_glue => fails = true,
+            Node::Expr(Expr::Prim(Prim::Fail, _)) => fails = true,
             Node::Expr(Expr::Func(name)) if !table.contains(&name.as_str()) => table.push(name),
             _ => {}
         });
@@ -827,7 +819,16 @@ x.__hibana_reset(); if (x.__hibana_alloc(1) !== first || x.literal() !== packed 
 const m = new WebAssembly.Module(require('fs').readFileSync(0));
 if (JSON.stringify(WebAssembly.Module.imports(m)) !== '[]') throw Error('unexpected imports');
 const x = new WebAssembly.Instance(m, {}).exports;
-if (Object.keys(x).join(',') !== 'result' || x.result(20) !== 41) throw Error('unexpected exports or result');
+if (Object.keys(x).filter(name => name !== 'memory' && name !== '__hibana_reset').join(',') !== 'result'
+    || x.result(20) !== 41) throw Error('unexpected exports or result');
+try { x.result(Number.MAX_SAFE_INTEGER); throw Error('overflow expected'); }
+catch (e) { if (!(e instanceof WebAssembly.RuntimeError)) throw e; }
+const view = new DataView(x.memory.buffer);
+const error = Number(view.getBigUint64(24, true));
+const length = Number(view.getBigUint64(error, true));
+if (new TextDecoder().decode(new Uint8Array(x.memory.buffer, error + 8, length)) !== 'オーバーフロー') throw Error('unexpected error');
+x.__hibana_reset();
+if (view.getBigUint64(24, true) !== 0n || x.result(20) !== 41) throw Error('reset failed');
 "#;
         let mut child = Command::new("node")
             .args(["-e", script])
@@ -846,7 +847,8 @@ if (Object.keys(x).join(',') !== 'result' || x.result(20) !== 41) throw Error('u
         let bytes = crate::to_wasm_library(used, &["result".into(), "plus".into()]).unwrap();
         let result = node(&bytes, r#"const m = new WebAssembly.Module(require('fs').readFileSync(0));
 const x = new WebAssembly.Instance(m, {}).exports;
-if (Object.keys(x).join(',') !== 'plus,result' || x.plus(20, 22) !== 42) throw Error('exports');"#);
+if (Object.keys(x).filter(name => name !== 'memory' && name !== '__hibana_reset').join(',') !== 'plus,result'
+    || x.plus(20, 22) !== 42) throw Error('exports');"#);
         assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
 
         assert!(

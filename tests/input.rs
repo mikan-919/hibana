@@ -1,3 +1,6 @@
+#[path = "common/wasm_web.rs"]
+mod wasm_web;
+
 use std::io::{Read, Write};
 use std::process::{Command, Output, Stdio};
 
@@ -46,7 +49,7 @@ fn input_lines_match_all_backends() {
         command.arg(path);
         commands.push(command);
     }
-    let web = hibana::to_web(source, &["main".into()]).unwrap();
+    let web = wasm_web::build(source, &["main".into()]).unwrap();
     std::fs::write(dir.join("input.wasm"), web.wasm).unwrap();
     std::fs::write(dir.join("input-glue.mjs"), web.javascript).unwrap();
     let runner = dir.join("input-wasm.mjs");
@@ -97,7 +100,7 @@ try { api.main(); } catch (e) { console.error(e.message); process.exitCode = 1; 
 fn wasm_input_uses_host_callback() {
     let dir = std::env::temp_dir().join(format!("hibana-input-host-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let web = hibana::to_web("fn next_line() -> String { input() }", &["next_line".into()]).unwrap();
+    let web = wasm_web::build("fn next_line() -> String { input() }", &["next_line".into()]).unwrap();
     std::fs::write(dir.join("input.wasm"), web.wasm).unwrap();
     std::fs::write(dir.join("glue.mjs"), web.javascript).unwrap();
     let script = dir.join("check.mjs");
