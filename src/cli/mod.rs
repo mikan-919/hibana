@@ -1,6 +1,6 @@
 use crate::{error, eval, fmt, parser, typeck};
 #[cfg(test)]
-use crate::{run, to_js, to_web};
+use crate::{run, to_js};
 
 // ソースの該当箇所に下線を引いて表示するためのエラー
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
@@ -860,7 +860,7 @@ fn main() {
             let src = std::fs::read_to_string(&p).unwrap();
             crate::smt::without_z3(|| {
                 if name == "wasm_web.hb" {
-                    super::to_web(&src, &["echo".into(), "answer".into(), "greet".into()]).map(|_| ())
+                    crate::to_wasm_library(&src, &["echo".into(), "answer".into(), "greet".into()]).map(|_| ())
                 } else if !src.contains("fn main(") {
                     // main のない依存ファイルも、ライブラリとして証明を検査する。
                     let modules = crate::pipeline::load(&src, p.parent().unwrap())?;

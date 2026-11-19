@@ -8,6 +8,7 @@ use crate::parser::Name;
 // 利用者の関数には GC のシャドースタックを付ける（Ctx::shadow。仕組みは runtime.hb の先頭）
 use crate::error::R;
 use crate::parser::{self, Expr as Ast, Stmt as AstStmt};
+use crate::typeck::{BoundaryCheck, V};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
@@ -35,11 +36,11 @@ pub(crate) const STATIC_BYTES: usize = 200;
 pub struct Program {
     pub(crate) functions: Vec<Function>,
     pub(crate) imports: Vec<Import>,
-    // 公開関数と外部関数の境界の型（引数, 戻り値）。Vec と構造体を渡す接続コードが使う
+    // 公開関数と外部関数の境界の型（引数, 戻り値）。接続コードが値の変換に使う
     pub(crate) boundary: HashMap<String, (Vec<BoundaryType>, BoundaryType)>,
 }
 
-/// WASM の境界で渡す値の形。Vec と構造体は runtime.hb の __val_in・__val_out のバイト列で渡す
+/// WASM の境界で渡す値の形。Vec・構造体・Result は runtime.hb の変換したバイト列で渡す
 #[derive(Debug, Clone, PartialEq)]
 pub enum BoundaryType {
     Int,
@@ -50,6 +51,10 @@ pub enum BoundaryType {
     Vec(Box<BoundaryType>),
     // 構築子の番号（IR の構築子の並び）と、宣言の順のフィールド
     Struct(i64, Vec<(String, BoundaryType)>),
+    Result {
+        ok: (i64, Box<BoundaryType>),
+        err: (i64, Box<BoundaryType>),
+    },
 }
 
 impl BoundaryType {
@@ -64,6 +69,7 @@ impl BoundaryType {
             Self::Unit => json!("unit"),
             Self::Vec(x) => json!({ "vec": x.json() }),
             Self::Struct(k, fields) => json!({ "ctor": k, "fields": fields.iter().map(|(n, t)| json!([n, t.json()])).collect::<Vec<_>>() }),
+            Self::Result { ok, err } => json!({ "result": [[ok.0, ok.1.json()], [err.0, err.1.json()]] }),
         }
     }
 
@@ -74,7 +80,7 @@ impl BoundaryType {
             Self::Bool => ValueType::Bool,
             Self::Str => ValueType::Str,
             Self::Unit => ValueType::Unit,
-            Self::Vec(_) | Self::Struct(..) => ValueType::Value,
+            Self::Vec(_) | Self::Struct(..) | Self::Result { .. } => ValueType::Value,
         }
     }
 }
@@ -87,7 +93,7 @@ pub enum ValueType {
     Bool,
     Str,
     Unit,
-    // Vec と構造体。中身は Program::boundary の型で決まる
+    // Vec・構造体・Result。中身は Program::boundary の型で決まる
     Value,
     Other,
 }
@@ -106,6 +112,8 @@ pub struct Function {
     pub(crate) params: u32,
     pub(crate) param_types: Vec<ValueType>,
     pub(crate) result_type: ValueType,
+    // IR の組み立てと公開関数の選択を分ける場合も、公開できない理由を保持する。
+    pub(crate) export_error: Option<Box<crate::error::Error>>,
     // 公開関数の入口で仕事の並びを空にし、Promise なら完了値を取り出す
     pub(crate) finish_at_boundary: bool,
     // 引数を含む局所変数の数。引数は 0 から順に並ぶ
@@ -255,6 +263,7 @@ impl Function {
     /// 利用者が書いた関数で、引数と戻り値を WASM の境界で渡せるか
     pub fn boundary(&self) -> bool {
         !self.name.starts_with("__")
+            && self.export_error.is_none()
             && self.param_types.len() == self.params as usize
             && self
                 .param_types
@@ -463,6 +472,10 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>, info: &cr
     if exports.is_none() && (!p.datas.is_empty() || !p.tests.is_empty()) {
         return Err("IR は型宣言とテスト宣言に未対応".into());
     }
+    let mut boundary_check = BoundaryCheck::new(p);
+    let with_sources = |error: crate::error::Error| {
+        error.with_sources(p.modules.iter().map(|module| &module.source))
+    };
     let mut pending: Vec<String> = match exports {
         Some(names) => {
             let mut seen = HashSet::new();
@@ -494,14 +507,16 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>, info: &cr
             if !visited.insert(name.clone()) {
                 continue;
             }
-            let js = cx
+            let source = cx
                 .sources
                 .get(name.as_str())
-                .map(|s| s.f)
-                .filter(|f| f.js.is_some());
+                .filter(|s| !s.runtime)
+                .map(|s| s.f);
+            let js = source.filter(|f| f.js.is_some());
             let mut function = match js {
                 Some(f) => {
-                    let (param_types, result_type) = cx.boundary(f, &mut descs);
+                    boundary_check.signature(f).map_err(with_sources)?;
+                    let (param_types, result_type) = cx.boundary(f, &mut boundary_check, &mut descs).map_err(with_sources)?;
                     if param_types.iter().chain([&result_type]).any(|t| *t == ValueType::Value) {
                         pending.extend(["__val_in".to_string(), "__val_out".to_string()]);
                     }
@@ -533,11 +548,17 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>, info: &cr
                 None if cx.sources.contains_key(name.as_str()) => cx.function(&name)?,
                 None => cx.generated(&name)?,
             };
+            if let Some(f) = source && !f.alias && f.implicit == 0 && !f.params.is_empty() {
+                function.export_error = boundary_check.signature(f).err().map(Box::new);
+            }
             if exported(&name) {
+                if let Some(error) = function.export_error.take() {
+                    return Err(with_sources(*error));
+                }
                 if let Some(f) = cx.sources.get(name.as_str()).map(|s| s.f)
                     && f.implicit == 0
                 {
-                    let (param_types, result_type) = cx.boundary(f, &mut descs);
+                    let (param_types, result_type) = cx.boundary(f, &mut boundary_check, &mut descs).map_err(with_sources)?;
                     if param_types.iter().chain([&result_type]).any(|t| *t == ValueType::Value) {
                         pending.extend(["__val_in".to_string(), "__val_out".to_string()]);
                     }
@@ -623,6 +644,7 @@ impl<'a> Ctx<'a> {
             params: f.params.len() as u32,
             param_types: f.params.iter().map(|(_, t)| value_type(t)).collect(),
             result_type: ret_type(f),
+            export_error: None,
             finish_at_boundary: !runtime && !variant && has_async(&f.effects),
             locals,
             body,
@@ -643,6 +665,7 @@ impl<'a> Ctx<'a> {
             params,
             param_types: vec![],
             result_type: ValueType::Other,
+            export_error: None,
             finish_at_boundary: false,
             locals: params,
             body: vec![],
@@ -719,40 +742,54 @@ impl<'a> Ctx<'a> {
         Err(format!("IR に関数 {name} が無い").into())
     }
 
-    // 境界の関数の引数と戻り値の型。Vec と構造体は Value にし、形を descs に記録する
-    fn boundary(&self, f: &parser::Fn, descs: &mut HashMap<String, (Vec<BoundaryType>, BoundaryType)>) -> (Vec<ValueType>, ValueType) {
-        let ty = |t: Option<&Ast>| match t.map_or(Some(BoundaryType::Unit), |t| self.desc(t, &mut Vec::new())) {
-            Some(d) => (d.value_type(), Some(d)),
-            None => (t.map_or(ValueType::Unit, value_type), None),
-        };
-        let params: Vec<_> = f.params.iter().map(|(_, t)| ty(Some(t))).collect();
-        let result = ty(f.ret.as_ref());
-        if let (Some(ps), Some(r)) = (params.iter().map(|p| p.1.clone()).collect::<Option<Vec<_>>>(), result.1.clone()) {
+    // 境界の関数の引数と戻り値の型。複合値の形は descs に記録する
+    fn boundary(
+        &self,
+        f: &parser::Fn,
+        check: &mut BoundaryCheck,
+        descs: &mut HashMap<String, (Vec<BoundaryType>, BoundaryType)>,
+    ) -> R<(Vec<ValueType>, ValueType)> {
+        let (params, result) = check.types(f)?;
+        let params: Vec<_> = params.iter().map(|t| self.desc(t, check, false, &mut Vec::new())).collect();
+        let result = self.desc(&result, check, f.js.is_none(), &mut Vec::new());
+        let ty = |d: &Option<BoundaryType>| d.as_ref().map_or(ValueType::Other, BoundaryType::value_type);
+        let signature = (params.iter().map(ty).collect(), ty(&result));
+        if let (Some(ps), Some(r)) = (params.into_iter().collect::<Option<Vec<_>>>(), result) {
             descs.insert(f.name.to_string(), (ps, r));
         }
-        (params.into_iter().map(|p| p.0).collect(), result.0)
+        Ok(signature)
     }
 
-    // 境界で渡せる型の形。int・number・bool・String・unit と、それらの Vec と、型引数の無い構造体。
-    // 自分を含む構造体（seen にある型）や、Ref・関数の型を含むものは None
-    fn desc(&self, t: &Ast, seen: &mut Vec<Name>) -> Option<BoundaryType> {
-        Some(match t.peel() {
-            Ast::Var(n) if n == "int" => BoundaryType::Int,
-            Ast::Var(n) if n == "number" => BoundaryType::Number,
-            Ast::Var(n) if n == "bool" => BoundaryType::Bool,
-            Ast::Var(n) if n == "String" => BoundaryType::Str,
-            Ast::Var(n) if n == "unit" => BoundaryType::Unit,
-            Ast::Refine(base, _, _) => self.desc(base, seen)?,
-            Ast::Call(n, xs) if n == "Vec" && xs.len() == 1 => BoundaryType::Vec(Box::new(self.desc(&xs[0], seen)?)),
-            Ast::Var(n) => {
+    fn desc(&self, t: &V, check: &mut BoundaryCheck, allow_result: bool, seen: &mut Vec<Name>) -> Option<BoundaryType> {
+        Some(match t {
+            V::Prim("int") => BoundaryType::Int,
+            V::Prim("number") => BoundaryType::Number,
+            V::Prim("bool") => BoundaryType::Bool,
+            V::Prim("String") => BoundaryType::Str,
+            V::Prim("unit") => BoundaryType::Unit,
+            V::Refine(r) => self.desc(&r.0, check, allow_result, seen)?,
+            V::VecT(item) => BoundaryType::Vec(Box::new(self.desc(item, check, allow_result, seen)?)),
+            // ponytail: 列挙型は公開関数が返す標準の Result に限る。ほかの列挙型も扱うなら構築子の表を渡す。
+            V::DataT(data) if allow_result && data.0 == "std.Result" => {
+                let [ok, err] = data.1.as_slice() else { return None };
+                BoundaryType::Result {
+                    ok: (self.ctors.get("std.Ok")?.0, Box::new(self.desc(ok, check, allow_result, seen)?)),
+                    err: (self.ctors.get("std.Err")?.0, Box::new(self.desc(err, check, allow_result, seen)?)),
+                }
+            }
+            V::DataT(data) => {
+                let n = &data.0;
                 let d = self.datas.get(n.as_str())?;
                 let [c] = d.ctors.as_slice() else { return None };
                 if !d.params.is_empty() || c.name.structure_owner().is_none() || seen.contains(n) {
                     return None;
                 }
                 let (k, _) = self.ctors.get(c.name.as_str())?;
+                let types = check.fields(d, c).ok()?;
                 seen.push(n.clone());
-                let fields = c.fields.iter().map(|(f, t)| Some((f.to_string(), self.desc(t, seen)?))).collect::<Option<Vec<_>>>();
+                let fields = c.fields.iter().zip(&types).map(|((f, _), t)| {
+                    Some((f.to_string(), self.desc(t, check, allow_result, seen)?))
+                }).collect::<Option<Vec<_>>>();
                 seen.pop();
                 BoundaryType::Struct(*k, fields?)
             }
@@ -1554,6 +1591,7 @@ impl Lower<'_, '_> {
             params: 1 + params.len() as u32,
             param_types: vec![],
             result_type: ValueType::Other,
+            export_error: None,
             finish_at_boundary: false,
             locals,
             body: stmts,

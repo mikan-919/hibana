@@ -4,6 +4,9 @@ mod traits;
 mod effects;
 #[path = "proof.rs"]
 mod proof;
+#[path = "boundary.rs"]
+mod boundary;
+pub(crate) use boundary::BoundaryCheck;
 use effects::{eff_key, flat, infer_effects, op_site};
 use traits::{ImplLookup, is_impl};
 
@@ -107,6 +110,7 @@ const BUILTINS: &[&str] = &[
     "task_done",
     "task_value",
     "compile_file",
+    "compile_wasm_file",
     "write_bytes",
 ];
 
@@ -128,17 +132,22 @@ const STR_FNS: &[(&str, &[&str], &str)] = &[
     ("panic", &["String"], "never"),
     // スクリプト専用（SCRIPT_FNS）。ファイルを JS・WASM・ネイティブにコンパイルしたバイト列と、その書き込み
     ("compile_file", &["String", "String"], "Vec<int>"),
+    ("compile_wasm_file", &["String", "Vec<String>"], "Pair<Vec<int>, String>"),
     ("write_bytes", &["String", "Vec<int>"], "unit"),
 ];
 
 // インタプリタで実行するスクリプトでだけ使える組み込み関数。ほかのバックエンドの出力から辿れるとエラー
-pub(crate) const SCRIPT_FNS: &[&str] = &["compile_file", "write_bytes"];
+pub(crate) const SCRIPT_FNS: &[&str] = &["compile_file", "compile_wasm_file", "write_bytes"];
 
 // 組み込み関数の表の型の綴りを型にする
 fn table_type(s: &str) -> V {
     match s {
         "Vec<String>" => V::VecT(Rc::new(prim("String"))),
         "Vec<int>" => V::VecT(Rc::new(prim("int"))),
+        "Pair<Vec<int>, String>" => V::DataT(Rc::new((
+            crate::parser::qual("std", "Pair"),
+            vec![table_type("Vec<int>"), prim("String")],
+        ))),
         _ => prim(s),
     }
 }
@@ -659,15 +668,7 @@ fn check_prog(prog: &mut Program, require_main: bool) -> R<Info> {
         }
         names.push(n);
     }
-    for d in &prog.datas {
-        ck.norm.datas.insert(d.name.clone(), d.clone());
-        for c in &d.ctors {
-            ck.norm.ctors.insert(c.name.clone(), (d.clone(), c.clone()));
-        }
-    }
-    for f in &prog.fns {
-        ck.norm.fns.insert(f.name.clone(), f.clone());
-    }
+    ck.norm.load_declarations(prog);
     for d in &prog.datas {
         ck.module = d.module.clone();
         ck.data_level(d).map_err(|e| at_opt(e, d.span))?;
@@ -756,6 +757,9 @@ fn check_fn(ck: &mut Ck, f: &mut Fn) -> R<()> {
         return Err(r("関数は型を返せない。型を計算するなら type で定義する").into());
     }
     // extern の関数と効果の操作は本体が無いので、型の宣言だけを検査する
+    if f.js.is_some() && !ck.inferring {
+        ck.norm.check_boundary_signature(f)?;
+    }
     if f.js.is_some() || f.op.is_some() {
         return Ok(());
     }
@@ -827,15 +831,7 @@ fn check_macro_body(
         impls: Vec::new(),
         effect_names: Default::default(),
     };
-    for f in &prog.fns {
-        ck.norm.fns.insert(f.name.clone(), f.clone());
-    }
-    for d in &prog.datas {
-        ck.norm.datas.insert(d.name.clone(), d.clone());
-        for c in &d.ctors {
-            ck.norm.ctors.insert(c.name.clone(), (d.clone(), c.clone()));
-        }
-    }
+    ck.norm.load_declarations(prog);
     let mut helpers = prog.clone();
     let mut pending = Vec::new();
     walk(&Expr::Block(b.clone()), &mut |e| {

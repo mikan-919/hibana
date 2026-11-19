@@ -310,9 +310,10 @@ pub struct Program {
 pub(super) const LIBS: &[(&str, &str)] = &[
     ("std", include_str!("../../lib/std.hb")),
     ("std::math", include_str!("../../lib/math.hb")),
+    ("std::wasm_web", include_str!("../../lib/wasm_web.hb")),
 ];
 
-pub(super) const PRELUDE_NAMES: &[&str] = &["Result", "Ok", "Err", "parse_int", "refine", "spawn"];
+pub(super) const PRELUDE_NAMES: &[&str] = &["Result", "Ok", "Err", "parse_int", "refine", "spawn", "compile_wasm_file"];
 
 // use した名前の取り込み方
 #[derive(Debug, Clone)]
@@ -578,6 +579,7 @@ fn parse_modules_tokens(
         "task_done",
         "task_value",
         "compile_file",
+        "compile_wasm_file",
         "write_bytes",
         "Vec",
         "Type",

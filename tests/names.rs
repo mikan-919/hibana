@@ -1,3 +1,6 @@
+#[path = "common/wasm_web.rs"]
+mod wasm_web;
+
 use hibana::parser::{NameKind, Program};
 use std::process::Command;
 
@@ -138,7 +141,7 @@ fn main() {
 
     let directory = std::env::temp_dir().join(format!("hibana-names-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
-    let web = hibana::to_web(source, &["main".into()]).unwrap();
+    let web = wasm_web::build(source, &["main".into()]).unwrap();
     std::fs::write(directory.join("program.wasm"), web.wasm).unwrap();
     std::fs::write(directory.join("glue.mjs"), web.javascript).unwrap();
     std::fs::write(directory.join("run.mjs"), "import fs from 'node:fs'; import {instantiate} from './glue.mjs'; (await instantiate(fs.readFileSync(new URL('./program.wasm', import.meta.url)))).main();").unwrap();

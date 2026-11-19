@@ -79,6 +79,7 @@ pub fn emit(program: &Program) -> R<Vec<u8>> {
         params: 0,
         param_types: vec![],
         result_type: ir::ValueType::Unit,
+        export_error: None,
         finish_at_boundary: false,
         locals: 0,
         body: vec![

@@ -49,28 +49,12 @@ pub fn to_wasm_library(src: &str, exports: &[String]) -> error::R<Vec<u8>> {
     pipeline::emit_wasm(&ir, Some(exports))
 }
 
-pub fn to_js_glue(src: &str, exports: &[String]) -> error::R<String> {
+/// 同じ型検査結果から WASM ライブラリと受け渡し規約の JSON を作る。
+pub fn compile_wasm_library(src: &str, exports: &[String]) -> error::R<(Vec<u8>, String)> {
     let ir = pipeline::lower(&checked(src, pipeline::Kind::Library)?, Some(exports))?;
-    pipeline::emit_js_glue(&ir, exports)
-}
-
-/// Web 向けの WASM と、それを呼び出す ES モジュール。
-pub struct WebOutput {
-    pub wasm: Vec<u8>,
-    pub javascript: String,
-}
-
-/// ソースを一度だけ型検査し、指定した関数を公開する Web 用成果物を作る。
-pub fn to_web(src: &str, exports: &[String]) -> error::R<WebOutput> {
-    if exports.is_empty() {
-        return Err("Web の公開関数を指定してください".into());
-    }
-    let ir = pipeline::lower(&checked(src, pipeline::Kind::Library)?, Some(exports))?;
-    let javascript = pipeline::emit_js_glue(&ir, exports)?;
-    Ok(WebOutput {
-        wasm: wasm::emit_with_glue(&ir, exports),
-        javascript,
-    })
+    let abi = pipeline::wasm_abi(&ir, exports)?;
+    let wasm = pipeline::emit_wasm(&ir, Some(exports))?;
+    Ok((wasm, abi))
 }
 
 /// libc を使わない静的な ELF の実行ファイルを作る。main から辿れる関数だけを含める。

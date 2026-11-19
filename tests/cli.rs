@@ -86,10 +86,55 @@ fn build_scripts_write_compiled_outputs() {
 }
 
 #[test]
+fn hibana_build_scripts_generate_web_library_and_typescript() {
+    let dir = std::env::temp_dir().join(format!("hibana-build-web-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/rules.hb"), "pub type Positive = int[x -> x > 0]\n").unwrap();
+    std::fs::write(dir.join("src/app.hb"), r#"
+use rules
+pub fn validate(n: int) -> Result<rules.Positive, String> with {} {
+    refine<rules.Positive>(n)
+}
+"#).unwrap();
+    std::fs::write(dir.join("build.hb"), r#"
+use std::wasm_web
+
+fn main() {
+    let compiled = compile_wasm_file('src/app.hb', ['validate'])
+    write_bytes('dist/app.wasm', compiled.first)
+    write_bytes('dist/app.mjs', wasm_web.utf8(wasm_web.javascript(compiled.second)))
+    write_bytes('dist/app.d.mts', wasm_web.utf8(wasm_web.typescript(compiled.second)))
+    write_bytes('dist/utf8.txt', wasm_web.utf8('é日本語🌸'))
+}
+"#).unwrap();
+    let build = Command::new(env!("CARGO_BIN_EXE_hibana"))
+        .arg("build.hb").current_dir(&dir).output().unwrap();
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    let declarations = std::fs::read_to_string(dir.join("dist/app.d.mts")).unwrap();
+    assert!(declarations.contains(r#""validate": (arg0: number) => { ok: true; value: number } | { ok: false; error: string };"#));
+    assert_eq!(std::fs::read(dir.join("dist/utf8.txt")).unwrap(), "é日本語🌸".as_bytes());
+    let js = Command::new("node").args(["--input-type=module", "-e", r#"
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { instantiate } from './dist/app.mjs';
+const api = await instantiate(readFileSync('dist/app.wasm'));
+assert.deepEqual(Object.keys(api), ['validate']);
+assert.deepEqual(api.validate(7), { ok: true, value: 7 });
+assert.deepEqual(api.validate(0), { ok: false, error: '細分化型の条件を満たさない' });
+"#]).current_dir(&dir).output().unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert!(js.status.success(), "{}", String::from_utf8_lossy(&js.stderr));
+}
+
+#[test]
 fn script_functions_are_rejected_by_compiled_backends() {
-    let src = "fn main() {\n    write_bytes('x', [1])\n}\n";
-    for e in [hibana::to_js(src).unwrap_err(), hibana::to_wasm(src).unwrap_err()] {
-        assert!(e.to_string().contains("インタプリタでの実行"), "{e}");
+    for src in [
+        "fn main() { write_bytes('x', [1]) }",
+        "fn main() { put(len(compile_wasm_file('src/app.hb', ['validate']).first)) }",
+    ] {
+        for e in [hibana::to_js(src).unwrap_err(), hibana::to_wasm(src).unwrap_err(), hibana::to_native(src).unwrap_err()] {
+            assert!(e.to_string().contains("インタプリタでの実行"), "{e}");
+        }
     }
     assert!(hibana::to_js("fn f() -> Vec<int> { compile_file('a.hb', 'js') }\nfn main() {}").is_err());
 }

@@ -1,3 +1,6 @@
+#[path = "common/wasm_web.rs"]
+mod wasm_web;
+
 use hibana::pipeline::{self, Kind};
 use std::path::Path;
 use std::process::Command;
@@ -31,10 +34,10 @@ fn builds_and_links_as_independent_steps() {
     assert!(!twice.body().is_empty());
     assert!(pipeline::link(&all, &["missing".into()]).is_err());
     assert!(pipeline::emit_wasm(&linked, Some(&["unused".into()])).is_err());
-    assert!(pipeline::emit_js_glue(&linked, &["twice".into(), "twice".into()]).is_err());
+    assert!(pipeline::wasm_abi(&linked, &["twice".into(), "twice".into()]).is_err());
 
     let bytes = pipeline::emit_wasm(&linked, Some(&exports)).unwrap();
-    let glue = pipeline::emit_js_glue(&linked, &exports).unwrap();
+    let glue = wasm_web::javascript(&pipeline::wasm_abi(&linked, &exports).unwrap()).unwrap();
     let dir = std::env::temp_dir().join(format!("hibana-pipeline-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let wasm = dir.join("math.wasm");
@@ -91,7 +94,7 @@ fn unused() -> int { unused_host() }
         &exports,
     )
     .unwrap();
-    let glue = pipeline::emit_js_glue(&ir, &exports).unwrap();
+    let glue = wasm_web::javascript(&pipeline::wasm_abi(&ir, &exports).unwrap()).unwrap();
     // 生成した接続コードの順序と変換は、下で WASM を実行して確かめる。
 
     let dir = std::env::temp_dir().join(format!("hibana-signatures-{}", std::process::id()));

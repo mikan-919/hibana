@@ -358,6 +358,7 @@ impl Ctx<'_> {
             params: 1,
             param_types: vec![],
             result_type: ValueType::Other,
+            export_error: None,
             finish_at_boundary: false,
             locals: co.state + 1,
             body,

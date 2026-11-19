@@ -1,3 +1,6 @@
+#[path = "common/wasm_web.rs"]
+mod wasm_web;
+
 use std::process::Command;
 
 #[test]
@@ -144,7 +147,7 @@ fn ir_matches_javascript(name: &str, source: &str, panic: Option<&str>) -> Vec<u
     let want = Command::new("node").arg(&js).output().unwrap();
     assert!(want.status.success(), "{}", String::from_utf8_lossy(&want.stderr));
     assert_panic_report(&want.stderr, panic, "JavaScript");
-    let web = hibana::to_web(source, &["main".into()]).unwrap();
+    let web = wasm_web::build(source, &["main".into()]).unwrap();
     std::fs::write(dir.join("main.wasm"), web.wasm).unwrap();
     std::fs::write(dir.join("glue.mjs"), web.javascript).unwrap();
     let runner = dir.join("run.mjs");

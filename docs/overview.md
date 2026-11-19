@@ -59,16 +59,16 @@ nix develop -c cargo run -q -- tests/programs/types/refine.hb
 | 整形 | `hibana fmt <ファイル>` |
 | テスト | `hibana test <ファイル...>` |
 
-コード生成はRustのAPI（プログラムから呼び出す関数群）を使います。生成物のファイル保存と実行は呼び出し側が行います。
+コード生成は hibana のビルドスクリプトか、Rust の API（プログラムから呼び出す関数群）を使います。生成物のファイル保存と実行は呼び出し側が行います。
 
 | 実行方式 | Rustの入口 | 対応範囲・制約 |
 |---|---|---|
 | インタプリタ | `hibana::run` | 型検査後の構文木を評価する。JavaScriptの外部関数は実行しない |
 | JavaScript | `hibana::to_js` | JavaScript・TypeScriptとの連携や非同期処理に対応する |
-| WebAssembly | `hibana::to_wasm`、`hibana::to_web` | `to_wasm` は `main` 用、`to_web` は指定した公開関数とJavaScript接続コードを生成する |
+| WebAssembly | `hibana::to_wasm`、`hibana::compile_wasm_library` | `to_wasm` は `main` 用、`compile_wasm_library` は指定した関数を公開する WASM と受け渡し規約を生成する |
 | ネイティブ | `hibana::to_native` | x86-64のLinux用。Cの標準ライブラリや外部リンカーに依存せず、外部関数は未対応 |
 
-WASMの公開関数・外部関数の境界で渡せる型は `int`・`number`・`String`・`bool`・`unit` と、それらの `Vec` と構造体です。外部関数の接続は同期呼び出しに限ります。IRを使うWASMとネイティブは、シャドースタックを根にするマーク＆スイープのGC（使わなくなったメモリを自動で回収する仕組み）で、確保したメモリを回収します。詳細は[WASMの説明](wasm.md)と[言語仕様の既知の制約](spec.md#12-既知の制約)にあります。
+WASMの公開関数・外部関数の境界で渡せる型は `int`・`number`・`String`・`bool`・`unit` と、それらの `Vec` と構造体です。公開関数の戻り値には `Result` も使えます。外部関数の接続は同期呼び出しに限ります。IRを使うWASMとネイティブは、シャドースタックを根にするマーク＆スイープのGC（使わなくなったメモリを自動で回収する仕組み）で、確保したメモリを回収します。詳細は[WASMの説明](wasm.md)と[言語仕様の既知の制約](spec.md#12-既知の制約)にあります。
 
 ## 実装を読む入口
 
@@ -120,6 +120,6 @@ WASMとネイティブが共通のIRを使います。インタプリタとJavaS
 <details>
 <summary>WASMを生成するには、どの入口を使うか？</summary>
 
-Rustから `hibana::to_wasm` や `hibana::to_web` を呼びます。コマンドラインの操作は実行・整形・テストです。
+hibana のビルドスクリプトでは、`compile_file` で実行用、`compile_wasm_file` でライブラリ用の WASM と受け渡し規約を生成します。JavaScript の接続コードと TypeScript の型宣言は `std::wasm_web` が生成します。スクリプトは `hibana <ファイル>` で実行します。
 
 </details>

@@ -1,3 +1,6 @@
+#[path = "common/wasm_web.rs"]
+mod wasm_web;
+
 use std::fs;
 use std::process::Command;
 
@@ -23,7 +26,7 @@ fn check_backends(name: &str, source: &str, want: Expected<'_>) {
     fs::write(&javascript, js).unwrap();
     let js = Command::new("node").arg(javascript).output().unwrap();
 
-    let web = hibana::to_web(source, &["main".into()]).unwrap();
+    let web = wasm_web::build(source, &["main".into()]).unwrap();
     fs::write(dir.join("main.wasm"), web.wasm).unwrap();
     fs::write(dir.join("glue.mjs"), web.javascript).unwrap();
     let runner = dir.join("run.mjs");
@@ -482,7 +485,7 @@ fn equality_type_errors() {
         let errors = [
             hibana::run(&source, &mut Vec::new()).err(),
             hibana::to_js(&source).err(),
-            hibana::to_web(&source, &["main".into()]).err(),
+            wasm_web::build(&source, &["main".into()]).err(),
             hibana::to_native(&source).err(),
         ];
         let messages = errors.map(|error| error.expect(&source).to_string());

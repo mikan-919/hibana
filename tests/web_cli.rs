@@ -1,3 +1,6 @@
+#[path = "common/wasm_web.rs"]
+mod wasm_web;
+
 use std::process::Command;
 
 #[test]
@@ -12,7 +15,7 @@ fn web_api_emits_pair_and_runs_generated_module() {
     .unwrap();
     let out = dir.join("artifacts");
     let source = std::fs::read_to_string(&source).unwrap();
-    let web = hibana::to_web(&source, &["echo".into(), "answer".into()]).unwrap();
+    let web = wasm_web::build(&source, &["echo".into(), "answer".into()]).unwrap();
     std::fs::create_dir_all(&out).unwrap();
     std::fs::write(out.join("hello.web.wasm"), web.wasm).unwrap();
     std::fs::write(out.join("hello.web.mjs"), web.javascript).unwrap();
@@ -60,6 +63,8 @@ fn removed_codegen_commands_are_rejected() {
 }
 
 #[test]
-fn web_api_rejects_empty_exports() {
-    assert!(hibana::to_web("fn echo(s: String) -> String { s }", &[]).is_err());
+fn wasm_abi_can_describe_an_empty_export_set() {
+    let (_, abi) = hibana::compile_wasm_library("fn echo(s: String) -> String { s }", &[]).unwrap();
+    let abi: serde_json::Value = serde_json::from_str(&abi).unwrap();
+    assert_eq!(abi["exports"], serde_json::json!([]));
 }
