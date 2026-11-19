@@ -137,6 +137,27 @@ fn main() {
 }
 
 #[test]
+fn mixed_division_and_remainder_use_nonzero_integer_divisors() {
+    let source = r#"
+fn guarded(d: int) -> number {
+    if d != 0 { 7.0 / d } else { 0.0 }
+}
+fn refined(d: int[n -> n != 0]) -> number { 5.5 % d }
+fn guarded_number(d: int) -> number {
+    if d != 0.0 { 7.0 / d } else { 0.0 }
+}
+fn main() {
+    put(guarded(2))
+    put(guarded(-2))
+    put(guarded(0))
+    put(refined(2))
+    put(guarded_number(2))
+}
+"#;
+    check_backends("mixed-division", source, success("3.5\n-3.5\n0\n1.5\n3.5\n"));
+}
+
+#[test]
 fn fractional_exponent() {
     for (name, expression) in [("literal", "2.0 ** 0.5"), ("computed", "2 ** (1.0 / 2)")] {
         check_backends(

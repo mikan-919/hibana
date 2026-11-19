@@ -1162,7 +1162,7 @@ impl Ck {
                     want(&int, &rt, &op)?;
                 }
                 if matches!(op, "/" | "%") {
-                    self.nonzero(&r, numeric == prim("number"))?;
+                    self.nonzero(&r, &rt, numeric == prim("number"))?;
                 }
                 if matches!(op, "+" | "-" | "*" | "**" | "/" | "%") {
                     numeric
@@ -2815,6 +2815,8 @@ mod tests {
             "fn f(a: int, b: int) -> int { a / b }\nfn main() {}",
             "fn f(a: int, b: int) -> int { a % b }\nfn main() {}",
             "fn f(a: number, b: number) -> number { a / b }\nfn main() {}",
+            "fn f(b: int) -> number { 7.0 / b }\nfn main() {}",
+            "fn f(b: int) -> number { if b != 0 { 0.0 } else { 5.5 % b } }\nfn main() {}",
             "fn main() { put(1.0 / 0.0) }",
         ] {
             assert!(check(src).unwrap_err().to_string().contains("割る数が 0 でない"), "{src}");
