@@ -76,6 +76,12 @@ fn check_eq_goal(t: &V) -> R<()> {
     Ok(())
 }
 
+pub(super) enum ImplLookup {
+    Found(Expr, V),
+    Missing(Error),
+    Ambiguous(Error),
+}
+
 impl Ck {
     fn impl_head(&mut self, f: &Fn) -> R<(Vec<usize>, Env, V)> {
         let mut env: Env = vec![HashMap::new()];
@@ -172,23 +178,28 @@ impl Ck {
             return Ok(None);
         }
         let goal = V::DataT(Rc::new((tr.into(), vec![base(t)])));
-        match self.resolve_inst(&goal, 0) {
-            Ok(inst) => Ok(Some(inst)),
-            Err(_) => Ok(None),
+        match self.resolve_in(&goal, 0, &[])? {
+            ImplLookup::Found(inst, _) => Ok(Some(inst)),
+            ImplLookup::Missing(_) => Ok(None),
+            ImplLookup::Ambiguous(error) => Err(error),
         }
     }
 
     // トレイトの実装を探す。引数の実装（inst#k）とその親、impl の順
-    // ponytail: 制約付き impl の重複は検査していない。適用条件の重なりが判定できるようになったら宣言時に検査する。
-    pub(super) fn resolve_inst(&mut self, goal: &V, depth: usize) -> R<Expr> {
-        self.resolve_in(goal, depth, &[]).map(|r| r.0)
+    pub(super) fn resolve_inst(&mut self, goal: &V) -> R<Expr> {
+        match self.resolve_in(goal, 0, &[])? {
+            ImplLookup::Found(inst, _) => Ok(inst),
+            ImplLookup::Missing(error) | ImplLookup::Ambiguous(error) => Err(error),
+        }
     }
 
     // goal の中のメタ変数 metas は、実装に合わせて決めてよい（トレイトの型引数が分からない時のメソッドの探索）。見つけた実装の型も返す
-    pub(super) fn resolve_in(&mut self, goal: &V, depth: usize, metas: &[usize]) -> R<(Expr, V)> {
-        check_eq_goal(goal)?;
+    pub(super) fn resolve_in(&mut self, goal: &V, depth: usize, metas: &[usize]) -> R<ImplLookup> {
+        if let Err(error) = check_eq_goal(goal) {
+            return Ok(ImplLookup::Missing(error));
+        }
         if depth > 16 {
-            return Err(format!("{} の実装を探すのが終わらない", show(goal)).into());
+            return Ok(ImplLookup::Missing(format!("{} の実装を探すのが終わらない", show(goal)).into()));
         }
         let mut cands: Vec<Expr> = self
             .scopes
@@ -202,7 +213,7 @@ impl Ck {
             let mut c = cands[i].clone();
             let t = self.expr(&mut c)?;
             if self.unify(&t, goal, metas, &mut HashMap::new())? && check_eq_goal(&t).is_ok() {
-                return Ok((c, t));
+                return Ok(ImplLookup::Found(c, t));
             }
             if let V::DataT(d) = base(&t)
                 && let Some(data) = self.norm.datas.get(&d.0)
@@ -215,7 +226,10 @@ impl Ck {
             }
             i += 1;
         }
-        for f in self.impls.clone() {
+        let mut candidates = Vec::new();
+        let mut missing = None;
+        let mut ambiguous = None;
+        'candidate: for f in self.impls.clone() {
             let (mut ids, mut fenv, rt) = self.impl_head(&f)?;
             let mut sol = HashMap::new();
             ids.extend_from_slice(metas);
@@ -233,14 +247,44 @@ impl Ck {
                 continue;
             }
             let mut subs = Vec::new();
+            let mut ambiguous_constraint = None;
             for (_, pt) in &f.params[f.implicit..] {
                 let t = self.norm.eval_or_opaque(pt, &mut fenv)?;
                 let t = self.apply(&sol, &t)?;
-                subs.push(self.resolve_inst(&t, depth + 1)?);
+                match self.resolve_in(&t, depth + 1, &[])? {
+                    ImplLookup::Found(inst, _) => subs.push(inst),
+                    ImplLookup::Missing(error) => {
+                        missing.get_or_insert(error);
+                        continue 'candidate;
+                    }
+                    ImplLookup::Ambiguous(error) => {
+                        ambiguous_constraint.get_or_insert(error);
+                    }
+                }
             }
-            return Ok((Expr::Call(f.name.clone(), subs), rt));
+            if let Some(error) = ambiguous_constraint {
+                ambiguous.get_or_insert(error);
+                continue;
+            }
+            candidates.push((Expr::Call(f.name, subs), rt, f.span));
         }
-        Err(format!("{} の実装が無い（impl で書く）", show(goal)).into())
+        if candidates.len() > 1 {
+            let mut error = Error::from(format!("{} のトレイト実装が曖昧（適用できる実装が複数ある）", show(goal)));
+            error.related = candidates.into_iter().filter_map(|(_, _, span)| span)
+                .map(|span| crate::error::RelatedSpan {
+                    span,
+                    source: None,
+                    label: "候補のトレイト実装",
+                }).collect();
+            return Ok(ImplLookup::Ambiguous(error));
+        }
+        Ok(if let Some(error) = ambiguous {
+            ImplLookup::Ambiguous(error)
+        } else if let Some((inst, ty, _)) = candidates.pop() {
+            ImplLookup::Found(inst, ty)
+        } else {
+            ImplLookup::Missing(missing.unwrap_or_else(|| format!("{} の実装が無い（impl で書く）", show(goal)).into()))
+        })
     }
 
     pub(super) fn apply(&mut self, sol: &HashMap<usize, V>, v: &V) -> R<V> {

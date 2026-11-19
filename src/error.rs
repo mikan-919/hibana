@@ -17,8 +17,17 @@ pub struct Error {
     pub origin_source: Option<SourceId>,
     pub origin_file: Option<SourceFile>,
     pub origin_label: Option<&'static str>,
+    // エラーに関係する追加の位置
+    pub related: Vec<RelatedSpan>,
     // span の行番号。with_line で msg の前に「行 N: 」を付けると None に戻る
     pub line: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RelatedSpan {
+    pub span: Span,
+    pub source: Option<SourceFile>,
+    pub label: &'static str,
 }
 
 pub type R<T> = Result<T, Error>;
@@ -40,6 +49,11 @@ impl Error {
             let source = source.as_ref();
             if source.id == self.source_id { self.source = Some(source.clone()); }
             if Some(source.id) == self.origin_source { self.origin_file = Some(source.clone()); }
+            for related in &mut self.related {
+                if related.span.source == source.id {
+                    related.source = Some(source.clone());
+                }
+            }
         }
         self
     }
@@ -78,6 +92,7 @@ impl From<String> for Error {
             origin_source: None,
             origin_file: None,
             origin_label: None,
+            related: Vec::new(),
             line: None,
         }
     }

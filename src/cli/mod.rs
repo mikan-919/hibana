@@ -103,7 +103,7 @@ fn report(path: &str, src: &str, e: error::Error) -> miette::Report {
             .iter()
             .any(|s| e.msg.contains(s))
             .then(|| "値.to_string() で文字列にする".to_string());
-        let related = match (e.origin, &e.origin_file) {
+        let mut related = match (e.origin, &e.origin_file) {
             (Some(span), Some(source)) if source.id != e.source_id => vec![RelatedSite {
                 title: e.origin_label.unwrap_or("効果の操作を呼んでいる位置"),
                 src: miette::NamedSource::new(source.name.clone(), source.text.clone()),
@@ -112,6 +112,16 @@ fn report(path: &str, src: &str, e: error::Error) -> miette::Report {
             }],
             _ => Vec::new(),
         };
+        related.extend(e.related.into_iter().filter_map(|site| {
+            let source = site.source?;
+            let name = if source.id.0 == 0 { path.to_string() } else { source.name };
+            Some(RelatedSite {
+                title: site.label,
+                src: miette::NamedSource::new(name, source.text),
+                span: (site.span.start.offset, site.span.end.offset - site.span.start.offset).into(),
+                label: site.label,
+            })
+        }));
         let report = Report {
             help: e.help.clone().or(to_str),
             origin: e.origin.filter(|_| e.origin_source.is_none_or(|source| source == e.source_id)).map(Into::into),
