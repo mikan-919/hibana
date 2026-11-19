@@ -29,7 +29,7 @@ fn ends_value(t: &Token) -> bool {
     ) || matches!(punct(t), ")" | "]" | "}" | "true" | "false")
 }
 
-// i 番目から始まる JSX の要素（<tag ... </tag>）の最後のトークンの番号
+// i 番目から始まる JSX 形式の要素（<tag ... </tag>。マクロの構文で定義する）の最後のトークンの番号
 // JSX の本文は空白も文字列になるので、要素はソースのまま写す
 fn jsx_end(toks: &[Token], i: usize) -> Option<usize> {
     let starts = |k: usize| {
