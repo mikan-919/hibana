@@ -15,7 +15,7 @@ use super::prove::{bin, len, replace_len, un, Env, Eval, Halt, Term};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::error::{Ctx, Error, R};
+use crate::error::{Ctx, Error, R, RelatedSpan};
 use crate::lexer::Span;
 
 // 型検査中の値。型そのものも値として表す
@@ -1225,7 +1225,7 @@ impl Ck {
             }
         }
         // T::f が無ければ、f をメソッドに持つトレイトのうち、x の型に実装があるもの
-        let mut ambiguous = false;
+        let mut ambiguous_impl = false;
         if !self.norm.fns.contains_key(&name) {
             let mut traits: Vec<(Name, Name)> = self
                 .norm
@@ -1241,30 +1241,31 @@ impl Ck {
                 .collect();
             traits.sort();
             // Self 以外の型引数（trait Fail<E> の E）は、実装に合わせて決める
-            let mut has_impl = None;
+            let mut candidates = Vec::new();
             for (tr, method) in &traits {
                 let metas: Vec<usize> = (1..self.norm.datas[tr].params.len()).map(|_| self.norm.fresh()).collect();
                 let mut args = vec![base(&t)];
                 args.extend(metas.iter().map(|id| neu(Term::Var(*id, "?".into()))));
                 let goal = V::DataT(Rc::new((tr.clone(), args)));
                 let lookup = self.resolve_in(&goal, 0, &metas)?;
-                // 複数の候補があれば、呼び出しの引数と戻り値の型で絞る。
                 if !matches!(lookup, ImplLookup::Missing(_)) {
-                    ambiguous = matches!(lookup, ImplLookup::Ambiguous(_));
-                    has_impl = Some(method);
-                    break;
+                    candidates.push((tr, method, matches!(lookup, ImplLookup::Ambiguous(_))));
                 }
             }
-            match (has_impl, traits.first()) {
-                (Some(m), _) => name = m.clone(),
+            match (candidates.as_slice(), traits.first()) {
+                ([(_, method, multiple)], _) => {
+                    name = (*method).clone();
+                    // 同じトレイトの実装候補は、呼び出しの引数と戻り値の型で絞る。
+                    ambiguous_impl = *multiple;
+                }
                 // 実装が無ければ組み込みの文字列化（std.Display の実装があればそれを使う）
-                _ if f == "to_string" && xs.is_empty() => {
+                ([], _) if f == "to_string" && xs.is_empty() => {
                     *e = Expr::Call("to_str".into(), vec![*x]);
                     return self.to_str(e);
                 }
                 // 実装が無いことは、呼び出しの検査で報告する
-                (None, Some((_, m))) => name = m.clone(),
-                (None, None) => {
+                ([], Some((_, method))) => name = method.clone(),
+                ([], None) => {
                     let Some(ty) = ty else {
                         return Err(format!("{} の値にはメソッドを呼べない", show(&t)).into());
                     };
@@ -1275,12 +1276,25 @@ impl Ck {
                     )
                     .into());
                 }
+                _ => {
+                    let names = candidates.iter().map(|(tr, _, _)| tr.to_string()).collect::<Vec<_>>();
+                    let mut error = Error::from(format!(
+                        "{} のメソッド {f} が曖昧（{} が候補）",
+                        show(&t),
+                        names.join("、")
+                    ));
+                    error.related = candidates.iter()
+                        .filter_map(|(_, method, _)| self.norm.fns[*method].span)
+                        .map(|span| RelatedSpan { span, source: None, label: "候補のメソッド宣言" })
+                        .collect();
+                    return Err(error);
+                }
             }
         }
         let mut args = Vec::with_capacity(xs.len() + 1);
         args.push(*x);
         args.extend(xs);
-        let r = self.call_fn(&name, &mut args, expected.filter(|_| ambiguous), addr);
+        let r = self.call_fn(&name, &mut args, expected.filter(|_| ambiguous_impl), addr);
         *e = Expr::Call(name, args);
         r
     }
