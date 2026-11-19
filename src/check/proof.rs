@@ -192,16 +192,35 @@ impl Ck {
     }
 
     // 割る数 d について d != 0 を証明する
-    pub(super) fn nonzero(&mut self, d: &Expr, real: bool) -> R<()> {
+    pub(super) fn nonzero(&mut self, d: &Expr, ty: &V, real: bool) -> R<()> {
         let zero = if real { V::Num(0.0) } else { V::Int(0) };
         let dv = self.eval_value(d)?;
-        let goal = bin("!=", dv.clone(), zero.clone());
-        // Z3 を使わない証明器でも i >= 2 などの下限から示せるよう、符号の形も試す
-        let signed = bin("||", bin("<", zero.clone(), dv.clone()), bin("<", dv, zero));
-        if !self.prove(&goal) && !self.prove(&signed) {
-            return Err(format!("割る数が 0 でないこと {} を証明できない", show(&goal)).into());
+        if self.proves_nonzero(&dv, &zero) {
+            return Ok(());
         }
-        Ok(())
+        // int から number への変換ではゼロかどうかが変わらない
+        if real && base(ty) == prim("int")
+            && let V::Neu(n) = &dv
+            && let Term::Num(int_value) = &**n
+            && self.proves_nonzero(int_value, &V::Int(0))
+        {
+            return Ok(());
+        }
+        let goal = bin("!=", dv, zero);
+        Err(format!("割る数が 0 でないこと {} を証明できない", show(&goal)).into())
+    }
+
+    fn proves_nonzero(&mut self, d: &V, zero: &V) -> bool {
+        if self.prove(&bin("!=", d.clone(), zero.clone())) {
+            return true;
+        }
+        // Z3 を使わない証明器でも i >= 2 などの下限から示せるよう、符号の形も試す
+        let signed = bin(
+            "||",
+            bin("<", zero.clone(), d.clone()),
+            bin("<", d.clone(), zero.clone()),
+        );
+        self.prove(&signed)
     }
 
     pub(super) fn eval_value(&mut self, e: &Expr) -> R<V> {
