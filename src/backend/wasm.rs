@@ -877,7 +877,6 @@ const v = new DataView(x.memory.buffer), p = Number(v.getBigUint64(24, true)), n
 process.stdout.write(Buffer.from(x.memory.buffer, p + 8, n));
 "#;
         for (src, expected) in [
-            ("fn f(a: int, b: int) -> int { a / b } fn main() { put(f(1, 0)) }", "0 で除算した"),
             ("fn f(a: int, b: int) -> int { a + b } fn main() { put(f(9007199254740991, 1)) }", "オーバーフロー"),
             ("fn f(a: int, b: int) -> int { a ** b } fn main() { put(f(2, -1)) }", "負の指数"),
             ("fn f(a: int, b: int) -> int { a ** b } fn main() { put(f(2, 63)) }", "オーバーフロー"),
@@ -892,7 +891,7 @@ process.stdout.write(Buffer.from(x.memory.buffer, p + 8, n));
 
     #[test]
     fn executes_and_checks_integer_errors() {
-        let src = "fn add(a: int, b: int) -> int { a + b }\nfn sub(a: int, b: int) -> int { a - b }\nfn mul(a: int, b: int) -> int { a * b }\nfn div(a: int, b: int) -> int { a / b }\nfn rem(a: int, b: int) -> int { a % b }\nfn main() { put(add(2, 3))\n put(mul(7, 6))\n put(sub(1, 2))\n put(div(7, 2))\n put(rem(7, 2)) }";
+        let src = "fn add(a: int, b: int) -> int { a + b }\nfn sub(a: int, b: int) -> int { a - b }\nfn mul(a: int, b: int) -> int { a * b }\nfn div(a: int, b: int[b -> b != 0]) -> int { a / b }\nfn rem(a: int, b: int[b -> b != 0]) -> int { a % b }\nfn main() { put(add(2, 3))\n put(mul(7, 6))\n put(sub(1, 2))\n put(div(7, 2))\n put(rem(7, 2)) }";
         let bytes = crate::to_wasm(src).unwrap();
         let mut expected = Vec::new();
         crate::run(src, &mut expected).unwrap();

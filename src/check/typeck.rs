@@ -1124,6 +1124,9 @@ impl Ck {
                     want(&int, &lt, &op)?;
                     want(&int, &rt, &op)?;
                 }
+                if matches!(op, "/" | "%") {
+                    self.nonzero(&r, numeric == prim("number"))?;
+                }
                 if matches!(op, "+" | "-" | "*" | "**" | "/" | "%") {
                     numeric
                 } else {
@@ -2770,6 +2773,29 @@ mod tests {
         let source = "fn items() -> Vec<int> { [1] }\nfn main() { let xs = items()\n put(xs[0]) }";
         assert!(check(source).unwrap_err().to_string().contains("添字の範囲"));
         check(&source.replace("put(xs[0])", "if len(xs) > 0 { put(xs[0]) }")).unwrap();
+    }
+
+    // / と % は割る数が 0 でないことを証明する
+    #[test]
+    fn division_requires_nonzero_divisor() {
+        for src in [
+            "fn f(a: int, b: int) -> int { a / b }\nfn main() {}",
+            "fn f(a: int, b: int) -> int { a % b }\nfn main() {}",
+            "fn f(a: number, b: number) -> number { a / b }\nfn main() {}",
+            "fn main() { put(1.0 / 0.0) }",
+        ] {
+            assert!(check(src).unwrap_err().to_string().contains("割る数が 0 でない"), "{src}");
+        }
+        for src in [
+            "fn f(a: int, b: int[b -> b != 0]) -> int { a / b }\nfn main() {}",
+            "fn f(a: int, b: int) -> int { if b != 0 { a % b } else { 0 } }\nfn main() {}",
+            "fn f(a: int, b: int[b -> b >= 2]) -> int { a / b }\nfn main() {}",
+            "fn f(a: number, b: number[b -> b > 0.0]) -> number { a / b }\nfn main() {}",
+            "fn f(a: number, b: number[b -> b < 0.0]) -> number { a / b }\nfn main() {}",
+            "fn main() { put(7 / 2) }",
+        ] {
+            check(src).unwrap_or_else(|e| panic!("{src}: {e}"));
+        }
     }
 
     #[test]

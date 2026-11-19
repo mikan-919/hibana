@@ -244,6 +244,11 @@ fn prove_number(goal: &V, facts: &[&V]) -> bool {
             if *op == "<" && constant(a) == Some(0.0) && sign(b, facts, true) { return true; }
             if *op == "<" && strict_shift(a, b, facts) { return true; }
             if *op == "<=" && number_term(a) == number_term(b) { return true; }
+            // x != 0 は 0 < x か x < 0 から示す
+            if *op == "!=" && constant(b) == Some(0.0) {
+                let zero = V::Num(0.0);
+                return prove_number(&bin("<", zero.clone(), a.clone()), facts) || prove_number(&bin("<", a.clone(), zero), facts);
+            }
             match (interval(a, facts), interval(b, facts)) {
                 (Some((al,ah)),Some((bl,bh))) => match *op {
                     "<=" => ah <= bl, "<" => ah < bl, "!=" => ah < bl || bh < al,
