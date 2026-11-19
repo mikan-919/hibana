@@ -429,6 +429,16 @@ impl Eval {
         self.next_id
     }
 
+    pub(super) fn load_declarations(&mut self, program: &crate::parser::Program) {
+        self.fns.extend(program.fns.iter().map(|f| (f.name.clone(), f.clone())));
+        for data in &program.datas {
+            self.datas.insert(data.name.clone(), data.clone());
+            for ctor in &data.ctors {
+                self.ctors.insert(ctor.name.clone(), (data.clone(), ctor.clone()));
+            }
+        }
+    }
+
     pub(super) fn opaque(&mut self) -> V {
         let id = self.fresh();
         neu(Term::Opaque(id))

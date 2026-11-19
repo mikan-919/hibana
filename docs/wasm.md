@@ -47,6 +47,7 @@ console.log(api.greet("hibana"));
 - `with Async` の公開関数は、WASM 内の仕事の並びが空になるまで実行し、完了した値を同期で返します。JavaScript からは `api.twice(40)` のように呼び出します。
 - `extern "browser" { fn show(message: String) }` などの外部関数は、`imports.hibana_host.show` に同期 JavaScript 関数を指定します。WASM では extern のモジュール文字列ではなく、関数名で接続します。
 - ホスト関数も同じ型変換を使います。非同期関数や Promise は扱いません。
+- 公開関数の引数とホスト関数の戻り値に細分化型（値に条件を付けた型）を指定するとコンパイルエラーになります。配列の要素と構造体のフィールドも対象です。`int` などで受け取り、hibana 側で `refine<T>` を使うと条件を検査できます。
 - 接続コードは呼び出しごとに一時メモリをリセットします。ホスト関数から同じインスタンスの公開関数へ再入することはできません。
 
 `input()` は `imports.hibana.read(fd, target)` に同期の読み取り関数を渡して使えます。`fd` は標準入力の0、`target` は書き込み先の `Uint8Array` です。書き込んだバイト数を返し、入力終了は0、失敗は負の値にします。指定を省いた Node.js では標準入力を読みます。`put` の出力先は `imports.hibana.print`（省略時は `console.log`）です。

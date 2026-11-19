@@ -103,7 +103,7 @@ fn emit_module(program: &Program, selected: Option<&[String]>, with_glue: bool) 
         .functions
         .iter()
         .filter(|f| match selected {
-            Some(names) => names.contains(&f.name),
+            Some(names) => f.export_error.is_none() && names.contains(&f.name),
             // 文字列を渡す関数は、変換するランタイムの関数がある時だけ公開する
             None => {
                 f.boundary()
@@ -891,7 +891,31 @@ process.stdout.write(Buffer.from(x.memory.buffer, p + 8, n));
 
     #[test]
     fn executes_and_checks_integer_errors() {
-        let src = "fn add(a: int, b: int) -> int { a + b }\nfn sub(a: int, b: int) -> int { a - b }\nfn mul(a: int, b: int) -> int { a * b }\nfn div(a: int, b: int[b -> b != 0]) -> int { a / b }\nfn rem(a: int, b: int[b -> b != 0]) -> int { a % b }\nfn main() { put(add(2, 3))\n put(mul(7, 6))\n put(sub(1, 2))\n put(div(7, 2))\n put(rem(7, 2)) }";
+        let src = r#"
+type NonZero = int[n -> n != 0]
+fn add(a: int, b: int) -> int { a + b }
+fn sub(a: int, b: int) -> int { a - b }
+fn mul(a: int, b: int) -> int { a * b }
+fn div(a: int, b: int) -> int {
+    match refine<NonZero>(b) {
+        Ok(divisor) -> a / divisor
+        Err(error) -> panic(error)
+    }
+}
+fn rem(a: int, b: int) -> int {
+    match refine<NonZero>(b) {
+        Ok(divisor) -> a % divisor
+        Err(error) -> panic(error)
+    }
+}
+fn main() {
+    put(add(2, 3))
+    put(mul(7, 6))
+    put(sub(1, 2))
+    put(div(7, 2))
+    put(rem(7, 2))
+}
+"#;
         let bytes = crate::to_wasm(src).unwrap();
         let mut expected = Vec::new();
         crate::run(src, &mut expected).unwrap();

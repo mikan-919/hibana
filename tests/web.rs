@@ -26,6 +26,60 @@ fn references_cannot_cross_the_wasm_boundary() {
 }
 
 #[test]
+fn extern_declarations_reject_incoming_refinements() {
+    for source in [
+        "type Positive = int[x -> x > 0]\nextern '' { fn host() -> Positive }",
+        "struct Entry { values: Vec<int[x -> x > 0]> }\nextern '' { fn host() -> Entry with Async }",
+        "struct Entry<A> { value: A }\nextern '' { fn host() -> Entry<int[x -> x > 0]> }",
+        "extern '' { fn host(callback: (int[x -> x > 0]) -> unit) }",
+        "extern '' { fn host() -> () -> int[x -> x > 0] }",
+    ] {
+        let source = format!("{source}\nfn main() {{}}");
+        let error = hibana::to_js(&source).err().expect("外部宣言を拒否する");
+        assert!(error.msg.contains("細分化型"), "{error}");
+        assert!(error.help.as_deref().unwrap().contains("refine<T>"));
+    }
+    let outgoing = "type Positive = int[x -> x > 0]\nextern '' { fn host(n: Positive, f: () -> Positive) }\nfn main() { host(7, fn() { 7 }) }";
+    assert!(hibana::to_js(outgoing).is_ok());
+}
+
+#[test]
+fn wasm_cannot_export_inputs_with_refinements() {
+    let exports = ["echo".into()];
+    for source in [
+        "fn echo(n: int[x -> x > 0]) -> int { n }",
+        "type Positive = int[x -> x > 0]\nfn echo(n: Positive) -> int { n }",
+        "struct Entry { values: Vec<int[x -> x > 0]> }\nfn echo(n: Entry) -> int { len(n.values) }",
+        "extern 'host' { fn from_host() -> int[x -> x > 0] }\nfn echo() -> int { from_host() }",
+    ] {
+        let error = hibana::to_web(source, &exports).err().unwrap();
+        assert!(error.msg.contains("細分化型"), "{error}");
+        let error = hibana::to_wasm_library(source, &exports).unwrap_err();
+        assert!(error.msg.contains("細分化型"), "{error}");
+    }
+
+    let source = "fn echo(n: int[x -> x > 0]) -> int[x -> x > 0] { n }\nfn main() -> int[x -> x > 0] { echo(7) }";
+    let checked = pipeline::check(pipeline::parse(source).unwrap(), Kind::Executable).unwrap();
+    let all = pipeline::lower(&checked, None).unwrap();
+    assert!(pipeline::link(&all, &exports).unwrap_err().msg.contains("細分化型"));
+    assert!(pipeline::emit_wasm(&all, Some(&exports)).unwrap_err().msg.contains("細分化型"));
+    assert!(pipeline::emit_js_glue(&all, &exports).unwrap_err().msg.contains("細分化型"));
+    assert!(hibana::to_web(source, &["main".into()]).is_ok());
+    for bytes in [
+        hibana::to_wasm(source).unwrap(),
+        pipeline::emit_wasm(&all, None).unwrap(),
+        hibana::wasm::emit_selected(&all, Some(&["echo".into(), "main".into()])),
+    ] {
+        let output = Command::new("node")
+            .args(["-e", "const wasm = new WebAssembly.Instance(new WebAssembly.Module(Buffer.from(process.argv[1], 'hex'))); if ('echo' in wasm.exports || wasm.exports.main() !== 7) process.exitCode = 1;"])
+            .arg(bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    }
+}
+
+#[test]
 fn web_async_exports_return_completed_values() {
     let source = r#"
 fn step(n: int) -> int with Async { n + 1 }

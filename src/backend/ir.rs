@@ -106,6 +106,8 @@ pub struct Function {
     pub(crate) params: u32,
     pub(crate) param_types: Vec<ValueType>,
     pub(crate) result_type: ValueType,
+    // IR の組み立てと公開関数の選択を分ける場合も、公開できない理由を保持する。
+    pub(crate) export_error: Option<Box<crate::error::Error>>,
     // 公開関数の入口で仕事の並びを空にし、Promise なら完了値を取り出す
     pub(crate) finish_at_boundary: bool,
     // 引数を含む局所変数の数。引数は 0 から順に並ぶ
@@ -255,6 +257,7 @@ impl Function {
     /// 利用者が書いた関数で、引数と戻り値を WASM の境界で渡せるか
     pub fn boundary(&self) -> bool {
         !self.name.starts_with("__")
+            && self.export_error.is_none()
             && self.param_types.len() == self.params as usize
             && self
                 .param_types
@@ -463,6 +466,10 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>, info: &cr
     if exports.is_none() && (!p.datas.is_empty() || !p.tests.is_empty()) {
         return Err("IR は型宣言とテスト宣言に未対応".into());
     }
+    let mut boundary_check = crate::typeck::BoundaryCheck::new(p);
+    let with_sources = |error: crate::error::Error| {
+        error.with_sources(p.modules.iter().map(|module| &module.source))
+    };
     let mut pending: Vec<String> = match exports {
         Some(names) => {
             let mut seen = HashSet::new();
@@ -494,13 +501,15 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>, info: &cr
             if !visited.insert(name.clone()) {
                 continue;
             }
-            let js = cx
+            let source = cx
                 .sources
                 .get(name.as_str())
-                .map(|s| s.f)
-                .filter(|f| f.js.is_some());
+                .filter(|s| !s.runtime)
+                .map(|s| s.f);
+            let js = source.filter(|f| f.js.is_some());
             let mut function = match js {
                 Some(f) => {
+                    boundary_check.signature(f).map_err(with_sources)?;
                     let (param_types, result_type) = cx.boundary(f, &mut descs);
                     if param_types.iter().chain([&result_type]).any(|t| *t == ValueType::Value) {
                         pending.extend(["__val_in".to_string(), "__val_out".to_string()]);
@@ -533,7 +542,13 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>, info: &cr
                 None if cx.sources.contains_key(name.as_str()) => cx.function(&name)?,
                 None => cx.generated(&name)?,
             };
+            if let Some(f) = source && !f.alias && f.implicit == 0 && !f.params.is_empty() {
+                function.export_error = boundary_check.signature(f).err().map(Box::new);
+            }
             if exported(&name) {
+                if let Some(error) = function.export_error.take() {
+                    return Err(with_sources(*error));
+                }
                 if let Some(f) = cx.sources.get(name.as_str()).map(|s| s.f)
                     && f.implicit == 0
                 {
@@ -623,6 +638,7 @@ impl<'a> Ctx<'a> {
             params: f.params.len() as u32,
             param_types: f.params.iter().map(|(_, t)| value_type(t)).collect(),
             result_type: ret_type(f),
+            export_error: None,
             finish_at_boundary: !runtime && !variant && has_async(&f.effects),
             locals,
             body,
@@ -643,6 +659,7 @@ impl<'a> Ctx<'a> {
             params,
             param_types: vec![],
             result_type: ValueType::Other,
+            export_error: None,
             finish_at_boundary: false,
             locals: params,
             body: vec![],
@@ -1554,6 +1571,7 @@ impl Lower<'_, '_> {
             params: 1 + params.len() as u32,
             param_types: vec![],
             result_type: ValueType::Other,
+            export_error: None,
             finish_at_boundary: false,
             locals,
             body: stmts,

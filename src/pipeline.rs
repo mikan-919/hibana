@@ -373,13 +373,15 @@ fn select_exports<'a>(program: &'a ir::Program, names: &[String]) -> R<Vec<&'a i
         if !seen.insert(name) {
             return Err(format!("公開する関数 {name} が重複している").into());
         }
-        selected.push(
-            program
-                .functions
-                .iter()
-                .find(|f| f.name == *name)
-                .ok_or_else(|| format!("IR に公開する関数 {name} が無い"))?,
-        );
+        let function = program
+            .functions
+            .iter()
+            .find(|f| f.name == *name)
+            .ok_or_else(|| format!("IR に公開する関数 {name} が無い"))?;
+        if let Some(error) = function.export_error.as_deref() {
+            return Err(error.clone());
+        }
+        selected.push(function);
     }
     Ok(selected)
 }
