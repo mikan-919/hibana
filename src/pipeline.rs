@@ -1,6 +1,8 @@
 //! ビルドの段階。ファイルの書き込みや外部ツールの起動は呼び出し側が行う。
 use crate::{error::R, ir, js, parser, typeck, wasm};
+use ir::{BoundaryType, ValueType};
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write;
 use std::path::Path;
 
 /// 実行ファイルは main を要求し、ライブラリは要求しない。
@@ -123,8 +125,11 @@ pub fn emit_wasm(program: &ir::Program, exports: Option<&[String]>) -> R<Vec<u8>
 /// int と number は Number、str は文字列、unit は undefined として渡す。
 pub fn emit_js_glue(program: &ir::Program, exports: &[String]) -> R<String> {
     let signatures = boundary_signatures(program, exports)?;
-    let hosts = serde_json::to_string(&signatures.imports).unwrap();
-    let names = serde_json::to_string(&signatures.exports).unwrap();
+    let json = |signatures: &[BoundarySignature<'_>]| {
+        serde_json::to_string(&signatures.iter().map(BoundarySignature::json).collect::<Vec<_>>()).unwrap()
+    };
+    let hosts = json(&signatures.imports);
+    let names = json(&signatures.exports);
     let template = r#"// hibana が生成した JavaScript 接続コード
 export async function instantiate(bytes, imports = {}) {
   let instance;
@@ -336,26 +341,110 @@ export async function instantiate(bytes, imports = {}) {
     Ok(format!("{before}{hosts}{middle}{names}{exports}{fail_at}{after}"))
 }
 
-// JS 接続コードに渡す境界の型名とシグネチャ。
-type BoundarySignature<'a> = (&'a str, Vec<serde_json::Value>, serde_json::Value);
+/// 同じ公開関数を指定した JavaScript 接続コードに対応する TypeScript の型宣言を作る。
+pub fn emit_ts_declarations(program: &ir::Program, exports: &[String]) -> R<String> {
+    let signatures = boundary_signatures(program, exports)?;
+    let mut output = String::from(r#"type Imports = WebAssembly.Imports & {
+  hibana?: {
+    print?: (message: string) => void;
+    error?: (message: string) => void;
+    read?: (fd: number, target: Uint8Array) => number | bigint;
+  };
+"#);
+    let imports = if signatures.imports.is_empty() {
+        "imports?: Imports"
+    } else {
+        output.push_str("  hibana_host: {\n");
+        for signature in &signatures.imports {
+            writeln!(output, "    {}", signature.typescript()).unwrap();
+        }
+        output.push_str("  };\n");
+        "imports: Imports"
+    };
+    output.push_str("};\n\n");
+    writeln!(output, "export function instantiate(bytes: BufferSource | WebAssembly.Module, {imports}): Promise<{{").unwrap();
+    for signature in &signatures.exports {
+        writeln!(output, "  {}", signature.typescript()).unwrap();
+    }
+    output.push_str("}>;\n");
+    Ok(output)
+}
+
+fn typescript_type(ty: &BoundaryType) -> String {
+    match ty {
+        BoundaryType::Int | BoundaryType::Number => "number".into(),
+        BoundaryType::Bool => "boolean".into(),
+        BoundaryType::Str => "string".into(),
+        BoundaryType::Unit => "undefined".into(),
+        BoundaryType::Vec(item) => format!("Array<{}>", typescript_type(item)),
+        BoundaryType::Struct(_, fields) => {
+            let mut output = String::from("{");
+            for (name, ty) in fields {
+                let key = serde_json::to_string(name).unwrap();
+                write!(output, " {key}: {};", typescript_type(ty)).unwrap();
+            }
+            output.push_str(" }");
+            output
+        }
+        BoundaryType::Result { ok, err } => format!(
+            "{{ ok: true; value: {} }} | {{ ok: false; error: {} }}",
+            typescript_type(&ok.1),
+            typescript_type(&err.1),
+        ),
+    }
+}
+
+struct BoundarySignature<'a> {
+    name: &'a str,
+    params: Vec<BoundaryType>,
+    result: BoundaryType,
+}
+
+impl BoundarySignature<'_> {
+    fn json(&self) -> (&str, Vec<serde_json::Value>, serde_json::Value) {
+        (self.name, self.params.iter().map(BoundaryType::json).collect(), self.result.json())
+    }
+
+    fn typescript(&self) -> String {
+        let name = serde_json::to_string(self.name).unwrap();
+        let params = self.params.iter().enumerate()
+            .map(|(i, ty)| format!("arg{i}: {}", typescript_type(ty)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{name}: ({params}) => {};", typescript_type(&self.result))
+    }
+}
 
 struct BoundarySignatures<'a> {
     exports: Vec<BoundarySignature<'a>>,
     imports: Vec<BoundarySignature<'a>>,
 }
 
-// 基本型は名前の文字列、複合型は ir::BoundaryType::json の形
 fn boundary_signature<'a>(
     program: &ir::Program,
     name: &'a str,
-    params: &[ir::ValueType],
-    result: &ir::ValueType,
-) -> BoundarySignature<'a> {
+    params: &[ValueType],
+    result: ValueType,
+) -> R<BoundarySignature<'a>> {
     if let Some((ps, r)) = program.boundary.get(name) {
-        return (name, ps.iter().map(|t| t.json()).collect(), r.json());
+        return Ok(BoundarySignature { name, params: ps.clone(), result: r.clone() });
     }
-    let ty = |t: &ir::ValueType| serde_json::Value::String(t.to_string());
-    (name, params.iter().map(ty).collect(), ty(result))
+    // 公開関数を後で選ぶ場合、基本型は関数の IR から取得できる。
+    let primitive = |ty| -> R<BoundaryType> {
+        Ok(match ty {
+            ValueType::Int => BoundaryType::Int,
+            ValueType::Number => BoundaryType::Number,
+            ValueType::Bool => BoundaryType::Bool,
+            ValueType::Str => BoundaryType::Str,
+            ValueType::Unit => BoundaryType::Unit,
+            _ => return Err(format!("IR は関数 {name} の境界の型に未対応").into()),
+        })
+    };
+    Ok(BoundarySignature {
+        name,
+        params: params.iter().copied().map(primitive).collect::<R<_>>()?,
+        result: primitive(result)?,
+    })
 }
 
 fn boundary_signatures<'a>(
@@ -364,13 +453,13 @@ fn boundary_signatures<'a>(
 ) -> R<BoundarySignatures<'a>> {
     let exports = select_exports(program, exports)?
         .into_iter()
-        .map(|f| boundary_signature(program, &f.name, &f.param_types, &f.result_type))
-        .collect();
+        .map(|f| boundary_signature(program, &f.name, &f.param_types, f.result_type))
+        .collect::<R<_>>()?;
     let imports = program
         .imports
         .iter()
-        .map(|f| boundary_signature(program, &f.name, &f.param_types, &f.result_type))
-        .collect();
+        .map(|f| boundary_signature(program, &f.name, &f.param_types, f.result_type))
+        .collect::<R<_>>()?;
     Ok(BoundarySignatures { exports, imports })
 }
 

@@ -126,6 +126,33 @@ for (const name of ['web', 'split']) {
 }
 
 #[test]
+fn web_type_declarations_describe_exports_and_required_host_functions() {
+    let source = r#"
+pub type Positive = int[x -> x > 0]
+pub fn validate(n: int) -> Result<Positive, String> with {} { refine<Positive>(n) }
+struct Entry { values: Vec<number>, valid: bool }
+extern 'host' {
+    fn accept(entry: Entry) -> String
+    fn unused() -> bool
+}
+fn send(entry: Entry) -> String { accept(entry) }
+"#;
+    let declarations = hibana::to_ts_declarations(source, &["validate".into()]).unwrap();
+    assert!(declarations.contains("imports?: Imports"));
+    assert!(declarations.contains(r#""validate": (arg0: number) => { ok: true; value: number } | { ok: false; error: string };"#));
+    assert!(!declarations.contains("hibana_host"));
+
+    let declarations = hibana::to_ts_declarations(source, &["send".into()]).unwrap();
+    let signature = |name| format!(r#""{name}": (arg0: {{ "values": Array<number>; "valid": boolean; }}) => string;"#);
+    assert!(declarations.contains("imports: Imports"));
+    assert!(declarations.contains("hibana_host: {"));
+    assert!(declarations.contains(&signature("accept")));
+    assert!(declarations.contains(&signature("send")));
+    assert!(!declarations.contains("unused"));
+    assert!(hibana::to_ts_declarations(source, &["missing".into()]).is_err());
+}
+
+#[test]
 fn web_async_exports_return_completed_values() {
     let source = r#"
 fn step(n: int) -> int with Async { n + 1 }

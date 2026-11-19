@@ -67,3 +67,7 @@ console.log(api.greet("hibana"));
 `hibana::to_web(source, &exports)` は一度の型検査と IR 変換から `WebOutput { wasm, javascript }` を返します。ファイルの保存は呼び出し側で行います。
 
 WASM 単体は `hibana::to_wasm_library(source, &exports)`、接続コード単体は `hibana::to_js_glue(source, &exports)` で生成できます。
+
+`hibana::to_ts_declarations(source, &exports)` は、同じ公開関数を指定した接続コードに対応する TypeScript の型宣言を文字列で返します。`wasm_web.mjs` と組み合わせる場合は `wasm_web.d.mts` に保存します。公開関数、戻り値、呼び出しに必要なホスト関数の型が宣言に含まれます。`Result` の戻り値は `ok` の真偽に応じて `value` と `error` の型が決まります。
+
+型検査と IR 変換を済ませている場合は、同じ IR と公開関数名を `pipeline::emit_ts_declarations` に渡せます。

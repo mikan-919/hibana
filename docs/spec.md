@@ -604,6 +604,8 @@ WASM の公開関数は標準ライブラリの `Result<T, E>` を戻り値に�
 
 JavaScript の接続コードは `hibana::to_js_glue(source, &exports)`、WASM と接続コードの同時生成は `hibana::to_web(source, &exports)` で行えます。`instantiate` の引数には WASM のバイト列と必要な外部関数を渡します。公開関数・外部関数の整数は JavaScript の `number` で受け渡し、`BigInt` は受理しません。接続コードと WASM の入口の両方で安全整数を検査します。文字列の内部パックと入出力用の内部呼び出しには64ビット整数を維持します。文字列やホスト関数を使う Web 向けライブラリの例は [WebAssembly](wasm.md) を参照してください。
 
+同じ公開関数を指定した接続コード用の TypeScript 宣言は `hibana::to_ts_declarations(source, &exports)` で取得できます。IR を使う場合は `pipeline::emit_ts_declarations` が宣言を返します。
+
 JavaScript、IR、実行用 WASM、ネイティブの実行ファイルは、それぞれ `hibana::to_js`、`hibana::to_ir`、`hibana::to_wasm`、`hibana::to_native` で生成します。API は文字列やバイト列を返し、ファイルへの保存は呼び出し側で行います。`to_wasm` と `to_native` は `main` から辿れる関数だけを含めます。
 
 Rust のライブラリからは、`hibana::pipeline` の各関数を組み合わせられます。`load` は `use` のファイルを読み、ファイルごとの本文と識別子を持つ `ModuleSet` を返します。`parse` はファイルごとに構文解析し、宣言とマクロの情報を共有した構文木とモジュール表を作ります。エラーの位置はファイル内の位置です。同じモジュール名が異なるファイルを指す場合はエラーです。`check` は型検査し、`lower` は IR を作り、`link` は IR から公開関数とその呼び出し先を選びます。`emit_wasm` と `emit_js_glue` はそれぞれバイト列と文字列を返すため、書き込みや外部ツールの起動は呼び出し側で決められます。

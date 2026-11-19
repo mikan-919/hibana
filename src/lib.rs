@@ -54,6 +54,12 @@ pub fn to_js_glue(src: &str, exports: &[String]) -> error::R<String> {
     pipeline::emit_js_glue(&ir, exports)
 }
 
+/// WASM の JavaScript 接続コードに対応する TypeScript の型宣言を作る。
+pub fn to_ts_declarations(src: &str, exports: &[String]) -> error::R<String> {
+    let ir = pipeline::lower(&checked(src, pipeline::Kind::Library)?, Some(exports))?;
+    pipeline::emit_ts_declarations(&ir, exports)
+}
+
 /// Web 向けの WASM と、それを呼び出す ES モジュール。
 pub struct WebOutput {
     pub wasm: Vec<u8>,
