@@ -635,6 +635,7 @@ fn check_prog(prog: &mut Program, require_main: bool) -> R<Info> {
         ck.module = d.module.clone();
         ck.data_level(d).map_err(|e| at_opt(e, d.span))?;
     }
+    ck.check_impl_overlaps(&prog.fns)?;
     if require_main {
         match ck.norm.fns.get(&Name::from("main")) {
             Some(f) if f.params.is_empty() => {}

@@ -29,7 +29,7 @@
 //   +128 印を付ける作業の並び、+136 その容量
 //   +144 標準入力の区画（__input）
 //   +152 非同期の仕事の並びの先頭（値）、+168 その末尾（__enqueue）
-//   +176 コルーチンか then の関数を実行中なら 1（実行時エラーを伝える）
+//   +176 実行の入口、コルーチン、then の関数で実行時エラーを中断として運ぶ間は 1
 //   +184 then の関数で最初に起きた実行時エラー（文字列の値）
 fn __alloc(n: int) -> int {
     let st = __static()
@@ -1538,14 +1538,25 @@ fn __run_job() -> bool {
     true
 }
 
-// 実行の入口で仕事をすべて動かし、戻り値を取り出す。仕事の中で GC が動くので v を根に置く
+fn __begin_entry() {
+    __store(__static() + 176, 1)
+}
+
+// 仕事をすべて動かしてから入口の結果を返す。仕事の中で GC が動くので結果と中断を根に置く
 fn __finish_entry(v: int) -> int {
-    let roots = __frame_push(1)
+    let st = __static()
+    __store(st + 176, 0)
+    let roots = __frame_push(2)
     __setv(roots, v)
+    let failure = if __aborting() { __abort_info() } else { __mkv(0, 0) }
+    __setv(roots + 16, failure)
     while __run_job() {
     }
-    let st = __static()
     __store(st + 64, roots)
+    if __tag(failure) != 0 {
+        if __is_panic(failure) { __die(__panic_message(failure)) }
+        __die('with で処理されなかった中断')
+    }
     let mut result = v
     if __tag(v) == 11 {
         let p = __payload(v)

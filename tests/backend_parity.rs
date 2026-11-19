@@ -231,6 +231,32 @@ fn main() {
 }
 
 #[test]
+fn failing_sync_main_drains_started_tasks() {
+    let source = r#"
+use std -> *
+fn step(n: int) -> int with Async { n }
+fn work() -> int with Async {
+    let n = step(42).await
+    put(n)
+    n
+}
+fn fail() { panic('main の失敗 ' + 42.to_string()) }
+fn main() {
+    let task = spawn(work())
+    task.then(fn(n) { panic('then の失敗 ' + n.to_string()) })
+    task.then(fn(n) { put(n + 1) })
+    fail()
+    put('失敗後の main')
+}
+"#;
+    check_backends(
+        "failing-sync-main",
+        source,
+        reported(false, "42\n43\n", "実行時エラー: main の失敗 42"),
+    );
+}
+
+#[test]
 fn task_display() {
     let source = r#"
 use std -> *
@@ -242,6 +268,42 @@ fn main() {
 }
 "#;
     check_backends("task-display", source, success("<task>\n[<task>]\n"));
+}
+
+#[test]
+fn inferred_requirements_preserve_function_and_refinement_types() {
+    let source = r#"
+use std -> *
+type Mapper = (int) -> String with Async
+type Digit = int[d -> 0 <= d && d <= 9]
+trait DigitSource<T> { fn fetch_digit(self) -> T }
+trait Source<T> { fn take_value(self) -> T }
+
+fn make_mapper() -> Mapper MAPPER_REQUIREMENT {
+    let f: Mapper = take_value()
+    f
+}
+fn mapped(n: int) -> String MAPPED_REQUIREMENTS {
+    let f = make_mapper()
+    f(n).await
+}
+fn declared_digit() -> Digit with DigitSource<Digit> { fetch_digit() }
+fn get_digit() -> Digit DIGIT_REQUIREMENT { declared_digit() }
+fn next_digit() -> int DIGIT_REQUIREMENT { get_digit() + 1 }
+fn to_label(n: int) -> String with Async { n.to_string() }
+fn main() with Async {
+    put(with Source(fn() { to_label }) { mapped(42).await })
+    put(with DigitSource(fn() { 8 }) { next_digit() })
+}
+"#;
+    for explicit in [false, true] {
+        let source = source
+            .replace("MAPPER_REQUIREMENT", if explicit { "with Source<Mapper>" } else { "" })
+            .replace("MAPPED_REQUIREMENTS", if explicit { "with Source<Mapper>, Async" } else { "" })
+            .replace("DIGIT_REQUIREMENT", if explicit { "with DigitSource<Digit>" } else { "" });
+        let name = if explicit { "requirements-explicit" } else { "requirements-inferred" };
+        check_backends(name, &source, success("42\n9\n"));
+    }
 }
 
 #[test]

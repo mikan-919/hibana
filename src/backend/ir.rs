@@ -269,7 +269,7 @@ impl Function {
     /// 呼ぶ関数の名前。算術の範囲外などで呼ぶランタイムの関数も含む
     pub fn calls(&self) -> Vec<&str> {
         let mut names = Vec::new();
-        if self.finish_at_boundary { names.push("__finish_entry"); }
+        if self.finish_at_boundary { names.extend(["__begin_entry", "__finish_entry"]); }
         if self.result_type == ValueType::Int || self.param_types.contains(&ValueType::Int) { names.push("__int_in"); }
         if self.result_type == ValueType::Number || self.param_types.contains(&ValueType::Number) { names.push("__num_checked"); }
         self.each(&mut |n| match n {
@@ -565,7 +565,7 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>, info: &cr
         let Some(main) = functions.iter_mut().find(|f| f.name == "main" && !f.finish_at_boundary) else { break };
         if !asyncs { break; }
         main.finish_at_boundary = true;
-        pending.push("__finish_entry".into());
+        pending.extend(["__begin_entry".into(), "__finish_entry".into()]);
     }
     // 宣言の順（ランタイム、利用者の関数）に並べ、出力を決まった形にする
     let order: HashMap<&str, usize> = runtime

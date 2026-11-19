@@ -51,7 +51,7 @@ console.log(api.greet("hibana"));
 
 `input()` は `imports.hibana.read(fd, target)` に同期の読み取り関数を渡して使えます。`fd` は標準入力の0、`target` は書き込み先の `Uint8Array` です。書き込んだバイト数を返し、入力終了は0、失敗は負の値にします。指定を省いた Node.js では標準入力を読みます。`put` の出力先は `imports.hibana.print`（省略時は `console.log`）です。
 
-`spawn` した処理の実行時エラーは、`imports.hibana.error`（省略時は `console.error`）にメッセージを渡し、残りの処理を続けます。`then` に渡した関数で実行時エラーが起きた場合は、残りの処理を動かしてから、公開関数の呼び出しを例外で終えます。
+`spawn` した処理の実行時エラーは、`imports.hibana.error`（省略時は `console.error`）にメッセージを渡し、残りの処理を続けます。同期の `main`、非同期の公開関数、または `then` に渡した関数が失敗した場合は、残りの処理を動かしてから、公開関数の呼び出しを例外で終えます。公開関数と `then` に渡した関数の両方が失敗した場合は、公開関数のエラーを例外にします。
 
 ## 現在の対応範囲
 

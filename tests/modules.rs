@@ -104,6 +104,114 @@ fn private_inference_stops_at_explicit_public_effects() {
 }
 
 #[test]
+fn inferred_requirements_still_require_matching_providers() {
+    let declarations = r#"
+pub type Digit = int[d -> 0 <= d && d <= 9]
+pub type Convert = (int) -> String with Async
+pub trait Source<T> { fn value(self) -> T with {} }
+fn declared_digit() -> Digit with Source<Digit> { value() }
+fn digit() -> Digit { declared_digit() }
+fn forward_digit() -> Digit { digit() }
+fn convert() -> Convert {
+    let f: Convert = value()
+    f
+}
+fn forward_convert() -> Convert { convert() }
+"#;
+    for (export, expected) in [
+        ("pub fn entry() -> Digit with {} { forward_digit() }", "with dep.Source<int["),
+        ("pub fn entry() -> Digit with Source<int> { forward_digit() }", "が必要だが"),
+        ("pub fn entry() -> Convert with {} { forward_convert() }", "with dep.Source<(int) -> String with Async>"),
+        ("pub fn entry() -> Convert with Source<(int) -> String> { forward_convert() }", "が必要だが"),
+    ] {
+        let dependency = format!("{declarations}\n{export}");
+        let files = Files::new("inferred-provider", &[("dep.hb", &dependency)]);
+        let mut program = files.parse("use dep\nfn main() {}").unwrap();
+        let error = hibana::typeck::check(&mut program).unwrap_err();
+        assert!(error.msg.contains(expected), "{export}: {error}");
+        let source = error.source.unwrap();
+        assert!(source.name.ends_with("dep.hb"));
+        assert!(error.span.unwrap().0 >= declarations.len());
+    }
+}
+
+#[test]
+fn overlapping_trait_impls_point_to_both_declarations() {
+    let trait_decl = "trait Mark<T> { fn mark(self) -> int }";
+    for (first, second) in [
+        ("impl Mark<int> for int", "impl Mark<int> for int"),
+        ("impl<T> Mark<int> for Vec<T>", "impl Mark<int> for Vec<int>"),
+        ("impl<T> Mark<int> for Vec<T>", "impl<T> Mark<T> for Vec<int>"),
+    ] {
+        let source = format!("{trait_decl}\n{first} {{ fn mark(self) -> int {{ 1 }} }}\n{second} {{ fn mark(self) -> int {{ 2 }} }}\nfn main() {{}}");
+        let mut program = pipeline::parse(source.as_str()).unwrap();
+        let error = hibana::typeck::check(&mut program).unwrap_err();
+        assert!(error.msg.contains("トレイト実装が重複"), "{source}: {error}");
+        let sites = [error.span.unwrap().0, error.origin.unwrap().0];
+        assert_eq!(sites, [source.rfind(second).unwrap(), source.find(first).unwrap()]);
+        assert_eq!(error.origin_source, Some(error.source_id));
+    }
+}
+
+#[test]
+fn trait_impl_overlaps_are_detected_across_modules() {
+    let files = Files::new("overlapping-trait-impls", &[
+        ("api.hb", "pub trait Mark { fn mark(self) -> int with {} }"),
+        ("left.hb", "use api -> {Mark}\nimpl<T> Mark for Vec<T> { fn mark(self) -> int { 1 } }"),
+        ("right.hb", "use api -> {Mark}\nimpl Mark for Vec<int> { fn mark(self) -> int { 2 } }"),
+    ]);
+    let mut program = files.parse("use left\nuse right\nfn main() {}").unwrap();
+    let error = hibana::typeck::check(&mut program).unwrap_err();
+    assert!(error.msg.contains("トレイト実装が重複"), "{error}");
+    let sites = [
+        (error.source.unwrap(), error.span.unwrap().0),
+        (error.origin_file.unwrap(), error.origin.unwrap().0),
+    ];
+    assert!(sites.iter().any(|(source, _)| source.name.ends_with("left.hb")));
+    assert!(sites.iter().any(|(source, _)| source.name.ends_with("right.hb")));
+    assert!(sites.iter().all(|(source, at)| source.text[*at..].starts_with("impl")));
+
+    let entry = files.0.join("main.hb");
+    std::fs::write(&entry, "use left\nuse right\nfn main() {}").unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_hibana"))
+        .arg(entry)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    for expected in ["left.hb", "right.hb", "重複する実装の宣言"] {
+        assert!(stderr.contains(expected), "{stderr}");
+    }
+}
+
+#[test]
+fn disjoint_trait_impls_are_usable_together() {
+    let source = r#"
+trait Mark<T> { fn mark(self) -> int }
+impl Mark<int> for Vec<int> { fn mark(self) -> int { 1 } }
+impl Mark<int> for Vec<String> { fn mark(self) -> int { 2 } }
+impl Mark<String> for Vec<int> { fn mark(self) -> int { 3 } }
+fn int_mark<A: Mark<int>>(value: A) -> int { value.mark() }
+fn string_mark<A: Mark<String>>(value: A) -> int { value.mark() }
+
+struct Pair<A, B> { left: A, right: B }
+impl<A> Mark<int> for Pair<A, A> { fn mark(self) -> int { 4 } }
+impl<B> Mark<int> for Pair<Vec<B>, B> { fn mark(self) -> int { 5 } }
+
+fn main() {
+    put(int_mark([1]))
+    put(int_mark(['x']))
+    put(string_mark([1]))
+    put(int_mark(Pair { left: 1, right: 2 }))
+    put(int_mark(Pair { left: [1], right: 2 }))
+}
+"#;
+    let mut output = Vec::new();
+    hibana::run(source, &mut output).unwrap();
+    assert_eq!(output, b"1\n2\n3\n4\n5\n");
+}
+
+#[test]
 fn explicit_empty_effects_also_stop_lambda_inference() {
     for body in [
         "let f = fn() with {} { log('entry') }",

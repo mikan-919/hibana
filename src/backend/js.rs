@@ -3,7 +3,7 @@
 // 値の表し方: int と number は JavaScript の number（整数は53ビット安全整数）、bool・str は JavaScript の値、
 // unit は undefined、Vec は配列、type の値は { $c: 構築子名, $f: [フィールド] }、関数は関数、
 // 型は名前の文字列。式は1つずつ一時変数に入れて、評価の順序をインタプリタと揃える
-use crate::parser::{Arm, Block, Expr, Fn, Program, Stmt};
+use crate::parser::{Arm, Block, Expr, Fn, Name, Program, Stmt};
 use std::collections::HashMap;
 
 const PRELUDE: &str = r#""use strict";
@@ -91,18 +91,21 @@ function $spawn(f) {
   $h = h;
   return t;
 }
-let $mainFailed = false, $thenFailed = false;
+let $mainFailure, $thenFailure;
+function $deferFailure(e, main) {
+  const scheduled = $mainFailure || $thenFailure;
+  if (main) $mainFailure = { e };
+  else $thenFailure ??= { e };
+  if (scheduled) return;
+  // 残りの仕事が終わってから、main の失敗、または最初の then の失敗を報告する。
+  const finish = () => $failed(($mainFailure ?? $thenFailure).e);
+  if (globalThis.process?.once) process.once("beforeExit", finish);
+  else setTimeout(finish, 0);
+}
 function $then(t, g) {
   t.p.then(() => {
     if (t.s !== 1) return;
-    try { g(t.v); } catch (e) {
-      if ($thenFailed) return;
-      $thenFailed = true;
-      // 残りの仕事が終わってから、最初の失敗を報告する。
-      const finish = () => { if (!$mainFailed) $failed(e); };
-      if (globalThis.process?.once) process.once("beforeExit", finish);
-      else setTimeout(finish, 0);
-    }
+    try { g(t.v); } catch (e) { $deferFailure(e, false); }
   });
 }
 class $Abort { constructor(h, v) { this.h = h; this.v = v; } }
@@ -191,8 +194,8 @@ function $to(d, v) {
   if (d === "number") return $fchk(v);
   if (d === "int") return v;
   if (d.vec) return v.map((x) => $to(d.vec, x));
-  if (d.fn && d.async) return (...a) => Promise.resolve(v(...a.map((x, i) => $from(d.fn[i], x)))).then((r) => $to(d.ret, r));
-  if (d.fn) return (...a) => $to(d.ret, v(...a.map((x, i) => $from(d.fn[i], x))));
+  if (d.fn && d.async) return async (...a) => $to(d.ret, await v(...d.fn.map((t, i) => $from(t, a[i]))));
+  if (d.fn) return (...a) => $to(d.ret, v(...d.fn.map((t, i) => $from(t, a[i]))));
   if (d.st) return Object.fromEntries(d.f.map(([n, fd], i) => [n, $to(fd, v.$f[i])]));
   return v;
 }
@@ -205,11 +208,25 @@ function $from(d, v) {
     if (typeof v !== "number" || !Number.isSafeInteger(v)) throw new Error("JavaScript の値 " + v + " は int でない");
     return v === 0 ? 0 : v;
   }
+  if (d === "bool") {
+    if (typeof v !== "boolean") throw new TypeError("真偽値が必要");
+    return v;
+  }
+  if (d === "String") {
+    if (typeof v !== "string") throw new TypeError("文字列が必要");
+    return v;
+  }
   if (d === "unit") return undefined;
-  if (d.vec) return Array.from(v, (x) => $from(d.vec, x));
+  if (d.vec) {
+    if (!Array.isArray(v)) throw new TypeError("配列が必要");
+    return Array.from(v, (x) => $from(d.vec, x));
+  }
   if (d.fn && d.async) return async (...a) => $from(d.ret, await v(...a.map((x, i) => $to(d.fn[i], x))));
   if (d.fn) return (...a) => $from(d.ret, v(...a.map((x, i) => $to(d.fn[i], x))));
-  if (d.st) return $d(d.st, d.f.map(([n, fd]) => $from(fd, v[n])));
+  if (d.st) {
+    if (typeof v !== "object" || v === null) throw new TypeError("オブジェクトが必要");
+    return $d(d.st, d.f.map(([n, fd]) => $from(fd, v[n])));
+  }
   return v;
 }
 "#;
@@ -291,34 +308,35 @@ pub fn emit(prog: &Program, info: &crate::typeck::Info) -> String {
     }
     // import は ES モジュールの先頭に置く
     let mut out = imports + &out;
-    out += &format!("(async () => {{ try {{ await {}(); }} catch (e) {{ $mainFailed = true; $failed(e); }} }})();\n", ident("f_", "main"));
+    out += &format!("(async () => {{ try {{ await {}(); }} catch (e) {{ $deferFailure(e, true); }} }})();\n", ident("f_", "main"));
     out
 }
 
-// 型の式を、extern の境界での変換の記述（$to と $from が読む）にする。int・Vec・関数・構造体のほかはそのまま渡す
-fn desc(prog: &Program, t: &Expr, depth: usize) -> String {
-    if depth > 8 {
-        return "\"any\"".into();
-    }
+// 型の式を、extern の境界での変換の記述（$to と $from が読む）にする。
+fn desc(prog: &Program, t: &Expr, seen: &mut Vec<Name>) -> String {
     match t.peel() {
-        Expr::Var(n) if n == "number" => "\"number\"".into(),
-        Expr::Var(n) if n == "int" || n == "unit" => lit(n),
-        Expr::Refine(b, ..) => desc(prog, b, depth + 1),
+        Expr::Var(n) if matches!(n.as_str(), "int" | "number" | "bool" | "String" | "unit") => lit(n),
+        Expr::Refine(b, ..) => desc(prog, b, seen),
         Expr::Call(n, args) if n == "Vec" && args.len() == 1 => {
-            format!("{{ vec: {} }}", desc(prog, &args[0], depth + 1))
+            format!("{{ vec: {} }}", desc(prog, &args[0], seen))
         }
         Expr::Pi(bs, r, effs) => {
-            let ps: Vec<String> = bs.iter().map(|(_, t)| desc(prog, t, depth + 1)).collect();
+            let ps: Vec<String> = bs.iter().map(|(_, t)| desc(prog, t, seen)).collect();
             format!(
                 "{{ fn: [{}], ret: {}, async: {} }}",
                 ps.join(", "),
-                desc(prog, r, depth + 1),
+                desc(prog, r, seen),
                 has_async(effs)
             )
         }
         Expr::Var(n) | Expr::Call(n, _) => {
+            // ponytail: 再帰型の変換記述は有限回だけ展開する。全階層を扱うには名前で記述を参照する。
+            if seen.len() >= 8 && seen.contains(n) {
+                return "\"any\"".into();
+            }
+            seen.push(n.clone());
             // 構造体はフィールドごとに、引数の無い別名はその中身で変換する
-            if let Some(d) = prog
+            let result = if let Some(d) = prog
                 .datas
                 .iter()
                 .find(|d| &d.name == n && d.ctors.len() == 1 && d.ctors[0].name.structure_owner().is_some())
@@ -327,22 +345,18 @@ fn desc(prog: &Program, t: &Expr, depth: usize) -> String {
                 let fs: Vec<String> = c
                     .fields
                     .iter()
-                    .map(|(f, t)| format!("[{}, {}]", lit(f), desc(prog, t, depth + 1)))
+                    .map(|(f, t)| format!("[{}, {}]", lit(f), desc(prog, t, seen)))
                     .collect();
-                return format!("{{ st: {}, f: [{}] }}", lit(&c.name), fs.join(", "));
-            }
-            match prog
-                .fns
-                .iter()
-                .find(|f| &f.name == n && f.alias && f.params.is_empty())
-            {
-                Some(f) => f
-                    .body
-                    .tail
-                    .as_ref()
-                    .map_or("\"any\"".into(), |b| desc(prog, b, depth + 1)),
-                None => "\"any\"".into(),
-            }
+                format!("{{ st: {}, f: [{}] }}", lit(&c.name), fs.join(", "))
+            } else {
+                prog.fns
+                    .iter()
+                    .find(|f| &f.name == n && f.alias && f.params.is_empty())
+                    .and_then(|f| f.body.tail.as_ref())
+                    .map_or("\"any\"".into(), |b| desc(prog, b, seen))
+            };
+            seen.pop();
+            result
         }
         _ => "\"any\"".into(),
     }
@@ -522,12 +536,12 @@ impl Gen<'_> {
             .params
             .iter()
             .zip(&params)
-            .map(|((_, t), a)| format!("$to({}, {a})", desc(prog, t, 0)))
+            .map(|((_, t), a)| format!("$to({}, {a})", desc(prog, t, &mut Vec::new())))
             .collect();
         let ret = f
             .ret
             .as_ref()
-            .map_or("\"unit\"".to_string(), |t| desc(prog, t, 0));
+            .map_or("\"unit\"".to_string(), |t| desc(prog, t, &mut Vec::new()));
         let (a, w) = if is_async(f) {
             ("async ", "await ")
         } else {
