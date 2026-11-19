@@ -1,21 +1,57 @@
 use super::*;
+use crate::parser::Ctor;
 
 impl Eval {
     pub(super) fn check_boundary_signature(&mut self, f: &Fn) -> R<()> {
         let imported = f.js.is_some();
-        let mut env: Env = vec![HashMap::new()];
-        for (name, expr) in &f.params {
-            let ty = self.eval_or_opaque(expr, &mut env)?;
-            self.check_boundary_type(&ty, !imported, &mut Vec::new())
+        let (params, result) = self.boundary_types(f, imported)?;
+        for ((name, _), ty) in f.params.iter().zip(&params) {
+            self.check_boundary_type(ty, !imported, &mut Vec::new())
                 .ctx(|e| format!("関数 {} の引数 {name}: {e}", f.name))?;
-            env[0].insert(name.clone(), self.opaque());
         }
-        if imported && let Some(expr) = &f.ret {
-            let ty = self.eval_or_opaque(expr, &mut env)?;
-            self.check_boundary_type(&ty, true, &mut Vec::new())
+        if imported {
+            self.check_boundary_type(&result, true, &mut Vec::new())
                 .ctx(|e| format!("関数 {} の戻り値: {e}", f.name))?;
         }
         Ok(())
+    }
+
+    fn boundary_types(&mut self, f: &Fn, include_return: bool) -> R<(Vec<V>, V)> {
+        let mut env: Env = vec![HashMap::new()];
+        let mut params = Vec::with_capacity(f.params.len());
+        for (name, expr) in &f.params {
+            let ty = self
+                .eval_or_opaque(expr, &mut env)
+                .ctx(|e| format!("関数 {} の引数 {name}: {e}", f.name))?;
+            params.push(ty);
+            env[0].insert(name.clone(), self.opaque());
+        }
+        let result = if include_return && let Some(expr) = &f.ret {
+            self.eval_or_opaque(expr, &mut env)
+                .ctx(|e| format!("関数 {} の戻り値: {e}", f.name))?
+        } else {
+            prim("unit")
+        };
+        Ok((params, result))
+    }
+
+    fn boundary_fields(&mut self, data: &Data, ctor: &Ctor, args: &[V]) -> R<Vec<V>> {
+        let mut env: Env = vec![
+            data.params
+                .iter()
+                .map(|(name, _)| name.clone())
+                .zip(args.iter().cloned())
+                .collect(),
+        ];
+        let mut fields = Vec::with_capacity(ctor.fields.len());
+        for (name, expr) in &ctor.fields {
+            fields.push(
+                self.eval_or_opaque(expr, &mut env)
+                    .ctx(|e| format!("{} のフィールド {name}: {e}", ctor.name))?,
+            );
+            env[0].insert(name.clone(), self.opaque());
+        }
+        Ok(fields)
     }
 
     fn check_boundary_type(
@@ -53,18 +89,10 @@ impl Eval {
                 }
                 visiting.push(key);
                 for ctor in &data.ctors {
-                    let mut env: Env = vec![
-                        data.params
-                            .iter()
-                            .map(|(name, _)| name.clone())
-                            .zip(d.1.iter().cloned())
-                            .collect(),
-                    ];
-                    for (name, expr) in &ctor.fields {
-                        let field = self.eval_or_opaque(expr, &mut env)?;
-                        self.check_boundary_type(&field, incoming, visiting)
+                    let fields = self.boundary_fields(&data, ctor, &d.1)?;
+                    for ((name, _), field) in ctor.fields.iter().zip(&fields) {
+                        self.check_boundary_type(field, incoming, visiting)
                             .ctx(|e| format!("{} のフィールド {name}: {e}", ctor.name))?;
-                        env[0].insert(name.clone(), self.opaque());
                     }
                 }
                 visiting.pop();
@@ -89,5 +117,15 @@ impl BoundaryCheck {
         self.0
             .check_boundary_signature(f)
             .map_err(|error| at_opt(error, f.span).with_line())
+    }
+
+    pub(crate) fn types(&mut self, f: &Fn) -> R<(Vec<V>, V)> {
+        self.0
+            .boundary_types(f, true)
+            .map_err(|error| at_opt(error, f.span).with_line())
+    }
+
+    pub(crate) fn fields(&mut self, data: &Data, ctor: &Ctor) -> R<Vec<V>> {
+        self.0.boundary_fields(data, ctor, &[])
     }
 }

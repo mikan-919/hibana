@@ -42,7 +42,9 @@ console.log(api.greet("hibana"));
 - `number` は有限な `Number` で渡します。WASM の境界では `f64` になり、`NaN` と無限大は拒否します。
 - `String` は JavaScript の文字列です。UTF-8 として WASM のメモリへ渡します。
 - `bool` は JavaScript の真偽値で渡し、整数の0・1は受け付けません。
-- `Vec<T>` は JavaScript の配列、型引数の無い構造体（`struct Point { x: int, y: number }`）はフィールド名をキーにしたオブジェクトです。要素とフィールドは上の型と、入れ子の `Vec` と構造体にできます。接続コードは値を 8 バイトの語の並び（型の番号と中身）にして WASM のメモリへ書き、`runtime.hb` の `__val_in`・`__val_out` が組み立て・読み出します。`Ref<T>`・関数・`enum`・型引数のある構造体は渡せません（コンパイルエラー）。
+- `Vec<T>` は JavaScript の配列、型引数の無い構造体（`struct Point { x: int, y: number }`）はフィールド名をキーにしたオブジェクトです。要素とフィールドは上の型と、入れ子の `Vec` と構造体にできます。
+- 公開関数の戻り値には標準ライブラリの `Result<T, E>` も使えます。`Ok(value)` は `{ ok: true, value }` に、`Err(error)` は `{ ok: false, error }` になります。`T` と `E` には戻り値として渡せる型を使い、配列の要素や構造体のフィールドにも `Result` を含められます。
+- 接続コードは複合値を 8 バイトの語の並び（型の番号と中身）で受け渡します。`Ref<T>`・関数・標準の `Result` 以外の列挙型・型引数のある構造体を境界に指定するとコンパイルエラーになります。
 - 戻り値のない関数は `undefined` を返します。
 - `with Async` の公開関数は、WASM 内の仕事の並びが空になるまで実行し、完了した値を同期で返します。JavaScript からは `api.twice(40)` のように呼び出します。
 - `extern "browser" { fn show(message: String) }` などの外部関数は、`imports.hibana_host.show` に同期 JavaScript 関数を指定します。WASM では extern のモジュール文字列ではなく、関数名で接続します。

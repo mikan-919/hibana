@@ -598,6 +598,8 @@ WASM 出力は関数を名前で公開します。`int` と `number` は `f64` �
 
 WASM の公開関数の引数と、外部関数の戻り値に細分化型を指定するとコンパイルエラーになります。配列の要素と構造体のフィールドにも同じ規則が適用されます。公開関数を自動で選ぶ場合、細分化型を受け取る関数は内部関数として扱います。
 
+WASM の公開関数は標準ライブラリの `Result<T, E>` を戻り値にできます。JavaScript の接続コードは `Ok(value)` を `{ ok: true, value }`、`Err(error)` を `{ ok: false, error }` に変換します。`T` と `E` は境界から返せる型です。
+
 `with Async` の公開関数は、仕事の並びが空になるまで WASM 内で処理を進め、完了した値を境界の型に変換して同期で返します。
 
 JavaScript の接続コードは `hibana::to_js_glue(source, &exports)`、WASM と接続コードの同時生成は `hibana::to_web(source, &exports)` で行えます。`instantiate` の引数には WASM のバイト列と必要な外部関数を渡します。公開関数・外部関数の整数は JavaScript の `number` で受け渡し、`BigInt` は受理しません。接続コードと WASM の入口の両方で安全整数を検査します。文字列の内部パックと入出力用の内部呼び出しには64ビット整数を維持します。文字列やホスト関数を使う Web 向けライブラリの例は [WebAssembly](wasm.md) を参照してください。

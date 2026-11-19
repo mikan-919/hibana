@@ -131,8 +131,8 @@ export async function instantiate(bytes, imports = {}) {
   let active = false;
   const encoder = new TextEncoder();
   const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-  // Vec と構造体は 8 バイトの語の並びで渡す（runtime.hb の __val_in・__val_out）。
-  // 値は [型の番号][中身]、文字列は [3][長さ][バイト列]、Vec は [4][要素数][要素...]、構造体は [5][構築子][フィールド数][フィールド...]
+  // Vec・構造体・Result は 8 バイトの語の並びで渡す（runtime.hb の __val_in・__val_out）。
+  // 値は [型の番号][中身]、文字列は [3][長さ][バイト列]、Vec は [4][要素数][要素...]、構造体と Result は [5][構築子][フィールド数][フィールド...]
   function put(out, type, value) {
     if (typeof type === "object" && type.vec !== undefined) {
       if (!Array.isArray(value)) throw new TypeError("配列が必要");
@@ -170,6 +170,20 @@ export async function instantiate(bytes, imports = {}) {
   }
   function take(view, at, type) {
     const word = (k) => view.getBigInt64(at + 8 * k, true);
+    if (typeof type === "object" && type.result !== undefined) {
+      const [[okCtor, okType], [errCtor, errType]] = type.result;
+      const ctor = word(1);
+      if (word(0) !== 5n || word(2) !== 1n) throw new TypeError("Result の形式が不正");
+      if (ctor === BigInt(okCtor)) {
+        const [value, next] = take(view, at + 24, okType);
+        return [{ ok: true, value }, next];
+      }
+      if (ctor === BigInt(errCtor)) {
+        const [error, next] = take(view, at + 24, errType);
+        return [{ ok: false, error }, next];
+      }
+      throw new TypeError("Result の構築子が不正");
+    }
     if (typeof type === "object" && type.vec !== undefined) {
       const items = [];
       let next = at + 16;
@@ -330,7 +344,7 @@ struct BoundarySignatures<'a> {
     imports: Vec<BoundarySignature<'a>>,
 }
 
-// 型は名前の文字列。Vec と構造体は ir::BoundaryType::json の形
+// 基本型は名前の文字列、複合型は ir::BoundaryType::json の形
 fn boundary_signature<'a>(
     program: &ir::Program,
     name: &'a str,

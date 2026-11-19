@@ -80,6 +80,52 @@ fn wasm_cannot_export_inputs_with_refinements() {
 }
 
 #[test]
+fn wasm_exports_return_validation_results() {
+    let source = r#"
+pub type Positive = int[x -> x > 0]
+pub type Checked<A> = Result<A, String>
+pub fn validate(n: int) -> Checked<Positive> with {} { refine<Positive>(n) }
+fn values(n: int) -> Result<Vec<int>, String> { Ok([n, 7]) }
+fn checks(n: int) -> Vec<Result<int, String>> { [Ok(n), Err('入力なし'), Ok(7)] }
+fn consume(result: Result<int, String>) -> bool { true }
+"#;
+    let exports = ["validate", "values", "checks"].map(String::from);
+    let web = hibana::to_web(source, &exports).unwrap();
+    assert!(hibana::to_web(source, &["consume".into()]).is_err());
+
+    let dir = std::env::temp_dir().join(format!("hibana-web-result-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, wasm, javascript) in [
+        ("web", web.wasm, web.javascript),
+        ("split", hibana::to_wasm_library(source, &exports).unwrap(), hibana::to_js_glue(source, &exports).unwrap()),
+    ] {
+        std::fs::write(dir.join(format!("{name}.wasm")), wasm).unwrap();
+        std::fs::write(dir.join(format!("{name}.mjs")), javascript).unwrap();
+    }
+    let output = Command::new("node")
+        .args(["--input-type=module", "-e", r#"
+import { readFileSync } from 'node:fs';
+import assert from 'node:assert/strict';
+for (const name of ['web', 'split']) {
+  const { instantiate } = await import(`./${name}.mjs`);
+  const api = await instantiate(readFileSync(`${name}.wasm`));
+  assert.deepEqual(api.validate(7), { ok: true, value: 7 });
+  assert.deepEqual(api.validate(0), { ok: false, error: '細分化型の条件を満たさない' });
+  assert.deepEqual(api.values(3), { ok: true, value: [3, 7] });
+  assert.deepEqual(api.checks(3), [
+    { ok: true, value: 3 }, { ok: false, error: '入力なし' }, { ok: true, value: 7 },
+  ]);
+  assert.deepEqual(api.validate(8), { ok: true, value: 8 });
+}
+"#])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+}
+
+#[test]
 fn web_async_exports_return_completed_values() {
     let source = r#"
 fn step(n: int) -> int with Async { n + 1 }
