@@ -235,6 +235,55 @@ fn ambiguous_trait_impls_report_the_call_and_both_modules() {
 }
 
 #[test]
+fn same_named_trait_methods_are_ambiguous_regardless_of_trait_name() {
+    for other in ["Alpha", "Zeta"] {
+        let traits = format!(
+            "trait {other} {{ fn label(self) -> String }}\ntrait Beta {{ fn label(self) -> String }}"
+        );
+        let other_impl = format!("impl {other} for int {{ fn label(self) -> String {{ 'other' }} }}");
+        let beta_impl = "impl Beta for int { fn label(self) -> String { 'beta' } }";
+        let main = "fn main() { put(1.label()) }";
+        let source = format!("{traits}\n{other_impl}\n{beta_impl}\n{main}");
+        let error = hibana::run(&source, &mut Vec::new()).unwrap_err();
+        assert!(error.msg.contains("メソッド label が曖昧"), "{error}");
+        for candidate in [other, "Beta"] {
+            assert!(error.msg.contains(candidate), "{error}");
+        }
+        assert_eq!(error.span.unwrap().0, source.find("1.label()").unwrap());
+        assert_eq!(error.related.len(), 2);
+        for offset in traits.match_indices("fn label").map(|(offset, _)| offset) {
+            assert!(error.related.iter().any(|site| {
+                site.span.start.offset == offset
+                    && site.source.as_ref().is_some_and(|source| source.id == error.source_id)
+            }));
+        }
+
+        let source = format!("{traits}\n{beta_impl}\n{main}");
+        let mut output = Vec::new();
+        hibana::run(&source, &mut output).unwrap();
+        assert_eq!(output, b"beta\n");
+    }
+}
+
+#[test]
+fn ambiguous_trait_methods_report_declarations_in_both_modules() {
+    let files = Files::new("ambiguous-trait-methods", &[
+        ("alpha.hb", "pub trait Label { fn label(self) -> String with {} }\nimpl Label for int { fn label(self) -> String { 'alpha' } }"),
+        ("beta.hb", "pub trait Label { fn label(self) -> String with {} }\nimpl Label for int { fn label(self) -> String { 'beta' } }"),
+        ("main.hb", "use alpha\nuse beta\nfn main() { put(1.label()) }"),
+    ]);
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_hibana"))
+        .arg(files.0.join("main.hb"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1));
+    for expected in ["メソッド label が曖昧", "alpha.Label", "beta.Label", "main.hb", "alpha.hb", "beta.hb"] {
+        assert!(stderr.contains(expected), "{stderr}");
+    }
+}
+
+#[test]
 fn ambiguous_equality_is_reported_instead_of_using_builtin_equality() {
     let source = "
 use std -> {Eq}
