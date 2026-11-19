@@ -106,6 +106,8 @@ const BUILTINS: &[&str] = &[
     "task_then",
     "task_done",
     "task_value",
+    "compile_file",
+    "write_bytes",
 ];
 
 // 文字列の組み込み関数 (名前, 引数, 戻り値)。split の戻り値は Vec<String>
@@ -124,7 +126,22 @@ const STR_FNS: &[(&str, &[&str], &str)] = &[
     ("now_ms", &[], "int"),
     // 実行時エラーにする
     ("panic", &["String"], "never"),
+    // スクリプト専用（SCRIPT_FNS）。ファイルを JS・WASM・ネイティブにコンパイルしたバイト列と、その書き込み
+    ("compile_file", &["String", "String"], "Vec<int>"),
+    ("write_bytes", &["String", "Vec<int>"], "unit"),
 ];
+
+// インタプリタで実行するスクリプトでだけ使える組み込み関数。ほかのバックエンドの出力から辿れるとエラー
+pub(crate) const SCRIPT_FNS: &[&str] = &["compile_file", "write_bytes"];
+
+// 組み込み関数の表の型の綴りを型にする
+fn table_type(s: &str) -> V {
+    match s {
+        "Vec<String>" => V::VecT(Rc::new(prim("String"))),
+        "Vec<int>" => V::VecT(Rc::new(prim("int"))),
+        _ => prim(s),
+    }
+}
 
 pub(super) fn prim(name: &str) -> V {
     V::Prim(
@@ -534,6 +551,26 @@ pub(crate) fn callees(f: &Fn) -> Vec<Name> {
         }
     });
     out
+}
+
+// roots から辿れる関数が SCRIPT_FNS を呼べばエラーにする。None はすべての関数
+pub(crate) fn reject_script_calls(prog: &Program, roots: Option<&[String]>) -> R<()> {
+    let mut pending: Vec<Name> = match roots {
+        Some(rs) => rs.iter().map(Name::from).collect(),
+        None => prog.fns.iter().map(|f| f.name.clone()).collect(),
+    };
+    let mut seen = std::collections::HashSet::new();
+    while let Some(name) = pending.pop() {
+        if !seen.insert(name.clone()) { continue; }
+        let Some(f) = prog.fns.iter().find(|f| f.name == name) else { continue };
+        for n in callees(f) {
+            if SCRIPT_FNS.contains(&n.as_str()) {
+                return Err(format!("{n} はインタプリタでの実行（hibana <ファイル>）でだけ使える").into());
+            }
+            pending.push(n);
+        }
+    }
+    Ok(())
 }
 
 // 型検査の結果のうち、出力に使うもの
@@ -1123,6 +1160,9 @@ impl Ck {
                 } else {
                     want(&int, &lt, &op)?;
                     want(&int, &rt, &op)?;
+                }
+                if matches!(op, "/" | "%") {
+                    self.nonzero(&r, numeric == prim("number"))?;
                 }
                 if matches!(op, "+" | "-" | "*" | "**" | "/" | "%") {
                     numeric
@@ -1814,13 +1854,9 @@ impl Ck {
                     return Err(format!("{name} の引数は{}個", params.len()).into());
                 }
                 for (p, a) in params.iter().zip(args.iter_mut()) {
-                    self.check(a, &prim(p))?;
+                    self.check(a, &table_type(p))?;
                 }
-                if *ret == "Vec<String>" {
-                    V::VecT(Rc::new(prim("String")))
-                } else {
-                    prim(ret)
-                }
+                table_type(ret)
             }
             Expr::For(x, it, end, body) => {
                 // 繰り返しの中で代入される変数についての事実は、2回目以降には成り立たない
@@ -2770,6 +2806,29 @@ mod tests {
         let source = "fn items() -> Vec<int> { [1] }\nfn main() { let xs = items()\n put(xs[0]) }";
         assert!(check(source).unwrap_err().to_string().contains("添字の範囲"));
         check(&source.replace("put(xs[0])", "if len(xs) > 0 { put(xs[0]) }")).unwrap();
+    }
+
+    // / と % は割る数が 0 でないことを証明する
+    #[test]
+    fn division_requires_nonzero_divisor() {
+        for src in [
+            "fn f(a: int, b: int) -> int { a / b }\nfn main() {}",
+            "fn f(a: int, b: int) -> int { a % b }\nfn main() {}",
+            "fn f(a: number, b: number) -> number { a / b }\nfn main() {}",
+            "fn main() { put(1.0 / 0.0) }",
+        ] {
+            assert!(check(src).unwrap_err().to_string().contains("割る数が 0 でない"), "{src}");
+        }
+        for src in [
+            "fn f(a: int, b: int[b -> b != 0]) -> int { a / b }\nfn main() {}",
+            "fn f(a: int, b: int) -> int { if b != 0 { a % b } else { 0 } }\nfn main() {}",
+            "fn f(a: int, b: int[b -> b >= 2]) -> int { a / b }\nfn main() {}",
+            "fn f(a: number, b: number[b -> b > 0.0]) -> number { a / b }\nfn main() {}",
+            "fn f(a: number, b: number[b -> b < 0.0]) -> number { a / b }\nfn main() {}",
+            "fn main() { put(7 / 2) }",
+        ] {
+            check(src).unwrap_or_else(|e| panic!("{src}: {e}"));
+        }
     }
 
     #[test]

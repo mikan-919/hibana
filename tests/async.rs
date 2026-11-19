@@ -79,7 +79,7 @@ fn main() with Async {\n    put(all([boom(), noise()]).await)\n}\n";
     let output = javascript_error(
         source,
         "globalThis.boom = async () => { throw new Error('boom'); };\n\
-globalThis.pause = async () => 0;",
+globalThis.pause = async () => 1;",
     );
     assert!(!output.status.success());
     assert_eq!(
@@ -111,16 +111,16 @@ fn main() with Async {\n    spawn(boom())\n    put(pause().await + 1)\n}\n";
 
 #[test]
 fn arithmetic_errors_keep_the_operator_position_after_evaluating_operands() {
-    for operand in ["(1 - 1)", "pause().await"] {
+    for operand in ["(2 - 1)", "pause().await"] {
         let source = format!(
             "extern '' {{ fn pause() -> int with Async }}\n\
-fn main() with Async {{\n    put(1 / {operand})\n}}\n"
+fn main() with Async {{\n    put(9007199254740991 + {operand})\n}}\n"
         );
-        let output = javascript_error(&source, "globalThis.pause = async () => 0;");
+        let output = javascript_error(&source, "globalThis.pause = async () => 1;");
         assert!(!output.status.success());
         assert_eq!(
             String::from_utf8_lossy(&output.stderr),
-            "実行時エラー: 0 で除算した（3 行 9 列）\n"
+            "実行時エラー: オーバーフロー（3 行 9 列）\n"
         );
     }
 }

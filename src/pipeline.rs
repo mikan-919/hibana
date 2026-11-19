@@ -45,6 +45,7 @@ pub fn check(mut program: parser::Program, kind: Kind) -> R<Checked> {
 
 /// 公開する関数から辿れる関数を IR に変換する。None はすべての関数を変換する。
 pub fn lower(checked: &Checked, exports: Option<&[String]>) -> R<ir::Program> {
+    typeck::reject_script_calls(&checked.program, exports)?;
     ir::lower_selected(&checked.program, exports, &checked.info)
 }
 
@@ -385,5 +386,6 @@ fn select_exports<'a>(program: &'a ir::Program, names: &[String]) -> R<Vec<&'a i
 
 /// 型検査済みプログラムから JavaScript を作る。
 pub fn emit_js(checked: &Checked) -> R<String> {
+    typeck::reject_script_calls(&checked.program, None)?;
     Ok(js::emit(&checked.program, &checked.info))
 }

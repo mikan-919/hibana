@@ -172,7 +172,6 @@ fn main() with Async {
 #[test]
 fn spawned_arithmetic_failure() {
     for (name, expression, message) in [
-        ("division", "1 / n", "実行時エラー: 0 で除算した"),
         (
             "addition",
             "9007199254740991 + (n + 1)",
@@ -216,7 +215,7 @@ fn step() -> int with Async { 42 }
 fn main() {
     let task = spawn(step())
     task.then(fn(n) { panic('then の失敗 ' + n.to_string()) })
-    task.then(fn(n) { put(n / (n - n)) })
+    task.then(fn(n) { put(9007199254740991 + (n - 41)) })
     task.then(fn(n) { put(n) })
     spawn(step()).then(fn(n) { spawn(step()).then(fn(m) { put(m + n) }) })
     put('main')

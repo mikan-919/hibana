@@ -233,6 +233,22 @@ fn str_val(v: Value) -> Rc<str> {
     }
 }
 
+// compile_file の本体。use はコンパイルするファイルのディレクトリから探す
+fn compile_file(path: &str, target: &str) -> Result<Vec<u8>, String> {
+    let src = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    let outer = crate::parser::base_dir();
+    let dir = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("."));
+    crate::parser::set_base_dir(dir);
+    let r = match target {
+        "js" => crate::to_js(&src).map(String::into_bytes),
+        "wasm" => crate::to_wasm(&src),
+        "native" => crate::to_native(&src),
+        _ => Err(format!("compile_file の出力先 {target} は未対応（js・wasm・native）").into()),
+    };
+    crate::parser::set_base_dir(&outer);
+    r.map_err(|e| format!("{path}: {e}"))
+}
+
 fn error<T>(msg: String) -> R<T> {
     Err(Flow::Error(msg, None))
 }
@@ -816,6 +832,20 @@ impl<'a> Interp<'a> {
                 let line = String::from_utf8(line)
                     .map_err(|_| Flow::Error("標準入力の文字コードが UTF-8 でない".into(), None))?;
                 Value::Str(line.into())
+            } else if name == "compile_file" {
+                let (target, path) = (str_val(vs.pop().unwrap()), str_val(vs.pop().unwrap()));
+                let bytes = compile_file(&path, &target).map_err(|e| Flow::Error(e, None))?;
+                Value::Arr(Rc::new(bytes.into_iter().map(|b| Value::Int(b as i64)).collect()))
+            } else if name == "write_bytes" {
+                let Value::Arr(xs) = vs.pop().unwrap() else { unreachable!("型検査済み") };
+                let path = str_val(vs.pop().unwrap());
+                let bytes = xs.iter().map(|v| u8::try_from(int(v.clone())).map_err(|_| Flow::Error("write_bytes のバイトは 0〜255".into(), None))).collect::<Result<Vec<u8>, _>>()?;
+                let p = std::path::Path::new(path.as_ref());
+                if let Some(dir) = p.parent().filter(|d| !d.as_os_str().is_empty()) {
+                    std::fs::create_dir_all(dir).map_err(|e| Flow::Error(format!("{path}: {e}"), None))?;
+                }
+                std::fs::write(p, bytes).map_err(|e| Flow::Error(format!("{path}: {e}"), None))?;
+                Value::Unit
             } else if let Some(v) = self.syn_fn(name, &mut vs)? {
                 v
             } else if name == "put" {

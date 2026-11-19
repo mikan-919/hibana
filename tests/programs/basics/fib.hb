@@ -3,7 +3,7 @@ fn fib(n: int) -> int {
 }
 
 fn is_prime(n: int) -> bool {
-    let mut i = 2
+    let mut i: int[i -> i >= 2] = 2
     while i * i <= n {
         if n % i == 0 { return false }
         i = i + 1

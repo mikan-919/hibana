@@ -506,12 +506,9 @@ mod tests {
         let cases = [
             ("fn f(a: int, b: int) -> int { a + b }\nfn main() { put(1)\n put(f(9007199254740991, 1)) }", "オーバーフロー"),
             ("fn f(a: int, b: int) -> int { a * b }\nfn main() { put(1)\n put(f(-2, -9007199254740991)) }", "オーバーフロー"),
-            ("fn f(a: int, b: int) -> int { a / b }\nfn main() { put(1)\n put(f(1, 0)) }", "0 で除算した"),
             ("fn f(a: int, b: int) -> int { a - b }\nfn main() { put(1)\n put(f(-9007199254740991, 1)) }", "オーバーフロー"),
             ("fn f(a: int, b: int) -> int { a ** b }\nfn main() { put(1)\n put(f(2, -1)) }", "負の指数"),
             ("fn f(a: int, b: int) -> int { a ** b }\nfn main() { put(1)\n put(f(3, 100)) }", "オーバーフロー"),
-            ("fn main() { put(1)\n put(1.0 / 0.0) }", "0 で除算した"),
-            ("fn main() { put(1)\n put(1.0 % 0.0) }", "0 で除算した"),
             ("fn main() { put(1)\n put(2.0 ** 1024.0) }", "number の演算結果が有限でない"),
             ("use std::math\nfn main() { put(1)\n put(math::sqrt(-1)) }", "sqrt の引数が負"),
             ("use std::math\nfn main() { put(1)\n put(math::floor(9007199254740992.0)) }", "floor の結果が int の範囲外"),
@@ -832,7 +829,7 @@ fn main() {
     // 実行時エラーの位置。インタプリタはエラーに位置を付け、JS はメッセージに行と列を足す
     #[test]
     fn runtime_error_positions() {
-        let src = "fn half(x: int, y: int) -> int {\n    x / y\n}\nfn main() {\n    put(half(1, 0))\n}\n";
+        let src = "fn half(x: int, y: int) -> int {\n    x + y\n}\nfn main() {\n    put(half(9007199254740991, 1))\n}\n";
         let e = out(src).unwrap_err();
         assert_eq!(e.span, Some((37, 5)), "{e:?}");
         let tmp = std::env::temp_dir().join(format!("hibana-pos-{}", std::process::id()));
@@ -843,7 +840,7 @@ fn main() {
             .arg(&js)
             .output()
             .unwrap();
-        let want = "実行時エラー: 0 で除算した（2 行 5 列）\n";
+        let want = "実行時エラー: オーバーフロー（2 行 5 列）\n";
         assert_eq!(String::from_utf8(r.stderr).unwrap(), want);
         std::fs::remove_dir_all(&tmp).unwrap();
     }
@@ -935,7 +932,7 @@ fn main() {
             ("fn main() { while { continue } {} }", "continue はループの本体の中でだけ使える"),
             ("fn main() { while true { let f: () -> unit = fn() { break }; break } }", "break はループの本体の中でだけ使える"),
             ("trait Log { fn log(self) } fn main() { while true { with Log(fn() { continue }) { log() }; break } }", "continue はループの本体の中でだけ使える"),
-            ("fn main() { put(1 / 0); }", "0 で除算"),
+            ("fn main() { put(1 / 0); }", "割る数が 0 でないこと"),
             ("fn main() { y; }", "未定義の変数"),
             ("fn main() { 1 + ; }", "式が必要"),
             ("fn main() { let x = 1 put(x) }", "文の区切り"),
