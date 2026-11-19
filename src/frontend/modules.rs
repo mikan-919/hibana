@@ -1,7 +1,7 @@
 //! 依存ファイルの読み込みとモジュール表。
 use super::parser::{LIBS, PRELUDE_NAMES, Use, base_dir, module_name};
 use crate::error::{Error, R};
-use crate::lexer::{TPart, Tok, Token, lex};
+use crate::lexer::{TPart, Tok, Token, lex, lex_text_apostrophes};
 use std::collections::HashMap;
 
 // JavaScript のパッケージ（npm・node:）の型宣言 .d.ts を node_modules から探す
@@ -150,6 +150,12 @@ pub(super) fn source_tokens(source: &super::source::SourceFile) -> R<Vec<Token>>
     Ok(tokens)
 }
 
+pub(super) fn text_source_tokens(source: &super::source::SourceFile) -> Option<Vec<Token>> {
+    let mut tokens = lex_text_apostrophes(&source.text)?;
+    identify_tokens(&mut tokens, source.id);
+    Some(tokens)
+}
+
 /// use の依存を読み込み、ファイルごとの位置とモジュールを保持する。
 pub fn load_modules(source: &str, directory: &std::path::Path) -> R<ModuleSet> {
     let mut loaded = ModuleSet::from(source);
@@ -158,11 +164,18 @@ pub fn load_modules(source: &str, directory: &std::path::Path) -> R<ModuleSet> {
     let mut cursor = 0;
     while cursor < loaded.modules.len() {
         let unit = &loaded.modules[cursor];
-        let tokens = source_tokens(&unit.source)?;
+        let tokens = source_tokens(&unit.source)
+            .or_else(|error| text_source_tokens(&unit.source).ok_or(error))?;
         let dir = unit.base_dir.clone();
         let mut requests = Vec::new();
+        let mut depth = 0;
         for pair in tokens.windows(2) {
-            if pair[0].tok != Tok::Punct("use") {
+            match pair[0].tok {
+                Tok::Punct("(" | "[" | "{") => depth += 1,
+                Tok::Punct(")" | "]" | "}") => depth -= 1,
+                _ => {}
+            }
+            if pair[0].tok != Tok::Punct("use") || depth != 0 {
                 continue;
             }
             match &pair[1].tok {

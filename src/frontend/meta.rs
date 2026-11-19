@@ -1638,7 +1638,7 @@ impl Parser<'_> {
         Ok(n)
     }
 
-    // ponytail: トークン単位で切り出すので、字句解析できない文字（例: Don't の '）は Text に書けない
+    // ponytail: トークン単位で切り出す。文字列リテラルの中でも止めるなら、ここでソースから区切りを探す。
     fn m_text(&mut self, stop: &[String]) -> M<Node> {
         let start = self.pos;
         loop {

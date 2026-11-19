@@ -1,7 +1,7 @@
 // フォーマッタ。トークンの並びと改行は変えず、字下げ・行内の空白・空行・コメントの位置だけを整える
 // ponytail: 行の長さで改行の位置は変えない。変えるなら構文木から出力し直す
 use crate::error::R;
-use crate::lexer::{Tok, Token, lex};
+use crate::lexer::{Tok, Token, lex, lex_text_apostrophes};
 
 const OPEN: &[&str] = &["(", "[", "{"];
 const CLOSE: &[&str] = &[")", "]", "}"];
@@ -59,6 +59,24 @@ fn jsx_end(toks: &[Token], i: usize) -> Option<usize> {
     None
 }
 
+fn format_tokens(src: &str) -> R<Vec<Token>> {
+    if let Some(tokens) = lex_text_apostrophes(src) {
+        // 本文をそのまま写せる要素の中でだけ、アポストロフィを文字として読む。
+        let mut i = 0;
+        while i < tokens.len() {
+            if let Some(end) = jsx_end(&tokens, i) {
+                i = end + 1;
+            } else if tokens[i].tok == Tok::Raw('\'') {
+                return lex(src);
+            } else {
+                i += 1;
+            }
+        }
+        return Ok(tokens);
+    }
+    lex(src)
+}
+
 // トークンの間のコメント (前の改行の数, 綴り) と、最後のコメントの後の改行の数
 fn comments(gap: &str) -> (Vec<(usize, &str)>, usize) {
     let mut out = Vec::new();
@@ -88,7 +106,7 @@ fn comments(gap: &str) -> (Vec<(usize, &str)>, usize) {
 }
 
 pub fn format(src: &str) -> R<String> {
-    let toks = lex(src)?;
+    let toks = format_tokens(src)?;
     let mut out = String::new();
     // 開いた括弧ごとの (中身の字下げの深さ, $ の直後の括弧か)。$( と ${ の中は元の空白のまま
     let mut stack: Vec<(usize, bool)> = vec![(0, false)];
@@ -240,7 +258,7 @@ pub fn format(src: &str) -> R<String> {
     out = out.trim().to_string();
     out.push('\n');
     // 整形でトークンや改行の位置が変わっていないか確かめる（変わると文の区切りが変わる）
-    let after = lex(&out)?;
+    let after = format_tokens(&out)?;
     let key = |ts: &[Token]| -> Vec<(Tok, bool)> {
         ts.iter().map(|t| (t.tok.clone(), t.nl_before)).collect()
     };

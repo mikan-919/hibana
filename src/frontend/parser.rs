@@ -1,6 +1,6 @@
 pub use super::name::{Name, NameKind};
 pub use super::modules::{Module, ModuleSet, load_modules};
-use super::modules::{identify_tokens, source_tokens};
+use super::modules::{identify_tokens, source_tokens, text_source_tokens};
 use crate::lexer::{Span, TPart, Tok, Token, lex};
 use crate::meta::{Grammar, Node, Q};
 use std::collections::{HashMap, HashSet};
@@ -384,13 +384,35 @@ pub fn parse(src: &str) -> R<Program> {
 }
 
 pub fn parse_modules(loaded: ModuleSet) -> R<Program> {
-    let tokens = loaded
+    let original = loaded
         .modules
         .iter()
         .map(|module| source_tokens(&module.source))
-        .collect::<R<_>>()?;
-    parse_modules_tokens(&loaded, tokens, 0)
-        .map_err(|error| error.with_sources(loaded.modules.iter().map(|module| &module.source)))
+        .collect::<R<_>>()
+        .and_then(|tokens| parse_modules_tokens(&loaded, tokens, 0));
+    original.or_else(|error| {
+        // 正常に読める文字列を優先する。読めないときだけ Text のアポストロフィを試す。
+        let mut recovered = false;
+        let tokens = loaded
+            .modules
+            .iter()
+            .map(|module| {
+                if let Some(tokens) = text_source_tokens(&module.source) {
+                    recovered = true;
+                    Ok(tokens)
+                } else {
+                    source_tokens(&module.source)
+                }
+            })
+            .collect::<R<_>>();
+        if recovered
+            && let Ok(tokens) = tokens
+            && let Ok(program) = parse_modules_tokens(&loaded, tokens, 0)
+        {
+            return Ok(program);
+        }
+        Err(error.with_sources(loaded.modules.iter().map(|module| &module.source)))
+    })
 }
 
 #[derive(Default)]
