@@ -106,6 +106,98 @@ fn reported<'a>(success: bool, stdout: &'a str, report: &'a str) -> Expected<'a>
 }
 
 #[test]
+fn integer_overflow_is_handled_for_a_whole_calculation() {
+    let source = r#"
+use std -> *
+
+type Quantity = int[n -> 0 <= n && n <= 100]
+
+fn total(a: Quantity, b: Quantity) -> int[n -> 0 <= n && n <= 200] { a + b }
+
+fn bounded(raw: int) -> Result<int, String> {
+    let n = refine<Quantity>(raw)?
+    Ok(total(n, 100))
+}
+
+fn arithmetic(a: int, b: int) {
+    put(try_overflow(fn() { a + b }))
+    put(try_overflow(fn() { (0 - a) - b }))
+    put(try_overflow(fn() { a * 2 }))
+    put(try_overflow(fn() { 2 ** a }))
+}
+
+fn calculate() -> Result<int, String> {
+    try_overflow(fn() {
+        put('before')
+        let n = sum([9007199254740991, 1])
+        put('after')
+        n
+    })
+}
+
+fn main() {
+    put(bounded(100))
+    put(bounded(101))
+    put(try_overflow(fn() { sum([1, 2, 3]) }))
+    put(try_overflow(fn() { calculate() }))
+    arithmetic(9007199254740991, 1)
+    put('continued')
+}
+"#;
+    check_backends(
+        "integer-overflow-scope",
+        source,
+        success(concat!(
+            "std.Ok(200)\nstd.Err(\"細分化型の条件を満たさない\")\n",
+            "std.Ok(6)\nbefore\nstd.Ok(std.Err(\"オーバーフロー\"))\n",
+            "std.Err(\"オーバーフロー\")\nstd.Err(\"オーバーフロー\")\n",
+            "std.Err(\"オーバーフロー\")\nstd.Err(\"オーバーフロー\")\ncontinued\n",
+        )),
+    );
+}
+
+#[test]
+fn integer_overflow_in_async_calculation() {
+    let source = r#"
+use std -> *
+
+fn value() -> int with Async { 9007199254740991 }
+
+fn work() -> int with Async {
+    value().await + 1
+}
+
+fn main() with Async {
+    put(try_overflow(fn() { work().await }))
+    put(try_overflow(fn() {
+        spawn(work())
+        3
+    }))
+    put('continued')
+}
+"#;
+    check_backends(
+        "integer-overflow-async",
+        source,
+        reported(
+            true,
+            "std.Err(\"オーバーフロー\")\nstd.Ok(3)\ncontinued\n",
+            "実行時エラー: オーバーフロー",
+        ),
+    );
+}
+
+#[test]
+fn overflow_scope_keeps_other_runtime_errors() {
+    let source = "use std -> *\nfn main() { try_overflow(fn() { panic('オーバーフロー') }) }";
+    check_backends(
+        "integer-overflow-ordinary-panic",
+        source,
+        reported(false, "", "実行時エラー: オーバーフロー"),
+    );
+}
+
+#[test]
 fn closure_assignments() {
     let source = r#"
 fn main() {

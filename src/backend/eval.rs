@@ -73,6 +73,7 @@ enum Flow {
     Break,
     Continue,
     Error(String, Option<Span>),
+    IntegerOverflow(Option<Span>),
     // handle の腕が resume しなかった。(handle の番号, handle の値)
     Abort(usize, Value),
 }
@@ -113,6 +114,7 @@ pub fn run_fn(prog: &Program, entry: &str, out: &mut dyn Write) -> Result<Value,
     finish(&jobs, &result, &runtime).map_err(|flow| {
         let (msg, span) = match flow {
             Flow::Error(msg, span) => (msg, span),
+            Flow::IntegerOverflow(span) => ("オーバーフロー".into(), span),
             Flow::Abort(..) => ("with で処理されなかった中断".into(), None),
             Flow::Return(_) | Flow::Break | Flow::Continue => unreachable!("関数本体の外には出ない"),
         };
@@ -132,6 +134,7 @@ pub fn run_macro(b: &Block, vars: Vec<(Name, Value)>, prog: &Program) -> Result<
     match finish(&jobs, &result, &runtime) {
         Ok(v) | Err(Flow::Return(v)) => Ok(v),
         Err(Flow::Error(e, _)) => Err(e),
+        Err(Flow::IntegerOverflow(_)) => Err("オーバーフロー".into()),
         Err(Flow::Abort(..)) => unreachable!("handle の外には出ない"),
         Err(Flow::Break | Flow::Continue) => unreachable!("ループの外には出ない"),
     }
@@ -406,13 +409,18 @@ impl<'a> Interp<'a> {
         let done = task.clone();
         self.jobs().start(async move {
             let result = promise.wait().await;
-            match &result {
-                Err(Flow::Error(msg, Some(span))) => {
+            let report = match &result {
+                Err(Flow::Error(msg, span)) => Some((msg.as_str(), *span)),
+                Err(Flow::IntegerOverflow(span)) => Some(("オーバーフロー", *span)),
+                Err(Flow::Abort(..)) => Some(("with で処理されなかった中断", None)),
+                _ => None,
+            };
+            match report {
+                Some((msg, Some(span))) => {
                     eprintln!("実行時エラー: {msg}（{} 行 {} 列）", span.start.line, span.start.column);
                 }
-                Err(Flow::Error(msg, None)) => eprintln!("実行時エラー: {msg}"),
-                Err(Flow::Abort(..)) => eprintln!("実行時エラー: with で処理されなかった中断"),
-                _ => {}
+                Some((msg, None)) => eprintln!("実行時エラー: {msg}"),
+                None => {}
             }
             done.0.settle(result);
         });
@@ -741,6 +749,7 @@ impl<'a> Interp<'a> {
         async move {
             work.await.map_err(|flow| match flow {
                 Flow::Error(msg, None) => Flow::Error(msg, span),
+                Flow::IntegerOverflow(None) => Flow::IntegerOverflow(span),
                 _ => flow,
             })
         }
@@ -929,7 +938,7 @@ impl<'a> Interp<'a> {
                         if b < 0 && op == "**" {
                             return error("負の指数".into());
                         }
-                        Value::Int(arith(op, a, b).ok_or_else(|| Flow::Error("オーバーフロー".into(), None))?)
+                        Value::Int(arith(op, a, b).ok_or(Flow::IntegerOverflow(None))?)
                     }
                 }
             }
@@ -1003,6 +1012,7 @@ impl<'a> Interp<'a> {
                     env.pop();
                     r.map_err(|f| match f {
                         Flow::Error(e, _) => Error::from(e),
+                        Flow::IntegerOverflow(_) => Error::from("オーバーフロー"),
                         Flow::Return(_) => "${ } の中で return した".into(),
                         Flow::Abort(..) => unreachable!("マクロ本体に handle は無い"),
                         Flow::Break | Flow::Continue => unreachable!("ループの外には出ない"),
@@ -1039,7 +1049,7 @@ impl<'a> Interp<'a> {
                 let n = int(value);
                 Value::Int(
                     n.checked_neg().filter(|n| (MIN_SAFE_INT..=MAX_SAFE_INT).contains(n))
-                        .ok_or_else(|| Flow::Error("オーバーフロー".into(), None))?,
+                        .ok_or(Flow::IntegerOverflow(None))?,
                 )
             }
             Expr::Unary(_, x) => Value::Bool(!boolean(self.expr(x, env).await?)),
@@ -1062,7 +1072,7 @@ impl<'a> Interp<'a> {
                     .collect();
                 // 腕の中の exit は、この with の番号へ抜ける
                 captured.insert(exit_name(*node), Value::Int(id as i64));
-                let arms = arms
+                let arms: HashMap<_, _> = arms
                     .iter()
                     .map(|a| {
                         let body = Block { id: Default::default(),
@@ -1078,10 +1088,17 @@ impl<'a> Interp<'a> {
                         (a.ctor.clone(), Value::Fn(Rc::new(f)))
                     })
                     .collect();
+                let overflow_arm = arms.iter()
+                    .find(|(name, _)| super::is_integer_overflow_arm(name))
+                    .map(|(_, arm)| arm.clone());
                 let n = self.handlers.len();
                 self.handlers.push((id, Rc::new(arms)));
                 let r = self.expr(body, env).await;
                 self.handlers.truncate(n);
+                let r = match (r, overflow_arm) {
+                    (Err(Flow::IntegerOverflow(_)), Some(arm)) => Box::pin(self.apply(&arm, vec![])).await,
+                    (r, _) => r,
+                };
                 match r {
                     Err(Flow::Abort(h, v)) if h == id => v,
                     r => r?,

@@ -8,14 +8,15 @@ use std::collections::HashMap;
 
 const PRELUDE: &str = r#""use strict";
 const $SAFE_MAX = 9007199254740991;
-function $ichk(x) { if (!Number.isSafeInteger(x)) throw new Error("オーバーフロー"); return x === 0 ? 0 : x; }
+class $IntegerOverflow extends Error { constructor() { super("オーバーフロー"); } }
+function $ichk(x) { if (!Number.isSafeInteger(x)) throw new $IntegerOverflow(); return x === 0 ? 0 : x; }
 function $fchk(x) { if (!Number.isFinite(x)) throw new Error("number の演算結果が有限でない"); return x; }
 function $iadd(a, b) { return typeof a === "string" ? a + b : $ichk(a + b); }
 function $isub(a, b) { return $ichk(a - b); }
 function $imul(a, b) { return $ichk(a * b); }
 function $idiv(a, b) { if (b === 0) throw new Error("0 で除算した"); return $ichk(Math.trunc(a / b)); }
 function $irem(a, b) { if (b === 0) throw new Error("0 で除算した"); return $ichk(a % b); }
-function $ipow(a, b) { if (b < 0) throw new Error("負の指数"); if (b > 52) { if (a > 1 || a < -1) throw new Error("オーバーフロー"); b = 52 + b % 2; } return $ichk(a ** b); }
+function $ipow(a, b) { if (b < 0) throw new Error("負の指数"); if (b > 52) { if (a > 1 || a < -1) throw new $IntegerOverflow(); b = 52 + b % 2; } return $ichk(a ** b); }
 function $ineg(a) { return $ichk(-a); }
 function $fadd(a, b) { return $fchk(a + b); }
 function $fsub(a, b) { return $fchk(a - b); }
@@ -943,7 +944,15 @@ impl Gen<'_> {
                 self.push("try {".into());
                 let v = self.expr(body);
                 self.push(format!("{t} = {v};"));
-                self.push(format!("}} catch (e) {{ if (e instanceof $Abort && e.h === {h}) {t} = e.v; else throw e; }} finally {{ $h = {saved}; }}"));
+                self.push("} catch (e) {".into());
+                if let Some(arm) = arms.iter().find(|arm| super::is_integer_overflow_arm(&arm.ctor)) {
+                    let op = lit(&arm.ctor);
+                    self.push("if ((e instanceof $Located ? e.cause : e) instanceof $IntegerOverflow) {".into());
+                    self.push(format!("$h = {saved};"));
+                    self.push(format!("try {{ {h}.arms[{op}](); }} catch (exit) {{ e = exit; }}"));
+                    self.push("}".into());
+                }
+                self.push(format!("if (e instanceof $Abort && e.h === {h}) {t} = e.v; else throw e; }} finally {{ $h = {saved}; }}"));
                 t
             }
             Expr::Exit(target, x) => {

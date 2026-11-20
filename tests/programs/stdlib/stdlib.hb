@@ -29,6 +29,11 @@ test 'try' {
     assert(match try(fn() { map([2, 4], half) }) { Ok(xs) -> xs == [1, 2] Err(_) -> false })
 }
 
+test 'try_overflow' {
+    assert(match try_overflow(fn() { sum([1, 2]) }) { Ok(n) -> n == 3 Err(_) -> false })
+    assert(match try_overflow(fn() { sum([9007199254740991, 1]) }) { Ok(_) -> false Err(e) -> e == 'オーバーフロー' })
+}
+
 test 'String' {
     assert_eq(['a', 'b', 'c'].join(', '), 'a, b, c')
     assert_eq(repeat('ab', 3), 'ababab')

@@ -425,12 +425,29 @@ struct Ctx<'a> {
     lambdas: usize,
     // 型検査が記録した、JavaScript で待つ呼び出しと async にする本体（js.rs と同じ所で待つ）
     info: &'a crate::typeck::Info,
-    // コルーチンや then に実行時エラーを伝えるため、要求のない関数の呼び出しも検査する
+    // コルーチン、then、try_overflow へ実行時エラーを伝えるため、要求のない関数の呼び出しも検査する
     runtime_error_checks: bool,
 }
 
 pub fn lower(p: &parser::Program) -> R<Program> {
     lower_selected(p, None, &crate::typeck::Info::default())
+}
+
+fn uses_try_overflow(p: &parser::Program) -> bool {
+    let name = parser::qual("std", "try_overflow");
+    p.fns.iter().any(|f| {
+        let expressions = f.body.stmts.iter().map(|stmt| match stmt {
+            parser::Stmt::Let { init, .. } | parser::Stmt::Expr(init) => init,
+        });
+        let mut used = false;
+        for e in expressions.chain(f.body.tail.as_deref()) {
+            crate::typeck::walk(e, &mut |e| {
+                used |= matches!(e, Ast::Call(n, _) | Ast::Var(n) if *n == name);
+            });
+            if used { break; }
+        }
+        used
+    })
 }
 
 /// exports から辿れる関数だけを変換する。None はすべての関数を変換する。
@@ -467,7 +484,9 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>, info: &cr
         made: Vec::new(),
         lambdas: 0,
         info,
-        runtime_error_checks: !info.awaits.is_empty() || p.fns.iter().any(|f| has_async(&f.effects)),
+        runtime_error_checks: !info.awaits.is_empty()
+            || p.fns.iter().any(|f| has_async(&f.effects))
+            || (p.fns.iter().any(|f| f.name == "std.try_overflow") && uses_try_overflow(p)),
     };
     if exports.is_none() && (!p.datas.is_empty() || !p.tests.is_empty()) {
         return Err("IR は型宣言とテスト宣言に未対応".into());
@@ -1500,7 +1519,7 @@ impl Lower<'_, '_> {
                 let c = self.await_(c);
                 return Ok(self.checked(c));
             }
-            // ponytail: 非同期処理があるプログラムでは、要求の無い関数の呼び出しも検査する。負荷があれば、中断しうる関数を呼び出しの関係から絞る
+            // ponytail: 非同期処理や try_overflow があるプログラムでは、要求の無い関数の呼び出しも検査する。負荷があれば、中断しうる関数を呼び出しの関係から絞る
             return Ok(if self.cx.runtime_error_checks || !f.effects.is_empty() { self.checked(c) } else { c });
         }
         if matches!(n.as_str(), "Vec" | "Type" | "Ref" | "Async") || self.cx.types.contains(n.as_str()) {
