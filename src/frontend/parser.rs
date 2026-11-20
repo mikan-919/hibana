@@ -2190,7 +2190,7 @@ impl Parser<'_> {
             // with T(値), U(値) { 本体 } は、本体で起きた T・U の要求を値で処理する（Handle にする）。値はブロックに入る時に一度評価する。
             // 値が無名関数なら、その本体を腕にする（T のメソッドが 1 つの時だけ）。無名関数の値を返すと、呼んだ所が続く（#resume）。
             // それ以外の値は T の実装を持つ値で、メソッドごとに、その値のメソッドを呼んで続ける腕を作る
-            // ponytail: 要求の呼び出しは、実行中の with の並びから一番内側を探す（$op・__perform）。静的に決まる提供は、隠れた引数渡しに最適化できる
+            // 腕は型検査の後に、隠れた引数（文脈）で呼び出し先へ渡す（check/context.rs）
             Tok::Ident(name) if name == "with" && matches!(self.peek(), Tok::Ident(_)) => {
                 let id = NodeId::default();
                 let mut stmts = Vec::new();

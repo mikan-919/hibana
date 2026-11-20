@@ -585,3 +585,80 @@ fn equality_type_errors() {
         assert!(messages.iter().all(|m| *m == messages[0]), "{messages:?}");
     }
 }
+
+// 提供を隠れた引数（文脈）で渡す。関数の値・再帰・入れ子の with・Async を持つ要求・try
+#[test]
+fn requirements_pass_through_context() {
+    check_backends(
+        "requirements-context",
+        r#"
+use std -> *
+
+trait Log {
+    fn log(self, msg: String) with {}
+}
+
+trait Config {
+    fn load(self) -> int with Async
+}
+
+struct Prefix {
+    p: String
+}
+
+impl Log for Prefix {
+    fn log(self, msg: String) {
+        put(self.p + msg)
+    }
+}
+
+fn show(x: int) -> int with Log {
+    log('item ' + x.to_string())
+    x * 2
+}
+
+fn double(x: int) -> int {
+    x * 2
+}
+
+fn count(n: int) with Log {
+    if n > 0 {
+        log('count ' + n.to_string())
+        count(n - 1)
+    }
+}
+
+fn value() -> int with Async {
+    7
+}
+
+fn configured() -> int with Config, Async {
+    load().await + 1
+}
+
+fn main() with Async {
+    with Log(Prefix { p: '[a] ' }) {
+        put(map([1, 2], show).to_string())
+        put(map([3], double).to_string())
+        let f = fn(x: int) { log('lam ' + x.to_string()) }
+        f(1)
+        count(2)
+        with Log(fn(m) { log('inner ' + m) }) {
+            log('x')
+        }
+        log('after')
+    }
+    let r = try(fn() { fail('boom') })
+    match r {
+        Ok(_) -> { put('ok') }
+        Err(e) -> { put('err ' + e) }
+    }
+    let n = with Config(fn() { value().await * 2 }) {
+        configured().await
+    }
+    put(n.to_string())
+}
+"#,
+        success("[a] item 1\n[a] item 2\n[2, 4]\n[6]\n[a] lam 1\n[a] count 2\n[a] count 1\n[a] inner x\n[a] after\nerr boom\n15\n"),
+    );
+}

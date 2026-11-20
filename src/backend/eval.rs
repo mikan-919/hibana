@@ -90,12 +90,10 @@ struct Runtime<'a> {
     callback_error: RefCell<Option<Flow>>,
 }
 
-// 構文木を直接評価する。待っている関数は局所変数と with の記録を持ったまま止まる
+// 構文木を直接評価する。待っている関数は局所変数を持ったまま止まる
 struct Interp<'a> {
     runtime: Rc<Runtime<'a>>,
     jobs: Weak<Jobs<'a>>,
-    // 処理中の handle (番号, 操作の名前から腕の関数)。内側ほど後ろ
-    handlers: Vec<(usize, Rc<HashMap<Name, Value>>)>,
     variant: bool,
 }
 
@@ -336,7 +334,6 @@ impl<'a> Interp<'a> {
                 callback_error: RefCell::new(None),
             }),
             jobs: Rc::downgrade(jobs),
-            handlers: Vec::new(),
             variant: false,
         }
     }
@@ -345,7 +342,6 @@ impl<'a> Interp<'a> {
         Self {
             runtime: self.runtime.clone(),
             jobs: self.jobs.clone(),
-            handlers: self.handlers.clone(),
             variant: self.variant,
         }
     }
@@ -372,9 +368,10 @@ impl<'a> Interp<'a> {
         }
     }
 
-    async fn all(&self, fs: &[Value]) -> R<Value> {
+    // ctx は all を呼んだ所の文脈。Async の値が持つ要求は、待つ時の文脈で使う
+    async fn all(&self, fs: &[Value], ctx: Value) -> R<Value> {
         let jobs = self.jobs();
-        let promises: Vec<_> = fs.iter().map(|f| self.start_apply(f.clone(), vec![])).collect();
+        let promises: Vec<_> = fs.iter().map(|f| self.start_apply(f.clone(), vec![ctx.clone()])).collect();
         let all = Rc::new(Promise::default());
         if promises.is_empty() {
             all.settle(Ok(Value::Arr(Rc::new(vec![]))));
@@ -605,9 +602,23 @@ impl<'a> Interp<'a> {
             unreachable!("型検査済み")
         };
         match &**c {
-            Callable::Named(n) => self.call(self.runtime.fns[n.as_str()], args, false).await,
+            // 関数の値の呼び出しは最後に文脈を渡す。文脈を受け取らない関数では捨てる。組み込みから呼ぶ時は文脈が無いので空にする
+            Callable::Named(n) => {
+                let f = self.runtime.fns[n.as_str()];
+                let takes = f.params.last().is_some_and(|p| p.0.is_context());
+                let explicit = f.params.len() - f.implicit - usize::from(takes);
+                let mut args = args;
+                let ctx = if args.len() > explicit { args.pop() } else { None };
+                if takes {
+                    args.push(ctx.unwrap_or(Value::Unit));
+                }
+                self.call(f, args, false).await
+            }
             Callable::Lam { params, body, env, variant } => {
                 let mut scope = env.clone();
+                for p in &params[args.len().min(params.len())..] {
+                    scope.insert(p.clone(), Value::Unit);
+                }
                 scope.extend(params.iter().cloned().zip(args));
                 let saved = std::mem::replace(&mut self.variant, *variant);
                 let result = self.block(body, &mut vec![scope]).await;
@@ -636,10 +647,6 @@ impl<'a> Interp<'a> {
     }
 
     async fn call(&mut self, f: &'a Fn, args: Vec<Value>, variant: bool) -> R<Value> {
-        if f.op.is_some() {
-            let k = args.len() - (f.params.len() - f.implicit);
-            return self.perform(f, args[k..].to_vec()).await;
-        }
         if f.js.is_some() {
             return error(format!(
                 "extern の関数 {} は JavaScript 出力（hibana::to_js）でだけ使える", f.name
@@ -661,26 +668,6 @@ impl<'a> Interp<'a> {
         match result {
             Err(Flow::Return(v)) => Ok(v),
             r => r,
-        }
-    }
-
-    // 操作を、それを処理する一番内側の handle の腕で実行する。腕の中の操作は、その handle より外で処理する
-    async fn perform(&mut self, op: &Fn, args: Vec<Value>) -> R<Value> {
-        let name = &op.name;
-        let Some(i) = self.handlers.iter().rposition(|h| h.1.contains_key(name)) else {
-            return error(format!("操作 {name} を処理する handle が無い"));
-        };
-        let (id, f) = (self.handlers[i].0, self.handlers[i].1[name].clone());
-        let saved = self.handlers.split_off(i);
-        let r = if has_async(op) {
-            self.start_apply(f, args).wait().await
-        } else {
-            Box::pin(self.apply(&f, args)).await
-        };
-        self.handlers.extend(saved);
-        match r? {
-            Value::Data(d) if d.0 == "$resume" => Ok(d.1[0].clone()),
-            v => Err(Flow::Abort(id, v)),
         }
     }
 
@@ -779,7 +766,7 @@ impl<'a> Interp<'a> {
                 let Value::Arr(fs) = &vs[0] else {
                     unreachable!("型検査済み")
                 };
-                self.all(fs).await?
+                self.all(fs, vs.get(1).cloned().unwrap_or(Value::Unit)).await?
             } else if name == "spawn" && !self.runtime.fns.contains_key(name.as_str()) {
                 self.spawn(vs.remove(0))
             } else if matches!(name.as_str(), "task_then" | "task_done" | "task_value")
@@ -826,12 +813,20 @@ impl<'a> Interp<'a> {
                 let mut xs = xs.to_vec();
                 xs[i as usize] = x;
                 Value::Arr(Rc::new(xs))
-            } else if name == "#resume" {
-                // 腕の値として返し、perform が呼んだ所の値にする
-                Value::Data(Rc::new((
-                    "$resume".into(),
-                    vec![vs.pop().unwrap_or(Value::Unit)],
-                )))
+            } else if name == "#ctx_put" {
+                // 文脈の組 [操作の名前, 提供した関数, 外の文脈]
+                let (f, key, outer) = (vs.pop().unwrap(), vs.pop().unwrap(), vs.pop().unwrap());
+                Value::Data(Rc::new(("#ctx".into(), vec![key, f, outer])))
+            } else if name == "#ctx_get" {
+                let key = vs.pop().unwrap();
+                let mut c = vs.pop().unwrap();
+                loop {
+                    let Value::Data(d) = c else { unreachable!("型検査が提供を確かめている") };
+                    if value_eq(&d.1[0], &key) {
+                        break d.1[1].clone();
+                    }
+                    c = d.1[2].clone();
+                }
             } else if self.runtime.ctors.contains_key(name.as_str()) {
                 Value::Data(Rc::new((self.runtime.ctors[name.as_str()].0.clone(), vs)))
             } else if !self.runtime.fns.contains_key(name.as_str())
@@ -1063,42 +1058,18 @@ impl<'a> Interp<'a> {
                 variant: self.variant,
             })),
             Expr::Pi(..) => Value::Ty("fn".into()),
+            // 腕は本体の中で文脈に足してある（check/context.rs）。ここでは exit の行き先を決め、整数の範囲外を腕で受け取る
             Expr::Handle(node, body, arms) => {
                 let id = self.runtime.next_h.get() + 1;
                 self.runtime.next_h.set(id);
-                let mut captured: HashMap<Name, Value> = env
-                    .iter()
-                    .flat_map(|s| s.iter().map(|(k, v)| (k.clone(), v.clone())))
-                    .collect();
-                // 腕の中の exit は、この with の番号へ抜ける
-                captured.insert(exit_name(*node), Value::Int(id as i64));
-                let arms: HashMap<_, _> = arms
-                    .iter()
-                    .map(|a| {
-                        let body = Block { id: Default::default(),
-                            stmts: vec![],
-                            tail: Some(Box::new(a.body.clone())),
-                        };
-                        let f = Callable::Lam {
-                            params: a.binds.clone(),
-                            body,
-                            env: captured.clone(),
-                            variant: self.variant,
-                        };
-                        (a.ctor.clone(), Value::Fn(Rc::new(f)))
-                    })
-                    .collect();
-                let overflow_arm = arms.iter()
-                    .find(|(name, _)| super::is_integer_overflow_arm(name))
-                    .map(|(_, arm)| arm.clone());
-                let n = self.handlers.len();
-                self.handlers.push((id, Rc::new(arms)));
-                let r = self.expr(body, env).await;
-                self.handlers.truncate(n);
-                let r = match (r, overflow_arm) {
-                    (Err(Flow::IntegerOverflow(_)), Some(arm)) => Box::pin(self.apply(&arm, vec![])).await,
-                    (r, _) => r,
-                };
+                env.push(HashMap::from([(exit_name(*node), Value::Int(id as i64))]));
+                let mut r = self.expr(body, env).await;
+                if matches!(r, Err(Flow::IntegerOverflow(_)))
+                    && let Some(arm) = arms.iter().find(|a| super::is_integer_overflow_arm(&a.ctor))
+                {
+                    r = Box::pin(self.expr(&arm.body, env)).await;
+                }
+                env.pop();
                 match r {
                     Err(Flow::Abort(h, v)) if h == id => v,
                     r => r?,

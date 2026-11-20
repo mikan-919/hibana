@@ -64,7 +64,7 @@ impl Ck {
     // 効果 inst を起こしてよいか確かめる。handle の本体の効果の型がまだ決まっていなければ、ここで決める
     pub(super) fn use_effect(&mut self, inst: V) -> R<()> {
         let key = eff_key(&inst);
-        // 腕を待つのは、メソッドの宣言に with Async があるトレイトだけ（JavaScript では $aop で腕を待つ）
+        // 腕を待つのは、メソッドの宣言に with Async があるトレイトだけ（腕を async にし、要求の呼び出しで待つ）
         if key == "Async" && self.in_arm > 0 {
             return Err("with で提供する関数の中では Async を使えない（トレイトのメソッドの宣言に with Async を書くと使える）".into());
         }

@@ -689,8 +689,9 @@ fn check_prog(prog: &mut Program, require_main: bool) -> R<Info> {
         var_awaits: ck.var_awaits,
         async_inst: ck.async_inst,
     };
-    prog.async_info = info.clone();
-    Ok(info)
+    prog.async_info = info;
+    super::context::pass(prog);
+    Ok(prog.async_info.clone())
 }
 
 // 関数 1 つを検査する
