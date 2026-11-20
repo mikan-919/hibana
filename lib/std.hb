@@ -271,6 +271,16 @@ pub fn try<T, E, R: Effect>(f: () -> T with Fail<E>, R) -> Result<T, E> with R {
     }
 }
 
+trait IntOverflow {
+    fn raise_overflow(self) -> never with {}
+}
+
+pub fn try_overflow<T, R: Effect>(f: () -> T with R) -> Result<T, String> with R {
+    with IntOverflow(fn() { exit Err('オーバーフロー') }) {
+        Ok(f())
+    }
+}
+
 // ---- 非同期 ----
 
 // 2 つの値の組

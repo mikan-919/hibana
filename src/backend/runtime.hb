@@ -274,6 +274,20 @@ fn __overflow() {
     __die('オーバーフロー')
 }
 
+// 非同期処理または try_overflow の内側では、整数の範囲超過を中断番号 -2 で伝える。
+fn __integer_overflow() {
+    let st = __static()
+    let mut h = __load(st + 48)
+    while h != 0 && __tag(__overflow_arm(h)) != 6 {
+        h = __load(h)
+    }
+    if h != 0 || __load(st + 176) != 0 {
+        __exit(0 - 2, 'オーバーフロー')
+        return
+    }
+    __overflow()
+}
+
 fn __div_zero() {
     __die('0 で除算した')
 }
@@ -281,7 +295,7 @@ fn __div_zero() {
 // 利用者の整数演算。ランタイム内部の64ビット演算とは分ける。
 fn __i53(n: int) -> int {
     if n > 9007199254740991 || n < -9007199254740991 {
-        __panic('オーバーフロー')
+        __integer_overflow()
         return 0
     }
     n
@@ -293,7 +307,7 @@ fn __imul(a: int, b: int) -> int {
     let x = if a < 0 { 0 - a } else { a }
     let y = if b < 0 { 0 - b } else { b }
     if y != 0 && x > 9007199254740991 / y {
-        __panic('オーバーフロー')
+        __integer_overflow()
         return 0
     }
     a * b
@@ -331,7 +345,7 @@ fn __pow(a: int, b: int) -> int {
     let mut n = b
     if n > 52 {
         if a > 1 || a < 0 - 1 {
-            __panic('オーバーフロー')
+            __integer_overflow()
             return 0
         }
         n = 52 + n % 2
@@ -1393,7 +1407,7 @@ fn __abort_again(info: int) {
 }
 
 fn __is_panic(info: int) -> bool {
-    __payload(__getv(__payload(info) + 16)) == 0 - 1
+    __payload(__getv(__payload(info) + 16)) < 0
 }
 
 fn __panic_message(info: int) -> String {
@@ -1815,10 +1829,32 @@ fn __handle_push(id: int, ops: int, arms: int) -> int {
     id
 }
 
+fn __overflow_arm(h: int) -> int {
+    let ops = __payload(__getv(h + 16))
+    let n = __load(ops)
+    let mut i = 0
+    while i < n {
+        let op = __getv(ops + 8 + i * 16)
+        if __str_eq(__payload(op), __payload('std.IntOverflow::raise_overflow')) {
+            return __getv(__payload(__getv(h + 32)) + 8 + i * 16)
+        }
+        i = i + 1
+    }
+    __mkv(0, 0)
+}
+
 // 本体を終えた with を外す。この with への中断なら、腕の値が with の値になる
 fn __handle_end(id: int, v: int) -> int {
     let st = __static()
-    __store(st + 48, __load(__load(st + 48)))
+    let h = __load(st + 48)
+    __store(st + 48, __load(h))
+    if __load(st + 24) == 0 - 2 {
+        let arm = __overflow_arm(h)
+        if __tag(arm) == 6 {
+            __store(st + 24, 0)
+            arm(__mkv(0, 0))
+        }
+    }
     if __load(st + 24) == id {
         __store(st + 24, 0)
         return __getv(st + 32)
