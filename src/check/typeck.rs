@@ -902,7 +902,6 @@ impl Ck {
                     init,
                 } => {
                     // 名前を付けた要求（with Logger(logger)）。名前は要求の型を持ち、name.m(...) で要求の操作を呼ぶ。実行時の値は無い
-                    // ponytail: 名前は name.m(...) の形でだけ使える。値として渡すなら、関数の入口で with の並びから提供を取り出して束縛する
                     if let Expr::Call(n, xs) = &*init
                         && n == "#named"
                     {
