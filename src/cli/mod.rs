@@ -230,10 +230,20 @@ mod tests {
         files
     }
 
-    // 3 つの実行方式で確かめるプログラム。テスト用（tests/programs）と、利用者が書く正本（examples）
+    // 3 つの実行方式で確かめるプログラム。テスト用（tests/programs）と、利用者が書く正本（examples）。
+    // ビルドスクリプトは除く。型検査を通らなければ除かれず、比較の側で失敗する
     fn program_files() -> Vec<std::path::PathBuf> {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        ["tests/programs", "examples"].iter().flat_map(|d| hb_files(&root.join(d))).collect()
+        ["tests/programs", "examples"].iter().flat_map(|d| hb_files(&root.join(d))).filter(|p| !is_build_script(p)).collect()
+    }
+
+    // main からスクリプト用の関数（compile_file など）を辿れるか。辿れるファイルはインタプリタでしか動かない
+    fn is_build_script(p: &std::path::Path) -> bool {
+        let src = std::fs::read_to_string(p).unwrap();
+        let checked = crate::pipeline::load(&src, p.parent().unwrap())
+            .and_then(crate::pipeline::parse)
+            .and_then(|prog| crate::pipeline::check(prog, crate::pipeline::Kind::Executable));
+        checked.is_ok_and(|c| crate::check::typeck::reject_script_calls(&c.program, Some(&["main".to_string()])).is_err())
     }
 
     // 正本（examples）の .hb の横に同じ名前の .out があれば、インタプリタの出力がその中身と同じか
