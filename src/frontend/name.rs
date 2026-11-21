@@ -60,7 +60,7 @@ impl Name {
             member
         } else {
             Self {
-                spelling: format!("{module}.{member}"),
+                spelling: format!("{module}::{member}"),
                 kind: NameKind::Qualified(module.into(), Box::new(member)),
             }
         }
@@ -272,34 +272,39 @@ impl fmt::Display for Name {
         f.write_str(self.as_str())
     }
 }
+// 文字列との比較。修飾した名前の綴りは m::x で、型に属する名前の綴りと同じ形なので、文字列を名前として読んだ結果か、綴りそのもののどちらかが一致すれば等しい
+// （"std.Ok" と書いた文字列も、綴りから作った "std::Ok" も、修飾した名前 std::Ok に等しい）
+fn same(name: &Name, s: &str) -> bool {
+    name.as_str() == s || *name == Name::from(s)
+}
 impl PartialEq<str> for Name {
     fn eq(&self, other: &str) -> bool {
-        self == &Name::from(other)
+        same(self, other)
     }
 }
 impl PartialEq<&str> for Name {
     fn eq(&self, other: &&str) -> bool {
-        self == &Name::from(*other)
+        same(self, other)
     }
 }
 impl PartialEq<String> for Name {
     fn eq(&self, other: &String) -> bool {
-        self == &Name::from(other)
+        same(self, other)
     }
 }
 impl PartialEq<Name> for str {
     fn eq(&self, other: &Name) -> bool {
-        Name::from(self) == *other
+        same(other, self)
     }
 }
 impl PartialEq<Name> for &str {
     fn eq(&self, other: &Name) -> bool {
-        Name::from(*self) == *other
+        same(other, self)
     }
 }
 impl PartialEq<Name> for String {
     fn eq(&self, other: &Name) -> bool {
-        Name::from(self.as_str()) == *other
+        same(other, self)
     }
 }
 impl From<Name> for String {
@@ -310,5 +315,21 @@ impl From<Name> for String {
 impl From<Name> for std::rc::Rc<str> {
     fn from(name: Name) -> Self {
         name.spelling.into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Name;
+
+    // 修飾した名前は m::x と表示し、"m.x" と書いた文字列とも綴りの "m::x" とも等しい
+    #[test]
+    fn qualified_names_display_with_double_colons() {
+        let ok = Name::qualified("std", "Ok".into());
+        assert_eq!(ok.to_string(), "std::Ok");
+        assert!(ok == "std.Ok" && ok == "std::Ok" && ok == ok.to_string());
+        assert!(ok != "Ok" && ok != "core::Ok");
+        let ctor = Name::qualified("one", Name::associated("Shape".into(), "Node".into()));
+        assert_eq!(ctor.to_string(), "one::Shape::Node");
     }
 }

@@ -495,7 +495,7 @@ impl Gen<'_> {
 
     // extern の関数。(import 文, hibana の値を変換して呼ぶ関数)
     fn extern_fn(&mut self, prog: &Program, f: &Fn, module: &str) -> (String, String) {
-        let js_name = f.name.rsplit('.').next().unwrap();
+        let js_name = f.name.local().as_str();
         let imp = ident("$imp_", &f.name);
         let import = if module.is_empty() {
             format!(

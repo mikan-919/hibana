@@ -1825,7 +1825,7 @@ fn __overflow_arm(h: int) -> int {
     let mut i = 0
     while i < n {
         let op = __getv(ops + 8 + i * 16)
-        if __str_eq(__payload(op), __payload('std.IntOverflow::raise_overflow')) {
+        if __str_eq(__payload(op), __payload('std::IntOverflow::raise_overflow')) {
             return __getv(__payload(__getv(h + 32)) + 8 + i * 16)
         }
         i = i + 1

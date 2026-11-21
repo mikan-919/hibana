@@ -135,7 +135,7 @@ fn runtime_integer_refinement_evaluates_an_async_argument_once() {
     let javascript = hibana::to_js(source).unwrap();
     let output = Command::new("node").args(["-e", &format!("let calls = 0; globalThis.once = async () => {{ if (++calls > 1) throw Error('呼び出しが重複'); return 3; }};\n{javascript}")]).output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    assert_eq!(output.stdout, b"std.Ok(3)\n");
+    assert_eq!(output.stdout, b"std::Ok(3)\n");
 }
 
 // WASM とネイティブの非同期は、JavaScript の Promise とマイクロタスクと同じ順で動く（src/backend/ir/coroutine.rs）。

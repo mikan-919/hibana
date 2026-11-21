@@ -35,7 +35,7 @@ fn public_declarations_are_the_module_boundary() {
     hibana::typeck::check(&mut program).unwrap();
     let mut output = Vec::new();
     hibana::eval::run(&program, &mut output).unwrap();
-    assert_eq!(output, b"42\ndep.Chosen(3)\n");
+    assert_eq!(output, b"42\ndep::Chosen(3)\n");
     for (name, expression) in [
         ("hidden", "hidden()"),
         ("Secret", "Secret { value: 1 }"),
@@ -119,9 +119,9 @@ fn convert() -> Convert {
 fn forward_convert() -> Convert { convert() }
 "#;
     for (export, expected) in [
-        ("pub fn entry() -> Digit with {} { forward_digit() }", "with dep.Source<int["),
+        ("pub fn entry() -> Digit with {} { forward_digit() }", "with dep::Source<int["),
         ("pub fn entry() -> Digit with Source<int> { forward_digit() }", "が必要だが"),
-        ("pub fn entry() -> Convert with {} { forward_convert() }", "with dep.Source<(int) -> String with Async>"),
+        ("pub fn entry() -> Convert with {} { forward_convert() }", "with dep::Source<(int) -> String with Async>"),
         ("pub fn entry() -> Convert with Source<(int) -> String> { forward_convert() }", "が必要だが"),
     ] {
         let dependency = format!("{declarations}\n{export}");
@@ -278,7 +278,7 @@ fn ambiguous_trait_methods_report_declarations_in_both_modules() {
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1));
-    for expected in ["メソッド label が曖昧", "alpha.Label", "beta.Label", "main.hb", "alpha.hb", "beta.hb"] {
+    for expected in ["メソッド label が曖昧", "alpha::Label", "beta::Label", "main.hb", "alpha.hb", "beta.hb"] {
         assert!(stderr.contains(expected), "{stderr}");
     }
 }
@@ -597,7 +597,7 @@ fn main() { put(left 1)
     assert_eq!(output, b"1\napple\nlocal\n2\npear\n");
 
     let error = files.parse("use left -> {Item}\nuse right -> {Item}\nsyntax Both = Item").unwrap_err();
-    assert!(error.msg.contains("left.Item") && error.msg.contains("right.Item"), "{error}");
+    assert!(error.msg.contains("left::Item") && error.msg.contains("right::Item"), "{error}");
     let error = files.parse("use left\nsyntax Wrong = Item").unwrap_err();
     assert!(error.msg.contains("未定義の規則 Item"), "{error}");
     files.parse("use left -> {Item}\nuse left -> *\nsyntax Imported = Item").unwrap();
@@ -622,7 +622,7 @@ fn macro_candidates_follow_the_source_of_the_invocation() {
     assert_eq!(output, b"110\n2\n");
 
     let error = files.parse("use b\nuse a\nfn main() { put(pick) }").unwrap_err();
-    assert!(error.msg.contains("Ambiguous macro match（a.pick, b.pick）"), "{error}");
+    assert!(error.msg.contains("Ambiguous macro match（a::pick, b::pick）"), "{error}");
 }
 
 #[test]
@@ -670,7 +670,7 @@ fn same_named_constructors_resolve_through_their_type_and_module() {
     hibana::typeck::check(&mut program).unwrap();
     let mut output = Vec::new();
     hibana::eval::run(&program, &mut output).unwrap();
-    assert_eq!(output, b"one.Node(3)\ntwo.Node(4, 5)\n");
+    assert_eq!(output, b"one::Node(3)\ntwo::Node(4, 5)\n");
 }
 
 #[test]
@@ -750,12 +750,12 @@ fn private_traits_cannot_be_provided_from_other_modules() {
 #[test]
 fn public_declarations_cannot_expose_private_types() {
     for (dependency, declaration) in [
-        ("struct Secret { v: int }\npub struct Wrapper { s: Secret }", "dep.Wrapper"),
-        ("struct Secret { v: int }\npub fn leak() -> Secret with {} { Secret { v: 1 } }", "dep.leak"),
-        ("struct Secret { v: int }\npub fn take(xs: Vec<Secret>) -> int with {} { 0 }", "dep.take"),
-        ("enum Secret { A }\npub enum Choice { Hidden(s: Secret) }", "dep.Choice"),
-        ("type Secret = int\npub type Shown = Secret", "dep.Shown"),
-        ("trait Internal { fn value(self) -> int }\npub fn need() -> int with Internal { Internal::value() }", "dep.need"),
+        ("struct Secret { v: int }\npub struct Wrapper { s: Secret }", "dep::Wrapper"),
+        ("struct Secret { v: int }\npub fn leak() -> Secret with {} { Secret { v: 1 } }", "dep::leak"),
+        ("struct Secret { v: int }\npub fn take(xs: Vec<Secret>) -> int with {} { 0 }", "dep::take"),
+        ("enum Secret { A }\npub enum Choice { Hidden(s: Secret) }", "dep::Choice"),
+        ("type Secret = int\npub type Shown = Secret", "dep::Shown"),
+        ("trait Internal { fn value(self) -> int }\npub fn need() -> int with Internal { Internal::value() }", "dep::need"),
     ] {
         let files = Files::new("private-signature", &[("dep.hb", dependency)]);
         let error = files.parse("use dep\nfn main() {}").unwrap_err();
@@ -782,6 +782,6 @@ fn macros_use_private_names_with_the_permissions_of_their_module() {
         "use lib\nfn main() { put(lib::helper(1)) }",
     ] {
         let error = files.parse(source).unwrap_err();
-        assert!(error.msg.contains("lib.helper は非公開"), "{source}: {error}");
+        assert!(error.msg.contains("lib::helper は非公開"), "{source}: {error}");
     }
 }

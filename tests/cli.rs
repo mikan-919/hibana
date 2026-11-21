@@ -132,8 +132,8 @@ assert.deepEqual(api.validate(0), { ok: false, error: '細分化型の条件を�
 #[test]
 fn script_functions_are_rejected_by_compiled_backends() {
     for (src, name) in [
-        ("use std::fs\nfn main() { fs::write_bytes('x', [1]) }", "fs.write_bytes"),
-        ("use std::build\nfn main() { put(len(build::compile_wasm('src/app.hb', ['validate']).first)) }", "build.compile_wasm"),
+        ("use std::fs\nfn main() { fs::write_bytes('x', [1]) }", "fs::write_bytes"),
+        ("use std::build\nfn main() { put(len(build::compile_wasm('src/app.hb', ['validate']).first)) }", "build::compile_wasm"),
     ] {
         for e in [hibana::to_js(src).unwrap_err(), hibana::to_wasm(src).unwrap_err(), hibana::to_native(src).unwrap_err()] {
             assert!(e.to_string().contains(&format!("{name} はインタプリタでの実行")), "{e}");
@@ -166,5 +166,5 @@ fn library_only_builtins_are_hidden_from_user_code() {
     // ライブラリの関数を通せば使える。型検査が足す呼び出し（refine の num_floor）も通る
     let mut out = Vec::new();
     hibana::run("use std::math\nfn main() { put(math::floor(1.5))\n put(math::sqrt(4.0))\n put(refine<int>(3.0)) }", &mut out).unwrap();
-    assert_eq!(String::from_utf8(out).unwrap(), "1\n2\nstd.Ok(3)\n");
+    assert_eq!(String::from_utf8(out).unwrap(), "1\n2\nstd::Ok(3)\n");
 }

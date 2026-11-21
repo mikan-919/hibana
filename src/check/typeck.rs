@@ -1337,7 +1337,7 @@ impl Ck {
                     return Err(format!(
                         "{} にメソッド {f} が無い（fn {}::{f} を宣言する）",
                         show(&t),
-                        ty.rsplit('.').next().unwrap_or(&ty)
+                        ty.rsplit("::").next().unwrap_or(&ty)
                     )
                     .into());
                 }
