@@ -5,8 +5,8 @@ use std::fs
 
 fn main() {
     let src = 'first.hb'
-    fs.write_bytes('dist/first.mjs', build.compile(src, 'js'))
+    fs::write_bytes('dist/first.mjs', build::compile(src, 'js'))
     put('js -> dist/first.mjs')
-    build.write_executable('dist/first', build.compile(src, 'native'))
+    build::write_executable('dist/first', build::compile(src, 'native'))
     put('native -> dist/first')
 }

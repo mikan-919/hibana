@@ -22,7 +22,7 @@ pub fn typescript(abi: &str) -> R<String> {
 
 fn render(function: &str, abi: &str) -> R<String> {
     let abi = serde_json::to_string(abi).unwrap();
-    let script = format!("use std::wasm_web\nfn main() -> String {{ wasm_web.{function}({abi}) }}");
+    let script = format!("use std::wasm_web\nfn main() -> String {{ wasm_web::{function}({abi}) }}");
     let Value::Str(output) = hibana::run(&script, &mut Vec::new())? else {
         unreachable!("生成関数は文字列を返す");
     };

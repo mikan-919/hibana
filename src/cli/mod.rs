@@ -583,7 +583,7 @@ mod tests {
         )
         .unwrap();
         crate::parser::set_base_dir(&tmp);
-        let js = super::to_js("use 'fake-pkg'\nfn main() { put(fake_pkg.twice(21)) }").unwrap();
+        let js = super::to_js("use 'fake-pkg'\nfn main() { put(fake_pkg::twice(21)) }").unwrap();
         std::fs::write(tmp.join("main.mjs"), js).unwrap();
         let r = std::process::Command::new("node")
             .arg(tmp.join("main.mjs"))

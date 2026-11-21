@@ -77,19 +77,19 @@ type Pos = int[x -> x > 0]
 ### 3.3 モジュール
 
 ```
-use std              // 組み込みのライブラリ（lib/ 以下。実行ファイルに埋め込まれている）。std.map のように修飾して使う
+use std              // 組み込みのライブラリ（lib/ 以下。実行ファイルに埋め込まれている）。std::map のように修飾して使う
 use std -> *         // すべての名前を修飾なしで使う
 use std -> {map, Option}  // 挙げた名前だけ修飾なしで使う
 use std::math
     -> { floor }     // 名前の取り込みは改行して続けて書ける
     -> { sqrt }
-use util             // このファイルと同じディレクトリの util.hb。util.foo() と呼ぶ
-use foo::bar         // foo/bar.hb。bar.foo() または bar::foo() と呼ぶ
+use util             // このファイルと同じディレクトリの util.hb。util::foo() と呼ぶ
+use foo::bar         // foo/bar.hb。bar::foo() と呼ぶ
 use foo::bar -> {foo} // foo() と呼ぶ
 use foo::bar -> *     // すべての名前を修飾なしで使う
 ```
 
-- `use` したモジュールの関数・型・構築子は `モジュール名.名前`（`std.map(xs, f)`、`std.Some(1)`、`std.Option<int>`）で参照します。モジュール名で修飾できるのは、`->` を付けない `use` を書いたファイルの中だけです。`use std -> *` や `use std -> {map, Option}` だけでは `std.map` と書けず、`map` と書きます。利用者のファイルの同じ名前とは衝突しません。
+- `use` したモジュールの関数・型・構築子は `モジュール名::名前`（`std::map(xs, f)`、`std::Some(1)`、`std::Option<int>`）で参照します。`モジュール名.名前` の形はメソッドかフィールドとして読むので、モジュールの参照には使えません（エラーで `::` の形を案内します）。モジュール名で修飾できるのは、`->` を付けない `use` を書いたファイルの中だけです。`use std -> *` や `use std -> {map, Option}` だけでは `std::map` と書けず、`map` と書きます。利用者のファイルの同じ名前とは衝突しません。
 - 型の名前を取り込むと、その型に属する関数（`Response::text` など）も修飾なしで使えます。
 - モジュールの中では、そのモジュール自身の名前を修飾なしで参照できます。
 - 関数・型別名・構造体・列挙型・トレイトは、宣言に `pub` を付けたものだけをモジュール外から参照できます。`pub struct Point { x: int }`、`pub enum Choice { Yes, No }`、`pub type Count = int` のように書きます。構築子とフィールドの公開範囲は型の公開範囲に従います。トレイトのメソッドと要求の操作もトレイトの公開範囲に従い、公開トレイトのメソッドには `with` を明示します。
@@ -112,8 +112,8 @@ use 'some-package'        // npm のパッケージ。node_modules の package.j
 use 'node:path'           // Node.js の組み込み。node_modules/@types/node が要る
 
 fn main() {
-    put(util.add(2, 3))
-    let p = util.point(1, 2)       // interface Point は構造体 util.Point になる
+    put(util::add(2, 3))
+    let p = util::point(1, 2)       // interface Point は構造体 util::Point になる
     put(p.x + p.y)
 }
 ```
@@ -195,7 +195,7 @@ fn main() {
 use './js/util.ts'        // export async function later(x: number): Promise<number>
 
 fn twice_later(x: int) -> int with Async {
-    util.later(x).await + util.later(x).await    // 待つ場所に .await を書く
+    util::later(x).await + util::later(x).await    // 待つ場所に .await を書く
 }
 
 fn main() with Async {
@@ -542,7 +542,7 @@ macro unless('unless' expr:Expr block:Block) {
 
 ### std::math
 
-`use std::math` で読み込み、`math::sqrt(9)` または `math.sqrt(9)` で呼びます。`use std::math -> { floor }` で名前を取り込むと `floor(-2.5)` と呼べます。`sqrt(x)` は平方根を `number[r -> r >= 0.0]` で返し、負の引数は実行時エラーです。`floor(x)` は小数部分を負の無限大に向かって切り下げた `int` を返し、結果が `int` の範囲外なら実行時エラーです。
+`use std::math` で読み込み、`math::sqrt(9)` で呼びます。`use std::math -> { floor }` で名前を取り込むと `floor(-2.5)` と呼べます。`sqrt(x)` は平方根を `number[r -> r >= 0.0]` で返し、負の引数は実行時エラーです。`floor(x)` は小数部分を負の無限大に向かって切り下げた `int` を返し、結果が `int` の範囲外なら実行時エラーです。
 
 ### std::build と std::fs
 
@@ -550,10 +550,10 @@ macro unless('unless' expr:Expr block:Block) {
 
 | 名前 | 内容 |
 |---|---|
-| `build.compile(path, target)` | `(String, String) -> Vec<int>`。ファイルを `target`（`'js'`・`'wasm'`・`'native'`）にコンパイルしたバイト列 |
-| `build.compile_wasm(path, exports)` | `(String, Vec<String>) -> Pair<Vec<int>, String>`。`exports` の関数を公開する WASM ライブラリのバイト列と受け渡し規約の JSON を、一度のコンパイルで返す |
-| `build.write_executable(path, bytes)` | `(String, Vec<int>) -> unit`。実行権限を付けてファイルに書く。親ディレクトリが無ければ作る。実行権限は Unix でだけ付ける |
-| `fs.write_bytes(path, bytes)` | `(String, Vec<int>) -> unit`。ファイルに書く。親ディレクトリが無ければ作る。各要素は 0〜255 |
+| `build::compile(path, target)` | `(String, String) -> Vec<int>`。ファイルを `target`（`'js'`・`'wasm'`・`'native'`）にコンパイルしたバイト列 |
+| `build::compile_wasm(path, exports)` | `(String, Vec<String>) -> Pair<Vec<int>, String>`。`exports` の関数を公開する WASM ライブラリのバイト列と受け渡し規約の JSON を、一度のコンパイルで返す |
+| `build::write_executable(path, bytes)` | `(String, Vec<int>) -> unit`。実行権限を付けてファイルに書く。親ディレクトリが無ければ作る。実行権限は Unix でだけ付ける |
+| `fs::write_bytes(path, bytes)` | `(String, Vec<int>) -> unit`。ファイルに書く。親ディレクトリが無ければ作る。各要素は 0〜255 |
 
 ### std
 
@@ -607,13 +607,13 @@ use std::build
 use std::fs
 
 fn main() {
-    fs.write_bytes('dist/app.mjs', build.compile('src/app.hb', 'js'))
-    fs.write_bytes('dist/app.wasm', build.compile('src/app.hb', 'wasm'))
-    build.write_executable('dist/app', build.compile('src/app.hb', 'native'))
+    fs::write_bytes('dist/app.mjs', build::compile('src/app.hb', 'js'))
+    fs::write_bytes('dist/app.wasm', build::compile('src/app.hb', 'wasm'))
+    build::write_executable('dist/app', build::compile('src/app.hb', 'native'))
 }
 ```
 
-`hibana build.hb` で実行します。経路はスクリプトのディレクトリから数えるので、どのディレクトリから実行しても同じ場所に書き出します。`build.compile` の `wasm` は `main` を持つ実行用の WASM（`to_wasm` と同じ）です。`build.compile_wasm` に公開関数名を渡すと WASM ライブラリと受け渡し規約を取得できます。正本の例は `examples/build.hb` です。`std::wasm_web` はその規約から JavaScript の接続コードと TypeScript の型宣言を生成します。[WebAssembly の生成例](wasm.md)
+`hibana build.hb` で実行します。経路はスクリプトのディレクトリから数えるので、どのディレクトリから実行しても同じ場所に書き出します。`build::compile` の `wasm` は `main` を持つ実行用の WASM（`to_wasm` と同じ）です。`build::compile_wasm` に公開関数名を渡すと WASM ライブラリと受け渡し規約を取得できます。正本の例は `examples/build.hb` です。`std::wasm_web` はその規約から JavaScript の接続コードと TypeScript の型宣言を生成します。[WebAssembly の生成例](wasm.md)
 
 WASM 出力は関数を名前で公開します。`int` と `number` は `f64` と JavaScript の `Number` で渡します。`int` は安全整数の範囲と整数性、`number` は有限性を入口で検査します。`int` の負の0は正の0へ正規化します。`put` は取り込み `hibana.write(fd, 位置, 長さ)`、`input` は `hibana.read(fd, 位置, 長さ) -> 読み取ったバイト数`、`now_ms` は `hibana.now_ms()` を呼びます。JavaScript の接続コードは、出力を `imports.hibana.print`（無ければ `console.log`）に渡します。読み取りは `imports.hibana.read(fd, Uint8Array) -> バイト数` を使い、指定が無ければ Node.js の標準入力を読みます。入力終了は0、失敗は負の値です。実行時エラーでは、メッセージの文字列の位置を memory の24番地に書いて WASM の実行を停止します。JavaScript の接続コードは、メモリを参照できる場合、その文字列を例外のメッセージとして呼び出し元に返します。
 

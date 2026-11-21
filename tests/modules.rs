@@ -31,7 +31,7 @@ impl Drop for Files {
 fn public_declarations_are_the_module_boundary() {
     let dependency = "fn hidden() -> int { 41 }\nstruct Secret { value: int }\ntype Hidden = int\nenum Private { PrivateValue }\ntrait Internal { fn value(self) -> int }\npub type Count = int\npub struct Point { value: Count }\npub enum Choice { Chosen(value: int) }\npub fn answer() -> int with {} { hidden() + 1 }";
     let files = Files::new("public-boundary", &[("dep.hb", dependency)]);
-    let mut program = files.parse("use dep\nfn main() { let p = dep.Point { value: dep.answer() }\n put(p.value)\n put(dep.Chosen(3)) }").unwrap();
+    let mut program = files.parse("use dep\nfn main() { let p = dep::Point { value: dep::answer() }\n put(p.value)\n put(dep::Chosen(3)) }").unwrap();
     hibana::typeck::check(&mut program).unwrap();
     let mut output = Vec::new();
     hibana::eval::run(&program, &mut output).unwrap();
@@ -45,7 +45,7 @@ fn public_declarations_are_the_module_boundary() {
         ("Internal", "fn(n: Internal<int>) { n }"),
     ] {
         for (selection, expression) in [
-            (String::new(), expression.replacen(name, &format!("dep.{name}"), 1)),
+            (String::new(), expression.replacen(name, &format!("dep::{name}"), 1)),
             (" -> *".into(), expression.into()),
             (format!(" -> {{{name}}}"), "0".into()),
         ] {
@@ -92,7 +92,7 @@ fn private_inference_stops_at_explicit_public_effects() {
     }
     let dependency = "pub trait Log { fn log(self, message: String) with {} }\nfn leaf() { log('entry') }\nfn middle() { leaf() }\npub fn exported() with Log { middle() }";
     let files = Files::new("private-inference", &[("dep.hb", dependency)]);
-    let mut program = files.parse("use dep\nfn main() { with dep.Log(fn(message) { put(message) }) { dep.exported() } }").unwrap();
+    let mut program = files.parse("use dep\nfn main() { with dep::Log(fn(message) { put(message) }) { dep::exported() } }").unwrap();
     hibana::typeck::check(&mut program).unwrap();
     for name in ["dep.leaf", "dep.middle", "dep.exported"] {
         let function = program.fns.iter().find(|f| f.name == name).unwrap();
@@ -357,12 +357,12 @@ fn explicit_empty_effects_also_stop_lambda_inference() {
 fn method_syntax_cannot_call_private_functions() {
     let dependency = "pub struct Item { value: int }\nfn Item::hidden(self: Item) -> int { self.value }\npub fn Item::get(self: Item) -> int with {} { self.hidden() }";
     let files = Files::new("private-methods", &[("dep.hb", dependency)]);
-    for call in ["item.hidden()", "dep.Item::hidden(item)"] {
-        let source = format!("use dep\nfn main() {{ let item = dep.Item {{ value: 1 }}\n put({call}) }}");
+    for call in ["item.hidden()", "dep::Item::hidden(item)"] {
+        let source = format!("use dep\nfn main() {{ let item = dep::Item {{ value: 1 }}\n put({call}) }}");
         let error = files.parse(&source).and_then(|mut program| hibana::typeck::check(&mut program).map(|_| ())).unwrap_err();
         assert!(error.msg.contains("非公開"), "{source}: {error}");
     }
-    let mut program = files.parse("use dep\nfn main() { put(dep.Item { value: 1 }.get()) }").unwrap();
+    let mut program = files.parse("use dep\nfn main() { put(dep::Item { value: 1 }.get()) }").unwrap();
     hibana::typeck::check(&mut program).unwrap();
 }
 
@@ -391,8 +391,8 @@ fn module_names_qualify_only_under_a_plain_use() {
         .unwrap();
     hibana::typeck::check(&mut program).unwrap();
     for source in [
-        "use std::math -> { floor }\nfn main() { put(math::sqrt(9)) }",
         "use std::math -> { floor }\nfn main() { put(math.sqrt(9)) }",
+        "use std::math -> { floor }\nfn main() { put(math::sqrt(9)) }",
         "use std -> *\nfn main() { put(std.map([1], fn(x) { x })) }",
     ] {
         let mut program = files.parse(source).unwrap();
@@ -430,7 +430,7 @@ fn string_hibana_imports_are_rejected_before_reading() {
 
 #[test]
 fn builtin_imports_share_modules_and_preserve_source_text() {
-    let source = "use std\nuse std -> {map}\nuse std::math\nuse std::math -> {floor}\nfn main() { put(map([1, 2], fn(x) { x + 1 }))\n put(std.Some(3))\n put(math.sqrt(9))\n put(floor(2.5)) }";
+    let source = "use std\nuse std -> {map}\nuse std::math\nuse std::math -> {floor}\nfn main() { put(map([1, 2], fn(x) { x + 1 }))\n put(std::Some(3))\n put(math::sqrt(9))\n put(floor(2.5)) }";
     let mut program = pipeline::parse(pipeline::load(source, std::path::Path::new(".")).unwrap()).unwrap();
     assert_eq!(program.modules.len(), 3);
     assert_eq!(program.modules[0].source.text, source);
@@ -443,7 +443,7 @@ fn builtin_imports_share_modules_and_preserve_source_text() {
 #[test]
 fn typescript_import_forms_remain_available() {
     let files = Files::new("typescript-imports", &[("util.ts", "export function value(): number { return 42; }")]);
-    for (selection, call) in [("", "util.value()"), (" -> {value}", "value()"), (" -> *", "value()")] {
+    for (selection, call) in [("", "util::value()"), (" -> {value}", "value()"), (" -> *", "value()")] {
         let source = format!("use './util.ts'{selection}\nfn main() {{ put({call}) }}");
         let program = files.parse(&source).unwrap();
         let checked = pipeline::check(program, pipeline::Kind::Executable).unwrap();
@@ -486,11 +486,11 @@ fn main() {
 fn named_imports_resolve_nested_paths_and_file_local_dependencies() {
     let files = Files::new("named-imports", &[
         ("util.hb", "pub fn twice(n: int) -> int with {} { n * 2 }"),
-        ("tools/calc.hb", "use helper\npub fn answer() -> int with {} { helper.base() + 1 }"),
+        ("tools/calc.hb", "use helper\npub fn answer() -> int with {} { helper::base() + 1 }"),
         ("tools/helper.hb", "pub fn base() -> int with {} { 41 }"),
     ]);
-    for (selection, call) in [("", "calc.answer()"), (" -> {answer}", "answer()"), (" -> *", "answer()"), ("\n -> {answer}", "answer()"), ("", "calc::answer()") ] {
-        let source = format!("use util\nuse tools::calc{selection}\nuse tools::helper\nfn main() {{ put(util.twice({call})) }}");
+    for (selection, call) in [(" -> {answer}", "answer()"), (" -> *", "answer()"), ("\n -> {answer}", "answer()"), ("", "calc::answer()") ] {
+        let source = format!("use util\nuse tools::calc{selection}\nuse tools::helper\nfn main() {{ put(util::twice({call})) }}");
         let mut program = files.parse(&source).unwrap();
         assert_eq!(program.modules.len(), 4);
         hibana::typeck::check(&mut program).unwrap();
@@ -503,7 +503,7 @@ fn named_imports_resolve_nested_paths_and_file_local_dependencies() {
 #[test]
 fn builtin_imports_take_precedence_over_local_files() {
     let files = Files::new("builtin-precedence", &[("std.hb", "@"), ("std/math.hb", "@")]);
-    let mut program = files.parse("use std\nuse std::math\nfn main() { put(math.sqrt(9)) }").unwrap();
+    let mut program = files.parse("use std\nuse std::math\nfn main() { put(math::sqrt(9)) }").unwrap();
     hibana::typeck::check(&mut program).unwrap();
     let mut output = Vec::new();
     hibana::eval::run(&program, &mut output).unwrap();
@@ -525,12 +525,12 @@ fn cyclic_and_repeated_named_imports_share_modules() {
     let files = Files::new(
         "cycles",
         &[
-            ("a.hb", "use b\npub fn answer() -> int with {} { b.base() }"),
+            ("a.hb", "use b\npub fn answer() -> int with {} { b::base() }"),
             ("b.hb", "use a\npub fn base() -> int with {} { 42 }"),
         ],
     );
     let mut program = files
-        .parse("use a\nuse a\nfn main() { put(a.answer()) }")
+        .parse("use a\nuse a\nfn main() { put(a::answer()) }")
         .unwrap();
     assert_eq!(program.modules.len(), 3);
     assert_eq!(program.modules[1].name, "a");
@@ -557,7 +557,7 @@ fn imported_macros_and_types_share_declarations_without_source_concatenation() {
             ),
         ],
     );
-    let source = "use types\nuse math\nuse macros\nfn main() { put(math.value(types.Point { x: twice 3 })) }";
+    let source = "use types\nuse math\nuse macros\nfn main() { put(math::value(types::Point { x: twice 3 })) }";
     let mut program = files.parse(source).unwrap();
     assert_eq!(program.modules[0].source.text, source);
     hibana::typeck::check(&mut program).unwrap();
@@ -634,7 +634,7 @@ fn imported_parse_and_type_errors_keep_their_file_and_local_offsets() {
     ] {
         let files = Files::new(name, &[("dep.hb", text)]);
         let result = files
-            .parse("use dep\nfn main() { put(dep.value()) }")
+            .parse("use dep\nfn main() { put(dep::value()) }")
             .and_then(|program| pipeline::check(program, pipeline::Kind::Executable));
         let error = result.err().unwrap();
         let source = error.source.unwrap();
@@ -649,7 +649,7 @@ fn imported_runtime_errors_keep_their_file() {
     let text = "pub fn value() -> int with {} {\n panic('stop')\n}";
     let files = Files::new("runtime", &[("dep.hb", text)]);
     let mut program = files
-        .parse("use dep\nfn main() { put(dep.value()) }")
+        .parse("use dep\nfn main() { put(dep::value()) }")
         .unwrap();
     hibana::typeck::check(&mut program).unwrap();
     let error = hibana::eval::run(&program, &mut Vec::new()).unwrap_err();
@@ -666,7 +666,7 @@ fn same_named_constructors_resolve_through_their_type_and_module() {
             ("two.hb", "pub enum Shape { Node(left: int, right: int) }"),
         ],
     );
-    let mut program = files.parse("use one\nuse two\nfn main() { put(one.Shape::Node(3))\n put(two.Shape::Node(4, 5)) }").unwrap();
+    let mut program = files.parse("use one\nuse two\nfn main() { put(one::Shape::Node(3))\n put(two::Shape::Node(4, 5)) }").unwrap();
     hibana::typeck::check(&mut program).unwrap();
     let mut output = Vec::new();
     hibana::eval::run(&program, &mut output).unwrap();
@@ -678,7 +678,7 @@ fn effect_diagnostics_keep_the_call_and_operation_in_their_own_files() {
     let dependency = "pub trait Log { fn log(self, message: String) with {} }\npub fn trigger() with Log { log('entry') }";
     let files = Files::new("effect-origin", &[("dep.hb", dependency)]);
     let mut program = files
-        .parse("use dep\nfn main() { dep.trigger() }")
+        .parse("use dep\nfn main() { dep::trigger() }")
         .unwrap();
     let error = hibana::typeck::check(&mut program).err().unwrap();
     assert_eq!(error.source_id.0, 0);
@@ -703,7 +703,7 @@ fn declaration_macros_keep_generated_names_in_imported_modules() {
         )],
     );
     let mut program = files
-        .parse("use generated\nfn main() { put(generated.answer()) }")
+        .parse("use generated\nfn main() { put(generated::answer()) }")
         .unwrap();
     hibana::typeck::check(&mut program).unwrap();
     let mut output = Vec::new();
@@ -716,20 +716,20 @@ fn module_names_stay_in_the_file_that_uses_them() {
     let files = Files::new(
         "file-scope",
         &[
-            ("a.hb", "use b\npub fn answer() -> int with {} { b.base() }"),
+            ("a.hb", "use b\npub fn answer() -> int with {} { b::base() }"),
             ("b.hb", "pub fn base() -> int with {} { 42 }"),
         ],
     );
     // a.hb は b を修飾して使えるが、b を use していない main からは使えない
     let mut program = files
-        .parse("use a\nfn main() { put(a.answer()) }")
+        .parse("use a\nfn main() { put(a::answer()) }")
         .unwrap();
     hibana::typeck::check(&mut program).unwrap();
     let mut output = Vec::new();
     hibana::eval::run(&program, &mut output).unwrap();
     assert_eq!(output, b"42\n");
     let mut program = files
-        .parse("use a\nfn main() { put(b.base()) }")
+        .parse("use a\nfn main() { put(b::base()) }")
         .unwrap();
     let error = hibana::typeck::check(&mut program).err().unwrap();
     assert!(error.msg.contains("未定義"), "{}", error.msg);
@@ -739,7 +739,7 @@ fn module_names_stay_in_the_file_that_uses_them() {
 fn private_traits_cannot_be_provided_from_other_modules() {
     let files = Files::new("private-with", &[("dep.hb", "trait Internal { fn value(self) -> int }\npub fn one() -> int with {} { 1 }")]);
     for source in [
-        "use dep\nfn main() { put(with dep.Internal(fn() { 3 }) { 1 }) }",
+        "use dep\nfn main() { put(with dep::Internal(fn() { 3 }) { 1 }) }",
         "use dep -> *\nfn main() { put(with Internal(fn() { 3 }) { 1 }) }",
     ] {
         let error = files.parse(source).unwrap_err();
@@ -778,8 +778,8 @@ fn macros_use_private_names_with_the_permissions_of_their_module() {
     pipeline::lower(&checked, Some(&["main".into()])).unwrap();
     // 差し込んだ呼び出し側の式は、呼び出し側の権限のまま
     for source in [
-        "use lib\nfn main() { put(boxed lib.helper(1)) }",
-        "use lib\nfn main() { put(lib.helper(1)) }",
+        "use lib\nfn main() { put(boxed lib::helper(1)) }",
+        "use lib\nfn main() { put(lib::helper(1)) }",
     ] {
         let error = files.parse(source).unwrap_err();
         assert!(error.msg.contains("lib.helper は非公開"), "{source}: {error}");
