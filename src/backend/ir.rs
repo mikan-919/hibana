@@ -794,8 +794,8 @@ impl<'a> Ctx<'a> {
             V::DataT(data) if allow_result && data.0 == "std.Result" => {
                 let [ok, err] = data.1.as_slice() else { return None };
                 BoundaryType::Result {
-                    ok: (self.ctors.get("std.Ok")?.0, Box::new(self.desc(ok, check, allow_result, seen)?)),
-                    err: (self.ctors.get("std.Err")?.0, Box::new(self.desc(err, check, allow_result, seen)?)),
+                    ok: (self.ctors.get(crate::parser::qual("std", "Ok").as_str())?.0, Box::new(self.desc(ok, check, allow_result, seen)?)),
+                    err: (self.ctors.get(crate::parser::qual("std", "Err").as_str())?.0, Box::new(self.desc(err, check, allow_result, seen)?)),
                 }
             }
             V::DataT(data) => {

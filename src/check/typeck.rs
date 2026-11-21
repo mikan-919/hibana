@@ -111,7 +111,7 @@ const BUILTINS: &[&str] = &[
     "task_value",
     "compile_file",
     "compile_wasm_file",
-    "write_bytes",
+    "write_file",
 ];
 
 // 文字列の組み込み関数 (名前, 引数, 戻り値)。split の戻り値は Vec<String>
@@ -130,14 +130,19 @@ const STR_FNS: &[(&str, &[&str], &str)] = &[
     ("now_ms", &[], "int"),
     // 実行時エラーにする
     ("panic", &["String"], "never"),
-    // スクリプト専用（SCRIPT_FNS）。ファイルを JS・WASM・ネイティブにコンパイルしたバイト列と、その書き込み
+    // スクリプト専用（SCRIPT_FNS）。ファイルを JS・WASM・ネイティブにコンパイルしたバイト列と、その書き込み。
+    // write_file の 3 つ目の引数は実行権限を付けるか
     ("compile_file", &["String", "String"], "Vec<int>"),
     ("compile_wasm_file", &["String", "Vec<String>"], "Pair<Vec<int>, String>"),
-    ("write_bytes", &["String", "Vec<int>"], "unit"),
+    ("write_file", &["String", "Vec<int>", "bool"], "unit"),
 ];
 
 // インタプリタで実行するスクリプトでだけ使える組み込み関数。ほかのバックエンドの出力から辿れるとエラー
-pub(crate) const SCRIPT_FNS: &[&str] = &["compile_file", "compile_wasm_file", "write_bytes"];
+pub(crate) const SCRIPT_FNS: &[&str] = &["compile_file", "compile_wasm_file", "write_file"];
+
+// 組み込みのライブラリ（std::math・std::build・std::fs）の実装でだけ呼べる組み込み関数。
+// 利用者のコードからは未定義の関数に見え、ライブラリの関数（math.sqrt・build.compile など）を通して使う
+const STD_ONLY_FNS: &[&str] = &["num_floor", "num_sqrt", "compile_file", "compile_wasm_file", "write_file"];
 
 // 組み込み関数の表の型の綴りを型にする
 fn table_type(s: &str) -> V {
@@ -562,11 +567,13 @@ pub(crate) fn callees(f: &Fn) -> Vec<Name> {
     out
 }
 
-// roots から辿れる関数が SCRIPT_FNS を呼べばエラーにする。None はすべての関数
+// roots から辿れる関数が SCRIPT_FNS を呼べばエラーにする。None は利用者のすべての関数
+// （組み込みのライブラリの関数は、利用者の関数から辿れる時だけ調べる）
 pub(crate) fn reject_script_calls(prog: &Program, roots: Option<&[String]>) -> R<()> {
+    let libraries = crate::parser::builtin_modules(prog);
     let mut pending: Vec<Name> = match roots {
         Some(rs) => rs.iter().map(Name::from).collect(),
-        None => prog.fns.iter().map(|f| f.name.clone()).collect(),
+        None => prog.fns.iter().filter(|f| !libraries.contains(&f.module)).map(|f| f.name.clone()).collect(),
     };
     let mut seen = std::collections::HashSet::new();
     while let Some(name) = pending.pop() {
@@ -574,9 +581,30 @@ pub(crate) fn reject_script_calls(prog: &Program, roots: Option<&[String]>) -> R
         let Some(f) = prog.fns.iter().find(|f| f.name == name) else { continue };
         for n in callees(f) {
             if SCRIPT_FNS.contains(&n.as_str()) {
-                return Err(format!("{n} はインタプリタでの実行（hibana <ファイル>）でだけ使える").into());
+                // 組み込みはライブラリの中でだけ呼べるので、利用者が呼んだライブラリの関数（fs.write_bytes など）の名前を出す
+                let shown = if libraries.contains(&f.module) { f.name.to_string() } else { n.to_string() };
+                return Err(format!("{shown} はインタプリタでの実行（hibana <ファイル>）でだけ使える").into());
             }
             pending.push(n);
+        }
+    }
+    Ok(())
+}
+
+// 組み込みのライブラリの外の関数が STD_ONLY_FNS を呼べば、未定義の関数のエラーにする。
+// 型検査の前に本体を走査するので、型検査が書き足す呼び出し（refine の num_floor など）は対象にならない
+fn reject_std_only_calls(prog: &Program) -> R<()> {
+    let libraries = crate::parser::builtin_modules(prog);
+    for f in prog.fns.iter().filter(|f| !libraries.contains(&f.module)) {
+        // 呼び出しを囲む一番近い位置。walk は外側の式を先に訪れる
+        let (mut at, mut found) = (f.span, None);
+        walk(&Expr::Block(f.body.clone()), &mut |x| match x {
+            Expr::At(sp, _) if found.is_none() => at = Some(*sp),
+            Expr::Call(n, _) if found.is_none() && STD_ONLY_FNS.contains(&n.as_str()) => found = Some((n.clone(), at)),
+            _ => {}
+        });
+        if let Some((n, sp)) = found {
+            return Err(at_opt(format!("関数 {}: 未定義の関数 {n}", f.name).into(), sp));
         }
     }
     Ok(())
@@ -610,6 +638,7 @@ fn at_opt(e: Error, s: Option<Span>) -> Error {
 }
 
 fn check_prog(prog: &mut Program, require_main: bool) -> R<Info> {
+    reject_std_only_calls(prog)?;
     let mut ck = Ck {
         module: String::new(),
         norm: Eval::new(),
@@ -1308,7 +1337,7 @@ impl Ck {
                     return Err(format!(
                         "{} にメソッド {f} が無い（fn {}::{f} を宣言する）",
                         show(&t),
-                        ty.rsplit('.').next().unwrap_or(&ty)
+                        ty.rsplit("::").next().unwrap_or(&ty)
                     )
                     .into());
                 }
@@ -2168,7 +2197,7 @@ impl Ck {
             .iter()
             .flat_map(|s| s.vars.keys().map(|k| k.as_str()))
             .chain(self.norm.fns.keys().map(|k| k.as_str()))
-            .chain(STR_FNS.iter().map(|s| s.0))
+            .chain(STR_FNS.iter().map(|s| s.0).filter(|n| !STD_ONLY_FNS.contains(n)))
             .chain([
                 "put", "len", "push", "set_at", "to_str", "new_ref", "read", "write", "all",
             ])

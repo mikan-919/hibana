@@ -148,10 +148,10 @@ fn main() {
         "integer-overflow-scope",
         source,
         success(concat!(
-            "std.Ok(200)\nstd.Err(\"細分化型の条件を満たさない\")\n",
-            "std.Ok(6)\nbefore\nstd.Ok(std.Err(\"オーバーフロー\"))\n",
-            "std.Err(\"オーバーフロー\")\nstd.Err(\"オーバーフロー\")\n",
-            "std.Err(\"オーバーフロー\")\nstd.Err(\"オーバーフロー\")\ncontinued\n",
+            "std::Ok(200)\nstd::Err(\"細分化型の条件を満たさない\")\n",
+            "std::Ok(6)\nbefore\nstd::Ok(std::Err(\"オーバーフロー\"))\n",
+            "std::Err(\"オーバーフロー\")\nstd::Err(\"オーバーフロー\")\n",
+            "std::Err(\"オーバーフロー\")\nstd::Err(\"オーバーフロー\")\ncontinued\n",
         )),
     );
 }
@@ -181,7 +181,7 @@ fn main() with Async {
         source,
         reported(
             true,
-            "std.Err(\"オーバーフロー\")\nstd.Ok(3)\ncontinued\n",
+            "std::Err(\"オーバーフロー\")\nstd::Ok(3)\ncontinued\n",
             "実行時エラー: オーバーフロー",
         ),
     );

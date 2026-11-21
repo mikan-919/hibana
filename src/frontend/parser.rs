@@ -311,9 +311,25 @@ pub(super) const LIBS: &[(&str, &str)] = &[
     ("std", include_str!("../../lib/std.hb")),
     ("std::math", include_str!("../../lib/math.hb")),
     ("std::wasm_web", include_str!("../../lib/wasm_web.hb")),
+    ("std::build", include_str!("../../lib/build.hb")),
+    ("std::fs", include_str!("../../lib/fs.hb")),
 ];
 
-pub(super) const PRELUDE_NAMES: &[&str] = &["Result", "Ok", "Err", "parse_int", "refine", "spawn", "compile_wasm_file"];
+// 組み込みのライブラリを読み込んだモジュールのファイルの識別子
+pub(crate) fn builtin_identity(spec: &str) -> String {
+    format!("builtin:{spec}")
+}
+
+// 組み込みのライブラリから読み込んだモジュールの名前。標準ライブラリの中でだけ呼べる組み込み関数の判定に使う
+pub(crate) fn builtin_modules(prog: &Program) -> HashSet<String> {
+    prog.modules
+        .iter()
+        .filter(|m| LIBS.iter().any(|(spec, _)| builtin_identity(spec) == m.source.name))
+        .map(|m| m.name.clone())
+        .collect()
+}
+
+pub(super) const PRELUDE_NAMES: &[&str] = &["Result", "Ok", "Err", "parse_int", "refine", "spawn"];
 
 // use した名前の取り込み方
 #[derive(Debug, Clone)]
@@ -580,7 +596,7 @@ fn parse_modules_tokens(
         "task_value",
         "compile_file",
         "compile_wasm_file",
-        "write_bytes",
+        "write_file",
         "Vec",
         "Type",
         "with",
@@ -1015,30 +1031,14 @@ impl Parser<'_> {
         self.modules.get(&self.module).is_some_and(|ms| ms.contains(m))
     }
 
-    // 今のトークンが名前なら、修飾した名前に書き換える。web.ok は1個の名前にし、型名は今のモジュールから見た名前にする
+    // 今のトークンが名前なら、修飾した名前に書き換える。web::ok は修飾した名前にし、型名は今のモジュールから見た名前にする
     // （構造体の値と <> の判定に使う。それ以外の名前は resolve で局所変数と区別してから解決する）
     pub(super) fn qualify_here(&mut self) {
         let Tok::Ident(n) = self.peek().clone() else {
             return;
         };
-        if let NameKind::Associated(module, member) = &n.kind
-            && self.uses_module(module.as_str())
-        {
-            self.toks[self.pos].tok = Tok::Ident(Name::qualified(module, *member.clone()));
-            return;
-        }
-        let at = |k: usize| self.toks.get(self.pos + k).map(|t| t.tok.clone());
-        if self.uses_module(n.as_str())
-            && at(1) == Some(Tok::Punct("."))
-            && !self.toks[self.pos + 1].gap_before
-        {
-            if let Some(Tok::Ident(x)) = at(2) {
-                self.pos += 2;
-                // 巻き戻して読み直した時は、既に書き換えてある
-                if !matches!(x.kind, NameKind::Qualified(..)) {
-                    self.toks[self.pos].tok = Tok::Ident(Name::qualified(&n, x));
-                }
-            }
+        if let Some((module, rest)) = self.module_path(&n) {
+            self.toks[self.pos].tok = Tok::Ident(Name::qualified(&module, rest));
             return;
         }
         let q = self.qualify(&n);
@@ -1050,6 +1050,16 @@ impl Parser<'_> {
         {
             self.toks[self.pos].tok = Tok::Ident(q);
         }
+    }
+
+    // m::x と m::T::x の、先頭の m が use したモジュールなら (m, 残りの名前)
+    fn module_path(&self, n: &Name) -> Option<(String, Name)> {
+        let NameKind::Associated(owner, member) = &n.kind else { return None };
+        if matches!(owner.kind, NameKind::User) && self.uses_module(owner.as_str()) {
+            return Some((owner.to_string(), *member.clone()));
+        }
+        let (module, rest) = self.module_path(owner)?;
+        Some((module, Name::associated(rest, *member.clone())))
     }
 
     // f<T>(...) と、局所変数と比較演算子の並びを区別する。

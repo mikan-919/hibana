@@ -11,7 +11,7 @@ hibana main.hb
 hibana main.hb -- 引数...
 ```
 
-`hibana <ファイル>` でインタプリタが実行します。JavaScript・WASM・ネイティブへの出力は、ビルドスクリプトに `write_bytes('dist/app.mjs', compile_file('app.hb', 'js'))` のように書いて `hibana build.hb` で実行します（仕様の 11.1 節）。
+`hibana <ファイル>` でインタプリタが実行します。JavaScript・WASM・ネイティブへの出力は、ビルドスクリプトに `use std::build` と `use std::fs` を書き、`fs::write_bytes('dist/app.mjs', build::compile('app.hb', 'js'))` のように書いて `hibana build.hb` で実行します（仕様の 11.1 節）。
 
 ```
 fn greet(name: String) -> String {
@@ -70,7 +70,7 @@ fn main() {
 - `use std -> *` は標準ライブラリ（`lib/std.hb`）の名前を修飾なしで使えるようにします。`map`、`filter`、`fold`、`range`、`trim` などの関数と、`xs.join(sep)` などのメソッドがあります。一覧は仕様の 10 章にあります。
 - `fn(x) { ... }` は無名関数（クロージャ）で、外側の変数を使えます。引数の型は呼び出し先から推論します。
 
-別のファイルから使う宣言には `pub` を付けます。たとえば `util.hb` に `pub fn twice(n: int) -> int with {} { n * 2 }` と書くと、`use util` を書いたファイルから `util.twice(3)` と呼べます。型も `pub struct Point { x: int, y: int }` のように公開します。`pub` が無い宣言は同じモジュール内で使います。
+別のファイルから使う宣言には `pub` を付けます。たとえば `util.hb` に `pub fn twice(n: int) -> int with {} { n * 2 }` と書くと、`use util` を書いたファイルから `util::twice(3)` と呼べます。型も `pub struct Point { x: int, y: int }` のように公開します。`pub` が無い宣言は同じモジュール内で使います。
 
 公開関数は `with`（呼び出し時に必要な要求の宣言）を省けません。要求が無い場合は `with {}` と書きます。非公開関数では、`with` を省くと本体から要求を推論します。`with {}` を書いた関数は、要求を追加する本体の変更を型検査で検出します。
 
@@ -198,7 +198,7 @@ test 'join' {
 
 ## 6. 道具
 
-- hibana のファイルは `use util` で `util.hb`、`use foo::bar` で `foo/bar.hb` を読みます。経路は読み込み元のファイルのディレクトリを基準にします。`use foo::bar` の関数は `bar.foo()`、`use foo::bar -> {foo}` なら `foo()` と呼びます。
+- hibana のファイルは `use util` で `util.hb`、`use foo::bar` で `foo/bar.hb` を読みます。経路は読み込み元のファイルのディレクトリを基準にします。`use foo::bar` の関数は `bar::foo()`、`use foo::bar -> {foo}` なら `foo()` と呼びます。
 - `hibana fmt <ファイル>` はファイルを整形して書き戻します。設定はありません。
 - JavaScript と TypeScript のモジュールは `use './util.ts'` で読めます。型は TypeScript の宣言から読みます。詳細は仕様の 3.4 節です。
 

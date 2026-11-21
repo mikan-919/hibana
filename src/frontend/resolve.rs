@@ -160,7 +160,16 @@ fn names_in(e: &Expr, f: &mut impl FnMut(&Name)) {
 mod tests {
     #[test]
     fn local_values_shadow_module_names() {
-        let mut modules = crate::parser::ModuleSet::from("use tools\nstruct Data { x: int }\nfn main() { put(tools.x())\n let tools = Data { x: 3 }\n put(tools.x) }");
+        // tools::x はモジュール、局所変数の tools.x はフィールド。局所変数が無い所の tools.x は :: を案内するエラー
+        assert!(crate::parser::parse_modules({
+            let mut modules = crate::parser::ModuleSet::from("use tools\nfn main() { put(tools.x()) }");
+            let mut tools = crate::parser::ModuleSet::from("pub fn x() -> int with {} { 7 }").modules.remove(0);
+            tools.name = "tools".into();
+            tools.source.id = crate::frontend::source::SourceId(1);
+            modules.modules.push(tools);
+            modules
+        }).unwrap_err().to_string().contains("tools::x と書く"));
+        let mut modules = crate::parser::ModuleSet::from("use tools\nstruct Data { x: int }\nfn main() { put(tools::x())\n let tools = Data { x: 3 }\n put(tools.x)\n put(tools::x()) }");
         let mut tools = crate::parser::ModuleSet::from("pub fn x() -> int with {} { 7 }").modules.remove(0);
         tools.name = "tools".into();
         tools.source.id = crate::frontend::source::SourceId(1);
@@ -169,7 +178,7 @@ mod tests {
         crate::typeck::check(&mut program).unwrap();
         let mut output = Vec::new();
         crate::eval::run(&program, &mut output).unwrap();
-        assert_eq!(output, b"7\n3\n");
+        assert_eq!(output, b"7\n3\n7\n");
     }
 }
 
@@ -273,22 +282,21 @@ impl Resolver<'_> {
         }
     }
 
+    // m.x の m が局所変数でなく、修飾して使うモジュールの名前なら、m::x と書くよう案内する
+    fn module_dot(&mut self, base: &Expr, member: &Name) {
+        let Expr::Var(m) = base.peel() else { return };
+        if self.error.is_some() || self.locals.iter().any(|scope| scope.contains(m)) { return; }
+        let qualified = self.uses.get(&self.module).into_iter().flatten()
+            .any(|u| u.module == m.as_str() && matches!(u.names, crate::parser::UseNames::Qualified));
+        if qualified {
+            let error = Error::from(format!("モジュールの名前は {m}::{member} と書く（{m}.{member} はメソッドかフィールド）"));
+            self.error = Some(match self.span { Some(span) => error.at(span), None => error });
+        }
+    }
+
     fn expr(&mut self, e: &mut Expr) {
-        let local_member = match &*e {
-            Expr::Var(n) | Expr::Call(n, _) => match &n.kind {
-                crate::parser::NameKind::Qualified(base, field) if self.locals.iter().any(|scope| scope.iter().any(|name| name == base)) => Some((Name::from(base), *field.clone())),
-                _ => None,
-            },
-            _ => None,
-        };
-        if let Some((base, field)) = local_member {
-            let old = std::mem::replace(e, Expr::Int(0));
-            *e = match old {
-                Expr::Call(_, args) => Expr::Method(Box::new(Expr::Var(base)), field, args),
-                _ => Expr::Field(Box::new(Expr::Var(base)), field),
-            };
-            self.expr(e);
-            return;
+        if let Expr::Method(base, member, _) | Expr::Field(base, member) = &*e {
+            self.module_dot(base, member);
         }
         match e {
             Expr::Var(n) => self.name(n),

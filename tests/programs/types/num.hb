@@ -1,4 +1,5 @@
 use std -> *
+use std::math
 
 type Positive = number[x -> x > 0]
 
@@ -17,7 +18,7 @@ fn bounded_subtract(x: number[x -> -100.0 <= x && x <= 100.0]) -> number[r -> r 
 fn interval_sum(x: number[x -> 1.0 <= x && x <= 2.0]) -> number[r -> 2.0 <= r && r <= 3.0] { x + 1.0 }
 fn interval_product(x: number[x -> -2.0 <= x && x <= 3.0]) -> number[r -> -6.0 <= r && r <= 9.0] { x * x }
 
-fn nonnegative_root(x: number[x -> x >= 0.0]) -> number[r -> r >= 0.0] { num_sqrt(x) }
+fn nonnegative_root(x: number[x -> x >= 0.0]) -> number[r -> r >= 0.0] { math::sqrt(x) }
 
 fn main() {
     put(half_first([3, 5]))

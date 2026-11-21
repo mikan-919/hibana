@@ -57,31 +57,32 @@ fn removed_build_names_are_ordinary_functions() {
     }
 }
 
-// ビルドスクリプトは compile_file と write_bytes で JS・WASM・ネイティブを書き出す。
-// use はコンパイルするファイルのディレクトリから探し、パスは作業ディレクトリから数える
+// ビルドスクリプトは std::build と std::fs で JS・WASM・ネイティブを書き出す。
+// use はコンパイルするファイルのディレクトリから、スクリプトの経路はスクリプトのディレクトリから探す
 #[test]
 fn build_scripts_write_compiled_outputs() {
+    use std::os::unix::fs::PermissionsExt;
     let dir = std::env::temp_dir().join(format!("hibana-build-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(dir.join("src/greet.hb"), "pub fn greet() -> String with {} { 'hello' }\n").unwrap();
-    std::fs::write(dir.join("src/app.hb"), "use greet\nfn main() {\n    put(greet.greet())\n}\n").unwrap();
+    std::fs::write(dir.join("src/app.hb"), "use greet\nfn main() {\n    put(greet::greet())\n}\n").unwrap();
     std::fs::write(
         dir.join("build.hb"),
-        "fn main() {\n    for t in ['js', 'wasm', 'native'] {\n        write_bytes('dist/app.' + t, compile_file('src/app.hb', t))\n    }\n}\n",
+        "use std::build\nuse std::fs\n\nfn main() {\n    for t in ['js', 'wasm'] {\n        fs::write_bytes('dist/app.' + t, build::compile('src/app.hb', t))\n    }\n    build::write_executable('dist/app', build::compile('src/app.hb', 'native'))\n}\n",
     )
     .unwrap();
-    let result = Command::new(env!("CARGO_BIN_EXE_hibana")).arg("build.hb").current_dir(&dir).output().unwrap();
-    assert!(result.status.success(), "{result:?}");
-    let js = Command::new("node").arg(dir.join("dist/app.js")).output().unwrap();
-    assert_eq!(String::from_utf8_lossy(&js.stdout), "hello\n");
-    assert!(std::fs::read(dir.join("dist/app.wasm")).unwrap().starts_with(b"\0asm"));
-    assert!(std::fs::read(dir.join("dist/app.native")).unwrap().starts_with(b"\x7fELF"));
-    let result = Command::new(env!("CARGO_BIN_EXE_hibana"))
-        .arg("../build.hb")
-        .current_dir(dir.join("src"))
-        .output()
-        .unwrap();
-    assert!(String::from_utf8_lossy(&result.stderr).contains("src/app.hb"), "{result:?}");
+    // 作業ディレクトリによらず、同じ場所に書き出す
+    for (cwd, script) in [(dir.clone(), "build.hb"), (dir.join("src"), "../build.hb")] {
+        let _ = std::fs::remove_dir_all(dir.join("dist"));
+        let result = Command::new(env!("CARGO_BIN_EXE_hibana")).arg(script).current_dir(&cwd).output().unwrap();
+        assert!(result.status.success(), "{result:?}");
+        let js = Command::new("node").arg(dir.join("dist/app.js")).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&js.stdout), "hello\n");
+        assert!(std::fs::read(dir.join("dist/app.wasm")).unwrap().starts_with(b"\0asm"));
+        assert!(std::fs::read(dir.join("dist/app")).unwrap().starts_with(b"\x7fELF"));
+        assert_eq!(std::fs::metadata(dir.join("dist/app")).unwrap().permissions().mode() & 0o111, 0o111);
+        assert_eq!(std::fs::metadata(dir.join("dist/app.js")).unwrap().permissions().mode() & 0o111, 0);
+    }
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -92,19 +93,21 @@ fn hibana_build_scripts_generate_web_library_and_typescript() {
     std::fs::write(dir.join("src/rules.hb"), "pub type Positive = int[x -> x > 0]\n").unwrap();
     std::fs::write(dir.join("src/app.hb"), r#"
 use rules
-pub fn validate(n: int) -> Result<rules.Positive, String> with {} {
-    refine<rules.Positive>(n)
+pub fn validate(n: int) -> Result<rules::Positive, String> with {} {
+    refine<rules::Positive>(n)
 }
 "#).unwrap();
     std::fs::write(dir.join("build.hb"), r#"
+use std::build
+use std::fs
 use std::wasm_web
 
 fn main() {
-    let compiled = compile_wasm_file('src/app.hb', ['validate'])
-    write_bytes('dist/app.wasm', compiled.first)
-    write_bytes('dist/app.mjs', wasm_web.utf8(wasm_web.javascript(compiled.second)))
-    write_bytes('dist/app.d.mts', wasm_web.utf8(wasm_web.typescript(compiled.second)))
-    write_bytes('dist/utf8.txt', wasm_web.utf8('é日本語🌸'))
+    let compiled = build::compile_wasm('src/app.hb', ['validate'])
+    fs::write_bytes('dist/app.wasm', compiled.first)
+    fs::write_bytes('dist/app.mjs', wasm_web::utf8(wasm_web::javascript(compiled.second)))
+    fs::write_bytes('dist/app.d.mts', wasm_web::utf8(wasm_web::typescript(compiled.second)))
+    fs::write_bytes('dist/utf8.txt', wasm_web::utf8('é日本語🌸'))
 }
 "#).unwrap();
     let build = Command::new(env!("CARGO_BIN_EXE_hibana"))
@@ -128,13 +131,40 @@ assert.deepEqual(api.validate(0), { ok: false, error: '細分化型の条件を�
 
 #[test]
 fn script_functions_are_rejected_by_compiled_backends() {
-    for src in [
-        "fn main() { write_bytes('x', [1]) }",
-        "fn main() { put(len(compile_wasm_file('src/app.hb', ['validate']).first)) }",
+    for (src, name) in [
+        ("use std::fs\nfn main() { fs::write_bytes('x', [1]) }", "fs::write_bytes"),
+        ("use std::build\nfn main() { put(len(build::compile_wasm('src/app.hb', ['validate']).first)) }", "build::compile_wasm"),
     ] {
         for e in [hibana::to_js(src).unwrap_err(), hibana::to_wasm(src).unwrap_err(), hibana::to_native(src).unwrap_err()] {
-            assert!(e.to_string().contains("インタプリタでの実行"), "{e}");
+            assert!(e.to_string().contains(&format!("{name} はインタプリタでの実行")), "{e}");
         }
     }
-    assert!(hibana::to_js("fn f() -> Vec<int> { compile_file('a.hb', 'js') }\nfn main() {}").is_err());
+    assert!(hibana::to_js("use std::build\nfn f() -> Vec<int> { build::compile('a.hb', 'js') }\nfn main() {}").is_err());
+    // 読み込んだだけで呼ばないスクリプト用の関数は、出力を妨げない
+    assert!(hibana::to_js("use std::build\nfn main() { put(1) }").is_ok());
+}
+
+// 標準ライブラリの実装用の組み込みは、利用者のコードからは未定義の関数に見える
+#[test]
+fn library_only_builtins_are_hidden_from_user_code() {
+    for name in ["num_floor(1.5)", "num_sqrt(4.0)", "compile_file('a.hb', 'js')", "compile_wasm_file('a.hb', ['f'])", "write_file('x', [1], true)"] {
+        let source = format!("fn main() {{ {name} }}");
+        let e = hibana::run(&source, &mut Vec::new()).unwrap_err();
+        assert!(e.to_string().contains("未定義の関数"), "{name}: {e}");
+    }
+    // 名前が標準ライブラリと同じでも、利用者のファイルは標準ライブラリとして扱わない
+    let dir = std::env::temp_dir().join(format!("hibana-library-only-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("math.hb"), "pub fn f() -> int with {} { num_floor(1.5) }\n").unwrap();
+    let e = hibana::pipeline::load("use math\nfn main() { put(math::f()) }", &dir)
+        .and_then(hibana::pipeline::parse)
+        .and_then(|p| hibana::pipeline::check(p, hibana::pipeline::Kind::Executable))
+        .map(|_| ())
+        .unwrap_err();
+    assert!(e.to_string().contains("未定義の関数 num_floor"), "{e}");
+    std::fs::remove_dir_all(&dir).unwrap();
+    // ライブラリの関数を通せば使える。型検査が足す呼び出し（refine の num_floor）も通る
+    let mut out = Vec::new();
+    hibana::run("use std::math\nfn main() { put(math::floor(1.5))\n put(math::sqrt(4.0))\n put(refine<int>(3.0)) }", &mut out).unwrap();
+    assert_eq!(String::from_utf8(out).unwrap(), "1\n2\nstd::Ok(3)\n");
 }

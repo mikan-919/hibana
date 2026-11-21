@@ -628,7 +628,7 @@ impl PartialEq for Syn {
 fn walk(env: &[(Name, Value)], path: &[String], stop_at_list: bool) -> R<(Value, usize)> {
     let mut best: Option<(&Value, usize)> = None;
     for (k, v) in env {
-        let ks: Vec<&str> = k.split('.').collect();
+        let ks: Vec<&str> = k.split("::").collect();
         let hit = ks.len() <= path.len() && ks.iter().zip(path).all(|(a, b)| a == b);
         // 同じ長さなら後に積んだ（内側の）束縛を優先する
         if hit && best.is_none_or(|b| ks.len() >= b.1) {
