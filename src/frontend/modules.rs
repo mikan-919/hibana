@@ -195,7 +195,7 @@ pub fn load_modules(source: &str, directory: &std::path::Path) -> R<ModuleSet> {
             let (name, text, sub) = load(&spec, is_str, &dir, span)
                 .map_err(|error| error.with_sources(loaded.modules.iter().map(|m| &m.source)))?;
             let identity = if !is_str && LIBS.iter().any(|(name, _)| *name == spec) {
-                format!("builtin:{spec}")
+                super::parser::builtin_identity(&spec)
             } else {
                 let path = if is_str {
                     dir.join(&spec)

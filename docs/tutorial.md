@@ -11,7 +11,7 @@ hibana main.hb
 hibana main.hb -- 引数...
 ```
 
-`hibana <ファイル>` でインタプリタが実行します。JavaScript・WASM・ネイティブへの出力は、ビルドスクリプトに `write_bytes('dist/app.mjs', compile_file('app.hb', 'js'))` のように書いて `hibana build.hb` で実行します（仕様の 11.1 節）。
+`hibana <ファイル>` でインタプリタが実行します。JavaScript・WASM・ネイティブへの出力は、ビルドスクリプトに `use std::build` と `use std::fs` を書き、`fs.write_bytes('dist/app.mjs', build.compile('app.hb', 'js'))` のように書いて `hibana build.hb` で実行します（仕様の 11.1 節）。
 
 ```
 fn greet(name: String) -> String {

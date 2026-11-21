@@ -120,6 +120,6 @@ WASMとネイティブが共通のIRを使います。インタプリタとJavaS
 <details>
 <summary>WASMを生成するには、どの入口を使うか？</summary>
 
-hibana のビルドスクリプトでは、`compile_file` で実行用、`compile_wasm_file` でライブラリ用の WASM と受け渡し規約を生成します。JavaScript の接続コードと TypeScript の型宣言は `std::wasm_web` が生成します。スクリプトは `hibana <ファイル>` で実行します。
+hibana のビルドスクリプトでは、`std::build` の `build.compile` で実行用、`build.compile_wasm` でライブラリ用の WASM と受け渡し規約を生成します。JavaScript の接続コードと TypeScript の型宣言は `std::wasm_web` が生成します。スクリプトは `hibana <ファイル>` で実行します。
 
 </details>

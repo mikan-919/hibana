@@ -234,18 +234,24 @@ fn str_val(v: Value) -> Rc<str> {
     }
 }
 
+// スクリプトに書いた経路は、実行したファイルのディレクトリから数える（use と同じ）
+fn script_path(path: &str) -> std::path::PathBuf {
+    crate::parser::base_dir().join(path)
+}
+
 // use はコンパイルするファイルのディレクトリから探す。
 fn compile_source_file<T>(
     path: &str,
     compile: impl FnOnce(&str) -> crate::error::R<T>,
 ) -> Result<T, String> {
-    let src = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
     let outer = crate::parser::base_dir();
-    let dir = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("."));
-    crate::parser::set_base_dir(dir);
+    let file = script_path(path);
+    let shown = file.display();
+    let src = std::fs::read_to_string(&file).map_err(|e| format!("{shown}: {e}"))?;
+    crate::parser::set_base_dir(file.parent().unwrap_or(std::path::Path::new(".")));
     let r = compile(&src);
     crate::parser::set_base_dir(&outer);
-    r.map_err(|e| format!("{path}: {e}"))
+    r.map_err(|e| format!("{shown}: {e}"))
 }
 
 fn compile_file(path: &str, target: &str) -> Result<Vec<u8>, String> {
@@ -859,15 +865,23 @@ impl<'a> Interp<'a> {
                     .map_err(|e| Flow::Error(e, None))?;
                 let ctor = Name::structure(crate::parser::qual("std", "Pair"));
                 Value::Data(Rc::new((ctor, vec![byte_values(wasm), Value::Str(abi.into())])))
-            } else if name == "write_bytes" {
+            } else if name == "write_file" {
+                let executable = matches!(vs.pop().unwrap(), Value::Bool(true));
                 let Value::Arr(xs) = vs.pop().unwrap() else { unreachable!("型検査済み") };
                 let path = str_val(vs.pop().unwrap());
-                let bytes = xs.iter().map(|v| u8::try_from(int(v.clone())).map_err(|_| Flow::Error("write_bytes のバイトは 0〜255".into(), None))).collect::<Result<Vec<u8>, _>>()?;
-                let p = std::path::Path::new(path.as_ref());
+                let bytes = xs.iter().map(|v| u8::try_from(int(v.clone())).map_err(|_| Flow::Error("書き込むバイトは 0〜255".into(), None))).collect::<Result<Vec<u8>, _>>()?;
+                let p = script_path(&path);
+                let fail = |e: std::io::Error| Flow::Error(format!("{}: {e}", p.display()), None);
                 if let Some(dir) = p.parent().filter(|d| !d.as_os_str().is_empty()) {
-                    std::fs::create_dir_all(dir).map_err(|e| Flow::Error(format!("{path}: {e}"), None))?;
+                    std::fs::create_dir_all(dir).map_err(fail)?;
                 }
-                std::fs::write(p, bytes).map_err(|e| Flow::Error(format!("{path}: {e}"), None))?;
+                std::fs::write(&p, bytes).map_err(fail)?;
+                // ponytail: 実行権限は Unix でだけ付ける。ほかの OS では普通のファイルとして書く
+                #[cfg(unix)]
+                if executable {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).map_err(fail)?;
+                }
                 Value::Unit
             } else if let Some(v) = self.syn_fn(name, &mut vs)? {
                 v

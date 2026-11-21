@@ -5,19 +5,21 @@
 ## hibana のビルドスクリプトで生成する
 
 ```
+use std::build
+use std::fs
 use std::wasm_web
 
 fn main() {
     let source = 'tests/programs/wasm/wasm_web.hb'
-    let compiled = compile_wasm_file(source, ['echo', 'answer', 'greet'])
+    let compiled = build.compile_wasm(source, ['echo', 'answer', 'greet'])
     let abi = compiled.second
-    write_bytes('dist/wasm_web.wasm', compiled.first)
-    write_bytes('dist/wasm_web.mjs', wasm_web.utf8(wasm_web.javascript(abi)))
-    write_bytes('dist/wasm_web.d.mts', wasm_web.utf8(wasm_web.typescript(abi)))
+    fs.write_bytes('dist/wasm_web.wasm', compiled.first)
+    fs.write_bytes('dist/wasm_web.mjs', wasm_web.utf8(wasm_web.javascript(abi)))
+    fs.write_bytes('dist/wasm_web.d.mts', wasm_web.utf8(wasm_web.typescript(abi)))
 }
 ```
 
-上のコードを `build.hb` に保存し、リポジトリのルートで `hibana build.hb` を実行します。`compile_wasm_file` は一度のコンパイルで WASM のバイト列と受け渡し規約（ABI）の JSON を返します。`std::wasm_web` はその規約から JavaScript の接続コードと TypeScript の型宣言を生成します。スクリプトが保存先を指定して `write_bytes` で書き込みます。WASM には公開関数とそこから辿れる関数が含まれます。
+上のコードを `build.hb` に保存し、リポジトリのルートで `hibana build.hb` を実行します。`build.compile_wasm` は一度のコンパイルで WASM のバイト列と受け渡し規約（ABI）の JSON を返します。`std::wasm_web` はその規約から JavaScript の接続コードと TypeScript の型宣言を生成します。スクリプトが保存先を指定して `fs.write_bytes` で書き込みます。経路はスクリプトのディレクトリから数えます。WASM には公開関数とそこから辿れる関数が含まれます。
 
 ルートディレクトリを HTTP サーバーで配信し、`tests/programs/wasm/wasm_web.html` をブラウザで開くと、文字列を渡してブラウザ側の関数を呼べます。`file://` ではなく HTTP を使います。
 
@@ -65,7 +67,7 @@ console.log(api.greet("hibana"));
 
 ## WASM の受け渡し規約
 
-接続コードを書くライブラリは、`compile_wasm_file` が返す JSON の `exports` と `imports` を使います。各関数は `[名前, 引数の型の並び, 戻り値の型]` です。取り込み先のモジュール名は外部関数が `hibana_host`、標準入出力と時刻が `hibana` です。
+接続コードを書くライブラリは、`build.compile_wasm` が返す JSON の `exports` と `imports` を使います。各関数は `[名前, 引数の型の並び, 戻り値の型]` です。取り込み先のモジュール名は外部関数が `hibana_host`、標準入出力と時刻が `hibana` です。
 
 - 基本型は `int`、`number`、`String`、`bool`、`unit` の文字列です。`int` と `number` は WASM の `f64`、`bool` は `i64` の 0 または 1 です。`unit` の戻り値はありません。
 - `Vec` は `{ "vec": 要素型 }`、構造体は `{ "ctor": 構築子番号, "fields": [[名前, 型], ...] }`、`Result` は `{ "result": [[成功の構築子番号, 型], [失敗の構築子番号, 型]] }` です。

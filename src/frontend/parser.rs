@@ -311,9 +311,25 @@ pub(super) const LIBS: &[(&str, &str)] = &[
     ("std", include_str!("../../lib/std.hb")),
     ("std::math", include_str!("../../lib/math.hb")),
     ("std::wasm_web", include_str!("../../lib/wasm_web.hb")),
+    ("std::build", include_str!("../../lib/build.hb")),
+    ("std::fs", include_str!("../../lib/fs.hb")),
 ];
 
-pub(super) const PRELUDE_NAMES: &[&str] = &["Result", "Ok", "Err", "parse_int", "refine", "spawn", "compile_wasm_file"];
+// 組み込みのライブラリを読み込んだモジュールのファイルの識別子
+pub(crate) fn builtin_identity(spec: &str) -> String {
+    format!("builtin:{spec}")
+}
+
+// 組み込みのライブラリから読み込んだモジュールの名前。標準ライブラリの中でだけ呼べる組み込み関数の判定に使う
+pub(crate) fn builtin_modules(prog: &Program) -> HashSet<String> {
+    prog.modules
+        .iter()
+        .filter(|m| LIBS.iter().any(|(spec, _)| builtin_identity(spec) == m.source.name))
+        .map(|m| m.name.clone())
+        .collect()
+}
+
+pub(super) const PRELUDE_NAMES: &[&str] = &["Result", "Ok", "Err", "parse_int", "refine", "spawn"];
 
 // use した名前の取り込み方
 #[derive(Debug, Clone)]
@@ -580,7 +596,7 @@ fn parse_modules_tokens(
         "task_value",
         "compile_file",
         "compile_wasm_file",
-        "write_bytes",
+        "write_file",
         "Vec",
         "Type",
         "with",
