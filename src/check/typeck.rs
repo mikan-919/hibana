@@ -689,8 +689,9 @@ fn check_prog(prog: &mut Program, require_main: bool) -> R<Info> {
         var_awaits: ck.var_awaits,
         async_inst: ck.async_inst,
     };
-    prog.async_info = info.clone();
-    Ok(info)
+    prog.async_info = info;
+    super::context::pass(prog);
+    Ok(prog.async_info.clone())
 }
 
 // 関数 1 つを検査する
@@ -901,7 +902,6 @@ impl Ck {
                     init,
                 } => {
                     // 名前を付けた要求（with Logger(logger)）。名前は要求の型を持ち、name.m(...) で要求の操作を呼ぶ。実行時の値は無い
-                    // ponytail: 名前は name.m(...) の形でだけ使える。値として渡すなら、関数の入口で with の並びから提供を取り出して束縛する
                     if let Expr::Call(n, xs) = &*init
                         && n == "#named"
                     {

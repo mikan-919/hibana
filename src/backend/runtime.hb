@@ -16,7 +16,7 @@
 // すべての区画を 1 本の並び（+88）でつなぐ。種類は 0 中に値を持たない、1 Vec、2 構造体と関数、3 Ref、4 with の記録。
 // 根は、シャドースタック（ir.rs が利用者の関数の局所変数を写す区画）と、中断の値（+32）と処理中の with（+48）。
 // GC は利用者の関数の入口とループの先頭（ir.rs の安全な位置）でだけ動く。ランタイムの関数の中の生の位置は、
-// GC の間に生きていない。ランタイムの関数から利用者の関数を呼ぶ所（__all・__perform）は、持っている値をシャドースタックに置く
+// GC の間に生きていない。ランタイムの関数から利用者の関数を呼ぶ所（__all など）は、持っている値をシャドースタックに置く
 
 // ランタイムの状態は __static() から 200 バイト:
 //   +0 確保の次の位置、+8 区画の終わり、+16 実行時エラーの文字列（WASM だけ使う）
@@ -1300,12 +1300,12 @@ fn __write(r: int, x: int) {
     __setv(__payload(r), x)
 }
 
-// 非同期（Async）。JavaScript の Promise とマイクロタスクと同じ順で動かす（js.rs の async 関数・await・$all・$spawn・$then・$aop）。
+// 非同期（Async）。JavaScript の Promise とマイクロタスクと同じ順で動かす（js.rs の async 関数・await・$all・$spawn・$then）。
 // Promise は型の番号 11 の値で、構造体と同じ形 [状態][3][値][反応の先頭][反応の末尾]。状態は 0 未完了・1 値・2 失敗。
 // 反応と仕事は構造体 [種類][6][次][a][b][c][結果の状態][結果の値]。Promise が決まると反応を仕事の並び（+152 から）の末尾に移す。
 // 失敗の値は中断 [-3][2][行き先の番号][値]。実行時エラーは行き先 -1 とメッセージを持つ。
 // 仕事の種類: 1 コルーチンの再開、2 thenable（Promise で解決した Promise）、3 a を同じ結果で解決、4 all の 1 要素、
-// 5 $all の await の続き（with の並びを b に戻して a を解決）、6 spawn の終わり、7 then、8 $aop の await の続き
+// 5 $all の await の続き（with の並びを b に戻して a を解決）、6 spawn の終わり、7 then
 // コルーチンの区画は関数の値 [関数][数][Promise][状態の番号][再開の状態][再開の値][局所変数...]（ir.rs の Ctx::coroutine）
 
 fn __promise_new() -> int {
@@ -1526,7 +1526,7 @@ fn __run_job() -> bool {
         if __payload(__getv(task + 16)) == 1 {
             let saved = __load(st + 176)
             __store(st + 176, 1)
-            b(__getv(task + 32))
+            b(__getv(task + 32), __mkv(0, 0))
             __store(st + 176, saved)
             if __aborting() {
                 let info = __abort_info()
@@ -1535,18 +1535,6 @@ fn __run_job() -> bool {
                     __setv(st + 184, message)
                 }
             }
-        }
-    } else if kind == 8 {
-        __store(st + 48, __payload(b))
-        if status == 2 {
-            __settle(a, 2, v)
-        } else if __tag(v) == 5 && __load(__payload(v)) == 0 - 1 {
-            __resolve(a, __getv(__payload(v) + 16))
-        } else {
-            let info = __data_new(0 - 3, 2)
-            __setv(info + 16, __mkv(1, __load(__payload(c) + 8)))
-            __setv(info + 32, v)
-            __settle(a, 2, __mkv(5, info))
         }
     }
     true
@@ -1589,7 +1577,8 @@ fn __finish_entry(v: int) -> int {
 }
 
 // all。$all と同じく、すべての関数を呼んでから Promise.all にし、それを待つ async 関数の Promise を返す
-fn __all(fs: int) -> int {
+// c は all を呼んだ所の文脈。Async の値（引数なしの無名関数）は最後の引数に文脈を受け取る
+fn __all(fs: int, c: int) -> int {
     let st = __static()
     let h = __load(st + 48)
     let p = __payload(fs)
@@ -1597,15 +1586,16 @@ fn __all(fs: int) -> int {
     let outer = __promise_new()
     let ps = __arr_new(n)
     __zero(ps + 8, n * 16)
-    // 利用者の関数を呼ぶ間、fs と結果の並びを GC の根に置く
-    let roots = __frame_push(2)
+    // 利用者の関数を呼ぶ間、fs と結果の並びと文脈を GC の根に置く
+    let roots = __frame_push(3)
     __setv(roots, fs)
     __setv(roots + 16, __mkv(4, ps))
+    __setv(roots + 32, c)
     let mut i = 0
     while i < n {
         let f = __getv(p + 8 + i * 16)
         __store(st + 48, h)
-        __setv(ps + 8 + i * 16, f())
+        __setv(ps + 8 + i * 16, f(c))
         i = i + 1
     }
     __store(st + 64, roots)
@@ -1631,7 +1621,7 @@ fn __all(fs: int) -> int {
 fn __spawn(f: int) -> int {
     let st = __static()
     let h = __load(st + 48)
-    let p = f()
+    let p = f(__mkv(0, 0))
     let task = __data_new(0 - 2, 3)
     __setv(task + 16, __mkv(1, 0))
     __setv(task + 32, __mkv(0, 0))
@@ -1870,76 +1860,20 @@ fn __exit(id: int, v: int) -> int {
     0
 }
 
-// #resume した腕の値は構築子の番号 -1 の値で表す
-fn __resume(v: int) -> int {
-    let p = __data_new(0 - 1, 1)
-    __setv(p + 16, v)
+// 文脈（要求の提供）の組 [-4][3][操作の名前][提供した関数][外の文脈]。check/context.rs が #ctx_put・#ctx_get で作り、引く
+fn __ctx_put(c: int, k: String, f: int) -> int {
+    let p = __data_new(0 - 4, 3)
+    __setv(p + 16, k)
+    __setv(p + 32, f)
+    __setv(p + 48, c)
     __mkv(5, p)
 }
 
-// 要求の呼び出しを、内側の with から探して腕で処理する。腕の中の要求は、その with より外で処理する
-fn __perform(name: String, args: int) -> int {
-    let st = __static()
-    let mut h = __load(st + 48)
-    while h != 0 {
-        let ops = __payload(__getv(h + 16))
-        let n = __load(ops)
-        let mut k = 0
-        while k < n {
-            if __str_eq(__payload(__getv(ops + 8 + k * 16)), __payload(name)) {
-                let arm = __getv(__payload(__getv(h + 32)) + 8 + k * 16)
-                let saved = __load(st + 48)
-                __store(st + 48, __load(h))
-                // 腕を動かす間、外した with の記録と引数を GC の根に置く
-                let roots = __frame_push(2)
-                __setv(roots, __mkv(10, saved))
-                __setv(roots + 16, args)
-                let r = arm(args)
-                __store(st + 64, roots)
-                __store(st + 48, saved)
-                if __aborting() {
-                    return
-                }
-                if __tag(r) == 5 && __load(__payload(r)) == 0 - 1 {
-                    return __getv(__payload(r) + 16)
-                }
-                __store(st + 24, __load(h + 8))
-                __setv(st + 32, r)
-                return
-            }
-            k = k + 1
-        }
-        h = __load(h)
+// 内側の組から探す。型検査が提供を確かめているので、見つからないことは無い
+fn __ctx_get(c: int, k: String) -> int {
+    let mut p = __payload(c)
+    while !__str_eq(__payload(__getv(p + 16)), __payload(k)) {
+        p = __payload(__getv(p + 48))
     }
-    __die('要求を提供する with が無い')
-}
-
-// メソッドの宣言に with Async がある要求の呼び出し（js.rs の $aop）。腕は async な無名関数で、その Promise を待つ async 関数の Promise を返す。
-// 待つ間、with の並びは見つけた with より外のまま（$aop の finally は待った後で戻す）
-fn __aperform(name: String, args: int) -> int {
-    let st = __static()
-    let mut h = __load(st + 48)
-    while h != 0 {
-        let ops = __payload(__getv(h + 16))
-        let n = __load(ops)
-        let mut k = 0
-        while k < n {
-            if __str_eq(__payload(__getv(ops + 8 + k * 16)), __payload(name)) {
-                let arm = __getv(__payload(__getv(h + 32)) + 8 + k * 16)
-                let saved = __load(st + 48)
-                __store(st + 48, __load(h))
-                let outer = __promise_new()
-                let roots = __frame_push(2)
-                __setv(roots, __mkv(10, saved))
-                __setv(roots + 16, outer)
-                let p = arm(args)
-                __store(st + 64, roots)
-                __react(p, __job_new(8, outer, __mkv(10, saved), __mkv(10, h)))
-                return outer
-            }
-            k = k + 1
-        }
-        h = __load(h)
-    }
-    __die('要求を提供する with が無い')
+    __getv(p + 32)
 }

@@ -74,22 +74,16 @@ function $show(v) {
   if (style === 1) return name + " { " + $fields[v.$c].map((f, i) => f + ": " + $show(v.$f[i])).join(", ") + " }";
   return v.$f.length === 0 ? name : name + "(" + v.$f.map($show).join(", ") + ")";
 }
-// 処理中の handle。内側ほど後ろ。腕の中の操作は、その handle より外で処理する
-// 並べ替えずに作り直す（並行に動く処理と共有するため）。await の後は $k で、待つ前の並びに戻す
-let $h = [];
-function $k(h, v) { $h = h; return v; }
 // all。Async<T> の値（Promise を返す引数なしの関数）を全部走らせ、全部終わるのを待つ。最初の失敗で戻り、残りの結果は捨てる
 // ponytail: 失敗した時、残りの処理は走り続ける。取り消すには AbortSignal を各処理に通す必要がある
-async function $all(fs) {
-  const h = $h;
-  try { return await Promise.all(fs.map((f) => { $h = h; return f(); })); } finally { $h = h; }
+// c は all を呼んだ所の文脈。Async の値が持つ要求は、待つ時の文脈で使う
+async function $all(fs, c) {
+  return await Promise.all(fs.map((f) => f(c)));
 }
 // spawn。Async<T> の値を走らせ始め、状態（s: 0 未完了・1 値・2 失敗）を持つ Task を返す。失敗は console.error に出す
 function $spawn(f) {
-  const h = $h;
   const t = new $Task();
   t.p = f().then((v) => { t.s = 1; t.v = v; }, (e) => { t.s = 2; $report(e); });
-  $h = h;
   return t;
 }
 let $mainFailure, $thenFailure;
@@ -110,30 +104,9 @@ function $then(t, g) {
   });
 }
 class $Abort { constructor(h, v) { this.h = h; this.v = v; } }
-// 要求の呼び出し。一番内側の with の腕を、その with より外の並びで呼ぶ。腕の値が #resume なら呼んだ所の値、それ以外は with を抜ける
-function $find(op) {
-  for (let i = $h.length - 1; i >= 0; i--) if (Object.hasOwn($h[i].arms, op)) return i;
-  throw new Error("要求 " + op + " を提供する with が無い");
-}
-function $done(h, r) {
-  if (r && r.$c === "$resume") return r.$f[0];
-  throw new $Abort(h, r);
-}
-function $op(op, args) {
-  const i = $find(op), h = $h[i], saved = $h;
-  $h = $h.slice(0, i);
-  let r;
-  try { r = h.arms[op](...args); } finally { $h = saved; }
-  return $done(h, r);
-}
-// メソッドの宣言に with Async があるトレイトの腕は async 関数なので、待つ
-async function $aop(op, args) {
-  const i = $find(op), h = $h[i], saved = $h;
-  $h = $h.slice(0, i);
-  let r;
-  try { r = await h.arms[op](...args); } finally { $h = saved; }
-  return $done(h, r);
-}
+// 文脈（要求の提供）。組 { k: 操作の名前, f: 提供した関数, up: 外の文脈 } をつなぐ。内側から探す
+function $cput(c, k, f) { return { k, f, up: c }; }
+function $cget(c, k) { while (c.k !== k) c = c.up; return c.f; }
 function $str(v) { return typeof v === "string" ? v : $show(v); }
 function $print(v) { console.log($str(v)); }
 // 標準入力は呼び出し間で共有する区画に読む。区画が空の時だけ readSync を 1 回呼ぶ（対話の入力を待たずに返す）
@@ -375,10 +348,10 @@ fn is_poly(f: &Fn) -> bool {
         .any(|(_, t)| matches!(t.peel(), Expr::Var(k) if k == "Effect"))
 }
 
-// 待つ呼び出し。待った後に、待つ前の handle の並びに戻す
+// 待つ呼び出し
 fn wait(yes: bool, call: String) -> String {
     if yes {
-        format!("$k($h, await {call})")
+        format!("(await {call})")
     } else {
         call
     }
@@ -736,27 +709,14 @@ impl Gen<'_> {
                 let v = match name.as_str() {
                     "#num" => vs[0].clone(),
                     "num_floor" | "num_sqrt" => format!("${name}({})", vs[0]),
-                    // 腕の値として返し、$op が呼んだ所の値にする
-                    "#resume" => format!(
-                        "$d(\"$resume\", [{}])",
-                        vs.first().map_or("undefined", |v| v)
-                    ),
-                    n if self.fns.get(n).is_some_and(|f| f.op.is_some()) => {
-                        let f = self.fns[n];
-                        let k = vs.len() - (f.params.len() - f.implicit);
-                        // メソッドの宣言に with Async があれば、腕を待つ
-                        if is_async(f) {
-                            wait(true, format!("$aop({}, [{}])", lit(n), vs[k..].join(", ")))
-                        } else {
-                            format!("$op({}, [{}])", lit(n), vs[k..].join(", "))
-                        }
-                    }
+                    "#ctx_put" => format!("$cput({}, {}, {})", vs[0], vs[1], vs[2]),
+                    "#ctx_get" => format!("$cget({}, {})", vs[0], vs[1]),
                     "new_ref" => format!("new $Ref({})", vs[0]),
                     "read" => format!("{}.v", vs[0]),
                     "write" => format!("($w = {}, $w.v = {}, undefined)", vs[0], vs[1]),
                     "push" => format!("[...{}, {}]", vs[0], vs[1]),
                     "set_at" => format!("$set({}, {}, {})", vs[0], vs[1], vs[2]),
-                    "all" => wait(true, format!("$all({})", vs[0])),
+                    "all" => wait(true, format!("$all({}, {})", vs[0], vs.get(1).map_or("undefined", |c| c))),
                     "spawn" => format!("$spawn({})", vs[0]),
                     "task_then" => format!("$then({}, {})", vs[0], vs[1]),
                     "task_done" => format!("({}.s === 1)", vs[0]),
@@ -920,39 +880,24 @@ impl Gen<'_> {
                 let f = self.function(&params, body, a, &captures);
                 self.let_(f)
             }
+            // 腕は本体の中で文脈に足してある（check/context.rs）。exit した腕の値を例外で受け取り、整数の範囲外は腕を動かす
             Expr::Handle(node, body, arms) => {
-                // 腕は無名関数にする。本体はその場に書き、exit した腕の値を例外で受け取る
-                let h = self.let_("{ arms: null }".into());
+                let h = self.let_("{}".into());
                 self.exits.insert(*node, h.clone());
-                let fs: Vec<String> = arms
-                    .iter()
-                    .map(|a| {
-                        let params = a.binds.iter().map(|b| (b.clone(), None)).collect();
-                        let body = match &a.body {
-                            Expr::Block(b) => b.clone(),
-                            e => Block { id: Default::default(), stmts: vec![], tail: Some(Box::new(e.clone())) },
-                        };
-                        let f = self.expr(&Expr::Lam(params, None, None, body));
-                        format!("{}: {f}", lit(&a.ctor))
-                    })
-                    .collect();
-                self.push(format!("{h}.arms = {{ {} }};", fs.join(", ")));
                 let t = self.tmp();
                 self.push(format!("let {t};"));
-                let saved = self.tmp();
-                self.push(format!("const {saved} = $h; $h = [...$h, {h}];"));
                 self.push("try {".into());
                 let v = self.expr(body);
                 self.push(format!("{t} = {v};"));
                 self.push("} catch (e) {".into());
                 if let Some(arm) = arms.iter().find(|arm| super::is_integer_overflow_arm(&arm.ctor)) {
-                    let op = lit(&arm.ctor);
                     self.push("if ((e instanceof $Located ? e.cause : e) instanceof $IntegerOverflow) {".into());
-                    self.push(format!("$h = {saved};"));
-                    self.push(format!("try {{ {h}.arms[{op}](); }} catch (exit) {{ e = exit; }}"));
+                    self.push("try {".into());
+                    self.expr(&arm.body);
+                    self.push("} catch (exit) { e = exit; }".into());
                     self.push("}".into());
                 }
-                self.push(format!("if (e instanceof $Abort && e.h === {h}) {t} = e.v; else throw e; }} finally {{ $h = {saved}; }}"));
+                self.push(format!("if (e instanceof $Abort && e.h === {h}) {t} = e.v; else throw e; }}"));
                 t
             }
             Expr::Exit(target, x) => {

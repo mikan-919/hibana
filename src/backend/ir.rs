@@ -3,7 +3,7 @@ use crate::parser::Name;
 // 制御フローは WASM と同じ入れ子の形（if・while・return）で持ち、goto を持たない。
 // 値はすべて V（型の番号 tag と中身 payload の 2 つの 64 ビット整数）で表す。番号は runtime.hb の先頭を参照。
 // 文字列の連結・比較・表示などはランタイム（runtime.hb）の関数を呼ぶ。ランタイムも同じ変換で IR にする。
-// with（Handle）は、中断の印を置いて呼び出しの後で調べ、1 段ずつ戻って抜ける（Lower::checked）。腕の値は #resume で呼んだ所へ返し、exit で with を抜ける
+// 要求の提供は隠れた引数（文脈）で渡す（check/context.rs）。with（Handle）は exit の行き先で、中断の印を置いて呼び出しの後で調べ、1 段ずつ戻って抜ける（Lower::checked）
 // mut の変数が所有する Vec への push・set_at はその場で書き換える（runtime.hb の __push_own・__set_at_own）
 // 利用者の関数には GC のシャドースタックを付ける（Ctx::shadow。仕組みは runtime.hb の先頭）
 use crate::error::R;
@@ -21,7 +21,7 @@ pub const DATA: i64 = 5;
 pub const FN: i64 = 6;
 pub const TY: i64 = 7;
 pub const NUM: i64 = 9;
-// with の記録の並び（runtime.hb の __handle_push）と Promise。ランタイムの中と非同期の変換だけで使う
+// with の記録の並び（runtime.hb の __handle_push。整数の範囲外を受け取る腕を探す）と Promise。ランタイムの中と非同期の変換だけで使う
 pub const HANDLERS: i64 = 10;
 pub const PROMISE: i64 = 11;
 
@@ -601,7 +601,7 @@ pub fn lower_selected(p: &parser::Program, exports: Option<&[String]>, info: &cr
             functions.push(function);
         }
         // 同期の main でも spawn した仕事が残る。main の入口でその仕事を動かす
-        let asyncs = ["__co_new", "__spawn", "__all", "__aperform"].iter().any(|n| visited.contains(*n));
+        let asyncs = ["__co_new", "__spawn", "__all"].iter().any(|n| visited.contains(*n));
         let Some(main) = functions.iter_mut().find(|f| f.name == "main" && !f.finish_at_boundary) else { break };
         if !asyncs { break; }
         main.finish_at_boundary = true;
@@ -751,8 +751,10 @@ impl<'a> Ctx<'a> {
                 .get(target)
                 .ok_or_else(|| format!("IR に関数 {target} が無い"))?
                 .f;
+            // 関数の値の呼び出しは最後に文脈を渡す。文脈を受け取らない関数では捨てる
+            let takes = g.params.last().is_some_and(|p| p.0.is_context());
             let n = (g.params.len() - g.implicit) as u32;
-            let mut f = other(1 + n);
+            let mut f = other(1 + n + u32::from(!takes));
             let mut args: Vec<Expr> = (0..g.implicit).map(|_| unit()).collect();
             args.extend((1..=n).map(Expr::Local));
             f.body.push(Stmt::Return(call(target, args)));
@@ -841,7 +843,7 @@ impl<'a> Ctx<'a> {
 }
 
 // 利用者の関数を呼ぶランタイムの関数。中で GC が動きうる
-const CALLBACKS: &[&str] = &["__all", "__perform", "__spawn", "__task_then", "__co_step"];
+const CALLBACKS: &[&str] = &["__all", "__spawn", "__task_then", "__co_step"];
 
 // 前回の GC の後に確保したバイト数が上限を超えていれば GC を動かす。安全な位置（関数の入口とループの先頭）に置く
 fn poll() -> Stmt {
@@ -1217,7 +1219,7 @@ impl Lower<'_, '_> {
         id.is_some_and(|id| self.cx.info.awaits.contains(&id) || (self.variant && self.cx.info.var_awaits.contains(&id)))
     }
 
-    // await。js.rs の $k($h, await e) と同じく、待つ前の with の並びを覚え、再開した後で戻す。
+    // await。待つ前の with の記録（整数の範囲外を受け取る腕を探す並び）を覚え、再開した後で戻す。
     // #await はコルーチンの変換（Ctx::coroutine）が中断と再開に書き換える
     fn await_(&mut self, e: Expr) -> Expr {
         let (h, t) = (self.local(), self.local());
@@ -1488,19 +1490,6 @@ impl Lower<'_, '_> {
         }
         if let Some(src) = self.cx.sources.get(n.as_str()) {
             let f = src.f;
-            // 操作は、引数を Vec にして内側の handle から腕を探す。推論した型の引数は渡さない
-            if f.op.is_some() {
-                let k = args.len() - (f.params.len() - f.implicit);
-                let items = args.split_off(k);
-                let new = call("__arr_new", vec![int(items.len() as i64)]);
-                let items = self.object(ARR, new, 8, items);
-                // メソッドの宣言に with Async があれば、腕の Promise を待つ（js.rs の $aop）
-                if has_async(&f.effects) {
-                    let c = self.await_(call("__aperform", vec![Expr::Str(n.to_string()), items]));
-                    return Ok(self.checked(c));
-                }
-                return Ok(self.checked(call("__perform", vec![Expr::Str(n.to_string()), items])));
-            }
             // 推論したジェネリック引数は実行時には要らないので unit で埋める
             if args.len() + src.f.implicit == src.f.params.len() {
                 let mut full: Vec<Expr> = (0..src.f.implicit).map(|_| unit()).collect();
@@ -1525,8 +1514,12 @@ impl Lower<'_, '_> {
         if matches!(n.as_str(), "Vec" | "Type" | "Ref" | "Async") || self.cx.types.contains(n.as_str()) {
             return Ok(mkv(TY, Expr::Str(n.to_string())));
         }
-        // with の腕の #resume は、ランタイムの __resume
-        let rt = if n == "#resume" { "__resume".to_string() } else { format!("__{n}") };
+        // 文脈の組を作る・引く（check/context.rs）
+        let rt = match n.as_str() {
+            "#ctx_put" => "__ctx_put".to_string(),
+            "#ctx_get" => "__ctx_get".to_string(),
+            n => format!("__{n}"),
+        };
         if let Some(s) = self.cx.sources.get(rt.as_str()).filter(|s| s.runtime) {
             // 省いた引数は unit で埋める
             while args.len() < s.f.params.len() {
@@ -1629,7 +1622,8 @@ impl Lower<'_, '_> {
         Ok(self.object(FN, new, 16, items))
     }
 
-    // with を書き換えた Handle。番号を先に決めて腕（無名関数）に写し取らせ（exit の行き先）、腕を登録し、本体は Catch の中で評価する
+    // with を書き換えた Handle。番号を先に決めて本体の腕（無名関数）に写し取らせ（exit の行き先）、本体は Catch の中で評価する。
+    // 腕は本体の中で文脈に足してある（check/context.rs）。ここで登録するのは、整数の範囲外を受け取る腕だけ
     fn handle(&mut self, node: parser::NodeId, body: &Ast, arms: &[parser::Arm]) -> R<Expr> {
         let h = self.local();
         let mut stmts = vec![Stmt::Set(h, call("__handle_id", vec![]))];
@@ -1646,13 +1640,13 @@ impl Lower<'_, '_> {
             fns.push(self.lambda(&[Name::from("#args")], &a.binds, &b)?);
         }
         let n = int(ops.len() as i64);
-        self.vars.remove(&exit_name(node));
         let ops = self.object(ARR, call("__arr_new", vec![n.clone()]), 8, ops);
         let fns = self.object(ARR, call("__arr_new", vec![n]), 8, fns);
         stmts.push(Stmt::Eval(call("__handle_push", vec![Expr::Local(h), ops, fns])));
         self.handles.push(h);
         let v = self.expr(body);
         self.handles.pop();
+        self.vars.remove(&exit_name(node));
         let r = self.local();
         stmts.push(Stmt::Set(r, Expr::Catch(leaf(v?))));
         let end = call("__handle_end", vec![Expr::Local(h), Expr::Local(r)]);

@@ -18,6 +18,8 @@ pub enum NameKind {
     Requirement(Box<Name>),
     TraitMethod(Box<Name>, Box<Name>),
     Temporary(String, usize),
+    // 要求の提供を運ぶ隠れた引数（文脈）。check/context.rs が足す
+    Context(usize),
     // パターンを分けて作った変数。文字列は、その変数が元のパターンのどこかを示す雛形（□ が変数の位置）。網羅されていない例の表示に使う
     Pattern(String, usize),
 }
@@ -185,6 +187,14 @@ impl Name {
             spelling: format!("{hint}#{index}"),
             kind: NameKind::Temporary(hint.into(), index),
         }
+    }
+
+    pub fn context(index: usize) -> Self {
+        Self { spelling: format!("ctx#{index}"), kind: NameKind::Context(index) }
+    }
+
+    pub fn is_context(&self) -> bool {
+        matches!(self.kind, NameKind::Context(_))
     }
 
     pub fn pattern(template: &str, index: usize) -> Self {
