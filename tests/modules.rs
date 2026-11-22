@@ -427,6 +427,42 @@ fn unqualified_calls_to_same_named_imported_functions_are_ambiguous() {
 }
 
 #[test]
+fn unqualified_imported_constructors_with_the_same_name_are_ambiguous() {
+    let files = Files::new("ambiguous-constructors", &[
+        ("alpha.hb", "pub enum Shape { Node(value: int) }"),
+        ("beta.hb", "pub enum Shape { Node(value: int) }"),
+    ]);
+    for (first, second) in [
+        ("use alpha -> {Node}", "use beta -> {Node}"),
+        ("use beta -> {Node}", "use alpha -> {Node}"),
+        ("use alpha -> *", "use beta -> {Node}"),
+        ("use beta -> *", "use alpha -> *"),
+    ] {
+        let source = format!("{first}\n{second}\nfn main() {{ put(Node(1)) }}");
+        let error = files.parse(&source).unwrap_err();
+        assert_eq!(error.msg, "構築子 Node が曖昧（alpha::Node、beta::Node）");
+        assert_eq!(error.span.unwrap().0, source.find("Node(1)").unwrap());
+        assert_eq!(error.source.unwrap().text, source);
+    }
+
+    let source = "use alpha\nuse alpha -> *\nuse beta -> *\nfn main() { match alpha::Shape::Node(1) { Node(value) -> put(value) } }";
+    let error = files.parse(source).unwrap_err();
+    assert_eq!(error.msg, "構築子 Node が曖昧（alpha::Node、beta::Node）");
+    assert_eq!(error.span.unwrap().0, source.find("match").unwrap());
+
+    for (source, expected) in [
+        ("use alpha\nuse beta\nfn main() { put(alpha::Shape::Node(1))\nput(beta::Shape::Node(2)) }", &b"alpha::Node(1)\nbeta::Node(2)\n"[..]),
+        ("use alpha -> *\nuse beta -> *\nenum Local { Node(value: int) }\nfn main() { put(Node(3)) }", &b"Node(3)\n"[..]),
+    ] {
+        let mut program = files.parse(source).unwrap();
+        hibana::typeck::check(&mut program).unwrap();
+        let mut output = Vec::new();
+        hibana::eval::run(&program, &mut output).unwrap();
+        assert_eq!(output, expected, "{source}");
+    }
+}
+
+#[test]
 fn explicit_type_arguments_do_not_disambiguate_imported_functions() {
     let files = Files::new("ambiguous-generic-functions", &[
         ("alpha.hb", "pub fn value<T>(x: T) -> T with {} { x }"),

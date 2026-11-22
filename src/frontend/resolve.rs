@@ -10,6 +10,7 @@ struct Declaration {
     module: String,
     public: bool,
     function: bool,
+    constructor: bool,
 }
 
 // 構築子とトレイトから生成した名前も、元の宣言の公開範囲を持つ
@@ -19,13 +20,23 @@ fn visibility(prog: &Program) -> HashMap<Name, Declaration> {
             module: f.module.clone(),
             public: f.public,
             function: !f.alias && f.op.is_none(),
+            constructor: false,
         })).collect();
     for data in &prog.datas {
-        for name in std::iter::once(&data.name).chain(data.ctors.iter().map(|ctor| &ctor.name)) {
+        for name in std::iter::once(&data.name) {
             names.insert(name.clone(), Declaration {
                 module: data.module.clone(),
                 public: data.public,
                 function: false,
+                constructor: false,
+            });
+        }
+        for ctor in &data.ctors {
+            names.insert(ctor.name.clone(), Declaration {
+                module: data.module.clone(),
+                public: data.public,
+                function: false,
+                constructor: true,
             });
         }
     }
@@ -241,7 +252,7 @@ impl Resolver<'_> {
         }
         candidates.push((name.clone(), false));
         let mut private = None;
-        let mut functions = Vec::new();
+        let mut imported_values = Vec::new();
         for (candidate, explicit_import) in candidates {
             let resolved = self.ctors.get(&candidate).unwrap_or(&candidate);
             let declaration = self.visibility.get(resolved);
@@ -250,20 +261,27 @@ impl Resolver<'_> {
                 private = Some(resolved.clone());
                 continue;
             }
-            if explicit_import && declaration.is_some_and(|d| d.function) {
-                if !functions.contains(resolved) { functions.push(resolved.clone()); }
-            } else if functions.is_empty() {
+            if explicit_import && declaration.is_some_and(|d| d.function || d.constructor) {
+                if !imported_values.contains(resolved) { imported_values.push(resolved.clone()); }
+            } else if imported_values.is_empty() {
                 *name = resolved.clone();
                 return;
             }
         }
-        match functions.as_slice() {
+        match imported_values.as_slice() {
             [] => if let Some(private) = private { self.private(private); },
             [function] => *name = function.clone(),
             _ if self.error.is_none() => {
-                functions.sort_unstable();
-                let names = functions.iter().map(Name::as_str).collect::<Vec<_>>().join("、");
-                let error = Error::from(format!("関数 {name} が曖昧（{names}）"));
+                imported_values.sort_unstable();
+                let names = imported_values.iter().map(Name::as_str).collect::<Vec<_>>().join("、");
+                let kind = if imported_values.iter().all(|name| self.visibility[name].function) {
+                    "関数"
+                } else if imported_values.iter().all(|name| self.visibility[name].constructor) {
+                    "構築子"
+                } else {
+                    "名前"
+                };
+                let error = Error::from(format!("{kind} {name} が曖昧（{names}）"));
                 self.error = Some(match self.span { Some(span) => error.at(span), None => error });
             }
             _ => {}
