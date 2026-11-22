@@ -194,6 +194,7 @@ pub struct Parser<'s> {
     pub depth: usize,
     // 宣言された型の名前。直後の < を型引数として読む
     pub types: Rc<HashSet<Name>>,
+    pub public_types: Rc<HashSet<Name>>,
     // ジェネリック引数を持つ関数の名前。f<int>(x) の < を型引数として読む
     pub generic_fns: Rc<HashSet<Name>>,
     // 大域の名前（関数・型・構築子・組み込み・パターンのリテラル）
@@ -465,6 +466,7 @@ fn parse_modules_tokens(
             g: Rc::default(),
             depth: 0,
             types: Rc::default(),
+            public_types: Rc::default(),
             generic_fns: Rc::default(),
             globals: Rc::default(),
             structs: Rc::default(),
@@ -532,6 +534,7 @@ fn parse_modules_tokens(
     let uses = Rc::new(uses);
     let modules = Rc::new(modules);
     let mut types: HashSet<Name> = ["Vec", "Ref", "Type", "Async", "Task"].map(Name::from).into();
+    let mut public_types = HashSet::new();
     let mut generic_fns: HashSet<Name> = [Name::from("refine")].into();
     // 組み込みと利用者のファイルの名前・モジュール名・パターンのリテラル。マクロの衛生性で名前を付け替えない
     let mut globals: HashSet<Name> = [
@@ -619,7 +622,8 @@ fn parse_modules_tokens(
         // 1周目は宣言の名前を集める
         loop {
             let cur = p.module.clone();
-            if p.eat("pub") && !matches!(p.peek(), Tok::Punct("fn" | "type" | "struct" | "enum" | "trait")) {
+            let public = p.eat("pub");
+            if public && !matches!(p.peek(), Tok::Punct("fn" | "type" | "struct" | "enum" | "trait")) {
                 return p.err("pub の後には fn・type・struct・enum・trait を書く");
             }
             match p.peek() {
@@ -650,13 +654,20 @@ fn parse_modules_tokens(
                     fn_starts.push(p.pos);
                     p.skip_fn()?;
                 }
-                Tok::Punct(kw @ ("type" | "struct" | "enum")) => {
+                Tok::Punct(kw @ ("type" | "struct" | "enum" | "trait")) => {
                     let kw = *kw;
                     if let Some(Tok::Ident(n)) = p.toks.get(p.pos + 1).map(|t| t.tok.clone()) {
-                        types.insert(qual(&cur, &n));
+                        let name = qual(&cur, &n);
+                        if public { public_types.insert(name.clone()); }
+                        types.insert(name);
                         if !declare(&cur, &n, &mut globals) {
                             return dup(&p, p.pos + 1, &n);
                         }
+                    }
+                    if kw == "trait" {
+                        trait_starts.push(p.pos);
+                        p.skip_fn()?;
+                        continue;
                     }
                     data_starts.push(p.pos);
                     let start = p.pos;
@@ -666,16 +677,6 @@ fn parse_modules_tokens(
                             declare(&cur, &n, &mut globals);
                         }
                     }
-                }
-                Tok::Punct("trait") => {
-                    if let Some(Tok::Ident(n)) = p.toks.get(p.pos + 1).map(|t| t.tok.clone()) {
-                        types.insert(qual(&cur, &n));
-                        if !declare(&cur, &n, &mut globals) {
-                            return dup(&p, p.pos + 1, &n);
-                        }
-                    }
-                    trait_starts.push(p.pos);
-                    p.skip_fn()?;
                 }
                 Tok::Punct("impl") => {
                     impl_starts.push(p.pos);
@@ -722,8 +723,10 @@ fn parse_modules_tokens(
         Rc::new(mod_names),
         Rc::new(known),
     );
+    let public_types = Rc::new(public_types);
     for p in &mut parsers {
         p.types = types.clone();
+        p.public_types = public_types.clone();
         p.generic_fns = generic_fns.clone();
         p.globals = globals.clone();
         p.mod_names = mod_names.clone();
@@ -1015,18 +1018,53 @@ impl Parser<'_> {
 
     // 今のトークンが名前なら、修飾した名前に書き換える。web::ok は修飾した名前にし、型名は今のモジュールから見た名前にする
     // （構造体の値と <> の判定に使う。それ以外の名前は resolve で局所変数と区別してから解決する）
-    pub(super) fn qualify_here(&mut self) {
+    pub(super) fn qualify_here(&mut self) -> R<()> {
         let Tok::Ident(n) = self.peek().clone() else {
-            return;
+            return Ok(());
         };
         if let Some((module, rest)) = self.module_path(&n) {
             self.toks[self.pos].tok = Tok::Ident(Name::qualified(&module, rest));
-            return;
+            return Ok(());
         }
-        let q = self.qualify(&n);
+        let token = &self.toks[self.pos];
+        let span = token.site.unwrap_or(token.span);
+        let module = token.origin.as_deref().unwrap_or(&self.module);
+        let mut q = self.qualify(&n);
+        if let NameKind::Associated(owner, _) = &n.kind {
+            self.imported_type(module, owner, span)?;
+        } else if matches!(n.kind, NameKind::User)
+            && (self.types.contains(&q) || token.origin.is_some())
+        {
+            q = self.imported_type(module, &n, span)?.unwrap_or(q);
+        }
         if q != n && (self.types.contains(&q) || self.structs.contains_key(&q)) {
             self.toks[self.pos].tok = Tok::Ident(q);
         }
+        Ok(())
+    }
+
+    fn imported_type(&self, module: &str, name: &Name, span: Span) -> R<Option<Name>> {
+        let mut candidates = self.imported_type_candidates(module, name);
+        if candidates.len() > 1 {
+            let names = candidates.iter().map(Name::as_str).collect::<Vec<_>>().join("、");
+            return Err(Error::from(format!("型 {name} が曖昧（{names}）")).at(span));
+        }
+        Ok(candidates.pop())
+    }
+
+    pub(super) fn imported_type_candidates(&self, module: &str, name: &Name) -> Vec<Name> {
+        let local = qual(module, name);
+        if self.known.contains(&local) || self.types.contains(&local) {
+            return Vec::new();
+        }
+        let mut candidates: Vec<_> = self.uses.get(module).into_iter().flatten()
+            .filter(|u| u.span.is_some() && u.names.takes(name))
+            .map(|u| qual(&u.module, name))
+            .filter(|n| self.public_types.contains(n))
+            .collect();
+        candidates.sort_unstable();
+        candidates.dedup();
+        candidates
     }
 
     // m::x と m::T::x の、先頭の m が use したモジュールなら (m, 残りの名前)
@@ -1069,6 +1107,7 @@ impl Parser<'_> {
             g: self.g.clone(),
             depth: self.depth,
             types: self.types.clone(),
+            public_types: self.public_types.clone(),
             generic_fns: self.generic_fns.clone(),
             globals: self.globals.clone(),
             structs: self.structs.clone(),
@@ -1271,7 +1310,7 @@ impl Parser<'_> {
             return Ok((effects, names));
         }
         loop {
-            self.qualify_here();
+            self.qualify_here()?;
             let name = self.ident()?;
             let mut args = Vec::new();
             if self.eat("<") {
@@ -2151,7 +2190,7 @@ impl Parser<'_> {
             }
         }
         let origin = self.toks[self.pos].origin.clone();
-        self.qualify_here();
+        self.qualify_here()?;
         let mut e = match self.next() {
             Tok::Int(n) => Expr::Int(n),
             Tok::Float(n) => Expr::Num(n),
@@ -2183,7 +2222,7 @@ impl Parser<'_> {
                 let mut arms = Vec::new();
                 loop {
                     let astart = self.pos;
-                    self.qualify_here();
+                    self.qualify_here()?;
                     let trait_name = self.ident()?;
                     let Some(tr) = self.trait_name(&trait_name) else {
                         self.pos -= 1;

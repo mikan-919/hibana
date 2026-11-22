@@ -503,7 +503,7 @@ fn hygienic(t: &Token, prev: Option<&Token>, bound: &HashSet<Name>) -> Token {
         }
         // ライブラリのマクロが自分のモジュールの名前を使うなら、使う側でもその名前を指すよう修飾する
         (Some((_, _, m, names)), Tok::Ident(n))
-            if !m.is_empty() && names.contains_key(n) && !bound.contains(n) =>
+            if names.get(n).is_some_and(|name| !m.is_empty() || name == n) && !bound.contains(n) =>
         {
             Token {
                 tok: Tok::Ident(names[n].clone().into()),
@@ -1272,6 +1272,7 @@ impl Parser<'_> {
             g: self.g.clone(),
             depth: self.depth + 1,
             types: self.types.clone(),
+            public_types: self.public_types.clone(),
             generic_fns: self.generic_fns.clone(),
             globals: self.globals.clone(),
             structs: self.structs.clone(),
@@ -1332,6 +1333,7 @@ impl Parser<'_> {
             g: self.g.clone(),
             depth: self.depth + 1,
             types: self.types.clone(),
+            public_types: self.public_types.clone(),
             generic_fns: self.generic_fns.clone(),
             globals: self.globals.clone(),
             structs: self.structs.clone(),
@@ -1390,6 +1392,12 @@ impl Parser<'_> {
         }
         for n in self.mod_names.get(&m.module).into_iter().flatten() {
             names.insert(n.clone(), Name::qualified(&m.module, n.clone()));
+        }
+        // 同名の型は修飾せず、展開後に定義側のモジュールで候補を表示する。
+        for (name, qualified) in &mut names {
+            if self.types.contains(qualified) && self.imported_type_candidates(&m.module, name).len() > 1 {
+                *qualified = name.clone();
+            }
         }
         let prev =
             HYGIENE.with(|h| h.replace(Some((id, self.globals.clone(), m.module.clone(), names))));

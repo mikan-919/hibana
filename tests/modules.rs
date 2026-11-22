@@ -445,6 +445,81 @@ fn explicit_type_arguments_do_not_disambiguate_imported_functions() {
 }
 
 #[test]
+fn unqualified_types_with_the_same_name_are_ambiguous() {
+    let files = Files::new("ambiguous-types", &[
+        ("positive.hb", "pub type Limit = int[x -> x >= 0]"),
+        ("negative.hb", "pub type Limit = int[x -> x <= 0]"),
+        ("hidden.hb", "type Limit = int[x -> x <= 0]"),
+    ]);
+    for (first, second) in [
+        ("use positive -> {Limit}", "use negative -> {Limit}"),
+        ("use negative -> {Limit}", "use positive -> {Limit}"),
+        ("use positive -> *", "use negative -> {Limit}"),
+        ("use negative -> *", "use positive -> *"),
+    ] {
+        let source = format!("{first}\n{second}\nfn main() {{ let n: Limit = 1\nput(n) }}");
+        let error = files.parse(&source).unwrap_err();
+        assert_eq!(error.msg, "型 Limit が曖昧（negative::Limit、positive::Limit）");
+        assert_eq!(error.span, Some((source.find("Limit = 1").unwrap(), "Limit".len())));
+        assert_eq!(error.source.unwrap().text, source);
+    }
+
+    for (source, expected) in [
+        ("use positive\nuse negative\nfn main() { let n: positive::Limit = 1\nlet m: negative::Limit = -1\nput(n)\nput(m) }", &b"1\n-1\n"[..]),
+        ("use positive -> *\nuse positive -> {Limit}\nfn main() { let n: Limit = 1\nput(n) }", &b"1\n"[..]),
+        ("use positive -> *\nuse negative -> *\ntype Limit = int\nfn main() { let n: Limit = 1\nput(n) }", &b"1\n"[..]),
+        ("use hidden -> *\nuse positive -> *\nfn main() { let n: Limit = 1\nput(n) }", &b"1\n"[..]),
+    ] {
+        let mut program = files.parse(source).unwrap();
+        hibana::typeck::check(&mut program).unwrap();
+        let mut output = Vec::new();
+        hibana::eval::run(&program, &mut output).unwrap();
+        assert_eq!(output, expected, "{source}");
+    }
+}
+
+#[test]
+fn same_named_types_are_ambiguous_in_construction_and_requirements() {
+    let declarations = "pub struct Record { value: int }\npub enum Choice { Pick(value: int) }\npub trait Log { fn log(self) with {} }";
+    let files = Files::new("ambiguous-type-uses", &[
+        ("alpha.hb", declarations),
+        ("beta.hb", declarations),
+    ]);
+    let imports = "use alpha\nuse alpha -> *\nuse beta -> *\n";
+    for (name, body) in [
+        ("Record", "fn main() { put(Record { value: 1 }) }"),
+        ("Record", "fn main() { let Record { value } = alpha::Record { value: 1 }\nput(value) }"),
+        ("Choice", "fn main() { put(Choice::Pick(1)) }"),
+        ("Log", "fn report() with Log {}\nfn main() {}"),
+    ] {
+        let source = format!("{imports}{body}");
+        let error = files.parse(&source).unwrap_err();
+        assert_eq!(error.msg, format!("型 {name} が曖昧（alpha::{name}、beta::{name}）"));
+        assert_eq!(error.span.unwrap().0, source.find(name).unwrap());
+    }
+    let source = format!("{imports}fn report() with alpha::Log {{}}\nfn main() {{ let alpha::Record {{ value }} = alpha::Record {{ value: 1 }}\nput(value)\nput(alpha::Choice::Pick(2)) }}");
+    let mut program = files.parse(&source).unwrap();
+    hibana::typeck::check(&mut program).unwrap();
+    let mut output = Vec::new();
+    hibana::eval::run(&program, &mut output).unwrap();
+    assert_eq!(output, b"1\nalpha::Pick(2)\n");
+}
+
+#[test]
+fn macro_expansion_reports_ambiguous_types_from_its_definition_module() {
+    let files = Files::new("ambiguous-type-in-macro", &[
+        ("positive.hb", "pub type Limit = int[x -> x >= 0]"),
+        ("negative.hb", "pub type Limit = int[x -> x <= 0]"),
+        ("helpers.hb", "use positive -> {Limit}\nuse negative -> {Limit}\nmacro bounded('bounded') { quote { fn(x: Limit) -> Limit { x } } }"),
+    ]);
+    let source = "use helpers\nfn main() { let f = bounded\nput(f(0)) }";
+    let error = files.parse(source).unwrap_err();
+    assert!(error.msg.contains("型 Limit が曖昧（negative::Limit、positive::Limit）"), "{error}");
+    assert_eq!(error.span.unwrap().0, source.find("bounded").unwrap());
+    assert_eq!(error.source.unwrap().text, source);
+}
+
+#[test]
 fn string_imports_are_rejected_before_reading() {
     let files = Files::new("removed-string-imports", &[("util.hb", "pub fn value() -> int with {} { 42 }")]);
     for import in [
