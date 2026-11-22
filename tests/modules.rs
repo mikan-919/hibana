@@ -367,22 +367,6 @@ fn method_syntax_cannot_call_private_functions() {
 }
 
 #[test]
-fn distinct_files_with_the_same_module_name_are_rejected() {
-    let files = Files::new(
-        "collision",
-        &[
-            ("left/item.ts", "export function value(): number { return 1; }"),
-            ("right/item.ts", "export function value(): number { return 1; }"),
-        ],
-    );
-    let error = files
-        .parse("use './left/item.ts'\nuse './right/item.ts'\nfn main() {}")
-        .unwrap_err();
-    assert!(error.msg.contains("モジュール名 item"));
-    assert_eq!(error.source_id.0, 0);
-}
-
-#[test]
 fn module_names_qualify_only_under_a_plain_use() {
     let files = Files::new("qualification", &[]);
     // -> { } と -> * は名前を取り込むだけで、モジュール名では修飾できない
@@ -410,18 +394,27 @@ fn module_names_qualify_only_under_a_plain_use() {
 }
 
 #[test]
-fn string_hibana_imports_are_rejected_before_reading() {
-    let files = Files::new("removed-hibana-imports", &[("util.hb", "pub fn value() -> int with {} { 42 }")]);
-    for path in ["./util.hb", "util.hb", "./util", "../util", "./missing.hb", "./missing", "./util.hb/../util.hb"] {
+fn string_imports_are_rejected_before_reading() {
+    let files = Files::new("removed-string-imports", &[("util.hb", "pub fn value() -> int with {} { 42 }")]);
+    for import in [
+        "'./util.hb'",
+        "'./util'",
+        "'./util.js'",
+        "'./util.mjs'",
+        "\"./util.ts\"",
+        "'some-package'",
+        "'@scope/package'",
+        "'node:path'",
+    ] {
         for selection in ["", " -> {value}", " -> *"] {
-            let source = format!("use '{path}'{selection}\nfn main() {{}}");
+            let source = format!("use {import}{selection}\nfn main() {{}}");
             for error in [
                 pipeline::load(&source, &files.0).unwrap_err(),
                 pipeline::parse(source.as_str()).unwrap_err(),
             ] {
-                assert!(error.msg.contains("hibana ファイルは文字列の経路で読み込めない"), "{source}: {}", error.msg);
+                assert!(error.msg.contains("use の後にはモジュール名が必要"), "{source}: {}", error.msg);
                 assert_eq!(error.source_id.0, 0);
-                assert_eq!(error.span.unwrap().0, source.find('\'').unwrap());
+                assert_eq!(error.span, Some(("use ".len(), import.len())));
                 assert_eq!(error.source.unwrap().text, source);
             }
         }
@@ -438,17 +431,6 @@ fn builtin_imports_share_modules_and_preserve_source_text() {
     let mut output = Vec::new();
     hibana::eval::run(&program, &mut output).unwrap();
     assert_eq!(output, b"[2, 3]\nSome(3)\n3\n2\n");
-}
-
-#[test]
-fn typescript_import_forms_remain_available() {
-    let files = Files::new("typescript-imports", &[("util.ts", "export function value(): number { return 42; }")]);
-    for (selection, call) in [("", "util::value()"), (" -> {value}", "value()"), (" -> *", "value()")] {
-        let source = format!("use './util.ts'{selection}\nfn main() {{ put({call}) }}");
-        let program = files.parse(&source).unwrap();
-        let checked = pipeline::check(program, pipeline::Kind::Executable).unwrap();
-        pipeline::emit_js(&checked).unwrap();
-    }
 }
 
 #[test]

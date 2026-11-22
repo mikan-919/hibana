@@ -13,7 +13,7 @@ pub use check::{smt, typeck};
 pub use frontend::{lexer, meta, parser};
 pub use tooling::fmt;
 
-pub(crate) use frontend::{resolve, ts};
+pub(crate) use frontend::resolve;
 
 use std::io::Write;
 

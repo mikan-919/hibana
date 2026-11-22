@@ -365,24 +365,6 @@ pub struct Use {
 // モジュール名 m の中の名前 n の内部での名前。利用者のファイル（m が空）では n のまま
 pub fn qual(m: &str, n: impl Into<Name>) -> Name { Name::qualified(m, n.into()) }
 
-// use に書いた名前から、モジュール名を作る。ファイルは拡張子を除いた名前（./js/util.ts は util）、
-// node:path は path、@scope/pkg は pkg。名前に使えない文字は _ にし、キーワード（syntax など）には _ を足す
-pub fn module_name(spec: &str) -> String {
-    let last = spec.rsplit(['/', ':']).next().unwrap_or(spec);
-    let stem = last.split('.').next().unwrap_or(last);
-    let name: String = stem
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if crate::lexer::KEYWORDS.contains(&name.as_str()) { name + "_" } else { name }
-}
-
 // use に書いたファイルの経路の起点（use を書いた .hb のディレクトリ）
 thread_local! {
     static BASE: std::cell::RefCell<std::path::PathBuf> = std::cell::RefCell::new(".".into());
@@ -1135,21 +1117,20 @@ impl Parser<'_> {
         cands.into_iter().find(known).unwrap_or_else(|| n.clone())
     }
 
-    // use 名前、use 名前 -> *、use 名前 -> {a, b}、use "file.ts"
+    // use 名前、use 名前 -> *、use 名前 -> {a, b}
     fn use_decl(&mut self) -> R<Use> {
         let start = self.pos;
         self.expect("use")?;
-        let module = match self.next() {
-            Tok::Ident(n) => n.rsplit("::").next().unwrap().to_string(),
-            Tok::Str(f) => super::modules::external_module_name(&f)
-                .map_err(|error| error.at(self.toks[self.pos - 1].span))?,
-            _ => return self.err("use の後にはライブラリ名かファイル名が必要"),
+        let Tok::Ident(name) = self.peek() else {
+            return self.err("use の後にはモジュール名が必要");
         };
+        let module = name.rsplit("::").next().unwrap().to_string();
+        self.pos += 1;
         if self.toks[self.pos].tok == Tok::Punct(".") && !self.at_newline() {
             return self.err("use 名前 -> * または use 名前 -> { ... } で書く");
         }
         let names = if self.peek() == &Tok::Punct("->") {
-            // use 'file' -> * と、use 'file' -> { a } -> { b }（改行して続けてよい）
+            // use 名前 -> * と、use 名前 -> { a } -> { b }（改行して続けてよい）
             let mut ns = Vec::new();
             let mut all = false;
             while self.eat("->") {

@@ -1,4 +1,4 @@
-// 型宣言 greet.d.ts を隣に置いた JavaScript のモジュール
+// hibana から extern で呼ぶ JavaScript のモジュール
 export function hello(name) {
   return "Hello, " + name;
 }

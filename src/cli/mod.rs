@@ -374,8 +374,6 @@ mod tests {
             // extern を使う例はインタプリタでは動かないので、js_extern で確かめる
             // main の無いファイル（ライブラリとテスト）は実行しない
             if !src.contains("fn main(")
-                || src.contains(".ts'")
-                || src.contains(".js'")
                 || src.contains("\nextern")
             {
                 continue;
@@ -413,7 +411,7 @@ mod tests {
             if p.ends_with("examples/first.hb") {
                 continue;
             }
-            if src.contains(".ts'") || src.contains(".js'") || src.contains("\nextern") {
+            if src.contains("\nextern") {
                 continue;
             }
             crate::parser::set_base_dir(p.parent().unwrap());
@@ -542,48 +540,46 @@ mod tests {
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 
-    // use で JavaScript と TypeScript のモジュールを使う例を、Node.js で実行する
+    // extern で JavaScript と TypeScript の関数を呼ぶ例を、Node.js で実行する
     #[test]
     fn js_extern() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/programs/interop");
         crate::parser::set_base_dir(&dir);
-        let src = std::fs::read_to_string(dir.join("js_interop.hb")).unwrap();
-        // 出力した JS からの相対経路（./js/util.ts）で読み込めるよう、tests/programs/interop の中に書き出す
-        let js = dir.join(format!("js_interop_{}.mjs", std::process::id()));
-        std::fs::write(&js, super::to_js(&src).unwrap()).unwrap();
-        let r = std::process::Command::new("node")
-            .arg(&js)
-            .output()
-            .unwrap();
-        std::fs::remove_file(&js).unwrap();
-        assert_eq!(
-            String::from_utf8(r.stdout).unwrap(),
-            "50\nHIBANA!\n18\n3\n3\nHello, world\n6\n20\n[3, 5]\n[\"a2a\", \"b4b\"]\n[20, 40]\n7\n"
-        );
-        let e = out(&src).unwrap_err();
-        assert!(e.contains("JavaScript 出力"), "{e}");
-        // 型宣言が無いモジュールは型が分からないので使えない
-        let e = out("use './nope.js'\nfn main() {}").unwrap_err();
-        assert!(e.contains("型宣言 ./nope.d.ts が無い"), "{e}");
-        let e = out("use 'node:path'\nfn main() {}").unwrap_err();
-        assert!(e.contains("@types/node"), "{e}");
-        // npm のパッケージは node_modules の package.json の types から型宣言を読む
+        for (name, expected) in [
+            ("js_interop", "50\nHIBANA!\n18\n3\n3\nHello, world\n6\n20\n[3, 5]\n[\"a2a\", \"b4b\"]\n[20, 40]\n7\n"),
+            ("ts_num", "50\n6\n4\n6\n"),
+        ] {
+            let src = std::fs::read_to_string(dir.join(format!("{name}.hb"))).unwrap();
+            // extern の経路は生成した JavaScript の位置を基準にする
+            let js = dir.join(format!("{name}_{}.mjs", std::process::id()));
+            std::fs::write(&js, super::to_js(&src).unwrap()).unwrap();
+            let r = std::process::Command::new("node").arg(&js).output().unwrap();
+            std::fs::remove_file(&js).unwrap();
+            assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+            assert_eq!(String::from_utf8(r.stdout).unwrap(), expected);
+            let e = out(&src).unwrap_err();
+            assert!(e.contains("JavaScript 出力"), "{e}");
+        }
+    }
+
+    #[test]
+    fn js_extern_npm_package() {
         let tmp = std::env::temp_dir().join(format!("hibana-npm-{}", std::process::id()));
         let pkg = tmp.join("node_modules/fake-pkg");
         std::fs::create_dir_all(pkg.join("dist")).unwrap();
-        std::fs::write(pkg.join("package.json"), r#"{ "name": "fake-pkg", "type": "module", "main": "dist/index.js", "types": "dist/index.d.ts" }"#).unwrap();
+        std::fs::write(pkg.join("package.json"), r#"{ "name": "fake-pkg", "type": "module", "main": "dist/index.js" }"#).unwrap();
         std::fs::write(
             pkg.join("dist/index.js"),
             "export function twice(n) { return n * 2; }\n",
         )
         .unwrap();
         std::fs::write(
-            pkg.join("dist/index.d.ts"),
-            "export declare function twice(n: number): number;\n",
+            tmp.join("package_api.hb"),
+            "extern 'fake-pkg' { pub fn twice(n: number) -> number with {} }\n",
         )
         .unwrap();
         crate::parser::set_base_dir(&tmp);
-        let js = super::to_js("use 'fake-pkg'\nfn main() { put(fake_pkg::twice(21)) }").unwrap();
+        let js = super::to_js("use package_api\nfn main() { put(package_api::twice(21)) }").unwrap();
         std::fs::write(tmp.join("main.mjs"), js).unwrap();
         let r = std::process::Command::new("node")
             .arg(tmp.join("main.mjs"))
