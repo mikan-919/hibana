@@ -1,4 +1,6 @@
 //! ファイル単位のソースと位置。
+pub(crate) const INPUT_NAME: &str = "<input>";
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SourceId(pub usize);
 

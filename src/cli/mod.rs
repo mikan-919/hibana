@@ -1,3 +1,4 @@
+use crate::frontend::source::{INPUT_NAME, SourceFile};
 use crate::{error, eval, fmt, parser, typeck};
 #[cfg(test)]
 use crate::{run, to_js};
@@ -103,10 +104,14 @@ fn report(path: &str, src: &str, e: error::Error) -> miette::Report {
             .iter()
             .any(|s| e.msg.contains(s))
             .then(|| "値.to_string() で文字列にする".to_string());
-        let mut related = match (e.origin, &e.origin_file) {
+        let named_source = |source: SourceFile| {
+            let name = if source.name == INPUT_NAME { path.to_string() } else { source.name };
+            miette::NamedSource::new(name, source.text)
+        };
+        let mut related = match (e.origin, e.origin_file) {
             (Some(span), Some(source)) if source.id != e.source_id => vec![RelatedSite {
                 title: e.origin_label.unwrap_or("効果の操作を呼んでいる位置"),
-                src: miette::NamedSource::new(source.name.clone(), source.text.clone()),
+                src: named_source(source),
                 span: span.into(),
                 label: e.origin_label.unwrap_or("ここで起こしている"),
             }],
@@ -114,10 +119,9 @@ fn report(path: &str, src: &str, e: error::Error) -> miette::Report {
         };
         related.extend(e.related.into_iter().filter_map(|site| {
             let source = site.source?;
-            let name = if source.id.0 == 0 { path.to_string() } else { source.name };
             Some(RelatedSite {
                 title: site.label,
-                src: miette::NamedSource::new(name, source.text),
+                src: named_source(source),
                 span: (site.span.start.offset, site.span.end.offset - site.span.start.offset).into(),
                 label: site.label,
             })
@@ -129,9 +133,8 @@ fn report(path: &str, src: &str, e: error::Error) -> miette::Report {
             related,
             label,
             msg: e.msg,
-            // 読み込んだライブラリの中のエラーも指せるよう、ライブラリを足したソースを渡す
             src: match e.source {
-                Some(source) => miette::NamedSource::new(if source.id.0 == 0 { path.to_string() } else { source.name }, source.text),
+                Some(source) => named_source(source),
                 None => miette::NamedSource::new(path, src.to_string()),
             },
             span: e.span.map(Into::into),

@@ -45,7 +45,7 @@ impl From<&str> for ModuleSet {
                 name: String::new(),
                 source: super::source::SourceFile {
                     id: Default::default(),
-                    name: "<input>".into(),
+                    name: super::source::INPUT_NAME.into(),
                     text: text.into(),
                 },
                 uses: Vec::new(),

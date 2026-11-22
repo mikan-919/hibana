@@ -551,6 +551,8 @@ macro unless('unless' expr:Expr block:Block) {
 | `build::write_executable(path, bytes)` | `(String, Vec<int>) -> unit`。実行権限を付けてファイルに書く。親ディレクトリが無ければ作る。実行権限は Unix でだけ付ける |
 | `fs::write_bytes(path, bytes)` | `(String, Vec<int>) -> unit`。ファイルに書く。親ディレクトリが無ければ作る。各要素は 0〜255 |
 
+`build::compile` または `build::compile_wasm` のエラーでスクリプトが終了すると、位置のあるエラーはコンパイル対象か依存ファイルの該当箇所を表示します。終了コードは 1 です。
+
 ### std
 
 `use std -> *` で、修飾なしに使うのが普通です（`lib/std.hb`、例は `tests/programs/stdlib/std.hb`）。
