@@ -394,6 +394,57 @@ fn module_names_qualify_only_under_a_plain_use() {
 }
 
 #[test]
+fn unqualified_calls_to_same_named_imported_functions_are_ambiguous() {
+    let files = Files::new("ambiguous-functions", &[
+        ("alpha.hb", "pub fn value() -> int with {} { 1 }"),
+        ("beta.hb", "pub fn value() -> int with {} { 2 }"),
+    ]);
+    for (first, second) in [
+        ("use alpha -> {value}", "use beta -> {value}"),
+        ("use beta -> {value}", "use alpha -> {value}"),
+        ("use alpha -> *", "use beta -> {value}"),
+        ("use beta -> *", "use alpha -> *"),
+    ] {
+        let source = format!("{first}\n{second}\nfn main() {{ put(value()) }}");
+        let error = files.parse(&source).unwrap_err();
+        assert_eq!(error.msg, "関数 value が曖昧（alpha::value、beta::value）");
+        assert_eq!(error.span.unwrap().0, source.find("value()").unwrap());
+        assert_eq!(error.source.unwrap().text, source);
+    }
+
+    for (source, expected) in [
+        ("use alpha\nuse beta\nfn main() { put(alpha::value())\nput(beta::value()) }", &b"1\n2\n"[..]),
+        ("use alpha -> *\nuse alpha -> {value}\nfn main() { put(value()) }", &b"1\n"[..]),
+        ("use alpha -> *\nuse beta -> *\nfn value() -> int { 3 }\nfn main() { put(value()) }", &b"3\n"[..]),
+        ("use alpha -> *\nuse beta -> *\nfn main() { let value = fn() -> int { 4 }\nput(value()) }", &b"4\n"[..]),
+    ] {
+        let mut program = files.parse(source).unwrap();
+        hibana::typeck::check(&mut program).unwrap();
+        let mut output = Vec::new();
+        hibana::eval::run(&program, &mut output).unwrap();
+        assert_eq!(output, expected, "{source}");
+    }
+}
+
+#[test]
+fn explicit_type_arguments_do_not_disambiguate_imported_functions() {
+    let files = Files::new("ambiguous-generic-functions", &[
+        ("alpha.hb", "pub fn value<T>(x: T) -> T with {} { x }"),
+        ("beta.hb", "pub fn value<T>(x: T) -> T with {} { x }"),
+    ]);
+    let source = "use alpha -> *\nuse beta -> *\nfn main() { put(value<int>(1)) }";
+    let error = files.parse(source).expect_err("同名の関数が2つ見える");
+    assert_eq!(error.msg, "関数 value が曖昧（alpha::value、beta::value）");
+    assert_eq!(error.span.unwrap().0, source.find("value<int>").unwrap());
+
+    let mut program = files.parse("use alpha\nuse beta -> *\nfn main() { put(alpha::value<int>(1))\nput(value<int>(2)) }").unwrap();
+    hibana::typeck::check(&mut program).unwrap();
+    let mut output = Vec::new();
+    hibana::eval::run(&program, &mut output).unwrap();
+    assert_eq!(output, b"1\n2\n");
+}
+
+#[test]
 fn string_imports_are_rejected_before_reading() {
     let files = Files::new("removed-string-imports", &[("util.hb", "pub fn value() -> int with {} { 42 }")]);
     for import in [

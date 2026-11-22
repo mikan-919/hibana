@@ -1024,12 +1024,7 @@ impl Parser<'_> {
             return;
         }
         let q = self.qualify(&n);
-        if q != n
-            && (self.types.contains(&q)
-                || self.structs.contains_key(&q)
-                // 関数の名前は f<型>(...) の時だけ。他は局所変数かもしれないので resolve に任せる
-                || (self.generic_fns.contains(&q) && self.explicit_type_call(self.pos + 1)))
-        {
+        if q != n && (self.types.contains(&q) || self.structs.contains_key(&q)) {
             self.toks[self.pos].tok = Tok::Ident(q);
         }
     }
@@ -2335,9 +2330,11 @@ impl Parser<'_> {
                 }
                 Expr::Array(items)
             }
-            // f<型, ...>(引数) は型引数を明示した呼び出し。型引数を引数の先頭に並べる
+            // f<型, ...>(引数) は型引数を明示した呼び出し。名前解決まで f の綴りを残す
             Tok::Ident(name)
-                if self.generic_fns.contains(&name) && self.explicit_type_call(self.pos) =>
+                if self.peek() == &Tok::Punct("<")
+                    && self.generic_fns.contains(&self.qualify(&name))
+                    && self.explicit_type_call(self.pos) =>
             {
                 self.pos += 1;
                 let mut args = Vec::new();
