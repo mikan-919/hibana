@@ -7,4 +7,3 @@ pub mod parser;
 pub mod source;
 pub(crate) mod pattern;
 pub(crate) mod resolve;
-pub(crate) mod ts;

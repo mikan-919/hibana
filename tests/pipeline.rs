@@ -142,19 +142,13 @@ fn load_uses_explicit_base_directory_without_changing_caller() {
     let b = dir.join("b");
     std::fs::create_dir_all(&a).unwrap();
     std::fs::create_dir_all(&b).unwrap();
-    std::fs::write(a.join("util.ts"), "export function value(): number { return 1; }").unwrap();
-    std::fs::write(b.join("util.ts"), "export function value(): string { return 'two'; }").unwrap();
-    let source = "use './util.ts'\n";
+    std::fs::write(a.join("util.hb"), "pub fn value() -> int with {} { 1 }").unwrap();
+    std::fs::write(b.join("util.hb"), "pub fn value() -> int with {} { 2 }").unwrap();
     hibana::parser::set_base_dir(&a);
-    let loaded = pipeline::load(source, &b).unwrap();
-    assert!(loaded.modules.iter().any(|module| module.source.text.contains("-> String")));
-    let loaded = hibana::parser::load_modules(source, &a).unwrap();
-    assert!(loaded.modules.iter().any(|module| module.source.text.contains("-> number")));
-    std::fs::write(a.join("util.hb"), "fn value() -> int { 1 }").unwrap();
-    std::fs::write(b.join("util.hb"), "fn value() -> int { 2 }").unwrap();
     let loaded = pipeline::load("use util", &b).unwrap();
     assert!(loaded.modules.iter().any(|module| module.source.text.contains("{ 2 }")));
-    let loaded = hibana::parser::load_modules("use util", &a).unwrap();
-    assert!(loaded.modules.iter().any(|module| module.source.text.contains("{ 1 }")));
+    let mut output = Vec::new();
+    hibana::run("use util\nfn main() { put(util::value()) }", &mut output).unwrap();
+    assert_eq!(output, b"1\n");
     std::fs::remove_dir_all(dir).unwrap();
 }

@@ -367,22 +367,6 @@ fn method_syntax_cannot_call_private_functions() {
 }
 
 #[test]
-fn distinct_files_with_the_same_module_name_are_rejected() {
-    let files = Files::new(
-        "collision",
-        &[
-            ("left/item.ts", "export function value(): number { return 1; }"),
-            ("right/item.ts", "export function value(): number { return 1; }"),
-        ],
-    );
-    let error = files
-        .parse("use './left/item.ts'\nuse './right/item.ts'\nfn main() {}")
-        .unwrap_err();
-    assert!(error.msg.contains("モジュール名 item"));
-    assert_eq!(error.source_id.0, 0);
-}
-
-#[test]
 fn module_names_qualify_only_under_a_plain_use() {
     let files = Files::new("qualification", &[]);
     // -> { } と -> * は名前を取り込むだけで、モジュール名では修飾できない
@@ -410,18 +394,189 @@ fn module_names_qualify_only_under_a_plain_use() {
 }
 
 #[test]
-fn string_hibana_imports_are_rejected_before_reading() {
-    let files = Files::new("removed-hibana-imports", &[("util.hb", "pub fn value() -> int with {} { 42 }")]);
-    for path in ["./util.hb", "util.hb", "./util", "../util", "./missing.hb", "./missing", "./util.hb/../util.hb"] {
+fn unqualified_calls_to_same_named_imported_functions_are_ambiguous() {
+    let files = Files::new("ambiguous-functions", &[
+        ("alpha.hb", "pub fn value() -> int with {} { 1 }"),
+        ("beta.hb", "pub fn value() -> int with {} { 2 }"),
+    ]);
+    for (first, second) in [
+        ("use alpha -> {value}", "use beta -> {value}"),
+        ("use beta -> {value}", "use alpha -> {value}"),
+        ("use alpha -> *", "use beta -> {value}"),
+        ("use beta -> *", "use alpha -> *"),
+    ] {
+        let source = format!("{first}\n{second}\nfn main() {{ put(value()) }}");
+        let error = files.parse(&source).unwrap_err();
+        assert_eq!(error.msg, "関数 value が曖昧（alpha::value、beta::value）");
+        assert_eq!(error.span.unwrap().0, source.find("value()").unwrap());
+        assert_eq!(error.source.unwrap().text, source);
+    }
+
+    for (source, expected) in [
+        ("use alpha\nuse beta\nfn main() { put(alpha::value())\nput(beta::value()) }", &b"1\n2\n"[..]),
+        ("use alpha -> *\nuse alpha -> {value}\nfn main() { put(value()) }", &b"1\n"[..]),
+        ("use alpha -> *\nuse beta -> *\nfn value() -> int { 3 }\nfn main() { put(value()) }", &b"3\n"[..]),
+        ("use alpha -> *\nuse beta -> *\nfn main() { let value = fn() -> int { 4 }\nput(value()) }", &b"4\n"[..]),
+    ] {
+        let mut program = files.parse(source).unwrap();
+        hibana::typeck::check(&mut program).unwrap();
+        let mut output = Vec::new();
+        hibana::eval::run(&program, &mut output).unwrap();
+        assert_eq!(output, expected, "{source}");
+    }
+}
+
+#[test]
+fn unqualified_imported_constructors_with_the_same_name_are_ambiguous() {
+    let files = Files::new("ambiguous-constructors", &[
+        ("alpha.hb", "pub enum Shape { Node(value: int) }"),
+        ("beta.hb", "pub enum Shape { Node(value: int) }"),
+    ]);
+    for (first, second) in [
+        ("use alpha -> {Node}", "use beta -> {Node}"),
+        ("use beta -> {Node}", "use alpha -> {Node}"),
+        ("use alpha -> *", "use beta -> {Node}"),
+        ("use beta -> *", "use alpha -> *"),
+    ] {
+        let source = format!("{first}\n{second}\nfn main() {{ put(Node(1)) }}");
+        let error = files.parse(&source).unwrap_err();
+        assert_eq!(error.msg, "構築子 Node が曖昧（alpha::Node、beta::Node）");
+        assert_eq!(error.span.unwrap().0, source.find("Node(1)").unwrap());
+        assert_eq!(error.source.unwrap().text, source);
+    }
+
+    let source = "use alpha\nuse alpha -> *\nuse beta -> *\nfn main() { match alpha::Shape::Node(1) { Node(value) -> put(value) } }";
+    let error = files.parse(source).unwrap_err();
+    assert_eq!(error.msg, "構築子 Node が曖昧（alpha::Node、beta::Node）");
+    assert_eq!(error.span.unwrap().0, source.find("match").unwrap());
+
+    for (source, expected) in [
+        ("use alpha\nuse beta\nfn main() { put(alpha::Shape::Node(1))\nput(beta::Shape::Node(2)) }", &b"alpha::Node(1)\nbeta::Node(2)\n"[..]),
+        ("use alpha -> *\nuse beta -> *\nenum Local { Node(value: int) }\nfn main() { put(Node(3)) }", &b"Node(3)\n"[..]),
+    ] {
+        let mut program = files.parse(source).unwrap();
+        hibana::typeck::check(&mut program).unwrap();
+        let mut output = Vec::new();
+        hibana::eval::run(&program, &mut output).unwrap();
+        assert_eq!(output, expected, "{source}");
+    }
+}
+
+#[test]
+fn explicit_type_arguments_do_not_disambiguate_imported_functions() {
+    let files = Files::new("ambiguous-generic-functions", &[
+        ("alpha.hb", "pub fn value<T>(x: T) -> T with {} { x }"),
+        ("beta.hb", "pub fn value<T>(x: T) -> T with {} { x }"),
+    ]);
+    let source = "use alpha -> *\nuse beta -> *\nfn main() { put(value<int>(1)) }";
+    let error = files.parse(source).expect_err("同名の関数が2つ見える");
+    assert_eq!(error.msg, "関数 value が曖昧（alpha::value、beta::value）");
+    assert_eq!(error.span.unwrap().0, source.find("value<int>").unwrap());
+
+    let mut program = files.parse("use alpha\nuse beta -> *\nfn main() { put(alpha::value<int>(1))\nput(value<int>(2)) }").unwrap();
+    hibana::typeck::check(&mut program).unwrap();
+    let mut output = Vec::new();
+    hibana::eval::run(&program, &mut output).unwrap();
+    assert_eq!(output, b"1\n2\n");
+}
+
+#[test]
+fn unqualified_types_with_the_same_name_are_ambiguous() {
+    let files = Files::new("ambiguous-types", &[
+        ("positive.hb", "pub type Limit = int[x -> x >= 0]"),
+        ("negative.hb", "pub type Limit = int[x -> x <= 0]"),
+        ("hidden.hb", "type Limit = int[x -> x <= 0]"),
+    ]);
+    for (first, second) in [
+        ("use positive -> {Limit}", "use negative -> {Limit}"),
+        ("use negative -> {Limit}", "use positive -> {Limit}"),
+        ("use positive -> *", "use negative -> {Limit}"),
+        ("use negative -> *", "use positive -> *"),
+    ] {
+        let source = format!("{first}\n{second}\nfn main() {{ let n: Limit = 1\nput(n) }}");
+        let error = files.parse(&source).unwrap_err();
+        assert_eq!(error.msg, "型 Limit が曖昧（negative::Limit、positive::Limit）");
+        assert_eq!(error.span, Some((source.find("Limit = 1").unwrap(), "Limit".len())));
+        assert_eq!(error.source.unwrap().text, source);
+    }
+
+    for (source, expected) in [
+        ("use positive\nuse negative\nfn main() { let n: positive::Limit = 1\nlet m: negative::Limit = -1\nput(n)\nput(m) }", &b"1\n-1\n"[..]),
+        ("use positive -> *\nuse positive -> {Limit}\nfn main() { let n: Limit = 1\nput(n) }", &b"1\n"[..]),
+        ("use positive -> *\nuse negative -> *\ntype Limit = int\nfn main() { let n: Limit = 1\nput(n) }", &b"1\n"[..]),
+        ("use hidden -> *\nuse positive -> *\nfn main() { let n: Limit = 1\nput(n) }", &b"1\n"[..]),
+    ] {
+        let mut program = files.parse(source).unwrap();
+        hibana::typeck::check(&mut program).unwrap();
+        let mut output = Vec::new();
+        hibana::eval::run(&program, &mut output).unwrap();
+        assert_eq!(output, expected, "{source}");
+    }
+}
+
+#[test]
+fn same_named_types_are_ambiguous_in_construction_and_requirements() {
+    let declarations = "pub struct Record { value: int }\npub enum Choice { Pick(value: int) }\npub trait Log { fn log(self) with {} }";
+    let files = Files::new("ambiguous-type-uses", &[
+        ("alpha.hb", declarations),
+        ("beta.hb", declarations),
+    ]);
+    let imports = "use alpha\nuse alpha -> *\nuse beta -> *\n";
+    for (name, body) in [
+        ("Record", "fn main() { put(Record { value: 1 }) }"),
+        ("Record", "fn main() { let Record { value } = alpha::Record { value: 1 }\nput(value) }"),
+        ("Choice", "fn main() { put(Choice::Pick(1)) }"),
+        ("Log", "fn report() with Log {}\nfn main() {}"),
+    ] {
+        let source = format!("{imports}{body}");
+        let error = files.parse(&source).unwrap_err();
+        assert_eq!(error.msg, format!("型 {name} が曖昧（alpha::{name}、beta::{name}）"));
+        assert_eq!(error.span.unwrap().0, source.find(name).unwrap());
+    }
+    let source = format!("{imports}fn report() with alpha::Log {{}}\nfn main() {{ let alpha::Record {{ value }} = alpha::Record {{ value: 1 }}\nput(value)\nput(alpha::Choice::Pick(2)) }}");
+    let mut program = files.parse(&source).unwrap();
+    hibana::typeck::check(&mut program).unwrap();
+    let mut output = Vec::new();
+    hibana::eval::run(&program, &mut output).unwrap();
+    assert_eq!(output, b"1\nalpha::Pick(2)\n");
+}
+
+#[test]
+fn macro_expansion_reports_ambiguous_types_from_its_definition_module() {
+    let files = Files::new("ambiguous-type-in-macro", &[
+        ("positive.hb", "pub type Limit = int[x -> x >= 0]"),
+        ("negative.hb", "pub type Limit = int[x -> x <= 0]"),
+        ("helpers.hb", "use positive -> {Limit}\nuse negative -> {Limit}\nmacro bounded('bounded') { quote { fn(x: Limit) -> Limit { x } } }"),
+    ]);
+    let source = "use helpers\nfn main() { let f = bounded\nput(f(0)) }";
+    let error = files.parse(source).unwrap_err();
+    assert!(error.msg.contains("型 Limit が曖昧（negative::Limit、positive::Limit）"), "{error}");
+    assert_eq!(error.span.unwrap().0, source.find("bounded").unwrap());
+    assert_eq!(error.source.unwrap().text, source);
+}
+
+#[test]
+fn string_imports_are_rejected_before_reading() {
+    let files = Files::new("removed-string-imports", &[("util.hb", "pub fn value() -> int with {} { 42 }")]);
+    for import in [
+        "'./util.hb'",
+        "'./util'",
+        "'./util.js'",
+        "'./util.mjs'",
+        "\"./util.ts\"",
+        "'some-package'",
+        "'@scope/package'",
+        "'node:path'",
+    ] {
         for selection in ["", " -> {value}", " -> *"] {
-            let source = format!("use '{path}'{selection}\nfn main() {{}}");
+            let source = format!("use {import}{selection}\nfn main() {{}}");
             for error in [
                 pipeline::load(&source, &files.0).unwrap_err(),
                 pipeline::parse(source.as_str()).unwrap_err(),
             ] {
-                assert!(error.msg.contains("hibana ファイルは文字列の経路で読み込めない"), "{source}: {}", error.msg);
+                assert!(error.msg.contains("use の後にはモジュール名が必要"), "{source}: {}", error.msg);
                 assert_eq!(error.source_id.0, 0);
-                assert_eq!(error.span.unwrap().0, source.find('\'').unwrap());
+                assert_eq!(error.span, Some(("use ".len(), import.len())));
                 assert_eq!(error.source.unwrap().text, source);
             }
         }
@@ -438,17 +593,6 @@ fn builtin_imports_share_modules_and_preserve_source_text() {
     let mut output = Vec::new();
     hibana::eval::run(&program, &mut output).unwrap();
     assert_eq!(output, b"[2, 3]\nSome(3)\n3\n2\n");
-}
-
-#[test]
-fn typescript_import_forms_remain_available() {
-    let files = Files::new("typescript-imports", &[("util.ts", "export function value(): number { return 42; }")]);
-    for (selection, call) in [("", "util::value()"), (" -> {value}", "value()"), (" -> *", "value()")] {
-        let source = format!("use './util.ts'{selection}\nfn main() {{ put({call}) }}");
-        let program = files.parse(&source).unwrap();
-        let checked = pipeline::check(program, pipeline::Kind::Executable).unwrap();
-        pipeline::emit_js(&checked).unwrap();
-    }
 }
 
 #[test]

@@ -6,14 +6,38 @@ use std::collections::{HashMap, HashSet};
 use crate::error::{Error, R};
 use crate::lexer::Span;
 
+struct Declaration {
+    module: String,
+    public: bool,
+    function: bool,
+    constructor: bool,
+}
+
 // 構築子とトレイトから生成した名前も、元の宣言の公開範囲を持つ
-fn visibility(prog: &Program) -> HashMap<Name, (String, bool)> {
+fn visibility(prog: &Program) -> HashMap<Name, Declaration> {
     let mut names: HashMap<_, _> = prog.fns.iter()
-        .map(|f| (f.name.clone(), (f.module.clone(), f.public))).collect();
+        .map(|f| (f.name.clone(), Declaration {
+            module: f.module.clone(),
+            public: f.public,
+            function: !f.alias && f.op.is_none(),
+            constructor: false,
+        })).collect();
     for data in &prog.datas {
-        names.insert(data.name.clone(), (data.module.clone(), data.public));
+        for name in std::iter::once(&data.name) {
+            names.insert(name.clone(), Declaration {
+                module: data.module.clone(),
+                public: data.public,
+                function: false,
+                constructor: false,
+            });
+        }
         for ctor in &data.ctors {
-            names.insert(ctor.name.clone(), (data.module.clone(), data.public));
+            names.insert(ctor.name.clone(), Declaration {
+                module: data.module.clone(),
+                public: data.public,
+                function: false,
+                constructor: true,
+            });
         }
     }
     names
@@ -37,8 +61,8 @@ pub fn resolve(
                 for name in names {
                     let qualified = qual(&import.module, name);
                     let resolved = ctors.get(&qualified).unwrap_or(&qualified);
-                    if let Some((owner, false)) = visibility.get(resolved)
-                        && owner != module
+                    if let Some(declaration) = visibility.get(resolved)
+                        && !declaration.public && &declaration.module != module
                         && !grammar.declares(&qualified)
                     {
                         let error = Error::from(format!("{qualified} は非公開（宣言に pub を付ける）"));
@@ -211,7 +235,7 @@ struct Resolver<'a> {
     known: &'a HashSet<Name>,
     ctors: &'a HashMap<Name, Name>,
     locals: Vec<Vec<Name>>,
-    visibility: &'a HashMap<Name, (String, bool)>,
+    visibility: &'a HashMap<Name, Declaration>,
     span: Option<Span>,
     error: Option<Error>,
 }
@@ -220,26 +244,48 @@ impl Resolver<'_> {
     // 自分のモジュール、use で取り込んだ名前の順に探す。利用者のファイル（module が ""）では、自分の名前は修飾しない形のまま
     fn name(&mut self, name: &mut Name) {
         if self.locals.iter().any(|scope| scope.contains(name)) { return; }
-        let mut candidates = vec![qual(&self.module, &*name)];
+        let mut candidates = vec![(qual(&self.module, &*name), false)];
         for import in self.uses.get(&self.module).into_iter().flatten() {
-            if import.names.takes(name) { candidates.push(qual(&import.module, &*name)); }
+            if import.names.takes(name) {
+                candidates.push((qual(&import.module, &*name), import.span.is_some()));
+            }
         }
-        candidates.push(name.clone());
+        candidates.push((name.clone(), false));
         let mut private = None;
-        for candidate in candidates {
+        let mut imported_values = Vec::new();
+        for (candidate, explicit_import) in candidates {
             let resolved = self.ctors.get(&candidate).unwrap_or(&candidate);
-            if self.known.contains(resolved) || self.visibility.contains_key(resolved) {
-                if let Some((owner, false)) = self.visibility.get(resolved)
-                    && *owner != self.module
-                {
-                    private = Some(resolved.clone());
-                    continue;
-                }
+            let declaration = self.visibility.get(resolved);
+            if declaration.is_none() && !self.known.contains(resolved) { continue; }
+            if declaration.is_some_and(|d| !d.public && d.module != self.module) {
+                private = Some(resolved.clone());
+                continue;
+            }
+            if explicit_import && declaration.is_some_and(|d| d.function || d.constructor) {
+                if !imported_values.contains(resolved) { imported_values.push(resolved.clone()); }
+            } else if imported_values.is_empty() {
                 *name = resolved.clone();
                 return;
             }
         }
-        if let Some(private) = private { self.private(private); }
+        match imported_values.as_slice() {
+            [] => if let Some(private) = private { self.private(private); },
+            [function] => *name = function.clone(),
+            _ if self.error.is_none() => {
+                imported_values.sort_unstable();
+                let names = imported_values.iter().map(Name::as_str).collect::<Vec<_>>().join("、");
+                let kind = if imported_values.iter().all(|name| self.visibility[name].function) {
+                    "関数"
+                } else if imported_values.iter().all(|name| self.visibility[name].constructor) {
+                    "構築子"
+                } else {
+                    "名前"
+                };
+                let error = Error::from(format!("{kind} {name} が曖昧（{names}）"));
+                self.error = Some(match self.span { Some(span) => error.at(span), None => error });
+            }
+            _ => {}
+        }
     }
 
     fn private(&mut self, name: Name) {
@@ -359,9 +405,7 @@ impl Resolver<'_> {
                 self.expr(s);
                 for a in arms {
                     // 腕の操作名は構文解析で修飾済み。他のモジュールの非公開トレイトは提供できない
-                    if let Some((owner, false)) = self.visibility.get(&a.ctor)
-                        && *owner != self.module
-                    {
+                    if self.visibility.get(&a.ctor).is_some_and(|d| !d.public && d.module != self.module) {
                         self.private(a.ctor.clone());
                     }
                     let binds = a.binds.clone();

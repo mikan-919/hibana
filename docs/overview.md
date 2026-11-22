@@ -41,7 +41,7 @@ nix develop -c cargo run -q -- tests/programs/types/refine.hb
 
 ![loadからparseとcheckを経て、eval、js、irへ分岐し、irからwasmとnativeへ進む処理](figures/overview.svg)
 
-`load` は組み込みライブラリ、名前で指定したhibanaファイル、JavaScript・TypeScriptの型宣言を読み込みます。`use util` は `util.hb`、`use foo::bar` は `foo/bar.hb` を読み込み元のファイルのディレクトリから探します。`parse` は字句・構文解析を行い、マクロ展開と名前解決を終えた構文木（ソースの構造を表すデータ）を作ります。[構文解析器](../src/frontend/parser.rs)がこれらの処理をまとめています。
+`load` は組み込みライブラリと名前で指定したhibanaファイルを読み込みます。`use util` は `util.hb`、`use foo::bar` は `foo/bar.hb` を読み込み元のファイルのディレクトリから探します。`parse` は字句・構文解析を行い、マクロ展開と名前解決を終えた構文木（ソースの構造を表すデータ）を作ります。[構文解析器](../src/frontend/parser.rs)がこれらの処理をまとめています。
 
 `check` は型、トレイト、要求、細分化型の条件を検査し、省略された引数を補完します。実行用では `main` を要求し、ライブラリ用では要求しません。証明はこの段階で行い、実行時の証明処理としては残しません。
 
@@ -76,7 +76,7 @@ WASMの公開関数・外部関数の境界で渡せる型は `int`・`number`�
 |---|---|
 | `src/lib.rs`、`src/main.rs` | ライブラリと実行コマンドの入口 |
 | `src/pipeline.rs` | 読み込み、構文解析、検査、IR変換、公開関数の選択、WASM・JavaScript生成 |
-| `src/frontend/` | 字句・構文解析、名前解決、モジュールの読み込み、マクロ、TypeScript宣言の読み込み |
+| `src/frontend/` | 字句・構文解析、名前解決、モジュールの読み込み、マクロ |
 | `src/check/` | 型検査、トレイト解決、要求の検査、細分化型の証明、Z3との接続 |
 | `src/backend/` | 4つの実行方式と、WASM・ネイティブ共通のIR |
 | `src/tooling/`、`src/cli/`、`src/error.rs` | 整形、コマンド処理、エラー情報と表示 |

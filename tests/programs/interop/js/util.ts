@@ -1,4 +1,4 @@
-// hibana から use "./js/util.ts" で読み込む TypeScript のモジュール
+// hibana から extern で呼ぶ TypeScript のモジュール
 export interface Point {
   x: number;
   y: number;

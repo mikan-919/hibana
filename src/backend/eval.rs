@@ -1,6 +1,7 @@
 use crate::parser::Name;
 use crate::check::typeck::{MIN_SAFE_INT, MAX_SAFE_INT};
 use crate::error::Error;
+use crate::frontend::source::SourceFile;
 use crate::lexer::{Span, Tok, Token};
 use crate::meta::{self, Node, Syn};
 use crate::parser::{Block, Expr, Fn, NodeId, Program, Stmt};
@@ -73,6 +74,7 @@ enum Flow {
     Break,
     Continue,
     Error(String, Option<Span>),
+    CompileError(Box<Error>),
     IntegerOverflow(Option<Span>),
     // handle の腕が resume しなかった。(handle の番号, handle の値)
     Abort(usize, Value),
@@ -112,6 +114,7 @@ pub fn run_fn(prog: &Program, entry: &str, out: &mut dyn Write) -> Result<Value,
     finish(&jobs, &result, &runtime).map_err(|flow| {
         let (msg, span) = match flow {
             Flow::Error(msg, span) => (msg, span),
+            Flow::CompileError(error) => return *error,
             Flow::IntegerOverflow(span) => ("オーバーフロー".into(), span),
             Flow::Abort(..) => ("with で処理されなかった中断".into(), None),
             Flow::Return(_) | Flow::Break | Flow::Continue => unreachable!("関数本体の外には出ない"),
@@ -132,6 +135,7 @@ pub fn run_macro(b: &Block, vars: Vec<(Name, Value)>, prog: &Program) -> Result<
     match finish(&jobs, &result, &runtime) {
         Ok(v) | Err(Flow::Return(v)) => Ok(v),
         Err(Flow::Error(e, _)) => Err(e),
+        Err(Flow::CompileError(error)) => Err(compile_error_message(&error)),
         Err(Flow::IntegerOverflow(_)) => Err("オーバーフロー".into()),
         Err(Flow::Abort(..)) => unreachable!("handle の外には出ない"),
         Err(Flow::Break | Flow::Continue) => unreachable!("ループの外には出ない"),
@@ -243,18 +247,34 @@ fn script_path(path: &str) -> std::path::PathBuf {
 fn compile_source_file<T>(
     path: &str,
     compile: impl FnOnce(&str) -> crate::error::R<T>,
-) -> Result<T, String> {
+) -> R<T> {
     let outer = crate::parser::base_dir();
     let file = script_path(path);
     let shown = file.display();
-    let src = std::fs::read_to_string(&file).map_err(|e| format!("{shown}: {e}"))?;
+    let src = std::fs::read_to_string(&file)
+        .map_err(|e| Flow::Error(format!("{shown}: {e}"), None))?;
     crate::parser::set_base_dir(file.parent().unwrap_or(std::path::Path::new(".")));
     let r = compile(&src);
     crate::parser::set_base_dir(&outer);
-    r.map_err(|e| format!("{shown}: {e}"))
+    r.map_err(|mut error| {
+        if error.span.is_none() {
+            error.msg = format!("{shown}: {}", error.msg);
+        }
+        // コンパイル対象の入力を、スクリプトとは別のファイルとして表示する。
+        let name = std::path::absolute(&file).as_deref().unwrap_or(&file).display().to_string();
+        let input = SourceFile { id: Default::default(), name, text: src };
+        Flow::CompileError(Box::new(error.with_sources([input])))
+    })
 }
 
-fn compile_file(path: &str, target: &str) -> Result<Vec<u8>, String> {
+fn compile_error_message(error: &Error) -> String {
+    match &error.source {
+        Some(source) if error.span.is_some() => format!("{}: {error}", source.name),
+        _ => error.msg.clone(),
+    }
+}
+
+fn compile_file(path: &str, target: &str) -> R<Vec<u8>> {
     compile_source_file(path, |src| match target {
         "js" => crate::to_js(src).map(String::into_bytes),
         "wasm" => crate::to_wasm(src),
@@ -414,6 +434,10 @@ impl<'a> Interp<'a> {
             let result = promise.wait().await;
             let report = match &result {
                 Err(Flow::Error(msg, span)) => Some((msg.as_str(), *span)),
+                Err(Flow::CompileError(error)) => {
+                    eprintln!("{}", compile_error_message(error));
+                    None
+                }
                 Err(Flow::IntegerOverflow(span)) => Some(("オーバーフロー", *span)),
                 Err(Flow::Abort(..)) => Some(("with で処理されなかった中断", None)),
                 _ => None,
@@ -855,14 +879,13 @@ impl<'a> Interp<'a> {
                 Value::Str(line.into())
             } else if name == "compile_file" {
                 let (target, path) = (str_val(vs.pop().unwrap()), str_val(vs.pop().unwrap()));
-                let bytes = compile_file(&path, &target).map_err(|e| Flow::Error(e, None))?;
+                let bytes = compile_file(&path, &target)?;
                 byte_values(bytes)
             } else if name == "compile_wasm_file" {
                 let Value::Arr(exports) = vs.pop().unwrap() else { unreachable!("型検査済み") };
                 let path = str_val(vs.pop().unwrap());
                 let exports: Vec<String> = exports.iter().cloned().map(|v| str_val(v).to_string()).collect();
-                let (wasm, abi) = compile_source_file(&path, |src| crate::compile_wasm_library(src, &exports))
-                    .map_err(|e| Flow::Error(e, None))?;
+                let (wasm, abi) = compile_source_file(&path, |src| crate::compile_wasm_library(src, &exports))?;
                 let ctor = Name::structure(crate::parser::qual("std", "Pair"));
                 Value::Data(Rc::new((ctor, vec![byte_values(wasm), Value::Str(abi.into())])))
             } else if name == "write_file" {
@@ -1021,6 +1044,7 @@ impl<'a> Interp<'a> {
                     env.pop();
                     r.map_err(|f| match f {
                         Flow::Error(e, _) => Error::from(e),
+                        Flow::CompileError(error) => Error::from(compile_error_message(&error)),
                         Flow::IntegerOverflow(_) => Error::from("オーバーフロー"),
                         Flow::Return(_) => "${ } の中で return した".into(),
                         Flow::Abort(..) => unreachable!("マクロ本体に handle は無い"),

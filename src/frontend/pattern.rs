@@ -89,7 +89,7 @@ impl Parser<'_> {
             Tok::Ident(_) => {}
             _ => return self.err("パターンが必要"),
         }
-        self.qualify_here();
+        self.qualify_here()?;
         let n = self.ident()?;
         let structure = self.structs.get(&self.qualify(&n)).cloned();
         if !self.at_newline() && self.peek() == &Tok::Punct("{") && let Some(s) = &structure {

@@ -95,47 +95,42 @@ use foo::bar -> *     // すべての名前を修飾なしで使う
 - 関数・型別名・構造体・列挙型・トレイトは、宣言に `pub` を付けたものだけをモジュール外から参照できます。`pub struct Point { x: int }`、`pub enum Choice { Yes, No }`、`pub type Count = int` のように書きます。構築子とフィールドの公開範囲は型の公開範囲に従います。トレイトのメソッドと要求の操作もトレイトの公開範囲に従い、公開トレイトのメソッドには `with` を明示します。
 - 非公開の名前は、モジュール名による修飾・`-> *`・`-> {名前}` のいずれでも参照できません。型に属する関数は、その関数自身に `pub` が必要です。`extern` の公開関数はブロック内で `pub fn` と書きます。`impl` には `pub` を付けません。
 - 名前は、局所変数、自分のモジュール、`use` で修飾なしに取り込んだ名前の順に探します。
+- 異なるモジュールから `-> {名前}` や `-> *` で取り込んだ公開関数・型・構築子が同名なら、その名前を修飾なしで参照した位置でエラーになり、候補を表示します。`use alpha` と `alpha::value()`、`alpha::Shape::Node()` のようにモジュール名を指定して参照できます。
 - `Result`、`Ok`、`Err`、`parse_int` は `use` なしで使えます。自分のモジュールと明示した `use` の名前を先に探し、見つからなければ `std` の名前を使います。必要になった時に標準ライブラリを読み込みます。
 - `syntax` と `macro` の宣言名はモジュールごとに管理します。`use` による規則の参照とマクロの取り込みは 8.1 節で説明します。マクロの展開結果がライブラリの関数や型を使う場合、衛生性（展開した名前が呼び出し側の名前と衝突しない性質）により定義側の名前を参照します。
 - 同じモジュールは1回だけ読みます。
 - 名前による指定は組み込みライブラリを先に探し、なければ `::` をディレクトリの区切りに置き換えて `.hb` を付けます。経路は `use` を書いたファイルのディレクトリから解決します。参照に使うモジュール名は最後の名前（`foo::bar` なら `bar`）です。最後の名前が同じでも、異なるファイルなら重複エラーになります。
-- `.hb` ファイルを経路で読み込むことはできません。`use './util.hb'`、`use './util.hb' -> {foo}`、`use './util.hb' -> *` はエラーです。拡張子を省略した `use './util'` も使えません。
+- `use` には `std::math` や `util` のようにモジュール名を書きます。外部関数は `extern` で宣言します（3.4 節）。
 
-### 3.4 JavaScript / TypeScript のモジュール
+### 3.4 JavaScript / TypeScript との連携
 
-JS ターゲット（Rust API の `hibana::to_js`）でだけ使えます。インタプリタで呼ぶと実行時エラーになります。
+JavaScript に出力して外部関数を呼ぶときは、hibana の引数型と戻り値型を `extern` で宣言します。インタプリタで外部関数を呼ぶと実行時エラーになります。
 
 ```
-use './js/util.ts'        // TypeScript のファイル。export した関数・interface・type の型を読む
-use './js/greet.js'       // JavaScript のファイル。隣の greet.d.ts の型を読む
-use 'some-package'        // npm のパッケージ。node_modules の package.json の types、index.d.ts、@types/... を探す
-use 'node:path'           // Node.js の組み込み。node_modules/@types/node が要る
+extern './js/util.ts' {
+    fn add(x: number, y: number) -> number
+}
 
 fn main() {
-    put(util::add(2, 3))
-    let p = util::point(1, 2)       // interface Point は構造体 util::Point になる
-    put(p.x + p.y)
+    put(add(2, 3))
 }
 ```
 
-- `use` に名前で書くと組み込みライブラリか hibana ファイル、文字列で書くと JavaScript / TypeScript のファイルかパッケージです。ファイルの経路は、`use` を書いた .hb のファイルのディレクトリからの経路です。
-- モジュール名は、ファイル名から拡張子を除いた名前です（`./js/util.ts` は `util`、`node:path` は `path`、名前に使えない文字は `_`）。キーワードと同じ名前には末尾に `_` を足します。`use './js/util.ts' -> *` や `use './js/util.ts' -> {add}` で修飾なしにもできます。
-- 型は TypeScript の型宣言から読み、境界でその型に従って値を変換します。型宣言の無い JavaScript は使えません。
+`extern` の文字列は生成される JavaScript の `import` に渡ります。相対経路は生成した JavaScript の位置を基準に解決します。npm パッケージ名や `node:path` のような Node.js の組み込み名も指定できます。複数のファイルから使う宣言には `pub fn` を書き、その宣言を含む hibana のモジュールを名前で読み込みます。
 
-| TypeScript の型 | hibana の型 | 境界での変換 |
-|---|---|---|
-| `number` | `number` | 有限な JavaScript の number（非有限な値は実行時エラー） |
-| `string` `boolean` | `String` `bool` | JavaScript の文字列と真偽値 |
-| `void` | `unit` | 戻り値を捨てる |
-| `T[]` `Array<T>` | `Vec<T>` | JavaScript の配列を要素ごとに変換 |
-| `(x: A) => B` | `(A) -> B` | 引数と戻り値を変換するよう包む |
-| `interface P { ... }`、`type P = { ... }`、オブジェクト型 | 構造体 | 同じフィールド名のオブジェクト |
-| `Promise<T>`（戻り値） | `T` と `with Async`（3.5 節） | 呼ぶと `Async<T>` の値になり、`.await` で Promise を待つ |
-| `(x: A) => Promise<B>` | `(A) -> B with Async` | hibana の関数は Promise を返す関数として渡す |
-| 共用体・ジェネリクス・`any` などそれ以外 | `js` | JavaScript の値をそのまま持ち回る |
+| hibana の型 | 境界での変換 |
+|---|---|
+| `int` | JavaScript の安全整数 |
+| `number` | 有限な JavaScript の数値 |
+| `String`・`bool` | JavaScript の文字列と真偽値 |
+| `unit` | 戻り値を捨てる |
+| `Vec<T>` | JavaScript の配列を要素ごとに変換 |
+| 構造体 | 同じフィールド名の JavaScript オブジェクト |
+| `(A) -> B` | 引数と戻り値を変換するよう関数を包む |
+| 関数宣言の `-> T with Async` | 処理の完了を表す JavaScript の `Promise<T>` を `.await` で待つ（3.5 節） |
+| `(A) -> B with Async` | JavaScript 側では Promise を返す関数 |
+| `js` | JavaScript の値をそのまま渡す |
 
-- ジェネリクスや可変長引数を持つ関数、メソッドは読めないので無視します。
-- 内部では、型宣言から `extern '経路' { fn 名前(引数) -> 型 }` の宣言を作って使います。型宣言の無いモジュールには、この `extern` を直接書くこともできます。
 - JavaScript から受け取る `bool` と `String` は、宣言した型と異なる場合に実行時エラーになります。配列の要素と構造体のフィールドも検査します。この規則は外部関数の戻り値、Promise が返す値、外部関数から呼び出す hibana の関数への引数に適用します。
 - 外部から hibana に入る値の型に細分化型を書くと、コンパイルエラーになります。外部関数の戻り値、配列の要素、構造体のフィールド、関数を渡した先から戻ってくる値にも適用します。コールバック（外部関数から呼び出す hibana の関数）の引数も対象です。細分化する前の型で受け取り、`refine<T>` で条件を検査できます。
 
@@ -189,22 +184,24 @@ fn main() {
 
 #### 非同期
 
-`Async` は組み込みの要求で、待つ処理を表します。関数は `with Async` で宣言します。TypeScript の `Promise<T>` を返す関数は、`T` を返して `Async` を要求する関数として読みます（3.4 節）。
+`Async` は組み込みの要求で、待つ処理を表します。関数は `with Async` で宣言します。JavaScript の `Promise<T>` を返す外部関数は、`extern` に戻り値型 `T` と `with Async` を書きます（3.4 節）。
 
 ```
-use './js/util.ts'        // export async function later(x: number): Promise<number>
+extern './js/util.ts' {
+    fn later(x: number) -> number with Async
+}
 
-fn twice_later(x: int) -> int with Async {
-    util::later(x).await + util::later(x).await    // 待つ場所に .await を書く
+fn twice_later(x: number) -> number with Async {
+    later(x).await + later(x).await    // 待つ場所に .await を書く
 }
 
 fn main() with Async {
-    let a = twice_later(5)     // Async<int>。まだ走らない
+    let a = twice_later(5)     // Async<number>。まだ走らない
     put(a.await)               // ここで走らせて待つ
 }
 ```
 
-- 宣言に `Async` を書いた関数（`extern` の `with Async`、`Promise<T>` を返す TypeScript の関数、メソッドの宣言に `with Async` があるトレイトのメソッドを含む）と、関数型に `Async` を書いた値の呼び出しは、型 `Async<T>` の値になります。この値は、呼び出しの時点では要求を使わず、本体も走りません。引数は呼び出しの時点で評価します。
+- 宣言に `Async` を書いた関数（`extern` の `with Async`、メソッドの宣言に `with Async` があるトレイトのメソッドを含む）と、関数型に `Async` を書いた値の呼び出しは、型 `Async<T>` の値になります。この値は、呼び出しの時点では要求を使わず、本体も走りません。引数は呼び出しの時点で評価します。
 - `e.await` は `Async<T>` の値 `e` を走らせて待ち、型は `T` です。この式が `Async` を要求します。`.await` は `Async<T>` の値にだけ付けられます。`f(x).await` は、この 2 つの規則の組み合わせです。
 - 呼び出す関数が `Async` のほかの要求も持つなら、その要求は `.await` の時に使います（型は `Async<T with Fail<E>>` と表示します）。
 - 同じ `Async<T>` の値を 2 回待つと、本体を 2 回走らせます。
@@ -267,7 +264,7 @@ fn on_click() {                              // Async を持たない
 
 ### 3.6 ライブラリの読み込み
 
-名前で指定する `use` は、組み込みライブラリか hibana ファイルを読みます。`use util` は `util.hb`、`use foo::bar` は `foo/bar.hb` を、読み込み元のファイルと同じディレクトリから探します。読み込んだファイルの中の `use` も、そのファイルのディレクトリを基準に解決します。循環した依存と繰り返しの指定でも、同じファイルは1回だけ読みます。文字列による指定は JavaScript / TypeScript のモジュール用です（3.4 節）。
+`use` は、組み込みライブラリか hibana ファイルを読みます。`use util` は `util.hb`、`use foo::bar` は `foo/bar.hb` を、読み込み元のファイルと同じディレクトリから探します。読み込んだファイルの中の `use` も、そのファイルのディレクトリを基準に解決します。循環した依存と繰り返しの指定でも、同じファイルは1回だけ読みます。
 
 ### 3.7 トレイト
 
@@ -554,6 +551,8 @@ macro unless('unless' expr:Expr block:Block) {
 | `build::compile_wasm(path, exports)` | `(String, Vec<String>) -> Pair<Vec<int>, String>`。`exports` の関数を公開する WASM ライブラリのバイト列と受け渡し規約の JSON を、一度のコンパイルで返す |
 | `build::write_executable(path, bytes)` | `(String, Vec<int>) -> unit`。実行権限を付けてファイルに書く。親ディレクトリが無ければ作る。実行権限は Unix でだけ付ける |
 | `fs::write_bytes(path, bytes)` | `(String, Vec<int>) -> unit`。ファイルに書く。親ディレクトリが無ければ作る。各要素は 0〜255 |
+
+`build::compile` または `build::compile_wasm` のエラーでスクリプトが終了すると、位置のあるエラーはコンパイル対象か依存ファイルの該当箇所を表示します。終了コードは 1 です。
 
 ### std
 

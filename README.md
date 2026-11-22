@@ -47,7 +47,7 @@ nix develop -c cargo test
 
 Rust の実装は `src/` 内で役割ごとに分けています。
 
-- `frontend/`: 字句・構文解析、名前解決、マクロ展開、TypeScript の宣言の読み込み
+- `frontend/`: 字句・構文解析、名前解決、マクロ展開
 - `check/`: 型検査と Z3 による証明
 - `backend/`: インタプリタ、JavaScript、共通の IR、WebAssembly、ネイティブ出力
 - `tooling/`: フォーマッタ

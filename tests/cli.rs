@@ -87,6 +87,44 @@ fn build_scripts_write_compiled_outputs() {
 }
 
 #[test]
+fn build_scripts_report_the_file_with_the_compile_error() {
+    let dir = std::env::temp_dir().join(format!("hibana-build-error-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let invalid = "pub fn answer() -> int with {} {\n    'wrong type'\n}\n";
+    let main = "fn main() { put(answer()) }\n";
+    for (app, rules, location) in [
+        (format!("{invalid}{main}"), "", "src/app.hb:2:5"),
+        (
+            format!("use rules\npub fn answer() -> int with {{}} {{ rules::answer() }}\n{main}"),
+            invalid,
+            "src/rules.hb:2:5",
+        ),
+    ] {
+        std::fs::write(dir.join("src/app.hb"), app).unwrap();
+        std::fs::write(dir.join("src/rules.hb"), rules).unwrap();
+        for call in [
+            "build::compile('src/app.hb', 'js')",
+            "build::compile_wasm('src/app.hb', ['answer']).first",
+        ] {
+            let script = format!("use std::build\nfn main() {{ put(len({call})) }}\n");
+            std::fs::write(dir.join("build.hb"), script).unwrap();
+            let result = Command::new(env!("CARGO_BIN_EXE_hibana"))
+                .arg("build.hb")
+                .current_dir(&dir)
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            assert_eq!(result.status.code(), Some(1), "{call}: {stderr}");
+            assert!(result.stdout.is_empty(), "{call}: {result:?}");
+            assert!(stderr.contains(location), "{call}: {stderr}");
+            assert!(stderr.contains("'wrong type'"), "{call}: {stderr}");
+            assert!(stderr.contains("int が必要だが String"), "{call}: {stderr}");
+        }
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn hibana_build_scripts_generate_web_library_and_typescript() {
     let dir = std::env::temp_dir().join(format!("hibana-build-web-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("src")).unwrap();

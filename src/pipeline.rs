@@ -25,7 +25,7 @@ impl Checked {
 }
 
 /// use したファイルを `base_dir` から読み、構文解析に渡すモジュール表を作る。
-/// 組み込みライブラリと、名前で指定した hibana ファイル、JavaScript / TypeScript の型宣言を読み込む。
+/// 組み込みライブラリと、名前で指定した hibana ファイルを読み込む。
 pub fn load(source: &str, base_dir: &Path) -> R<parser::ModuleSet> {
     parser::load_modules(source, base_dir)
 }
